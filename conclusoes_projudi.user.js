@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      2.0
+// @version      3.0
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -13,9 +13,10 @@
 (function () {
     'use strict';
 
-    // Chaves usadas no sessionStorage para persistir dados entre reloads de página
-    const KEY_DADOS    = 'projudi_export_dados';
-    const KEY_RODANDO  = 'projudi_export_rodando';
+    // Chaves usadas no sessionStorage para persistir o estado entre reloads de página
+    const KEY_DADOS   = 'projudi_export_dados';
+    const KEY_RODANDO = 'projudi_export_rodando'; // "1" = coletando páginas
+    const KEY_PRONTO  = 'projudi_export_pronto';  // "1" = coleta terminada, pronto p/ baixar
 
     GM_addStyle(`
         #btn-exportar-excel {
@@ -30,6 +31,7 @@
             margin-left: 6px;
             border-radius: 3px;
         }
+        #btn-exportar-excel.pronto { background-color: #b8860b; border-color: #8a6508; }
         #btn-exportar-excel:disabled {
             background-color: #888;
             border-color: #666;
@@ -87,9 +89,11 @@
         return match ? parseInt(match[1], 10) : null;
     }
 
-    // ── Geração do arquivo Excel ───────────────────────────────────────────────
+    // ── Geração e download do arquivo Excel ─────────────────────────────────────
+    // Chamado a partir de um clique do usuário (gesto real), evitando o bloqueio
+    // de downloads automáticos que o navegador impõe a downloads sem interação.
 
-    function gerarExcel(dados) {
+    function gerarEbaixarExcel(dados) {
         const cabecalhos = ['Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador'];
         const linhas = dados.map(d => [
             d.dtRemessa, d.processo, d.classe, d.seq,
@@ -104,31 +108,62 @@
         ];
         XLSX.utils.book_append_sheet(wb, ws, 'Conclusões');
 
-        // GM_download bypassa CSP e sandbox do Tampermonkey
-        const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
-        const dataUrl = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + base64;
         const nomeArquivo = `conclusoes_projudi_${new Date().toISOString().slice(0, 10)}.xlsx`;
-        GM_download({ url: dataUrl, name: nomeArquivo });
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = nomeArquivo;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
     }
 
-    // ── Lógica principal ───────────────────────────────────────────────────────
+    // ── Estados do botão ────────────────────────────────────────────────────────
+
+    function configurarBotaoExportar() {
+        const btn = document.getElementById('btn-exportar-excel');
+        if (!btn) return;
+        btn.disabled = false;
+        btn.className = '';
+        btn.textContent = 'Exportar Excel';
+        btn.onclick = iniciarExportacao;
+    }
+
+    function configurarBotaoBaixar(qtd) {
+        const btn = document.getElementById('btn-exportar-excel');
+        if (!btn) return;
+        btn.disabled = false;
+        btn.className = 'pronto';
+        btn.textContent = `⬇ Baixar planilha (${qtd} registros)`;
+        btn.onclick = function () {
+            try {
+                const dados = JSON.parse(sessionStorage.getItem(KEY_DADOS) || '[]');
+                gerarEbaixarExcel(dados);
+                atualizarStatus(`✓ ${dados.length} registros exportados.`);
+                sessionStorage.removeItem(KEY_PRONTO);
+                sessionStorage.removeItem(KEY_DADOS);
+                configurarBotaoExportar();
+            } catch (err) {
+                atualizarStatus(`Erro ao gerar planilha: ${err.message}`);
+                console.error('[Exportar Projudi]', err);
+            }
+        };
+    }
+
+    // ── Lógica principal ────────────────────────────────────────────────────────
     //
     // A paginação do Projudi faz RELOAD COMPLETO da página a cada troca de página.
-    // Por isso usamos sessionStorage para acumular dados entre os reloads:
-    //   KEY_RODANDO = "1" enquanto a exportação está em andamento
-    //   KEY_DADOS   = JSON com o array acumulado de registros
-    //
-    // Fluxo ao carregar a página:
-    //   1. Se KEY_RODANDO == "1": estamos no meio de uma exportação automática
-    //      → coleta dados desta página, salva, verifica se há próxima página
-    //      → se sim: clica arrowNextOn (causará reload) e aguarda
-    //      → se não: gera Excel, limpa sessionStorage
-    //   2. Se KEY_RODANDO != "1": aguarda o usuário clicar "Exportar Excel"
-    //      → limpa sessionStorage, seta KEY_RODANDO, e inicia o ciclo acima
+    // Por isso usamos sessionStorage para acumular dados entre os reloads.
+    // Ao terminar a coleta NÃO baixamos automaticamente (o navegador bloqueia
+    // downloads sem gesto do usuário); em vez disso o botão vira "Baixar planilha"
+    // e o usuário clica para disparar o download.
 
     function iniciarExportacao() {
         sessionStorage.setItem(KEY_DADOS, JSON.stringify([]));
         sessionStorage.setItem(KEY_RODANDO, '1');
+        sessionStorage.removeItem(KEY_PRONTO);
         continuarExportacao();
     }
 
@@ -143,23 +178,21 @@
 
         const pagina    = numeroPaginaAtual();
         const total     = totalRegistros();
-        const totalPags = total ? Math.ceil(total / dadosPagina.length || 20) : '?';
+        const porPagina = dadosPagina.length || 20;
+        const totalPags = total ? Math.ceil(total / porPagina) : '?';
 
         atualizarStatus(`Coletando página ${pagina} de ${totalPags} — ${dadosAcumulados.length} registros até agora...`);
 
         if (temProximaPagina()) {
-            // Clica na próxima página — isso vai recarregar a página;
-            // o script vai retomar em continuarExportacao() no próximo load.
+            // Clica na próxima página — isso recarrega a página;
+            // o script retoma em continuarExportacao() no próximo load.
             document.querySelector('a.arrowNextOn').click();
         } else {
-            // Chegamos à última página — gera o arquivo e limpa o estado
+            // Última página: marca como pronto e deixa o usuário baixar com um clique
             sessionStorage.removeItem(KEY_RODANDO);
-            sessionStorage.removeItem(KEY_DADOS);
-
-            atualizarStatus(`Gerando arquivo com ${dadosAcumulados.length} registros...`);
-            gerarExcel(dadosAcumulados);
-            atualizarStatus(`✓ ${dadosAcumulados.length} registros exportados.`);
-            if (btn) btn.disabled = false;
+            sessionStorage.setItem(KEY_PRONTO, '1');
+            atualizarStatus(`Coleta concluída: ${dadosAcumulados.length} registros. Clique para baixar a planilha.`);
+            configurarBotaoBaixar(dadosAcumulados.length);
         }
     }
 
@@ -176,19 +209,24 @@
 
         const btn = document.createElement('button');
         btn.id = 'btn-exportar-excel';
-        btn.textContent = 'Exportar Excel';
+        btn.type = 'button';
         btn.title = 'Exporta todos os registros de todas as páginas para .xlsx';
-        btn.addEventListener('click', iniciarExportacao);
+        buttonBar.appendChild(btn);
 
         const status = document.createElement('span');
         status.id = 'exportar-status';
-
-        buttonBar.appendChild(btn);
         buttonBar.appendChild(status);
 
-        // Se havia uma exportação em andamento (retomada após reload de página), continua
         if (sessionStorage.getItem(KEY_RODANDO) === '1') {
+            // Exportação em andamento, retomada após reload de página
             continuarExportacao();
+        } else if (sessionStorage.getItem(KEY_PRONTO) === '1') {
+            // Coleta terminou em um ciclo anterior mas o arquivo ainda não foi baixado
+            const qtd = JSON.parse(sessionStorage.getItem(KEY_DADOS) || '[]').length;
+            atualizarStatus(`Coleta concluída: ${qtd} registros. Clique para baixar a planilha.`);
+            configurarBotaoBaixar(qtd);
+        } else {
+            configurarBotaoExportar();
         }
     }
 
