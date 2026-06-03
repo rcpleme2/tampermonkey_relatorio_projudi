@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.2
+// @version      3.3
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -21,6 +21,27 @@
     const KEY_PRONTO         = 'projudi_export_pronto';   // "1" = coleta terminada, pronto p/ baixar
     const KEY_NUM_PAGINAS    = 'projudi_export_num_paginas';
     const KEY_PAGINA_PREFIXO = 'projudi_export_pagina_';
+    const KEY_TIMESTAMP      = 'projudi_export_ts';       // marca de tempo da última atividade
+
+    // Se uma coleta "em andamento" não tiver atividade há mais que isto, é considerada
+    // obsoleta (ex.: execução interrompida, script atualizado no meio) e o estado é zerado.
+    const STALE_MS = 2 * 60 * 1000; // 2 minutos
+
+    function marcarAtividade() {
+        sessionStorage.setItem(KEY_TIMESTAMP, String(Date.now()));
+    }
+
+    function coletaObsoleta() {
+        const ts = parseInt(sessionStorage.getItem(KEY_TIMESTAMP) || '0', 10);
+        return !ts || (Date.now() - ts) > STALE_MS;
+    }
+
+    function resetarEstado() {
+        sessionStorage.removeItem(KEY_RODANDO);
+        sessionStorage.removeItem(KEY_PRONTO);
+        sessionStorage.removeItem(KEY_TIMESTAMP);
+        limparDadosArmazenados();
+    }
 
     // ── Persistência dos dados coletados ────────────────────────────────────────
 
@@ -206,9 +227,9 @@
     // e o usuário clica para disparar o download.
 
     function iniciarExportacao() {
-        limparDadosArmazenados();
+        resetarEstado();
         sessionStorage.setItem(KEY_RODANDO, '1');
-        sessionStorage.removeItem(KEY_PRONTO);
+        marcarAtividade();
         continuarExportacao();
     }
 
@@ -216,6 +237,7 @@
         const btn = document.getElementById('btn-exportar-excel');
         if (btn) btn.disabled = true;
 
+        marcarAtividade();
         const dadosPagina = coletarPaginaAtual();
         let totalColetado;
         try {
@@ -270,8 +292,8 @@
         status.id = 'exportar-status';
         buttonBar.appendChild(status);
 
-        if (sessionStorage.getItem(KEY_RODANDO) === '1') {
-            // Exportação em andamento, retomada após reload de página
+        if (sessionStorage.getItem(KEY_RODANDO) === '1' && !coletaObsoleta()) {
+            // Exportação em andamento (atividade recente), retomada após reload de página
             continuarExportacao();
         } else if (sessionStorage.getItem(KEY_PRONTO) === '1' && contarRegistros() > 0) {
             // Coleta terminou em um ciclo anterior mas o arquivo ainda não foi baixado
@@ -279,10 +301,9 @@
             atualizarStatus(`Coleta concluída: ${qtd} registros. Clique para baixar a planilha.`);
             configurarBotaoBaixar(qtd);
         } else {
-            // Limpa qualquer estado obsoleto (ex.: KEY_PRONTO de uma versão anterior sem dados)
-            sessionStorage.removeItem(KEY_PRONTO);
-            sessionStorage.removeItem(KEY_RODANDO);
-            limparDadosArmazenados();
+            // Nenhuma coleta válida em andamento: zera qualquer estado obsoleto
+            // (flags presas de execuções interrompidas ou de versões anteriores).
+            resetarEstado();
             configurarBotaoExportar();
         }
     }
