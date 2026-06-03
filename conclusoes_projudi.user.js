@@ -101,10 +101,18 @@
             { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 },
             { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 20 },
         ];
-
         XLSX.utils.book_append_sheet(wb, ws, 'Conclusões');
-        const dataHoje = new Date().toISOString().slice(0, 10);
-        XLSX.writeFile(wb, `conclusoes_projudi_${dataHoje}.xlsx`);
+
+        // Gera o binário e dispara o download via Blob para evitar bloqueio do sandbox do Tampermonkey
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([wbout], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `conclusoes_projudi_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
     }
 
     // ── Lógica principal ───────────────────────────────────────────────────────
