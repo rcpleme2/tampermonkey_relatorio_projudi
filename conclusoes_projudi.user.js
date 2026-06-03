@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.0
+// @version      3.1
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -13,10 +13,51 @@
 (function () {
     'use strict';
 
-    // Chaves usadas no sessionStorage para persistir o estado entre reloads de página
-    const KEY_DADOS   = 'projudi_export_dados';
-    const KEY_RODANDO = 'projudi_export_rodando'; // "1" = coletando páginas
-    const KEY_PRONTO  = 'projudi_export_pronto';  // "1" = coleta terminada, pronto p/ baixar
+    // Chaves usadas no sessionStorage para persistir o estado entre reloads de página.
+    // Cada página coletada é gravada em sua própria chave (KEY_PAGINA_PREFIXO + índice)
+    // para evitar reserializar e reescrever o blob inteiro a cada reload — o que, com
+    // milhares de registros, pode estourar a cota e corromper o valor armazenado.
+    const KEY_RODANDO        = 'projudi_export_rodando';  // "1" = coletando páginas
+    const KEY_PRONTO         = 'projudi_export_pronto';   // "1" = coleta terminada, pronto p/ baixar
+    const KEY_NUM_PAGINAS    = 'projudi_export_num_paginas';
+    const KEY_PAGINA_PREFIXO = 'projudi_export_pagina_';
+
+    // ── Persistência dos dados coletados ────────────────────────────────────────
+
+    function limparDadosArmazenados() {
+        const n = parseInt(sessionStorage.getItem(KEY_NUM_PAGINAS) || '0', 10);
+        for (let i = 0; i < n; i++) sessionStorage.removeItem(KEY_PAGINA_PREFIXO + i);
+        sessionStorage.removeItem(KEY_NUM_PAGINAS);
+    }
+
+    // Acrescenta os dados de uma página. Retorna o total de registros acumulados.
+    function adicionarPagina(dadosPagina) {
+        const idx = parseInt(sessionStorage.getItem(KEY_NUM_PAGINAS) || '0', 10);
+        sessionStorage.setItem(KEY_PAGINA_PREFIXO + idx, JSON.stringify(dadosPagina));
+        sessionStorage.setItem(KEY_NUM_PAGINAS, String(idx + 1));
+        return contarRegistros();
+    }
+
+    function contarRegistros() {
+        return lerTodosOsDados().length;
+    }
+
+    // Lê e concatena os dados de todas as páginas, validando que cada parte é array.
+    function lerTodosOsDados() {
+        const n = parseInt(sessionStorage.getItem(KEY_NUM_PAGINAS) || '0', 10);
+        let dados = [];
+        for (let i = 0; i < n; i++) {
+            const bruto = sessionStorage.getItem(KEY_PAGINA_PREFIXO + i);
+            if (!bruto) continue;
+            try {
+                const parte = JSON.parse(bruto);
+                if (Array.isArray(parte)) dados = dados.concat(parte);
+            } catch (e) {
+                console.error('[Exportar Projudi] página corrompida no índice', i, e);
+            }
+        }
+        return dados;
+    }
 
     GM_addStyle(`
         #btn-exportar-excel {
@@ -139,11 +180,15 @@
         btn.textContent = `⬇ Baixar planilha (${qtd} registros)`;
         btn.onclick = function () {
             try {
-                const dados = JSON.parse(sessionStorage.getItem(KEY_DADOS) || '[]');
+                const dados = lerTodosOsDados();
+                if (!dados.length) {
+                    atualizarStatus('Nenhum registro coletado para exportar.');
+                    return;
+                }
                 gerarEbaixarExcel(dados);
                 atualizarStatus(`✓ ${dados.length} registros exportados.`);
                 sessionStorage.removeItem(KEY_PRONTO);
-                sessionStorage.removeItem(KEY_DADOS);
+                limparDadosArmazenados();
                 configurarBotaoExportar();
             } catch (err) {
                 atualizarStatus(`Erro ao gerar planilha: ${err.message}`);
@@ -161,7 +206,7 @@
     // e o usuário clica para disparar o download.
 
     function iniciarExportacao() {
-        sessionStorage.setItem(KEY_DADOS, JSON.stringify([]));
+        limparDadosArmazenados();
         sessionStorage.setItem(KEY_RODANDO, '1');
         sessionStorage.removeItem(KEY_PRONTO);
         continuarExportacao();
@@ -171,17 +216,25 @@
         const btn = document.getElementById('btn-exportar-excel');
         if (btn) btn.disabled = true;
 
-        const dadosSalvos = JSON.parse(sessionStorage.getItem(KEY_DADOS) || '[]');
         const dadosPagina = coletarPaginaAtual();
-        const dadosAcumulados = dadosSalvos.concat(dadosPagina);
-        sessionStorage.setItem(KEY_DADOS, JSON.stringify(dadosAcumulados));
+        let totalColetado;
+        try {
+            totalColetado = adicionarPagina(dadosPagina);
+        } catch (err) {
+            // Estouro de cota do sessionStorage ou falha de gravação
+            sessionStorage.removeItem(KEY_RODANDO);
+            atualizarStatus(`Erro ao armazenar dados (${err.name}). Tente exportar em lotes menores via filtro.`);
+            console.error('[Exportar Projudi]', err);
+            if (btn) btn.disabled = false;
+            return;
+        }
 
         const pagina    = numeroPaginaAtual();
         const total     = totalRegistros();
         const porPagina = dadosPagina.length || 20;
         const totalPags = total ? Math.ceil(total / porPagina) : '?';
 
-        atualizarStatus(`Coletando página ${pagina} de ${totalPags} — ${dadosAcumulados.length} registros até agora...`);
+        atualizarStatus(`Coletando página ${pagina} de ${totalPags} — ${totalColetado} registros até agora...`);
 
         if (temProximaPagina()) {
             // Clica na próxima página — isso recarrega a página;
@@ -191,8 +244,8 @@
             // Última página: marca como pronto e deixa o usuário baixar com um clique
             sessionStorage.removeItem(KEY_RODANDO);
             sessionStorage.setItem(KEY_PRONTO, '1');
-            atualizarStatus(`Coleta concluída: ${dadosAcumulados.length} registros. Clique para baixar a planilha.`);
-            configurarBotaoBaixar(dadosAcumulados.length);
+            atualizarStatus(`Coleta concluída: ${totalColetado} registros. Clique para baixar a planilha.`);
+            configurarBotaoBaixar(totalColetado);
         }
     }
 
@@ -222,7 +275,7 @@
             continuarExportacao();
         } else if (sessionStorage.getItem(KEY_PRONTO) === '1') {
             // Coleta terminou em um ciclo anterior mas o arquivo ainda não foi baixado
-            const qtd = JSON.parse(sessionStorage.getItem(KEY_DADOS) || '[]').length;
+            const qtd = contarRegistros();
             atualizarStatus(`Coleta concluída: ${qtd} registros. Clique para baixar a planilha.`);
             configurarBotaoBaixar(qtd);
         } else {
