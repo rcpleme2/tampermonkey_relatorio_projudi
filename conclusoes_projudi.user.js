@@ -7,6 +7,7 @@
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @grant        GM_addStyle
+// @grant        GM_download
 // ==/UserScript==
 
 (function () {
@@ -103,16 +104,11 @@
         ];
         XLSX.utils.book_append_sheet(wb, ws, 'Conclusões');
 
-        // Gera o binário e dispara o download via Blob para evitar bloqueio do sandbox do Tampermonkey
-        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-        const blob = new Blob([wbout], { type: 'application/octet-stream' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `conclusoes_projudi_${new Date().toISOString().slice(0, 10)}.xlsx`;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+        // GM_download bypassa CSP e sandbox do Tampermonkey
+        const base64 = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+        const dataUrl = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + base64;
+        const nomeArquivo = `conclusoes_projudi_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        GM_download({ url: dataUrl, name: nomeArquivo });
     }
 
     // ── Lógica principal ───────────────────────────────────────────────────────
