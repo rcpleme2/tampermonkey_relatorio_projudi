@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.1
+// @version      3.2
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -273,12 +273,16 @@
         if (sessionStorage.getItem(KEY_RODANDO) === '1') {
             // Exportação em andamento, retomada após reload de página
             continuarExportacao();
-        } else if (sessionStorage.getItem(KEY_PRONTO) === '1') {
+        } else if (sessionStorage.getItem(KEY_PRONTO) === '1' && contarRegistros() > 0) {
             // Coleta terminou em um ciclo anterior mas o arquivo ainda não foi baixado
             const qtd = contarRegistros();
             atualizarStatus(`Coleta concluída: ${qtd} registros. Clique para baixar a planilha.`);
             configurarBotaoBaixar(qtd);
         } else {
+            // Limpa qualquer estado obsoleto (ex.: KEY_PRONTO de uma versão anterior sem dados)
+            sessionStorage.removeItem(KEY_PRONTO);
+            sessionStorage.removeItem(KEY_RODANDO);
+            limparDadosArmazenados();
             configurarBotaoExportar();
         }
     }
