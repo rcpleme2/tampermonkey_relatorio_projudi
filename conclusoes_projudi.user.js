@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.3
+// @version      3.4
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -63,19 +63,29 @@
         return lerTodosOsDados().length;
     }
 
-    // Lê e concatena os dados de todas as páginas, validando que cada parte é array.
+    // Desembrulha um valor lido do storage até obter um array. Aceita JSON serializado
+    // uma vez (string -> array) ou mais de uma vez (string -> string -> array), o que pode
+    // ocorrer conforme o ambiente do Tampermonkey/navegador serializa o valor.
+    function normalizarParaArray(valor) {
+        let v = valor;
+        let tentativas = 0;
+        while (typeof v === 'string' && tentativas < 5) {
+            try { v = JSON.parse(v); } catch (e) { break; }
+            tentativas++;
+        }
+        return Array.isArray(v) ? v : null;
+    }
+
+    // Lê e concatena os dados de todas as páginas.
     function lerTodosOsDados() {
         const n = parseInt(sessionStorage.getItem(KEY_NUM_PAGINAS) || '0', 10);
         let dados = [];
         for (let i = 0; i < n; i++) {
             const bruto = sessionStorage.getItem(KEY_PAGINA_PREFIXO + i);
             if (!bruto) continue;
-            try {
-                const parte = JSON.parse(bruto);
-                if (Array.isArray(parte)) dados = dados.concat(parte);
-            } catch (e) {
-                console.error('[Exportar Projudi] página corrompida no índice', i, e);
-            }
+            const parte = normalizarParaArray(bruto);
+            if (parte) dados = dados.concat(parte);
+            else console.error('[Exportar Projudi] página não pôde ser lida no índice', i);
         }
         return dados;
     }
