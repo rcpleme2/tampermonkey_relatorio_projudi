@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.5
+// @version      3.6
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -118,10 +118,16 @@
     `);
 
     function lerAtuacao() {
-        const grupo = document.querySelector('div.group');
-        if (!grupo) return '';
-        const span = grupo.querySelector('span[title]');
-        return span ? span.textContent.trim() : '';
+        // Localiza o bloco cujo rótulo é "Atuação:" (não o primeiro div.group, que é "Atribuição:")
+        const grupos = document.querySelectorAll('div.group');
+        for (const grupo of grupos) {
+            const label = grupo.querySelector('span.userinfo_label');
+            if (label && /atua[çc][ãa]o/i.test(label.textContent)) {
+                const span = grupo.querySelector('span[title]');
+                return span ? span.textContent.trim() : '';
+            }
+        }
+        return '';
     }
 
     // ── Coleta os dados da tabela visível na página atual ──────────────────────
