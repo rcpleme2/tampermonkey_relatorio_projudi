@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      3.4
+// @version      3.5
 // @description  Exporta todos os registros da tabela de conclusões (todas as páginas) para uma planilha Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -117,9 +117,17 @@
         }
     `);
 
+    function lerAtuacao() {
+        const grupo = document.querySelector('div.group');
+        if (!grupo) return '';
+        const span = grupo.querySelector('span[title]');
+        return span ? span.textContent.trim() : '';
+    }
+
     // ── Coleta os dados da tabela visível na página atual ──────────────────────
 
     function coletarPaginaAtual() {
+        const atuacao = lerAtuacao();
         const linhas = document.querySelectorAll('table.resultTable tbody tr');
         const dados = [];
         linhas.forEach(tr => {
@@ -140,7 +148,7 @@
             const preAnalise  = (tds[7].textContent || '').trim();
             const agrupador   = tds[8] ? (tds[8].textContent || '').trim() : '';
 
-            dados.push({ dtRemessa, processo, classe, seq, tipoConclusao, privativa, responsavel, preAnalise, agrupador });
+            dados.push({ atuacao, dtRemessa, processo, classe, seq, tipoConclusao, privativa, responsavel, preAnalise, agrupador });
         });
         return dados;
     }
@@ -166,16 +174,16 @@
     // de downloads automáticos que o navegador impõe a downloads sem interação.
 
     function gerarEbaixarExcel(dados) {
-        const cabecalhos = ['Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador'];
+        const cabecalhos = ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador'];
         const linhas = dados.map(d => [
-            d.dtRemessa, d.processo, d.classe, d.seq,
+            d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq,
             d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.agrupador,
         ]);
 
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.aoa_to_sheet([cabecalhos, ...linhas]);
         ws['!cols'] = [
-            { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 },
+            { wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 },
             { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 20 },
         ];
         XLSX.utils.book_append_sheet(wb, ws, 'Conclusões');
