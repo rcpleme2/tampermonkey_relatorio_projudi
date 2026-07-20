@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      7.1
-// @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (com painel e gráficos)
+// @version      8.0
+// @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (retrato, resumo com KPIs e gráficos, prioritários destacados)
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/analisarJuntada.do*
@@ -63,6 +63,14 @@
         };
     }
 
+    // Processo prioritário: o número recebe uma classe de cor extra (attentionBlue,
+    // attentionPurple, attentionRed, ...); o normal fica apenas com "attention" (preto).
+    function emPrioritario(em) {
+        if (!em) return false;
+        return (em.className || '').split(/\s+/)
+            .some(c => /^attention[A-Z]/.test(c) && c !== 'attentionBold');
+    }
+
     // ── Configurações dos dois relatórios ───────────────────────────────────────
     // Ambos ficam em conclusao.do; distinguem-se pelo cabeçalho da tabela:
     //   "Dt. Remessa"  => relatório de Conclusões (remessa)      — 9 colunas
@@ -75,8 +83,8 @@
         usaAtuacao: true,
         nomeArquivo: 'conclusoes_projudi',
         rotulos: { coletar: 'Coletar esta Atuação', coletarMais: 'Coletar mais uma Atuação', baixar: '⬇ Baixar planilha' },
-        cabecalhos: ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador'],
-        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 20 }],
+        cabecalhos: ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador', 'Prioritário'],
+        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 20 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const pc = processoEclasse(tds[2]);
             return {
@@ -90,9 +98,10 @@
                 responsavel: textoCelula(tds[6]),
                 preAnalise: textoCelula(tds[7]),
                 agrupador: textoCelula(tds[8]),
+                prioritario: emPrioritario(tds[2].querySelector('em')),
             };
         },
-        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.agrupador],
+        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
     };
 
     const CFG_RETORNO = {
@@ -103,8 +112,8 @@
         nomeArquivo: 'retorno_conclusos_projudi',
         rotulos: { coletar: 'Extrair Retorno', coletarMais: 'Extrair mais (Retorno)', baixar: '⬇ Baixar Retorno' },
         // Colunas pedidas: Processo - Classe - Dt. Retorno - Tipo de conclusão - Responsável - Agrupador
-        cabecalhos: ['Processo', 'Classe', 'Dt. Retorno', 'Tipo de Conclusão', 'Responsável', 'Agrupador'],
-        larguras: [{ wch: 26 }, { wch: 18 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 20 }],
+        cabecalhos: ['Processo', 'Classe', 'Dt. Retorno', 'Tipo de Conclusão', 'Responsável', 'Agrupador', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 18 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 20 }, { wch: 11 }],
         extrai: (tds) => {
             const pc = processoEclasse(tds[3]);
             return {
@@ -114,9 +123,10 @@
                 tipoConclusao: textoCelula(tds[5]),
                 responsavel: textoCelula(tds[7]),
                 agrupador: textoCelula(tds[9]),
+                prioritario: emPrioritario(tds[3].querySelector('em')),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.dtRetorno, d.tipoConclusao, d.responsavel, d.agrupador],
+        linha: (d) => [d.processo, d.classe, d.dtRetorno, d.tipoConclusao, d.responsavel, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
         pdf: {
             titulo: 'Retorno de Processos Conclusos',
             atosTitulo: 'Retornos de conclusão pendentes',
@@ -125,16 +135,19 @@
             dataTitulo: 'Retorno pendente mais antigo',
             processoCampo: 'processo',
             tipoCampo: 'tipoConclusao',
-            grupoCampo: 'agrupador',
-            grupoTitulo: 'Processos por Agrupador',
+            distribuicoes: [
+                { titulo: 'Processos por Agrupador', campo: 'agrupador', topN: 12 },
+                { titulo: 'Pendências por Responsável', campo: 'responsavel', topN: 12 },
+            ],
+            // Colunas (retrato): Dt. Retorno logo antes de Dias
             colunas: [
-                { header: 'Processo', width: 34, get: (d) => d.processo },
-                { header: 'Classe', width: 24, get: (d) => d.classe },
-                { header: 'Dt. Retorno', width: 26, get: (d) => d.dtRetorno },
-                { header: 'Tipo de Conclusão', width: 46, get: (d) => d.tipoConclusao },
-                { header: 'Responsável', width: 46, get: (d) => d.responsavel },
-                { header: 'Agrupador', width: 40, get: (d) => d.agrupador },
-                { header: 'Dias', width: 14, get: (d, ctx) => diasDecorridos(d.dtRetorno, ctx.now) },
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe', width: 20, get: (d) => d.classe },
+                { header: 'Tipo de Conclusão', width: 34, get: (d) => d.tipoConclusao },
+                { header: 'Responsável', width: 34, get: (d) => d.responsavel },
+                { header: 'Agrupador', width: 26, get: (d) => d.agrupador },
+                { header: 'Dt. Retorno', width: 24, get: (d) => d.dtRetorno },
+                { header: 'Dias', width: 12, get: (d, ctx) => diasDecorridos(d.dtRetorno, ctx.now) },
             ],
         },
     };
@@ -147,8 +160,8 @@
         nomeArquivo: 'juntadas_projudi',
         rotulos: { coletar: 'Extrair Juntadas', coletarMais: 'Extrair mais (Juntadas)', baixar: '⬇ Baixar Juntadas' },
         // Colunas pedidas: Processo - Tipo de documento - Especificação - Data de Envio - Juntado por
-        cabecalhos: ['Processo', 'Tipo de Documento', 'Especificação do Documento', 'Data de Envio', 'Juntado por'],
-        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 52 }, { wch: 18 }, { wch: 28 }],
+        cabecalhos: ['Processo', 'Tipo de Documento', 'Especificação do Documento', 'Data de Envio', 'Juntado por', 'Função', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 52 }, { wch: 18 }, { wch: 28 }, { wch: 18 }, { wch: 11 }],
         extrai: (tds) => {
             // Processo (td[3]): número em <em class="attention">
             const emProc = tds[3].querySelector('em');
@@ -170,9 +183,10 @@
                 dataEnvio: textoCelula(tds[7]),
                 juntadoPor: textoSemNegrito(tds[8]), // nome, sem o cargo em negrito
                 funcao: bFunc ? norm(bFunc.textContent) : '',
+                prioritario: emPrioritario(emProc),
             };
         },
-        linha: (d) => [d.processo, d.tipoDocumento, d.especificacao, d.dataEnvio, d.juntadoPor],
+        linha: (d) => [d.processo, d.tipoDocumento, d.especificacao, d.dataEnvio, d.juntadoPor, d.funcao || '', d.prioritario ? 'Sim' : 'Não'],
         pdf: {
             titulo: 'Juntadas',
             atosTitulo: 'Juntadas pendentes',
@@ -181,16 +195,20 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
-            grupoCampo: 'tipoDocumento',
-            grupoTitulo: 'Processos por Tipo de Documento',
+            distribuicoes: [
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 12 },
+                { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
+                { titulo: 'Pendências por Juntado por', campo: 'juntadoPor', topN: 12 },
+            ],
+            // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
-                { header: 'Processo', width: 34, get: (d) => d.processo },
-                { header: 'Tipo de Documento', width: 40, get: (d) => d.tipoDocumento },
-                { header: 'Especificação do Documento', width: 66, get: (d) => d.especificacao },
-                { header: 'Data de Envio', width: 26, get: (d) => d.dataEnvio },
-                { header: 'Juntado por', width: 36, get: (d) => d.juntadoPor },
-                { header: 'Função', width: 26, get: (d) => d.funcao || '' },
-                { header: 'Dias', width: 13, get: (d, ctx) => diasDecorridos(d.dataEnvio, ctx.now) },
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Tipo de Documento', width: 30, get: (d) => d.tipoDocumento },
+                { header: 'Especificação do Documento', width: 46, get: (d) => d.especificacao },
+                { header: 'Juntado por', width: 30, get: (d) => d.juntadoPor },
+                { header: 'Função', width: 16, get: (d) => d.funcao || '' },
+                { header: 'Data de Envio', width: 22, get: (d) => d.dataEnvio },
+                { header: 'Dias', width: 12, get: (d, ctx) => diasDecorridos(d.dataEnvio, ctx.now) },
             ],
         },
     };
@@ -461,22 +479,41 @@
         return arr;
     }
 
-    // Faixas de tempo de espera (com base nos dias decorridos até a emissão do relatório)
-    function faixasDeTempo(dados, campoData, now) {
-        let ate30 = 0, m30a90 = 0, mais90 = 0;
+    const COR_PRIORITARIO = [180, 60, 60];  // realce dos prioritários
+
+    function contarPrioritarios(dados) {
+        return dados.reduce((n, d) => n + (d.prioritario ? 1 : 0), 0);
+    }
+
+    // Média de registros por dia (com base nos dias distintos presentes nas datas)
+    function mediaPorDia(dados, campoData) {
+        const dias = new Set();
+        let comData = 0;
+        dados.forEach(d => {
+            const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(d[campoData] || '');
+            if (!m) return;
+            comData++;
+            dias.add(m[0]);
+        });
+        if (!dias.size) return 0;
+        return comData / dias.size;
+    }
+
+    // Faixas de tempo de espera, separando prioritários de normais.
+    function faixasPorPrioridade(dados, campoData, now) {
+        const b = [
+            { label: 'Até 30 dias', prioritarios: 0, normais: 0 },
+            { label: '31 a 90 dias', prioritarios: 0, normais: 0 },
+            { label: 'Mais de 90 dias', prioritarios: 0, normais: 0 },
+        ];
         dados.forEach(d => {
             const ts = parseDataBR(d[campoData]);
             if (ts == null) return;
             const dias = Math.floor((now - ts) / DIA_MS);
-            if (dias > 90) mais90++;
-            else if (dias > 30) m30a90++;
-            else ate30++;
+            const idx = dias > 90 ? 2 : (dias > 30 ? 1 : 0);
+            if (d.prioritario) b[idx].prioritarios++; else b[idx].normais++;
         });
-        return [
-            { label: 'Até 30 dias', valor: ate30, cor: [120, 140, 152] },
-            { label: '31 a 90 dias', valor: m30a90, cor: [90, 113, 132] },
-            { label: 'Mais de 90 dias', valor: mais90, cor: [150, 86, 86] },
-        ];
+        return b;
     }
 
     // Card de destaque (KPI). subs: array de linhas secundárias.
@@ -527,18 +564,72 @@
         });
     }
 
+    // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha, com legenda.
+    function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.escura);
+        doc.text(titulo, x, y + 4);
+        // Legenda
+        const legY = y + 4;
+        const q1 = x + w - 52;
+        doc.setFillColor(...COR_PRIORITARIO); doc.rect(q1, legY - 2.4, 3, 3, 'F');
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.texto);
+        doc.text('Prioritários', q1 + 4, legY);
+        const q2 = x + w - 24;
+        doc.setFillColor(...COR.media); doc.rect(q2, legY - 2.4, 3, 3, 'F');
+        doc.text('Normais', q2 + 4, legY);
+
+        const topo = y + 10;
+        const areaH = h - 10;
+        const rotuloW = Math.min(34, w * 0.32);
+        const valorW = 10;
+        const barX = x + rotuloW;
+        const barMaxW = Math.max(6, w - rotuloW - valorW);
+        const maxVal = Math.max(1, ...faixas.map(f => Math.max(f.prioritarios, f.normais)));
+        const linhaH = areaH / faixas.length;
+        const subH = Math.max(2.4, linhaH * 0.26);
+
+        doc.setFontSize(7.5);
+        faixas.forEach((f, i) => {
+            const base = topo + i * linhaH;
+            const meio = base + linhaH / 2;
+            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.texto);
+            doc.text(doc.splitTextToSize(f.label, rotuloW - 3)[0], x, meio + 1);
+            // prioritários (acima)
+            const wp = Math.max(0.5, (f.prioritarios / maxVal) * barMaxW);
+            doc.setFillColor(...COR_PRIORITARIO);
+            doc.roundedRect(barX, meio - subH - 1, wp, subH, 0.5, 0.5, 'F');
+            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.escura);
+            doc.text(String(f.prioritarios), barX + wp + 1.5, meio - 1.4);
+            // normais (abaixo)
+            const wn = Math.max(0.5, (f.normais / maxVal) * barMaxW);
+            doc.setFillColor(...COR.media);
+            doc.roundedRect(barX, meio + 1, wn, subH, 0.5, 0.5, 'F');
+            doc.text(String(f.normais), barX + wn + 1.5, meio + subH + 0.6);
+        });
+    }
+
+    function desenharRodape(doc, titulo, quando, pw, ph, m) {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+        doc.text(`${titulo}  •  Página ${doc.internal.getNumberOfPages()}`, m, ph - 6);
+        doc.text(quando, pw - m, ph - 6, { align: 'right' });
+    }
+
     function gerarPDF(dados, cfg) {
         const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
         if (!ctor) throw new Error('biblioteca jsPDF não carregada');
-        const doc = new ctor({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
         if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
 
         const p = cfg.pdf;
         const now = Date.now();
-        const pw = doc.internal.pageSize.getWidth();   // ~297 (paisagem)
-        const ph = doc.internal.pageSize.getHeight();  // ~210
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();   // ~210 (retrato)
+        const ph = doc.internal.pageSize.getHeight();  // ~297
         const m = 12;
-        const hoje = new Date().toLocaleDateString('pt-BR');
+        const uw = pw - 2 * m;                          // largura útil
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
 
         // Ordena por data, da mais antiga para a mais nova (sem data vai para o fim)
         const ordenados = dados.slice().sort((a, b) => {
@@ -546,70 +637,90 @@
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
 
-        // Cabeçalho
+        // ═══ PÁGINA 1 — RESUMO ═══
         doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
         doc.text(p.titulo, m, m + 2);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
-        doc.text(`Relatório gerado em ${hoje}  •  ${dados.length} registro(s)`, m, m + 8);
+        doc.text(`Resumo  •  extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s)`, m, m + 8);
         doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
 
-        // Painel: 2 KPIs (esquerda) + gráfico de faixas de tempo + gráfico de distribuição
-        const topo = m + 16;
-        const bandaH = 66;
         const gap = 6;
+        // KPIs numéricos (3 cards)
+        const kY = m + 16;
+        const kW = (uw - 2 * gap) / 3;
+        const prio = contarPrioritarios(dados);
+        const media = mediaPorDia(dados, p.dataCampo);
+        desenharCard(doc, m, kY, kW, 28, p.atosTitulo, String(dados.length), ['atos pendentes']);
+        desenharCard(doc, m + kW + gap, kY, kW, 28, 'Prioritários pendentes', String(prio),
+                     [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`]);
+        desenharCard(doc, m + 2 * (kW + gap), kY, kW, 28, 'Média por dia',
+                     media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', ['processos/dia']);
 
-        // KPIs empilhados
-        const kpiW = 72;
-        desenharCard(doc, m, topo, kpiW, 28, p.atosTitulo, String(dados.length), ['atos pendentes']);
-
+        // KPI do mais atrasado (card largo)
+        const aY = kY + 28 + gap;
         const antigo = acharMaisAntigo(dados, p.dataCampo);
         let subsAntigo = ['Data não disponível'];
         let valAntigo = '—';
         if (antigo) {
             const reg = antigo.registro;
             const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
-            valAntigo = antigo.dataStr;
+            valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
             subsAntigo = [
-                `Processo ${reg[p.processoCampo] || ''}`,
+                `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? '  — PRIORITÁRIO' : ''}`,
                 reg[p.tipoCampo] || '',
-                `${dias} dias em aberto`,
             ];
         }
-        desenharCard(doc, m, topo + 28 + gap, kpiW, bandaH - 28 - gap, p.dataTitulo, valAntigo, subsAntigo);
+        desenharCard(doc, m, aY, uw, 26, p.dataTitulo, valAntigo, subsAntigo);
 
-        // Gráfico de faixas de tempo
-        const agingX = m + kpiW + gap;
-        const agingW = 74;
-        desenharBarras(doc, agingX, topo, agingW, bandaH, p.agingTitulo, faixasDeTempo(dados, p.dataCampo, now));
+        // Gráficos (grade de 2 colunas): faixas de tempo + distribuições
+        const charts = [
+            { tipo: 'faixas', titulo: p.agingTitulo, faixas: faixasPorPrioridade(dados, p.dataCampo, now) },
+            ...p.distribuicoes.map(g => ({ tipo: 'barras', titulo: g.titulo, itens: contarPorCampo(dados, g.campo, g.topN) })),
+        ];
+        const gY0 = aY + 26 + gap + 2;
+        const colW = (uw - gap) / 2;
+        const nLinhas = Math.ceil(charts.length / 2);
+        const chartH = Math.min(92, (ph - m - gY0 - (nLinhas - 1) * 8) / nLinhas);
+        charts.forEach((c, i) => {
+            const col = i % 2, lin = Math.floor(i / 2);
+            const cx = m + col * (colW + gap);
+            const cy = gY0 + lin * (chartH + 8);
+            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, colW, chartH, c.titulo, c.faixas);
+            else desenharBarras(doc, cx, cy, colW, chartH, c.titulo, c.itens);
+        });
 
-        // Gráfico de distribuição (por agrupador / tipo de documento)
-        const distX = agingX + agingW + gap;
-        const distW = pw - m - distX;
-        desenharBarras(doc, distX, topo, distW, bandaH, p.grupoTitulo, contarPorCampo(dados, p.grupoCampo, 12));
+        desenharRodape(doc, p.titulo, carimbo, pw, ph, m);
 
-        // Tabela: colunas explícitas (larguras controladas => sem colunas sobrando), ordenada por data
+        // ═══ PÁGINA 2+ — TABELA DISCRIMINADA ═══
+        doc.addPage();
         const colunas = p.colunas;
         const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles[i] = { cellWidth: c.width }; });
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const idxProcesso = colunas.findIndex(c => /processo/i.test(c.header));
 
         doc.autoTable({
-            head: [colunas.map(c => c.header)],
-            body: ordenados.map(d => colunas.map(c => String(c.get(d, { now }) ?? ''))),
-            startY: topo + bandaH + 6,
-            margin: { left: m, right: m, top: m + 4, bottom: 12 },
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
+                return o;
+            }),
+            startY: m,
+            margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            tableWidth: 'wrap',
             styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.texto,
                       lineColor: COR.linha, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.escura, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.clara },
             columnStyles,
-            didDrawPage: () => {
-                const n = doc.internal.getNumberOfPages();
-                doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
-                doc.text(`${p.titulo}  •  Página ${n}`, m, ph - 6);
-                doc.text(hoje, pw - m, ph - 6, { align: 'right' });
+            // Realça o número do processo dos prioritários
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                    data.cell.styles.textColor = COR_PRIORITARIO;
+                    data.cell.styles.fontStyle = 'bold';
+                }
             },
+            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m),
         });
 
         const blob = doc.output('blob');
