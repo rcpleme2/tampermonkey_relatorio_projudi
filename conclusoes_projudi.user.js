@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      7.0
+// @version      7.1
 // @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (com painel e gráficos)
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -119,12 +119,23 @@
         linha: (d) => [d.processo, d.classe, d.dtRetorno, d.tipoConclusao, d.responsavel, d.agrupador],
         pdf: {
             titulo: 'Retorno de Processos Conclusos',
-            atosTitulo: 'Quantidade de atos',
+            atosTitulo: 'Retornos de conclusão pendentes',
+            agingTitulo: 'Retornos por tempo de espera',
             dataCampo: 'dtRetorno',
             dataTitulo: 'Retorno pendente mais antigo',
             processoCampo: 'processo',
+            tipoCampo: 'tipoConclusao',
             grupoCampo: 'agrupador',
             grupoTitulo: 'Processos por Agrupador',
+            colunas: [
+                { header: 'Processo', width: 34, get: (d) => d.processo },
+                { header: 'Classe', width: 24, get: (d) => d.classe },
+                { header: 'Dt. Retorno', width: 26, get: (d) => d.dtRetorno },
+                { header: 'Tipo de Conclusão', width: 46, get: (d) => d.tipoConclusao },
+                { header: 'Responsável', width: 46, get: (d) => d.responsavel },
+                { header: 'Agrupador', width: 40, get: (d) => d.agrupador },
+                { header: 'Dias', width: 14, get: (d, ctx) => diasDecorridos(d.dtRetorno, ctx.now) },
+            ],
         },
     };
 
@@ -150,23 +161,37 @@
             const tipoDocumento = b ? norm(b.textContent) : textoCelula(tdDoc);
             const especificacao = textoSemNegrito(emDoc);
 
+            // "Juntado por" (td[8]): nome (texto) + função (em <b>, ex.: "Procurador")
+            const bFunc = tds[8].querySelector('b');
             return {
                 processo,
                 tipoDocumento,
                 especificacao,
                 dataEnvio: textoCelula(tds[7]),
                 juntadoPor: textoSemNegrito(tds[8]), // nome, sem o cargo em negrito
+                funcao: bFunc ? norm(bFunc.textContent) : '',
             };
         },
         linha: (d) => [d.processo, d.tipoDocumento, d.especificacao, d.dataEnvio, d.juntadoPor],
         pdf: {
             titulo: 'Juntadas',
-            atosTitulo: 'Quantidade de atos',
+            atosTitulo: 'Juntadas pendentes',
+            agingTitulo: 'Juntadas por tempo de espera',
             dataCampo: 'dataEnvio',
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
+            tipoCampo: 'tipoDocumento',
             grupoCampo: 'tipoDocumento',
             grupoTitulo: 'Processos por Tipo de Documento',
+            colunas: [
+                { header: 'Processo', width: 34, get: (d) => d.processo },
+                { header: 'Tipo de Documento', width: 40, get: (d) => d.tipoDocumento },
+                { header: 'Especificação do Documento', width: 66, get: (d) => d.especificacao },
+                { header: 'Data de Envio', width: 26, get: (d) => d.dataEnvio },
+                { header: 'Juntado por', width: 36, get: (d) => d.juntadoPor },
+                { header: 'Função', width: 26, get: (d) => d.funcao || '' },
+                { header: 'Dias', width: 13, get: (d, ctx) => diasDecorridos(d.dataEnvio, ctx.now) },
+            ],
         },
     };
 
@@ -397,18 +422,26 @@
         linha:  [203, 213, 224], // bordas
     };
 
+    const DIA_MS = 86400000;
+
     function parseDataBR(str) {
         const m = /(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/.exec(str || '');
         if (!m) return null;
         return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime();
     }
 
-    function acharMaisAntigo(dados, campoData, campoProc) {
+    function diasDecorridos(str, now) {
+        const ts = parseDataBR(str);
+        if (ts == null) return '';
+        return String(Math.max(0, Math.floor((now - ts) / DIA_MS)));
+    }
+
+    function acharMaisAntigo(dados, campoData) {
         let best = null;
         dados.forEach(d => {
             const ts = parseDataBR(d[campoData]);
             if (ts == null) return;
-            if (!best || ts < best.ts) best = { ts, dataStr: (d[campoData] || '').trim(), processo: (d[campoProc] || '').trim() };
+            if (!best || ts < best.ts) best = { ts, dataStr: (d[campoData] || '').trim(), registro: d };
         });
         return best;
     }
@@ -428,46 +461,67 @@
         return arr;
     }
 
-    function desenharCard(doc, x, y, w, h, titulo, valor, sub) {
+    // Faixas de tempo de espera (com base nos dias decorridos até a emissão do relatório)
+    function faixasDeTempo(dados, campoData, now) {
+        let ate30 = 0, m30a90 = 0, mais90 = 0;
+        dados.forEach(d => {
+            const ts = parseDataBR(d[campoData]);
+            if (ts == null) return;
+            const dias = Math.floor((now - ts) / DIA_MS);
+            if (dias > 90) mais90++;
+            else if (dias > 30) m30a90++;
+            else ate30++;
+        });
+        return [
+            { label: 'Até 30 dias', valor: ate30, cor: [120, 140, 152] },
+            { label: '31 a 90 dias', valor: m30a90, cor: [90, 113, 132] },
+            { label: 'Mais de 90 dias', valor: mais90, cor: [150, 86, 86] },
+        ];
+    }
+
+    // Card de destaque (KPI). subs: array de linhas secundárias.
+    function desenharCard(doc, x, y, w, h, titulo, valor, subs) {
         doc.setDrawColor(...COR.linha); doc.setFillColor(...COR.clara); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.suave);
-        doc.text(titulo.toUpperCase(), x + 5, y + 7);
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(valor.length > 14 ? 15 : 20); doc.setTextColor(...COR.escura);
-        doc.text(valor, x + 5, y + 17);
-        if (sub) {
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.suave);
-            doc.text(doc.splitTextToSize(sub, w - 10)[0], x + 5, y + h - 4);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+        doc.text(String(titulo).toUpperCase(), x + 5, y + 6.5);
+        const grande = valor.length <= 13;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(grande ? 19 : 14); doc.setTextColor(...COR.escura);
+        doc.text(valor, x + 5, y + (grande ? 16 : 15));
+        if (subs && subs.length) {
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+            let yy = y + (grande ? 21 : 20);
+            subs.forEach(s => {
+                if (!s) return;
+                doc.text(doc.splitTextToSize(String(s), w - 10)[0], x + 5, yy);
+                yy += 4;
+            });
         }
     }
 
+    // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
     function desenharBarras(doc, x, y, w, h, titulo, itens) {
         doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.escura);
         doc.text(titulo, x, y + 4);
         const topo = y + 9;
         const areaH = h - 9;
         if (!itens.length) return;
-        const rotuloW = Math.min(70, w * 0.42);
+        const rotuloW = Math.min(64, w * 0.42);
         const valorW = 12;
         const barX = x + rotuloW;
-        const barMaxW = w - rotuloW - valorW;
+        const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(...itens.map(i => i.valor)) || 1;
         const linhaH = Math.min(9, areaH / itens.length);
-        const barH = Math.max(3, linhaH * 0.62);
+        const barH = Math.max(3, linhaH * 0.6);
 
         doc.setFontSize(8);
         itens.forEach((it, i) => {
-            const cy = topo + i * linhaH;
-            const meio = cy + linhaH / 2;
-            // rótulo
+            const meio = topo + i * linhaH + linhaH / 2;
             doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.texto);
-            const rot = doc.splitTextToSize(it.label, rotuloW - 3)[0];
-            doc.text(rot, x, meio + 1.2);
-            // barra
+            doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + 1.2);
             const bw = Math.max(0.6, (it.valor / maxVal) * barMaxW);
-            doc.setFillColor(...COR.media);
+            doc.setFillColor(...(it.cor || COR.media));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.6, 0.6, 'F');
-            // valor
             doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.escura);
             doc.text(String(it.valor), barX + bw + 2, meio + 1.2);
         });
@@ -480,10 +534,17 @@
         if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
 
         const p = cfg.pdf;
-        const pw = doc.internal.pageSize.getWidth();   // ~297
+        const now = Date.now();
+        const pw = doc.internal.pageSize.getWidth();   // ~297 (paisagem)
         const ph = doc.internal.pageSize.getHeight();  // ~210
         const m = 12;
         const hoje = new Date().toLocaleDateString('pt-BR');
+
+        // Ordena por data, da mais antiga para a mais nova (sem data vai para o fim)
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a[p.dataCampo]); const tb = parseDataBR(b[p.dataCampo]);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
 
         // Cabeçalho
         doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
@@ -492,36 +553,57 @@
         doc.text(`Relatório gerado em ${hoje}  •  ${dados.length} registro(s)`, m, m + 8);
         doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
 
-        // Painel: 2 cards à esquerda (empilhados) + gráfico de barras à direita
+        // Painel: 2 KPIs (esquerda) + gráfico de faixas de tempo + gráfico de distribuição
         const topo = m + 16;
-        const bandaH = 62;
-        const colEsqW = 88;
+        const bandaH = 66;
         const gap = 6;
-        const cardH = (bandaH - gap) / 2;
 
-        desenharCard(doc, m, topo, colEsqW, cardH, p.atosTitulo, String(dados.length));
+        // KPIs empilhados
+        const kpiW = 72;
+        desenharCard(doc, m, topo, kpiW, 28, p.atosTitulo, String(dados.length), ['atos pendentes']);
 
-        const antigo = acharMaisAntigo(dados, p.dataCampo, p.processoCampo);
-        desenharCard(doc, m, topo + cardH + gap, colEsqW, cardH, p.dataTitulo,
-                     antigo ? antigo.dataStr : '—',
-                     antigo ? `Processo ${antigo.processo}` : 'Data não disponível');
+        const antigo = acharMaisAntigo(dados, p.dataCampo);
+        let subsAntigo = ['Data não disponível'];
+        let valAntigo = '—';
+        if (antigo) {
+            const reg = antigo.registro;
+            const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
+            valAntigo = antigo.dataStr;
+            subsAntigo = [
+                `Processo ${reg[p.processoCampo] || ''}`,
+                reg[p.tipoCampo] || '',
+                `${dias} dias em aberto`,
+            ];
+        }
+        desenharCard(doc, m, topo + 28 + gap, kpiW, bandaH - 28 - gap, p.dataTitulo, valAntigo, subsAntigo);
 
-        const chartX = m + colEsqW + gap * 2;
-        const chartW = pw - m - chartX;
-        const itens = contarPorCampo(dados, p.grupoCampo, 12);
-        desenharBarras(doc, chartX, topo, chartW, bandaH, p.grupoTitulo, itens);
+        // Gráfico de faixas de tempo
+        const agingX = m + kpiW + gap;
+        const agingW = 74;
+        desenharBarras(doc, agingX, topo, agingW, bandaH, p.agingTitulo, faixasDeTempo(dados, p.dataCampo, now));
 
-        // Tabela com todos os dados
+        // Gráfico de distribuição (por agrupador / tipo de documento)
+        const distX = agingX + agingW + gap;
+        const distW = pw - m - distX;
+        desenharBarras(doc, distX, topo, distW, bandaH, p.grupoTitulo, contarPorCampo(dados, p.grupoCampo, 12));
+
+        // Tabela: colunas explícitas (larguras controladas => sem colunas sobrando), ordenada por data
+        const colunas = p.colunas;
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles[i] = { cellWidth: c.width }; });
+
         doc.autoTable({
-            head: [cfg.cabecalhos],
-            body: dados.map(cfg.linha),
+            head: [colunas.map(c => c.header)],
+            body: ordenados.map(d => colunas.map(c => String(c.get(d, { now }) ?? ''))),
             startY: topo + bandaH + 6,
             margin: { left: m, right: m, top: m + 4, bottom: 12 },
             theme: 'grid',
+            tableWidth: 'wrap',
             styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.texto,
                       lineColor: COR.linha, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.escura, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.clara },
+            columnStyles,
             didDrawPage: () => {
                 const n = doc.internal.getNumberOfPages();
                 doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
