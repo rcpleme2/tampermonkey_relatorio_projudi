@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      8.0
+// @version      8.1
 // @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (retrato, resumo com KPIs e gráficos, prioritários destacados)
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -131,13 +131,15 @@
             titulo: 'Retorno de Processos Conclusos',
             atosTitulo: 'Retornos de conclusão pendentes',
             agingTitulo: 'Retornos por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos retornos de conclusão pendentes',
             dataCampo: 'dtRetorno',
-            dataTitulo: 'Retorno pendente mais antigo',
+            dataTitulo: 'Retorno de conclusão mais antigo',
             processoCampo: 'processo',
             tipoCampo: 'tipoConclusao',
+            // mediaLabel ausente => o KPI de média por dia não é exibido no retorno
             distribuicoes: [
                 { titulo: 'Processos por Agrupador', campo: 'agrupador', topN: 12 },
-                { titulo: 'Pendências por Responsável', campo: 'responsavel', topN: 12 },
+                { titulo: 'Retornos pendentes por magistrado', campo: 'responsavel', topN: 12 },
             ],
             // Colunas (retrato): Dt. Retorno logo antes de Dias
             colunas: [
@@ -191,14 +193,16 @@
             titulo: 'Juntadas',
             atosTitulo: 'Juntadas pendentes',
             agingTitulo: 'Juntadas por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada das juntadas pendentes',
             dataCampo: 'dataEnvio',
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
+            mediaLabel: 'juntadas / dia',
             distribuicoes: [
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 12 },
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 12, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
                 { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
-                { titulo: 'Pendências por Juntado por', campo: 'juntadoPor', topN: 12 },
+                { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 12 },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -464,10 +468,12 @@
         return best;
     }
 
-    function contarPorCampo(dados, campo, topN) {
+    function contarPorCampo(dados, campo, topN, limpar) {
         const mapa = new Map();
         dados.forEach(d => {
-            const k = ((d[campo] || '').trim()) || '(vazio)';
+            let k = (d[campo] || '').trim();
+            if (limpar) k = limpar(k).trim();
+            k = k || '(vazio)';
             mapa.set(k, (mapa.get(k) || 0) + 1);
         });
         let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
@@ -516,23 +522,36 @@
         return b;
     }
 
-    // Card de destaque (KPI). subs: array de linhas secundárias.
-    function desenharCard(doc, x, y, w, h, titulo, valor, subs) {
+    // Card de destaque (KPI). subs: array de linhas secundárias. Se central=true, o
+    // conteúdo é centralizado horizontal e verticalmente dentro do card.
+    function desenharCard(doc, x, y, w, h, titulo, valor, subs, central) {
         doc.setDrawColor(...COR.linha); doc.setFillColor(...COR.clara); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        subs = (subs || []).filter(Boolean);
+
+        if (central) {
+            const cx = x + w / 2;
+            // altura total do bloco: título (4) + valor (7) + subs (4 cada)
+            const blocoH = 4 + 8 + subs.length * 4.2;
+            let yy = y + (h - blocoH) / 2 + 4;
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+            doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(valor.length <= 26 ? 14 : 11); doc.setTextColor(...COR.escura);
+            doc.text(valor, cx, yy, { align: 'center' }); yy += 5.5;
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 8)[0], cx, yy, { align: 'center' }); yy += 4.2; });
+            return;
+        }
+
         doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
         doc.text(String(titulo).toUpperCase(), x + 5, y + 6.5);
         const grande = valor.length <= 13;
         doc.setFont('helvetica', 'bold'); doc.setFontSize(grande ? 19 : 14); doc.setTextColor(...COR.escura);
         doc.text(valor, x + 5, y + (grande ? 16 : 15));
-        if (subs && subs.length) {
+        if (subs.length) {
             doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
             let yy = y + (grande ? 21 : 20);
-            subs.forEach(s => {
-                if (!s) return;
-                doc.text(doc.splitTextToSize(String(s), w - 10)[0], x + 5, yy);
-                yy += 4;
-            });
+            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], x + 5, yy); yy += 4; });
         }
     }
 
@@ -566,20 +585,19 @@
 
     // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha, com legenda.
     function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.escura);
-        doc.text(titulo, x, y + 4);
-        // Legenda
-        const legY = y + 4;
-        const q1 = x + w - 52;
-        doc.setFillColor(...COR_PRIORITARIO); doc.rect(q1, legY - 2.4, 3, 3, 'F');
+        // Título (linha 1) e legenda (linha 2) — separados para não se sobreporem
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.escura);
+        doc.text(doc.splitTextToSize(titulo, w)[0], x, y + 4);
+        const legY = y + 9.5;
+        doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
         doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.texto);
-        doc.text('Prioritários', q1 + 4, legY);
-        const q2 = x + w - 24;
+        doc.text('Prioritários', x + 4, legY);
+        const q2 = x + 28;
         doc.setFillColor(...COR.media); doc.rect(q2, legY - 2.4, 3, 3, 'F');
         doc.text('Normais', q2 + 4, legY);
 
-        const topo = y + 10;
-        const areaH = h - 10;
+        const topo = y + 14;
+        const areaH = h - 14;
         const rotuloW = Math.min(34, w * 0.32);
         const valorW = 10;
         const barX = x + rotuloW;
@@ -645,18 +663,21 @@
         doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
 
         const gap = 6;
-        // KPIs numéricos (3 cards)
+        // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
         const kY = m + 16;
-        const kW = (uw - 2 * gap) / 3;
         const prio = contarPrioritarios(dados);
-        const media = mediaPorDia(dados, p.dataCampo);
-        desenharCard(doc, m, kY, kW, 28, p.atosTitulo, String(dados.length), ['atos pendentes']);
-        desenharCard(doc, m + kW + gap, kY, kW, 28, 'Prioritários pendentes', String(prio),
-                     [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`]);
-        desenharCard(doc, m + 2 * (kW + gap), kY, kW, 28, 'Média por dia',
-                     media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', ['processos/dia']);
+        const kpis = [
+            { titulo: p.atosTitulo, valor: String(dados.length), subs: [] },
+            { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`] },
+        ];
+        if (p.mediaLabel) {
+            const media = mediaPorDia(dados, p.dataCampo);
+            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel] });
+        }
+        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs));
 
-        // KPI do mais atrasado (card largo)
+        // KPI do mais atrasado (card largo, texto centralizado)
         const aY = kY + 28 + gap;
         const antigo = acharMaisAntigo(dados, p.dataCampo);
         let subsAntigo = ['Data não disponível'];
@@ -670,21 +691,21 @@
                 reg[p.tipoCampo] || '',
             ];
         }
-        desenharCard(doc, m, aY, uw, 26, p.dataTitulo, valAntigo, subsAntigo);
+        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true);
 
         // Gráficos (grade de 2 colunas): faixas de tempo + distribuições
         const charts = [
             { tipo: 'faixas', titulo: p.agingTitulo, faixas: faixasPorPrioridade(dados, p.dataCampo, now) },
-            ...p.distribuicoes.map(g => ({ tipo: 'barras', titulo: g.titulo, itens: contarPorCampo(dados, g.campo, g.topN) })),
+            ...p.distribuicoes.map(g => ({ tipo: 'barras', titulo: g.titulo, itens: contarPorCampo(dados, g.campo, g.topN, g.limpar) })),
         ];
-        const gY0 = aY + 26 + gap + 2;
+        const gY0 = aY + 28 + gap + 2;
         const colW = (uw - gap) / 2;
         const nLinhas = Math.ceil(charts.length / 2);
-        const chartH = Math.min(92, (ph - m - gY0 - (nLinhas - 1) * 8) / nLinhas);
+        const chartH = Math.min(96, (ph - m - gY0 - (nLinhas - 1) * 10) / nLinhas);
         charts.forEach((c, i) => {
             const col = i % 2, lin = Math.floor(i / 2);
             const cx = m + col * (colW + gap);
-            const cy = gY0 + lin * (chartH + 8);
+            const cy = gY0 + lin * (chartH + 10);
             if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, colW, chartH, c.titulo, c.faixas);
             else desenharBarras(doc, cx, cy, colW, chartH, c.titulo, c.itens);
         });
@@ -693,6 +714,9 @@
 
         // ═══ PÁGINA 2+ — TABELA DISCRIMINADA ═══
         doc.addPage();
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.escura);
+        doc.text(p.tabelaTitulo || 'Tabela discriminada', m, m + 3);
+        const tabInicioY = m + 8;
         const colunas = p.colunas;
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
@@ -705,7 +729,7 @@
                 colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
                 return o;
             }),
-            startY: m,
+            startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.texto,
