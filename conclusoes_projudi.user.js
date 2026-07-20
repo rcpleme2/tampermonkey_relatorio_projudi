@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.0
-// @description  Coleta conclusões (remessa) OU retorno de processos conclusos, em várias páginas/atuações, acumula e exporta em Excel
+// @version      6.0
+// @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, em várias páginas/atuações, acumula e exporta em Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
+// @match        https://projudi2.tjpr.jus.br/projudi/processo/analisarJuntada.do*
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @grant        GM_addStyle
 // @grant        GM_download
@@ -33,6 +34,22 @@
 
     function textoCelula(td) {
         return td ? (td.textContent || '').trim() : '';
+    }
+
+    function norm(s) {
+        return (s || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Texto do elemento ignorando o conteúdo dos filhos <b> (ex.: separar a
+    // especificação — em texto normal — do tipo de documento — em negrito).
+    function textoSemNegrito(el) {
+        if (!el) return '';
+        let s = '';
+        el.childNodes.forEach(n => {
+            if (n.nodeType === 1 && n.tagName === 'B') return;
+            s += n.textContent;
+        });
+        return norm(s);
     }
 
     function processoEclasse(td) {
@@ -98,6 +115,39 @@
             };
         },
         linha: (d) => [d.processo, d.classe, d.dtRetorno, d.tipoConclusao, d.responsavel, d.agrupador],
+    };
+
+    const CFG_JUNTADAS = {
+        prefixo: 'projudi_juntadas_',
+        detecta: (cab) => /juntado\s+por/i.test(cab),
+        minTds: 9,                              // linhas têm 10 tds (0=checkbox, 1=expandir, 2=semáforo)
+        usaAtuacao: false,
+        nomeArquivo: 'juntadas_projudi',
+        rotulos: { coletar: 'Extrair Juntadas', coletarMais: 'Extrair mais (Juntadas)', baixar: '⬇ Baixar Juntadas' },
+        // Colunas pedidas: Processo - Tipo de documento - Especificação - Data de Envio - Juntado por
+        cabecalhos: ['Processo', 'Tipo de Documento', 'Especificação do Documento', 'Data de Envio', 'Juntado por'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 52 }, { wch: 18 }, { wch: 28 }],
+        extrai: (tds) => {
+            // Processo (td[3]): número em <em class="attention">
+            const emProc = tds[3].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[3]);
+
+            // Tipo de Documento (td[6]): título em <b>; especificação = texto após o <br>
+            const tdDoc = tds[6];
+            const b = tdDoc.querySelector('b');
+            const emDoc = tdDoc.querySelector('em') || tdDoc;
+            const tipoDocumento = b ? norm(b.textContent) : textoCelula(tdDoc);
+            const especificacao = textoSemNegrito(emDoc);
+
+            return {
+                processo,
+                tipoDocumento,
+                especificacao,
+                dataEnvio: textoCelula(tds[7]),
+                juntadoPor: textoSemNegrito(tds[8]), // nome, sem o cargo em negrito
+            };
+        },
+        linha: (d) => [d.processo, d.tipoDocumento, d.especificacao, d.dataEnvio, d.juntadoPor],
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -321,13 +371,16 @@
         #exportar-status { font-size: 0.8em; color: #555; margin-left: 8px; font-family: Verdana, Arial, sans-serif; }
     `);
 
-    // Detecta qual relatório está na tela pelo cabeçalho da resultTable.
+    // Detecta qual relatório está na tela pelo cabeçalho da resultTable; se não houver
+    // tabela reconhecível, tenta pela URL (útil na tela de busca da página de juntadas).
     function detectarConfig() {
         const thead = document.querySelector('table.resultTable thead');
         const cab = thead ? thead.textContent : '';
+        if (CFG_JUNTADAS.detecta(cab)) return CFG_JUNTADAS;
         if (CFG_RETORNO.detecta(cab)) return CFG_RETORNO;
         if (CFG_CONCLUSOES.detecta(cab)) return CFG_CONCLUSOES;
-        return null; // sem tabela de resultados reconhecível
+        if (/analisarJuntada\.do/i.test(location.pathname + location.search)) return CFG_JUNTADAS;
+        return null; // sem tabela de resultados reconhecível (página de conclusao.do sem resultados)
     }
 
     function injetarBotoes() {
@@ -338,8 +391,11 @@
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
         if (!cfg) {
-            const retomaRetorno = store.getItem(CFG_RETORNO.prefixo + 'rodando') === '1';
-            cfg = retomaRetorno ? CFG_RETORNO : CFG_CONCLUSOES;
+            // Página de conclusao.do sem resultados: respeita uma coleta em andamento;
+            // senão, assume o relatório de Conclusões.
+            const emAndamento = [CFG_RETORNO, CFG_JUNTADAS, CFG_CONCLUSOES]
+                .find(c => store.getItem(c.prefixo + 'rodando') === '1');
+            cfg = emAndamento || CFG_CONCLUSOES;
         }
         const coletor = criarColetor(cfg);
 
