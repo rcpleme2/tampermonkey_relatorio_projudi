@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.2
+// @version      12.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -246,6 +246,8 @@
                 { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 12 },
                 // Largura total (span 2) para caber o nome completo do tipo de documento
                 { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 14, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
+                // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o restante)
+                { titulo: 'Top 10 Processos com Mais Juntadas Pendentes', campo: 'processo', topN: 10, span: 2, semOutros: true },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -578,7 +580,9 @@
         return best;
     }
 
-    function contarPorCampo(dados, campo, topN, limpar) {
+    // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
+    // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
+    function contarPorCampo(dados, campo, topN, limpar, semOutros) {
         const mapa = new Map();
         dados.forEach(d => {
             let k = (d[campo] || '').trim();
@@ -588,9 +592,13 @@
         });
         let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
         if (arr.length > topN) {
-            const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
-            arr = arr.slice(0, topN);
-            arr.push({ label: 'Outros', valor: resto });
+            if (semOutros) {
+                arr = arr.slice(0, topN);
+            } else {
+                const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
+                arr = arr.slice(0, topN);
+                arr.push({ label: 'Outros', valor: resto });
+            }
         }
         return arr;
     }
@@ -697,18 +705,23 @@
         const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(...itens.map(i => i.valor)) || 1;
         const linhaH = Math.min(9, areaH / itens.length);
-        const barH = Math.max(3, linhaH * 0.58);
+        const barH = Math.max(1.5, linhaH * 0.58);
+        // A fonte acompanha a altura da linha: quando há muitos itens numa área pequena
+        // (ex.: grades com várias seções na mesma página), reduz o texto em vez de
+        // sobrepor uma linha na outra — nunca deixa o texto ilegível por colisão.
+        const fonte = Math.max(5.5, Math.min(8, linhaH * 0.85));
+        const offsetY = fonte * 0.15;
 
-        doc.setFontSize(8);
+        doc.setFontSize(fonte);
         itens.forEach((it, i) => {
             const meio = topo + i * linhaH + linhaH / 2;
             doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.tintaSec);
-            doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + 1.2);
+            doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + offsetY);
             const bw = Math.max(0.6, (it.valor / maxVal) * barMaxW);
             doc.setFillColor(...(it.cor || cor));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.6, 0.6, 'F');
             doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.tinta);
-            doc.text(fmt(it.valor), barX + bw + 2, meio + 1.2);
+            doc.text(fmt(it.valor), barX + bw + 2, meio + offsetY);
         });
     }
 
@@ -728,8 +741,15 @@
         doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
         doc.text('Normais', q2 + 4, legY);
 
+        // Legenda "Como ler": quebrada para a largura da coluna (nunca vaza para a coluna
+        // vizinha) e com espaço reservado dinamicamente conforme o número de linhas.
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6);
+        const captionTexto = 'Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.';
+        const captionLinhas = doc.splitTextToSize(captionTexto, w);
+        const captionH = captionLinhas.length * 2.8;
+
         const topo = y + 15;
-        const areaH = h - 15;
+        const areaH = h - 15 - captionH;
         const rotuloW = Math.min(36, w * 0.32);
         const valorW = 10;
         const barX = x + rotuloW;
@@ -760,7 +780,7 @@
         });
 
         doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
-        doc.text('Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.', x, y + h - 0.5);
+        doc.text(captionLinhas, x, y + h - captionH + 2.4);
     }
 
     // comIndice: se true, desenha um link "Voltar ao Índice" centralizado no rodapé,
@@ -849,7 +869,7 @@
             // Gráficos (grade de 2 colunas; um gráfico pode ocupar as 2 colunas com span:2)
             const charts = [
                 { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now) },
-                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar) })),
+                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros) })),
             ];
             let col = 0, row = 0;
             charts.forEach(c => {
