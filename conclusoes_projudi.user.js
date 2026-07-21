@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.4
+// @version      10.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1162,25 +1162,21 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
-    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial como "hoje - 3 anos"
-    // e submete a pesquisa — conforme pedido pelo usuário.
+    // Marca Situação=Analisadas, Tipo=Analítico e define a data inicial como "hoje - 3 anos".
+    // NÃO submete automaticamente: testamos clique programático (.click(), MouseEvent,
+    // form.submit()) e nenhum deles aciona o envio real — a página tem algum handler de
+    // clique (via addEventListener, não visível em onclick/onsubmit) que não reage a
+    // eventos sintéticos. O usuário ainda precisa clicar em "Pesquisar" manualmente, mas a
+    // extração inicia sozinha assim que os resultados aparecerem (flag auto_iniciar).
     function preencherEPesquisarTempoMedio() {
         const form = formularioTempoMedio();
         if (!form) return;
 
-        // Dispara 'click' + 'change' nos rádios: o Projudi costuma ter listeners (ex.: para
-        // habilitar/desabilitar outros campos do formulário) que .checked=true sozinho não aciona.
-        const marcarRadio = (radio) => {
-            if (!radio) return;
-            radio.checked = true;
-            radio.dispatchEvent(new Event('click', { bubbles: true }));
-            radio.dispatchEvent(new Event('change', { bubbles: true }));
-        };
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
         console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico}`);
-        marcarRadio(radioAnalisadas);
-        marcarRadio(radioAnalitico);
+        if (radioAnalisadas) radioAnalisadas.checked = true;
+        if (radioAnalitico) radioAnalitico.checked = true;
 
         const campoInicio = form.querySelector('input[name="dataInicio"]');
         if (campoInicio) {
@@ -1192,14 +1188,9 @@
             const dd = String(d.getDate()).padStart(2, '0');
             const mm = String(d.getMonth() + 1).padStart(2, '0');
             campoInicio.value = `${dd}/${mm}/${d.getFullYear()}`;
-            campoInicio.dispatchEvent(new Event('input', { bubbles: true }));
-            campoInicio.dispatchEvent(new Event('change', { bubbles: true }));
         }
         const campoFim = form.querySelector('input[name="dataFim"]');
-        if (campoFim) {
-            campoFim.disabled = false; // também precisa ir habilitado para ser enviado
-            campoFim.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+        if (campoFim) campoFim.disabled = false; // também precisa ir habilitado para ser enviado
         console.log(`[Projudi TM] campos preenchidos — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
 
         // Salva o período para uso posterior no PDF
@@ -1208,52 +1199,10 @@
             fim: campoFim ? campoFim.value : '',
         }));
 
-        // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
-        // automaticamente (sem esta flag a página de resultados só renderiza os botões).
+        // Sinaliza que, ao carregar a página de resultados (após o usuário clicar em
+        // Pesquisar), a extração deve iniciar automaticamente.
         store.setItem('projudi_tempomedio_auto_iniciar', '1');
-        console.log('[Projudi TM] flag auto_iniciar definida; submeterá em 1,5s');
-
-        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi TM] botão de pesquisa: tag=${btn ? btn.tagName : 'null'} id=${btn ? btn.id : ''} type=${btn ? btn.type : ''} disabled=${btn ? btn.disabled : ''} onclick="${btn ? (btn.getAttribute('onclick') || '') : ''}"`);
-        console.log(`[Projudi TM] form: action="${form.action}" method="${form.method}" onsubmit="${form.getAttribute('onsubmit') || ''}"`);
-        console.log(`[Projudi TM] estado final dos campos — situacao(A).checked=${radioAnalisadas ? radioAnalisadas.checked : '?'} analitico(true).checked=${radioAnalitico ? radioAnalitico.checked : '?'} dataInicio.disabled=${campoInicio ? campoInicio.disabled : '?'} dataFim.disabled=${campoFim ? campoFim.disabled : '?'}`);
-
-        // Intercepta alert/confirm temporariamente: se o clique disparar uma validação
-        // JS do Projudi (ex.: "preencha as datas"), o alert() bloqueia a thread e por
-        // isso nenhum log aparecia depois do clique — isso deve expor a mensagem.
-        const alertOriginal = window.alert;
-        const confirmOriginal = window.confirm;
-        window.alert = (msg) => { console.warn('[Projudi TM] window.alert interceptado:', msg); return alertOriginal.call(window, msg); };
-        window.confirm = (msg) => { console.warn('[Projudi TM] window.confirm interceptado:', msg); return confirmOriginal.call(window, msg); };
-        const restaurarDialogos = () => { window.alert = alertOriginal; window.confirm = confirmOriginal; };
-
-        // OBS: o action do formulário aponta para a MESMA url (estatistica.do), então uma
-        // navegação real via POST não muda location.href — não dá para usar isso como sinal
-        // de sucesso/falha. Em vez disso, só diagnosticamos (sem reenviar automaticamente,
-        // para não arriscar um duplo POST) e deixamos o bootstrap()/detectarConfig() da
-        // próxima carga de página confirmarem se os resultados apareceram.
-        setTimeout(() => {
-            console.log('[Projudi TM] disparando pesquisa (click no botão)');
-            if (btn && !btn.disabled) {
-                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                btn.click();
-            } else {
-                console.warn('[Projudi TM] botão ausente/desabilitado — usando form.submit() diretamente');
-                form.submit();
-            }
-            console.log('[Projudi TM] clique disparado — se a página recarregar, o próximo log será "[Projudi] bootstrap"');
-            // Diagnóstico tardio: se depois de 3s o MESMO formulário de filtros ainda estiver
-            // na tela (nenhum reload ocorreu), algo bloqueou o clique antes mesmo do submit.
-            setTimeout(() => {
-                const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
-                const temResultado = !!document.querySelector('table.resultTable');
-                console.log(`[Projudi TM] diagnóstico 3s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado} url="${location.href}"`);
-                if (aindaNoFormulario && !temResultado) {
-                    console.error('[Projudi TM] a página NÃO recarregou/atualizou após o clique — o clique não chegou a acionar o submit (possível handler JS bloqueando; veja se algum alert/confirm foi interceptado acima).');
-                }
-                restaurarDialogos();
-            }, 3000);
-        }, 1500);
+        console.log('[Projudi TM] campos preenchidos e flag auto_iniciar definida — clique em "Pesquisar" para buscar; a extração começará sozinha.');
     }
 
     function injetarBotoes() {
@@ -1267,8 +1216,8 @@
             b.id = 'btn-preencher-pesquisar-tm';
             b.type = 'button';
             b.className = 'projudi-btn';
-            b.title = 'Marca Analisadas + Analítico, define a data inicial 3 anos atrás e pesquisa';
-            b.textContent = 'Preencher e Pesquisar (3 anos)';
+            b.title = 'Marca Analisadas + Analítico e define a data inicial 3 anos atrás — depois clique em Pesquisar';
+            b.textContent = 'Preencher Filtros (3 anos)';
             b.onclick = preencherEPesquisarTempoMedio;
             buttonBar.appendChild(b);
             return;
@@ -1321,7 +1270,7 @@
         } else if (autoIniciarTM) {
             store.removeItem('projudi_tempomedio_auto_iniciar');
             console.log('[Projudi TM] flag auto_iniciar detectada — iniciando extração automaticamente');
-            coletor.iniciar();   // início automático após "Preencher e Pesquisar"
+            coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
         } else {
             console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
