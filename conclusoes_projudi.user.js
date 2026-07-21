@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.2
+// @version      10.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1168,10 +1168,19 @@
         const form = formularioTempoMedio();
         if (!form) return;
 
+        // Dispara 'click' + 'change' nos rádios: o Projudi costuma ter listeners (ex.: para
+        // habilitar/desabilitar outros campos do formulário) que .checked=true sozinho não aciona.
+        const marcarRadio = (radio) => {
+            if (!radio) return;
+            radio.checked = true;
+            radio.dispatchEvent(new Event('click', { bubbles: true }));
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+        };
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
-        if (radioAnalisadas) radioAnalisadas.checked = true;
-        if (radioAnalitico) radioAnalitico.checked = true;
+        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico}`);
+        marcarRadio(radioAnalisadas);
+        marcarRadio(radioAnalitico);
 
         const campoInicio = form.querySelector('input[name="dataInicio"]');
         if (campoInicio) {
@@ -1183,9 +1192,15 @@
             const dd = String(d.getDate()).padStart(2, '0');
             const mm = String(d.getMonth() + 1).padStart(2, '0');
             campoInicio.value = `${dd}/${mm}/${d.getFullYear()}`;
+            campoInicio.dispatchEvent(new Event('input', { bubbles: true }));
+            campoInicio.dispatchEvent(new Event('change', { bubbles: true }));
         }
         const campoFim = form.querySelector('input[name="dataFim"]');
-        if (campoFim) campoFim.disabled = false; // também precisa ir habilitado para ser enviado
+        if (campoFim) {
+            campoFim.disabled = false; // também precisa ir habilitado para ser enviado
+            campoFim.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        console.log(`[Projudi TM] campos preenchidos — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
 
         // Salva o período para uso posterior no PDF
         store.setItem('projudi_tempomedio_periodo', JSON.stringify({
@@ -1199,9 +1214,25 @@
         console.log('[Projudi TM] flag auto_iniciar definida; submeterá em 1,5s');
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi TM] botão de pesquisa: tag=${btn ? btn.tagName : 'null'} id=${btn ? btn.id : ''} type=${btn ? btn.type : ''} disabled=${btn ? btn.disabled : ''}`);
+
+        const urlAntes = location.href;
         setTimeout(() => {
-            console.log('[Projudi TM] clicando em Pesquisar');
-            if (btn) btn.click(); else form.submit();
+            console.log('[Projudi TM] disparando pesquisa (click no botão + fallback submit)');
+            if (btn && !btn.disabled) {
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                btn.click();
+            } else {
+                console.warn('[Projudi TM] botão ausente/desabilitado — usando form.submit() diretamente');
+                form.submit();
+            }
+            // Se após um tempo a página não navegou nem recarregou, tenta submit() puro como último recurso.
+            setTimeout(() => {
+                if (location.href === urlAntes && document.getElementById('estatisticaConclusaoForm')) {
+                    console.warn('[Projudi TM] URL não mudou após o clique — tentando form.submit() como fallback');
+                    form.submit();
+                }
+            }, 1200);
         }, 1500);
     }
 
