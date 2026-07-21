@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      11.0
+// @version      12.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -287,7 +287,6 @@
         linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados) => gerarPDFTempoMedio(dados),
-        montarConjunto: (doc, dados, ehPrimeiraSecao) => montarRelatorioTempoMedio(doc, dados, ehPrimeiraSecao),
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -522,16 +521,23 @@
         baixarBlob(blob, `${cfg.nomeArquivo}_${dataArquivo()}.xlsx`);
     }
 
-    // ── Geração e download do PDF (paisagem, painel + gráficos + tabela) ─────────
+    // ── Geração e download do PDF (retrato, KPIs + gráficos + tabela) ────────────
 
-    // Paleta sóbria (tons de ardósia)
+    // Paleta de acento (validada para acessibilidade/colorblind-safe). Uso semântico
+    // fixo: azul = métrica principal, vermelho = prioritário (sempre), âmbar = atenção/
+    // tempo de espera intermediário, aqua = positivo/secundário. Cor nunca é o único
+    // sinal — sempre acompanhada de rótulo ou legenda.
     const COR = {
-        escura: [45, 55, 72],    // #2D3748
-        media:  [90, 113, 132],  // barras
-        clara:  [237, 242, 247], // #EDF2F7 (zebra / fundo de card)
-        texto:  [45, 55, 72],
-        suave:  [113, 128, 150], // textos secundários
-        linha:  [203, 213, 224], // bordas
+        tinta:    [17, 17, 17],     // títulos fortes
+        tintaSec: [82, 81, 78],     // texto secundário
+        muted:    [137, 135, 129],  // eixos / rótulos em maiúsculas
+        grade:    [225, 224, 217],  // hairline / bordas
+        base:     [195, 194, 183],  // linhas de base
+        cartao:   [244, 247, 251],  // fundo de card
+        azul:     [42, 120, 214],   // métrica principal / série "normal"
+        aqua:     [27, 175, 122],   // secundário / positivo
+        ambar:    [250, 178, 25],   // atenção / faixa intermediária
+        vermelho: [208, 59, 59],    // PRIORITÁRIO / crítico
     };
 
     const DIA_MS = 86400000;
@@ -575,7 +581,7 @@
         return arr;
     }
 
-    const COR_PRIORITARIO = [180, 60, 60];  // realce dos prioritários
+    const COR_PRIORITARIO = COR.vermelho;  // realce dos prioritários (mesma cor em todo o relatório)
 
     function contarPrioritarios(dados) {
         return dados.reduce((n, d) => n + (d.prioritario ? 1 : 0), 0);
@@ -612,11 +618,25 @@
         return b;
     }
 
-    // Card de destaque (KPI). subs: array de linhas secundárias. Se central=true, o
-    // conteúdo é centralizado horizontal e verticalmente dentro do card.
-    function desenharCard(doc, x, y, w, h, titulo, valor, subs, central) {
-        doc.setDrawColor(...COR.linha); doc.setFillColor(...COR.clara); doc.setLineWidth(0.2);
+    // Título de seção com régua de acento (usado por gráficos e blocos da tabela).
+    function tituloSecao(doc, x, y, w, texto, acento) {
+        acento = acento || COR.azul;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
+        doc.text(texto, x, y);
+        doc.setDrawColor(...acento); doc.setLineWidth(0.7);
+        doc.line(x, y + 1.6, x + Math.min(w, doc.getTextWidth(texto) + 2), y + 1.6);
+    }
+
+    // Card de destaque (KPI), com uma barra de acento colorida à esquerda indicando o
+    // papel semântico do dado (azul=principal, vermelho=prioritário, âmbar=atenção,
+    // aqua=secundário). subs: array de linhas secundárias. Se central=true, o conteúdo
+    // é centralizado horizontal e verticalmente dentro do card.
+    function desenharCard(doc, x, y, w, h, titulo, valor, subs, central, acento) {
+        acento = acento || COR.azul;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
         subs = (subs || []).filter(Boolean);
 
         if (central) {
@@ -624,110 +644,128 @@
             // altura total do bloco: título (4) + valor (7) + subs (4 cada)
             const blocoH = 4 + 8 + subs.length * 4.2;
             let yy = y + (h - blocoH) / 2 + 4;
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
             doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(valor.length <= 26 ? 14 : 11); doc.setTextColor(...COR.escura);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(valor.length <= 26 ? 15 : 11); doc.setTextColor(...COR.tinta);
             doc.text(valor, cx, yy, { align: 'center' }); yy += 5.5;
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
-            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 8)[0], cx, yy, { align: 'center' }); yy += 4.2; });
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
             return;
         }
 
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
-        doc.text(String(titulo).toUpperCase(), x + 5, y + 6.5);
+        const px = x + 5;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text(String(titulo).toUpperCase(), px, y + 6.5);
         const grande = valor.length <= 13;
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(grande ? 19 : 14); doc.setTextColor(...COR.escura);
-        doc.text(valor, x + 5, y + (grande ? 16 : 15));
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(grande ? 20 : 14); doc.setTextColor(...COR.tinta);
+        doc.text(valor, px, y + (grande ? 16.5 : 15));
         if (subs.length) {
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
-            let yy = y + (grande ? 21 : 20);
-            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], x + 5, yy); yy += 4; });
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            let yy = y + (grande ? 22 : 20);
+            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 8)[0], px, yy); yy += 4; });
         }
     }
 
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
-    function desenharBarras(doc, x, y, w, h, titulo, itens, fmt) {
+    // cor: cor padrão das barras (acento semântico do gráfico); item.cor sobrepõe se definida.
+    function desenharBarras(doc, x, y, w, h, titulo, itens, fmt, cor) {
         fmt = fmt || (v => String(v));
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.escura);
-        doc.text(titulo, x, y + 4);
-        const topo = y + 9;
-        const areaH = h - 9;
+        cor = cor || COR.azul;
+        tituloSecao(doc, x, y + 4, w, titulo);
+        const topo = y + 10;
+        const areaH = h - 10;
         if (!itens.length) return;
         // Rótulo ocupa metade da largura (útil sobretudo no gráfico de largura total,
         // para caber o nome completo do tipo de documento em vez de truncar em "PETIÇÃO DE")
         const rotuloW = Math.min(w * 0.5, 120);
-        const valorW = 12;
+        const valorW = 13;
         const barX = x + rotuloW;
         const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(...itens.map(i => i.valor)) || 1;
         const linhaH = Math.min(9, areaH / itens.length);
-        const barH = Math.max(3, linhaH * 0.6);
+        const barH = Math.max(3, linhaH * 0.58);
 
         doc.setFontSize(8);
         itens.forEach((it, i) => {
             const meio = topo + i * linhaH + linhaH / 2;
-            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.texto);
+            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.tintaSec);
             doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + 1.2);
             const bw = Math.max(0.6, (it.valor / maxVal) * barMaxW);
-            doc.setFillColor(...(it.cor || COR.media));
+            doc.setFillColor(...(it.cor || cor));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.6, 0.6, 'F');
-            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.escura);
+            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.tinta);
             doc.text(fmt(it.valor), barX + bw + 2, meio + 1.2);
         });
     }
 
-    // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha, com legenda.
+    // Cores de severidade por faixa (até 30d / 31-90d / mais de 90d), usadas como
+    // marcador de ponto ao lado do rótulo — reforça a leitura sem depender só das barras.
+    const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
+
+    // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha, com
+    // legenda e uma legenda de "como ler" — o vermelho é sempre prioritário, nunca a faixa.
     function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
-        // Título (linha 1) e legenda (linha 2) — separados para não se sobreporem
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.escura);
-        doc.text(doc.splitTextToSize(titulo, w)[0], x, y + 4);
-        const legY = y + 9.5;
+        tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
+        const legY = y + 10;
         doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.texto);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
         doc.text('Prioritários', x + 4, legY);
         const q2 = x + 28;
-        doc.setFillColor(...COR.media); doc.rect(q2, legY - 2.4, 3, 3, 'F');
+        doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
         doc.text('Normais', q2 + 4, legY);
 
-        const topo = y + 14;
-        const areaH = h - 14;
-        const rotuloW = Math.min(34, w * 0.32);
+        const topo = y + 15;
+        const areaH = h - 15;
+        const rotuloW = Math.min(36, w * 0.32);
         const valorW = 10;
         const barX = x + rotuloW;
         const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(1, ...faixas.map(f => Math.max(f.prioritarios, f.normais)));
         const linhaH = areaH / faixas.length;
-        const subH = Math.max(2.4, linhaH * 0.26);
+        const subH = Math.max(2.4, linhaH * 0.24);
 
         doc.setFontSize(7.5);
         faixas.forEach((f, i) => {
             const base = topo + i * linhaH;
             const meio = base + linhaH / 2;
-            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.texto);
-            doc.text(doc.splitTextToSize(f.label, rotuloW - 3)[0], x, meio + 1);
+            doc.setFillColor(...(COR_SEVERIDADE[i] || COR.muted));
+            doc.circle(x + 1.4, meio - 0.4, 1.1, 'F');
+            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.tintaSec);
+            doc.text(doc.splitTextToSize(f.label, rotuloW - 6)[0], x + 4, meio + 1);
             // prioritários (acima)
             const wp = Math.max(0.5, (f.prioritarios / maxVal) * barMaxW);
             doc.setFillColor(...COR_PRIORITARIO);
             doc.roundedRect(barX, meio - subH - 1, wp, subH, 0.5, 0.5, 'F');
-            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.escura);
+            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.tinta);
             doc.text(String(f.prioritarios), barX + wp + 1.5, meio - 1.4);
             // normais (abaixo)
             const wn = Math.max(0.5, (f.normais / maxVal) * barMaxW);
-            doc.setFillColor(...COR.media);
+            doc.setFillColor(...COR.azul);
             doc.roundedRect(barX, meio + 1, wn, subH, 0.5, 0.5, 'F');
             doc.text(String(f.normais), barX + wn + 1.5, meio + subH + 0.6);
         });
+
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
+        doc.text('Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.', x, y + h - 0.5);
     }
 
-    function desenharRodape(doc, titulo, quando, pw, ph, m) {
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.suave);
+    // comIndice: se true, desenha um link "Voltar ao Índice" centralizado no rodapé,
+    // apontando para a página 1 (usado apenas no PDF conjunto). Evita o glifo "↑" — fora
+    // da codificação padrão das fontes do jsPDF e corrompe o texto renderizado.
+    function desenharRodape(doc, titulo, quando, pw, ph, m, comIndice) {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
         doc.text(`${titulo}  •  Página ${doc.internal.getNumberOfPages()}`, m, ph - 6);
         doc.text(quando, pw - m, ph - 6, { align: 'right' });
+        if (comIndice) {
+            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.azul);
+            doc.textWithLink('Voltar ao Índice', pw / 2 - 16, ph - 6, { pageNumber: 1 });
+        }
     }
 
-    // Monta um relatório (resumo geral + resumos por competência + tabela) dentro de um
-    // documento jsPDF já criado. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarRelatorio(doc, dados, cfg, ehPrimeiraSecao) {
+    // Monta as páginas de RESUMO (geral + por competência) de um relatório genérico
+    // (Retorno/Juntadas) dentro de um documento jsPDF já criado. ehPrimeiraSecao=false
+    // começa em página nova (uso no conjunto). comIndice ativa o link de rodapé.
+    function montarResumoGenerico(doc, dados, cfg, ehPrimeiraSecao, comIndice) {
         const p = cfg.pdf;
         const now = Date.now();
         const agora = new Date();
@@ -738,51 +776,45 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const carimbo = `${hoje} ${hora}`;
-
-        // Ordena por data, da mais antiga para a mais nova (sem data vai para o fim)
-        const ordenados = dados.slice().sort((a, b) => {
-            const ta = parseDataBR(a[p.dataCampo]); const tb = parseDataBR(b[p.dataCampo]);
-            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
-        });
+        const gap = 6;
 
         // Desenha uma página de resumo (KPIs + gráficos) para um subconjunto de dados.
-        const gap = 6;
         function desenharPaginaResumo(sub, contexto, primeira) {
             if (!primeira) doc.addPage();
 
             // Cabeçalho: título, competência em destaque (com quebra), e a data em linha própria
             let hy = m + 2;
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(p.titulo, m, hy);
             hy += 8;
             if (contexto.competencia) {
-                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.media);
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
                 const linhas = doc.splitTextToSize('Competência: ' + contexto.competencia, uw);
                 doc.text(linhas, m, hy);
                 hy += linhas.length * 5.2 + 1.5;
             } else if (contexto.rotulo) {
-                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.media);
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
                 doc.text(contexto.rotulo, m, hy);
                 hy += 7;
             }
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
             doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`, m, hy);
             hy += 3;
-            doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, hy, pw - m, hy);
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
             // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
-            const kY = hy + 5;
+            const kY = hy + 6;
             const prio = contarPrioritarios(sub);
             const kpis = [
-                { titulo: p.atosTitulo, valor: String(sub.length), subs: [] },
-                { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`] },
+                { titulo: p.atosTitulo, valor: String(sub.length), subs: [], acento: COR.azul },
+                { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
             ];
             if (p.mediaLabel) {
                 const media = mediaPorDia(sub, p.dataCampo);
-                kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel] });
+                kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
             }
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
-            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs));
+            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, false, k.acento));
 
             // KPI do mais atrasado (card largo, texto centralizado)
             const aY = kY + 28 + gap;
@@ -798,7 +830,7 @@
                     reg[p.tipoCampo] || '',
                 ];
             }
-            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true);
+            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
 
             // Gráficos (grade de 2 colunas; um gráfico pode ocupar as 2 colunas com span:2)
             const charts = [
@@ -824,10 +856,10 @@
                 const cy = gY0 + c.pos.row * (chartH + 10);
                 const cw = c.pos.span === 2 ? uw : colW;
                 if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
-                else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens);
+                else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
             });
 
-            desenharRodape(doc, p.titulo, carimbo, pw, ph, m);
+            desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
         }
 
         // ═══ RESUMO GERAL ═══
@@ -846,11 +878,30 @@
                 .sort((a, b) => b[1].length - a[1].length)
                 .forEach(([comp, sub]) => desenharPaginaResumo(sub, { competencia: comp }, false));
         }
+    }
 
-        // ═══ TABELA DISCRIMINADA ═══
+    // Monta a TABELA DISCRIMINADA de um relatório genérico dentro de um documento jsPDF
+    // já criado (sempre inicia em página nova). Retorna o número da página inicial da
+    // tabela (para o índice/bookmarks do PDF conjunto).
+    function montarTabelaGenerico(doc, dados, cfg, comIndice) {
+        const p = cfg.pdf;
+        const now = Date.now();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a[p.dataCampo]); const tb = parseDataBR(b[p.dataCampo]);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+
         doc.addPage();
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.escura);
-        doc.text(p.tabelaTitulo || 'Tabela discriminada', m, m + 3);
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, p.tabelaTitulo || 'Tabela discriminada');
         const tabInicioY = m + 8;
         const colunas = p.colunas;
         const columnStyles = {};
@@ -867,10 +918,10 @@
             startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.texto,
-                      lineColor: COR.linha, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
-            headStyles: { fillColor: COR.escura, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-            alternateRowStyles: { fillColor: COR.clara },
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             // Realça o número do processo dos prioritários
             didParseCell: (data) => {
@@ -879,9 +930,10 @@
                     data.cell.styles.fontStyle = 'bold';
                 }
             },
-            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m),
+            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
         });
 
+        return paginaInicial;
     }
 
     function novoDocPDF() {
@@ -894,17 +946,116 @@
 
     function gerarPDF(dados, cfg) {
         const doc = novoDocPDF();
-        montarRelatorio(doc, dados, cfg, true);
+        montarResumoGenerico(doc, dados, cfg, true, false);
+        const pgTabela = montarTabelaGenerico(doc, dados, cfg, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         baixarBlob(doc.output('blob'), `${cfg.nomeArquivo}_${dataArquivo()}.pdf`);
     }
 
-    // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]
-    function gerarPDFConjunto(secoes) {
-        const doc = novoDocPDF();
+    // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
+    // relatório (genérico via cfg.pdf, ou o caso especial do Tempo Médio).
+    function descreverSecaoPDF(cfg) {
+        if (cfg === CFG_TEMPOMEDIO) {
+            return {
+                rotulo: 'Tempo Médio de Cumprimento',
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoTempoMedio(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
+            };
+        }
+        return {
+            rotulo: cfg.pdf.titulo,
+            montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
+            montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
+        };
+    }
+
+    // Capa + índice clicável (página 1). Retorna as linhas desenhadas — cada uma com a
+    // posição Y, a seção e o tipo ("Resumo"/"Tabela detalhada") — para depois (após montar
+    // todo o conteúdo e já sabendo os números de página) voltar e completar os links.
+    function desenharCapaIndice(doc, secoes, agora) {
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 16;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
+        doc.text('Relatório Conjunto', m, 17);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
+
+        let y = 48;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
+        doc.text('Conteúdo', m, y); y += 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, y, m + 26, y); y += 8;
+
+        const linhas = [];
+        doc.setFontSize(10);
         secoes.forEach((s, i) => {
-            if (s.cfg.montarConjunto) s.cfg.montarConjunto(doc, s.dados, i === 0);
-            else montarRelatorio(doc, s.dados, s.cfg, i === 0);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
+            doc.text(`${i + 1}. ${s.rotulo}`, m, y);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.muted);
+            doc.text(`${s.dados.length} registro(s)`, pw - m, y, { align: 'right' });
+            y += 6;
+            ['Resumo', 'Tabela detalhada'].forEach(tipo => {
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+                doc.text(`•  ${tipo}`, m + 4, y);
+                linhas.push({ y, secaoIdx: i, tipo });
+                y += 5.5;
+            });
+            y += 3;
         });
+
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
+        doc.text('Todos os resumos vêm primeiro; as tabelas discriminadas ficam ao final. Clique num item para navegar.', m, ph - 16);
+        return linhas;
+    }
+
+    // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]. Estrutura:
+    // capa+índice clicável (pág. 1) → todos os resumos → todas as tabelas discriminadas,
+    // com marcadores (bookmarks) no leitor e link "Voltar ao Índice" no rodapé das tabelas.
+    function gerarPDFConjunto(secoesEntrada) {
+        const doc = novoDocPDF();
+        const agora = new Date();
+        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados }, descreverSecaoPDF(s.cfg)));
+
+        // PASSO A: capa + índice (números de página ainda em branco)
+        const linhasIndice = desenharCapaIndice(doc, secoes, agora);
+
+        // PASSO B: bloco de RESUMOS, depois bloco de TABELAS — todos os resumos antes de
+        // qualquer tabela, conforme pedido. Marcadores agrupam por bloco.
+        const paginaResumo = [], paginaTabela = [];
+        const bmResumos = doc.outline.add(null, 'Resumos', { pageNumber: 2 });
+        secoes.forEach(s => {
+            const pg = doc.internal.getNumberOfPages() + 1;
+            s.montarResumo(doc, s.dados, false, true);
+            paginaResumo.push(pg);
+            doc.outline.add(bmResumos, s.rotulo, { pageNumber: pg });
+        });
+        const primeiraTabelaPg = doc.internal.getNumberOfPages() + 1;
+        const bmTabelas = doc.outline.add(null, 'Tabelas detalhadas', { pageNumber: primeiraTabelaPg });
+        secoes.forEach(s => {
+            const pg = s.montarTabela(doc, s.dados, true);
+            paginaTabela.push(pg);
+            doc.outline.add(bmTabelas, s.rotulo, { pageNumber: pg });
+        });
+
+        // PASSO C: volta à página 1 e completa os números + links do índice
+        doc.setPage(1);
+        const pw = doc.internal.pageSize.getWidth();
+        const m = 16;
+        linhasIndice.forEach(l => {
+            const pg = l.tipo === 'Resumo' ? paginaResumo[l.secaoIdx] : paginaTabela[l.secaoIdx];
+            doc.setDrawColor(...COR.grade); doc.setLineWidth(0.2); doc.setLineDashPattern([0.5, 1], 0);
+            doc.line(m + 40, l.y - 0.8, pw - m - 10, l.y - 0.8);
+            doc.setLineDashPattern([], 0);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+            doc.textWithLink(`•  ${l.tipo}`, m + 4, l.y, { pageNumber: pg });
+            doc.setTextColor(...COR.tintaSec); doc.text(String(pg), pw - m, l.y, { align: 'right' });
+        });
+
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi_${dataArquivo()}.pdf`);
     }
 
@@ -946,10 +1097,9 @@
     // Lista dos processos mais demorados: linha dupla (processo em negrito + classe em
     // cinza) à esquerda e uma barra proporcional aos dias à direita.
     function desenharTopDemorados(doc, x, y, w, h, titulo, itens) {
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.escura);
-        doc.text(titulo, x, y + 4);
-        const topo = y + 9;
-        const areaH = h - 9;
+        tituloSecao(doc, x, y + 4, w, titulo, COR.vermelho);
+        const topo = y + 10;
+        const areaH = h - 10;
         if (!itens.length) return;
         const labelW = Math.min(w * 0.62, 120);
         const barX = x + labelW;
@@ -960,31 +1110,35 @@
 
         itens.forEach((it, i) => {
             const rowY = topo + i * linhaH;
-            const cor = it.prioritario ? COR_PRIORITARIO : COR.texto;
+            const cor = it.prioritario ? COR_PRIORITARIO : COR.tinta;
             doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...cor);
             doc.text(doc.splitTextToSize(it.processo || '', labelW - 3)[0], x, rowY + 3.3);
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...COR.suave);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...COR.muted);
             doc.text(doc.splitTextToSize(it.classe || '', labelW - 3)[0], x, rowY + 6.8);
 
             const meio = rowY + linhaH / 2;
             const bw = Math.max(0.6, (it.dias / maxVal) * barMaxW);
-            doc.setFillColor(...(it.prioritario ? COR_PRIORITARIO : COR.media));
+            doc.setFillColor(...(it.prioritario ? COR_PRIORITARIO : COR.azul));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.5, 0.5, 'F');
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.escura);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.tinta);
             doc.text(`${it.dias} dia${it.dias === 1 ? '' : 's'}`, barX + bw + 2, meio + 1.2);
         });
     }
 
+    const TITULO_TEMPOMEDIO = 'Tempo Médio de Cumprimento';
+
     function gerarPDFTempoMedio(dados) {
         const doc = novoDocPDF();
-        montarRelatorioTempoMedio(doc, dados, true);
+        montarResumoTempoMedio(doc, dados, true, false);
+        const pgTabela = montarTabelaTempoMedio(doc, dados, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         baixarBlob(doc.output('blob'), `tempo_medio_projudi_${dataArquivo()}.pdf`);
     }
 
-    // Desenha o relatório de Tempo Médio dentro de um doc jsPDF já existente (usado tanto
-    // pelo download individual quanto pelo PDF conjunto da automação). ehPrimeiraSecao=false
-    // começa em página nova, para poder ser combinado com outras seções no mesmo PDF.
-    function montarRelatorioTempoMedio(doc, dados, ehPrimeiraSecao) {
+    // Página de RESUMO (KPIs + gráficos) do relatório de Tempo Médio, dentro de um doc
+    // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
+    function montarResumoTempoMedio(doc, dados, ehPrimeiraSecao, comIndice) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -993,7 +1147,6 @@
         const uw = pw - 2 * m;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const titulo = 'Tempo Médio de Cumprimento';
 
         const validos = dados.filter(d => d.dias != null);
         const prioritarios = validos.filter(d => d.prioritario);
@@ -1002,13 +1155,6 @@
         const mediaPrio = mediaSimples(prioritarios, 'dias');
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisDemorado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
-
-        // Tabela final: do maior número de dias para o menor (sem dados vai ao final)
-        const ordenados = dados.slice().sort((a, b) => {
-            const da = a.dias == null ? -Infinity : a.dias;
-            const db = b.dias == null ? -Infinity : b.dias;
-            return db - da;
-        });
 
         // Período de referência (salvo quando o usuário preencheu o formulário)
         let periodoStr = '';
@@ -1024,31 +1170,30 @@
             return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
         }, null);
 
-        // ═══ PÁGINA 1 — RESUMO ═══
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
-        doc.text(titulo, m, m + 2);
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_TEMPOMEDIO, m, m + 2);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
         if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
         doc.text(subtitulo, m, m + 8);
-        doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 11, pw - m, m + 11);
 
         const gap = 6;
         // Linha 1: 4 KPIs centralizados — analisados / tempo médio geral / prioritários / não cumpridas
         const kY = m + 16;
         const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,                   kY, kW4, 28, 'Registros analisados',       String(dados.length),          [], true);
-        desenharCard(doc, m + kW4 + gap,       kY, kW4, 28, 'Tempo médio geral',           fmtDias(geral),                [], true);
-        desenharCard(doc, m + 2*(kW4+gap),     kY, kW4, 28, 'Prioritários',                String(prioritarios.length),   [`${prioPct}% do total`], true);
-        desenharCard(doc, m + 3*(kW4+gap),     kY, kW4, 28, 'Não cumpridas',               String(naoCumpridas.length),
-            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true);
+        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, 'Não cumpridas', String(naoCumpridas.length),
+            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.ambar);
 
         // Linha 2: tempo médio prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true);
-        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true);
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
 
         // Card largo: processo com cumprimento mais demorado (centralizado)
         const k3Y = k2Y + 26 + gap; // k2Y usa h=26
@@ -1060,7 +1205,7 @@
                 maisDemorado.classe || '',
             ];
         }
-        desenharCard(doc, m, k3Y, uw, 26, 'Processo com cumprimento mais demorado', valMD, subsMD, true);
+        desenharCard(doc, m, k3Y, uw, 26, 'Processo com cumprimento mais demorado', valMD, subsMD, true, COR.vermelho);
 
         // Gráficos 1 e 2 (largura total, empilhados): dividem o espaço vertical restante da
         // página de forma que a soma das duas alturas + o espaçamento sempre caiba, sem
@@ -1077,14 +1222,31 @@
 
         const chart2Y = chartY + chart1H + chartGap;
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
-        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio por Classe Processual', porClasse, fmtDias);
+        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio por Classe Processual', porClasse, fmtDias, COR.aqua);
 
-        desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m);
+        desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
 
-        // ═══ TABELA DISCRIMINADA (todos os resultados, do maior p/ o menor prazo) ═══
+    // Tabela discriminada do relatório de Tempo Médio (sempre inicia em página nova).
+    // Retorna o número da página inicial (para o índice/bookmarks do PDF conjunto).
+    function montarTabelaTempoMedio(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        // Do maior número de dias para o menor (sem dados vai ao final)
+        const ordenados = dados.slice().sort((a, b) => {
+            const da = a.dias == null ? -Infinity : a.dias;
+            const db = b.dias == null ? -Infinity : b.dias;
+            return db - da;
+        });
+
         doc.addPage();
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.escura);
-        doc.text('Tabela discriminada — todos os resultados', m, m + 3);
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — todos os resultados');
 
         const colunas = [
             { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -1108,10 +1270,10 @@
             startY: m + 8,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.texto,
-                      lineColor: COR.linha, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
-            headStyles: { fillColor: COR.escura, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-            alternateRowStyles: { fillColor: COR.clara },
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
@@ -1119,8 +1281,10 @@
                     data.cell.styles.fontStyle = 'bold';
                 }
             },
-            didDrawPage: () => desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m),
+            didDrawPage: () => desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
+
+        return paginaInicial;
     }
 
     // ── Interface ───────────────────────────────────────────────────────────────
