@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.6
+// @version      10.7
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1138,6 +1138,10 @@
         #btn-limpar  { background-color: #8a3b3b; border-color: #6e2f2f; }
         #btn-preencher-pesquisar-tm { background-color: #1e6b1e; border-color: #145214; }
         .projudi-btn:disabled { background-color: #999; border-color: #777; cursor: not-allowed; }
+        .projudi-select {
+            margin-left: 6px; padding: 2px 4px; font-size: 0.85em;
+            font-family: Verdana, Arial, sans-serif; border-radius: 3px; border: 1px solid #999;
+        }
         #exportar-status { font-size: 0.8em; color: #555; margin-left: 8px; font-family: Verdana, Arial, sans-serif; }
     `);
 
@@ -1162,17 +1166,34 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
-    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial como "hoje - 3 anos"
-    // e clica em Pesquisar. O diagnóstico anterior (3s) apontava falha, mas era falso
-    // negativo: o site do Projudi é lento e a navegação real ainda estava em andamento
-    // quando o diagnóstico rodou — por isso o timeout de checagem agora é bem mais longo.
-    function preencherEPesquisarTempoMedio() {
+    // Períodos pré-configurados para a data inicial do relatório de Tempo Médio.
+    const PERIODOS_TEMPOMEDIO = [
+        { id: '1m',  rotulo: 'Último mês inteiro', calc: () => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d; } },
+        { id: '1a',  rotulo: 'Último 1 ano',        calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return d; } },
+        { id: '2a',  rotulo: 'Últimos 2 anos',       calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 2); return d; } },
+        { id: '3a',  rotulo: 'Últimos 3 anos',       calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 3); return d; } },
+    ];
+
+    function formatarDataBR(d) {
+        const dd = String(d.getDate()).padStart(2, '0');
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        return `${dd}/${mm}/${d.getFullYear()}`;
+    }
+
+    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial conforme o período
+    // escolhido (select ao lado do botão) e clica em Pesquisar. O diagnóstico anterior (3s)
+    // apontava falha, mas era falso negativo: o site do Projudi é lento e a navegação real
+    // ainda estava em andamento quando o diagnóstico rodou — por isso o timeout de checagem
+    // agora é bem mais longo.
+    function preencherEPesquisarTempoMedio(periodoId) {
         const form = formularioTempoMedio();
         if (!form) return;
 
+        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO[3];
+
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
-        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico}`);
+        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico} período="${periodo.rotulo}"`);
         if (radioAnalisadas) radioAnalisadas.checked = true;
         if (radioAnalitico) radioAnalitico.checked = true;
 
@@ -1181,11 +1202,7 @@
             // Campos de data vêm com "disabled" no HTML original: se ficarem desabilitados,
             // o navegador NÃO os envia no submit. Precisamos habilitar antes de definir o valor.
             campoInicio.disabled = false;
-            const d = new Date();
-            d.setFullYear(d.getFullYear() - 3);
-            const dd = String(d.getDate()).padStart(2, '0');
-            const mm = String(d.getMonth() + 1).padStart(2, '0');
-            campoInicio.value = `${dd}/${mm}/${d.getFullYear()}`;
+            campoInicio.value = formatarDataBR(periodo.calc());
         }
         const campoFim = form.querySelector('input[name="dataFim"]');
         if (campoFim) campoFim.disabled = false; // também precisa ir habilitado para ser enviado
@@ -1224,16 +1241,30 @@
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
         if (!buttonBar) return;
 
-        // Tela de filtros do relatório de Tempo Médio (ainda sem resultados): só o botão
-        // de preencher+pesquisar; os botões de coleta/exportação fazem sentido depois da busca.
+        // Tela de filtros do relatório de Tempo Médio (ainda sem resultados): select do
+        // período + botão de preencher+pesquisar; os botões de coleta/exportação fazem
+        // sentido depois da busca.
         if (formularioTempoMedio() && !document.querySelector('table.resultTable')) {
+            const sel = document.createElement('select');
+            sel.id = 'sel-periodo-tm';
+            sel.className = 'projudi-select';
+            sel.title = 'Período usado como data inicial da pesquisa';
+            PERIODOS_TEMPOMEDIO.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                opt.textContent = p.rotulo;
+                sel.appendChild(opt);
+            });
+            sel.value = '3a'; // padrão: últimos 3 anos
+            buttonBar.appendChild(sel);
+
             const b = document.createElement('button');
             b.id = 'btn-preencher-pesquisar-tm';
             b.type = 'button';
             b.className = 'projudi-btn';
-            b.title = 'Marca Analisadas + Analítico, define a data inicial 3 anos atrás e pesquisa (o site pode demorar a responder)';
-            b.textContent = 'Preencher e Pesquisar (3 anos)';
-            b.onclick = preencherEPesquisarTempoMedio;
+            b.title = 'Marca Analisadas + Analítico, define a data inicial conforme o período escolhido e pesquisa (o site pode demorar a responder)';
+            b.textContent = 'Preencher e Pesquisar';
+            b.onclick = () => preencherEPesquisarTempoMedio(sel.value);
             buttonBar.appendChild(b);
             return;
         }
