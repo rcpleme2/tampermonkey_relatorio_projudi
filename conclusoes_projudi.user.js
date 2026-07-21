@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      8.3
-// @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (retrato, resumo com KPIs e gráficos, prioritários destacados)
+// @version      9.0
+// @description  Coleta conclusões/retorno/juntadas, exporta Excel ou PDF, e automatiza a extração conjunta (juntadas + retorno) a partir da página inicial
 // @author       rcpleme2
-// @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
-// @match        https://projudi2.tjpr.jus.br/projudi/processo/analisarJuntada.do*
+// @match        https://projudi2.tjpr.jus.br/projudi/*
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
@@ -338,6 +337,7 @@
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
                 const dica = cfg.usaAtuacao ? ' Troque de atuação e colete mais, ou baixe a planilha.' : ' Baixe a planilha ou colete mais.';
                 atualizarStatus(`Coleta concluída. Acumulado: ${total} registros${extra}.${dica}`);
+                avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
             }
         }
 
@@ -645,12 +645,9 @@
         doc.text(quando, pw - m, ph - 6, { align: 'right' });
     }
 
-    function gerarPDF(dados, cfg) {
-        const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
-        if (!ctor) throw new Error('biblioteca jsPDF não carregada');
-        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-        if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
-
+    // Monta um relatório (resumo geral + resumos por competência + tabela) dentro de um
+    // documento jsPDF já criado. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
+    function montarRelatorio(doc, dados, cfg, ehPrimeiraSecao) {
         const p = cfg.pdf;
         const now = Date.now();
         const agora = new Date();
@@ -754,7 +751,7 @@
         }
 
         // ═══ RESUMO GERAL ═══
-        desenharPaginaResumo(dados, { rotulo: 'Resumo geral' }, true);
+        desenharPaginaResumo(dados, { rotulo: 'Resumo geral' }, ehPrimeiraSecao);
 
         // ═══ RESUMO POR COMPETÊNCIA (quando há mais de uma) ═══
         const porComp = new Map();
@@ -805,8 +802,27 @@
             didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m),
         });
 
-        const blob = doc.output('blob');
-        baixarBlob(blob, `${cfg.nomeArquivo}_${dataArquivo()}.pdf`);
+    }
+
+    function novoDocPDF() {
+        const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+        if (!ctor) throw new Error('biblioteca jsPDF não carregada');
+        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
+        return doc;
+    }
+
+    function gerarPDF(dados, cfg) {
+        const doc = novoDocPDF();
+        montarRelatorio(doc, dados, cfg, true);
+        baixarBlob(doc.output('blob'), `${cfg.nomeArquivo}_${dataArquivo()}.pdf`);
+    }
+
+    // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]
+    function gerarPDFConjunto(secoes) {
+        const doc = novoDocPDF();
+        secoes.forEach((s, i) => montarRelatorio(doc, s.dados, s.cfg, i === 0));
+        baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi_${dataArquivo()}.pdf`);
     }
 
     // ── Interface ───────────────────────────────────────────────────────────────
@@ -884,17 +900,207 @@
         status.id = 'exportar-status';
         buttonBar.appendChild(status);
 
+        const estadoAuto = store.getItem(AUTO_ESTADO);
+        const querColetarAuto = (estadoAuto === 'coletando_juntadas' && cfg === CFG_JUNTADAS) ||
+                                (estadoAuto === 'coletando_retorno' && cfg === CFG_RETORNO);
+
         if (coletor.rodando() && !coletor.obsoleta()) {
             coletor.continuar(); // retoma após o reload da paginação
+        } else if (querColetarAuto) {
+            coletor.iniciar();   // automação: inicia a coleta ao chegar no relatório
         } else {
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
             coletor.render();
         }
     }
 
+    // ══════════════════════════ AUTOMAÇÃO ══════════════════════════
+    // Fluxo: (início) -> Juntadas [extrai tudo] -> início -> Retorno [extrai tudo]
+    //        -> início -> habilita "PDF conjunto". O estado persiste no localStorage,
+    //        então dá para rodar de novo em outra Atuação e ACUMULAR várias competências.
+    const AUTO_ESTADO = 'projudi_auto_estado';
+
+    function desembrulharArray(valor) {
+        let v = valor, t = 0;
+        while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { break; } t++; }
+        return Array.isArray(v) ? v : null;
+    }
+
+    // Lê os dados acumulados de um relatório a partir do prefixo de armazenamento.
+    function lerDadosDe(prefixo) {
+        const n = parseInt(store.getItem(prefixo + 'num_paginas') || '0', 10);
+        let dados = [];
+        for (let i = 0; i < n; i++) {
+            const b = store.getItem(prefixo + 'pagina_' + i);
+            if (!b) continue;
+            const parte = desembrulharArray(b);
+            if (parte) dados = dados.concat(parte);
+        }
+        return dados;
+    }
+
+    // Procura um link de menu (por URL e/ou texto) no documento atual e nos frames pai/topo.
+    function acharLinkMenu(urlRe, textoRe) {
+        const docs = [document];
+        try { if (window.parent && window.parent !== window) docs.push(window.parent.document); } catch (e) {}
+        try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (urlRe && !urlRe.test(a.href)) continue;
+                if (textoRe && !textoRe.test((a.textContent || '').trim())) continue;
+                return a;
+            }
+        }
+        return null;
+    }
+
+    function navegarMenu(alvo) {
+        let link = null;
+        if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
+        else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
+        else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
+        if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
+        link.click();
+        return true;
+    }
+
+    // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
+    // e tenta avançar (o próprio frame do relatório costuma ter o menu; senão o poll do
+    // painel assume).
+    function avancarAutomacao(cfg) {
+        const estado = store.getItem(AUTO_ESTADO);
+        if (estado === 'coletando_juntadas' && cfg === CFG_JUNTADAS) store.setItem(AUTO_ESTADO, 'ir_retorno');
+        else if (estado === 'coletando_retorno' && cfg === CFG_RETORNO) store.setItem(AUTO_ESTADO, 'ir_fim');
+        else return;
+        setTimeout(passoAutomacao, 900);
+    }
+
+    // Executa o passo de navegação do estado atual. Pode ser chamado por qualquer frame;
+    // uma trava de tempo evita cliques duplicados quando mais de um frame o executa.
+    function passoAutomacao() {
+        const estado = store.getItem(AUTO_ESTADO);
+        if (!estado || estado === 'concluido') return;
+        // Durante a coleta, quem conduz é injetarBotoes (no frame do relatório)
+        if (estado === 'coletando_juntadas' || estado === 'coletando_retorno') return;
+
+        const agora = Date.now();
+        const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
+        if (agora - lock < 4000) return; // já houve tentativa recente em algum frame
+
+        if (estado === 'ir_retorno') {
+            store.setItem('projudi_auto_lock', String(agora));
+            if (navegarMenu('retorno')) store.setItem(AUTO_ESTADO, 'coletando_retorno');
+        } else if (estado === 'ir_fim') {
+            store.setItem('projudi_auto_lock', String(agora));
+            store.setItem(AUTO_ESTADO, 'concluido');
+            navegarMenu('inicio');
+        }
+    }
+
+    function iniciarAutomacao() {
+        store.setItem(AUTO_ESTADO, 'coletando_juntadas');
+        store.setItem('projudi_auto_lock', String(Date.now()));
+        atualizarPainel();
+        setTimeout(() => navegarMenu('juntadas'), 300);
+    }
+
+    function limparTudoAutomacao() {
+        [CFG_JUNTADAS, CFG_RETORNO].forEach(c => {
+            const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
+            for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
+            store.removeItem(c.prefixo + 'num_paginas');
+            store.removeItem(c.prefixo + 'rodando');
+            store.removeItem(c.prefixo + 'ts');
+        });
+        store.removeItem(AUTO_ESTADO);
+        atualizarPainel();
+    }
+
+    function baixarPDFConjunto() {
+        const dj = lerDadosDe(CFG_JUNTADAS.prefixo);
+        const dr = lerDadosDe(CFG_RETORNO.prefixo);
+        const secoes = [];
+        if (dj.length) secoes.push({ dados: dj, cfg: CFG_JUNTADAS });
+        if (dr.length) secoes.push({ dados: dr, cfg: CFG_RETORNO });
+        if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
+        try { gerarPDFConjunto(secoes); }
+        catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
+    }
+
+    // Painel flutuante (na página que tem o menu principal / página inicial)
+    function atualizarPainel() {
+        const painel = document.getElementById('painel-automacao');
+        if (!painel) return;
+        const estado = store.getItem(AUTO_ESTADO) || 'inativo';
+        const nj = lerDadosDe(CFG_JUNTADAS.prefixo).length;
+        const nr = lerDadosDe(CFG_RETORNO.prefixo).length;
+        const emCurso = ['coletando_juntadas', 'coletando_retorno', 'ir_retorno', 'ir_fim'].includes(estado);
+        const rotuloEstado = ({
+            inativo: 'pronto', coletando_juntadas: 'coletando juntadas…', ir_retorno: 'indo ao retorno…',
+            coletando_retorno: 'coletando retorno…', ir_fim: 'finalizando…', concluido: 'concluído',
+        })[estado] || estado;
+
+        painel.querySelector('.pa-status').textContent =
+            `Estado: ${rotuloEstado}  •  Juntadas: ${nj}  •  Retorno: ${nr}`;
+        painel.querySelector('#pa-iniciar').disabled = emCurso;
+        painel.querySelector('#pa-pdf').disabled = (nj + nr) === 0;
+        painel.querySelector('#pa-limpar').disabled = emCurso;
+    }
+
+    function injetarPainel() {
+        if (document.getElementById('painel-automacao')) return;
+        // Só na página que hospeda o menu principal (evita duplicar em outros frames)
+        if (!document.querySelector('#main-menu')) return;
+        // Não injeta sobre a tela de resultados de um relatório
+        if (detectarConfig()) return;
+
+        const painel = document.createElement('div');
+        painel.id = 'painel-automacao';
+        painel.innerHTML = `
+            <div class="pa-titulo">Automação de relatórios</div>
+            <div class="pa-status">—</div>
+            <div class="pa-botoes">
+                <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai Juntadas e Retorno automaticamente">▶ Automatizar</button>
+                <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com Juntadas + Retorno">⬇ PDF conjunto</button>
+                <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados dos dois relatórios">Limpar</button>
+            </div>
+            <div class="pa-dica">Rode em cada Atuação para acumular várias competências.</div>`;
+        document.body.appendChild(painel);
+        painel.querySelector('#pa-iniciar').onclick = iniciarAutomacao;
+        painel.querySelector('#pa-pdf').onclick = baixarPDFConjunto;
+        painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        atualizarPainel();
+        // Mantém o painel vivo e conduz a navegação da automação (a coleta ocorre no
+        // frame de conteúdo, que pode não recarregar este frame) — poll leve.
+        setInterval(() => { atualizarPainel(); passoAutomacao(); }, 2000);
+    }
+
+    GM_addStyle(`
+        #painel-automacao {
+            position: fixed; top: 8px; right: 8px; z-index: 999999;
+            background: #f7f7f2; border: 1px solid #63735f; border-radius: 6px;
+            padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
+            font-family: Verdana, Arial, sans-serif; width: 300px;
+        }
+        #painel-automacao .pa-titulo { font-weight: bold; font-size: .8em; color: #2d3748; margin-bottom: 4px; }
+        #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
+        #painel-automacao .pa-botoes { display: flex; gap: 4px; flex-wrap: wrap; }
+        #painel-automacao .projudi-btn { margin-left: 0; }
+        #painel-automacao #pa-iniciar { background-color: #1e6b1e; border-color: #145214; }
+        #painel-automacao #pa-pdf { background-color: #34556b; border-color: #26404f; }
+        #painel-automacao #pa-limpar { background-color: #8a3b3b; border-color: #6e2f2f; }
+        #painel-automacao .pa-dica { font-size: .66em; color: #777; margin-top: 5px; }
+    `);
+
+    function bootstrap() {
+        injetarBotoes();       // botões nos relatórios (buttonBar)
+        injetarPainel();       // painel de automação (página com o menu)
+        passoAutomacao();      // avança a automação se estiver em estado de navegação
+    }
+
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', injetarBotoes);
+        document.addEventListener('DOMContentLoaded', bootstrap);
     } else {
-        injetarBotoes();
+        bootstrap();
     }
 })();
