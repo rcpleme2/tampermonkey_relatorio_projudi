@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      8.1
+// @version      8.2
 // @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (retrato, resumo com KPIs e gráficos, prioritários destacados)
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -63,6 +63,13 @@
         };
     }
 
+    // Competência = a Atuação até antes do primeiro " de "
+    // (ex.: "Vara Cível de Piraquara" -> "Vara Cível")
+    function competenciaDe(atuacao) {
+        if (!atuacao) return '';
+        return atuacao.split(/\s+de\s+/i)[0].trim();
+    }
+
     // Processo prioritário: o número recebe uma classe de cor extra (attentionBlue,
     // attentionPurple, attentionRed, ...); o normal fica apenas com "attention" (preto).
     function emPrioritario(em) {
@@ -114,7 +121,7 @@
         // Colunas pedidas: Processo - Classe - Dt. Retorno - Tipo de conclusão - Responsável - Agrupador
         cabecalhos: ['Processo', 'Classe', 'Dt. Retorno', 'Tipo de Conclusão', 'Responsável', 'Agrupador', 'Prioritário'],
         larguras: [{ wch: 26 }, { wch: 18 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 20 }, { wch: 11 }],
-        extrai: (tds) => {
+        extrai: (tds, atuacao) => {
             const pc = processoEclasse(tds[3]);
             return {
                 processo: pc.processo,
@@ -124,6 +131,8 @@
                 responsavel: textoCelula(tds[7]),
                 agrupador: textoCelula(tds[9]),
                 prioritario: emPrioritario(tds[3].querySelector('em')),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
             };
         },
         linha: (d) => [d.processo, d.classe, d.dtRetorno, d.tipoConclusao, d.responsavel, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
@@ -164,7 +173,7 @@
         // Colunas pedidas: Processo - Tipo de documento - Especificação - Data de Envio - Juntado por
         cabecalhos: ['Processo', 'Tipo de Documento', 'Especificação do Documento', 'Data de Envio', 'Juntado por', 'Função', 'Prioritário'],
         larguras: [{ wch: 26 }, { wch: 40 }, { wch: 52 }, { wch: 18 }, { wch: 28 }, { wch: 18 }, { wch: 11 }],
-        extrai: (tds) => {
+        extrai: (tds, atuacao) => {
             // Processo (td[3]): número em <em class="attention">
             const emProc = tds[3].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[3]);
@@ -186,6 +195,8 @@
                 juntadoPor: textoSemNegrito(tds[8]), // nome, sem o cargo em negrito
                 funcao: bFunc ? norm(bFunc.textContent) : '',
                 prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
             };
         },
         linha: (d) => [d.processo, d.tipoDocumento, d.especificacao, d.dataEnvio, d.juntadoPor, d.funcao || '', d.prioritario ? 'Sim' : 'Não'],
@@ -200,9 +211,10 @@
             tipoCampo: 'tipoDocumento',
             mediaLabel: 'juntadas / dia',
             distribuicoes: [
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 12, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
                 { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
                 { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 12 },
+                // Largura total (span 2) para caber o nome completo do tipo de documento
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 14, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -277,7 +289,8 @@
         }
 
         function coletarPaginaAtual() {
-            const atuacao = cfg.usaAtuacao ? lerAtuacao() : '';
+            // Sempre lê a Atuação (usada para a competência nos relatórios de retorno/juntadas)
+            const atuacao = lerAtuacao();
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
             const dados = [];
             linhas.forEach(tr => {
@@ -562,7 +575,9 @@
         const topo = y + 9;
         const areaH = h - 9;
         if (!itens.length) return;
-        const rotuloW = Math.min(64, w * 0.42);
+        // Rótulo ocupa metade da largura (útil sobretudo no gráfico de largura total,
+        // para caber o nome completo do tipo de documento em vez de truncar em "PETIÇÃO DE")
+        const rotuloW = Math.min(w * 0.5, 120);
         const valorW = 12;
         const barX = x + rotuloW;
         const barMaxW = Math.max(6, w - rotuloW - valorW);
@@ -655,64 +670,95 @@
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
 
-        // ═══ PÁGINA 1 — RESUMO ═══
-        doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
-        doc.text(p.titulo, m, m + 2);
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
-        doc.text(`Resumo  •  extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s)`, m, m + 8);
-        doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
-
+        // Desenha uma página de resumo (KPIs + gráficos) para um subconjunto de dados.
         const gap = 6;
-        // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
-        const kY = m + 16;
-        const prio = contarPrioritarios(dados);
-        const kpis = [
-            { titulo: p.atosTitulo, valor: String(dados.length), subs: [] },
-            { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`] },
-        ];
-        if (p.mediaLabel) {
-            const media = mediaPorDia(dados, p.dataCampo);
-            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel] });
-        }
-        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
-        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs));
+        function desenharPaginaResumo(sub, contexto, primeira) {
+            if (!primeira) doc.addPage();
 
-        // KPI do mais atrasado (card largo, texto centralizado)
-        const aY = kY + 28 + gap;
-        const antigo = acharMaisAntigo(dados, p.dataCampo);
-        let subsAntigo = ['Data não disponível'];
-        let valAntigo = '—';
-        if (antigo) {
-            const reg = antigo.registro;
-            const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
-            valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
-            subsAntigo = [
-                `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? '  — PRIORITÁRIO' : ''}`,
-                reg[p.tipoCampo] || '',
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
+            doc.text(p.titulo, m, m + 2);
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
+            doc.text(`${contexto}  •  extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`, m, m + 8);
+            doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
+
+            // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
+            const kY = m + 16;
+            const prio = contarPrioritarios(sub);
+            const kpis = [
+                { titulo: p.atosTitulo, valor: String(sub.length), subs: [] },
+                { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`] },
             ];
+            if (p.mediaLabel) {
+                const media = mediaPorDia(sub, p.dataCampo);
+                kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel] });
+            }
+            const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs));
+
+            // KPI do mais atrasado (card largo, texto centralizado)
+            const aY = kY + 28 + gap;
+            const antigo = acharMaisAntigo(sub, p.dataCampo);
+            let subsAntigo = ['Data não disponível'];
+            let valAntigo = '—';
+            if (antigo) {
+                const reg = antigo.registro;
+                const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
+                valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
+                subsAntigo = [
+                    `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                    reg[p.tipoCampo] || '',
+                ];
+            }
+            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true);
+
+            // Gráficos (grade de 2 colunas; um gráfico pode ocupar as 2 colunas com span:2)
+            const charts = [
+                { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now) },
+                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar) })),
+            ];
+            let col = 0, row = 0;
+            charts.forEach(c => {
+                if (c.span === 2) {
+                    if (col !== 0) { row++; col = 0; }
+                    c.pos = { row, col: 0, span: 2 }; row++; col = 0;
+                } else {
+                    c.pos = { row, col, span: 1 }; col++;
+                    if (col >= 2) { col = 0; row++; }
+                }
+            });
+            const nLinhas = Math.max(...charts.map(c => c.pos.row)) + 1;
+            const gY0 = aY + 28 + gap + 2;
+            const colW = (uw - gap) / 2;
+            const chartH = Math.min(96, (ph - m - gY0 - (nLinhas - 1) * 10) / nLinhas);
+            charts.forEach(c => {
+                const cx = m + c.pos.col * (colW + gap);
+                const cy = gY0 + c.pos.row * (chartH + 10);
+                const cw = c.pos.span === 2 ? uw : colW;
+                if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
+                else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens);
+            });
+
+            desenharRodape(doc, p.titulo, carimbo, pw, ph, m);
         }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true);
 
-        // Gráficos (grade de 2 colunas): faixas de tempo + distribuições
-        const charts = [
-            { tipo: 'faixas', titulo: p.agingTitulo, faixas: faixasPorPrioridade(dados, p.dataCampo, now) },
-            ...p.distribuicoes.map(g => ({ tipo: 'barras', titulo: g.titulo, itens: contarPorCampo(dados, g.campo, g.topN, g.limpar) })),
-        ];
-        const gY0 = aY + 28 + gap + 2;
-        const colW = (uw - gap) / 2;
-        const nLinhas = Math.ceil(charts.length / 2);
-        const chartH = Math.min(96, (ph - m - gY0 - (nLinhas - 1) * 10) / nLinhas);
-        charts.forEach((c, i) => {
-            const col = i % 2, lin = Math.floor(i / 2);
-            const cx = m + col * (colW + gap);
-            const cy = gY0 + lin * (chartH + 10);
-            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, colW, chartH, c.titulo, c.faixas);
-            else desenharBarras(doc, cx, cy, colW, chartH, c.titulo, c.itens);
+        // ═══ RESUMO GERAL ═══
+        desenharPaginaResumo(dados, 'Resumo geral', true);
+
+        // ═══ RESUMO POR COMPETÊNCIA (quando há mais de uma) ═══
+        const porComp = new Map();
+        dados.forEach(d => {
+            const c = (d.competencia || '').trim();
+            if (!c) return;
+            if (!porComp.has(c)) porComp.set(c, []);
+            porComp.get(c).push(d);
         });
+        if (porComp.size > 1) {
+            [...porComp.entries()]
+                .sort((a, b) => b[1].length - a[1].length)
+                .forEach(([comp, sub]) => desenharPaginaResumo(sub, `Competência: ${comp}`, false));
+        }
 
-        desenharRodape(doc, p.titulo, carimbo, pw, ph, m);
-
-        // ═══ PÁGINA 2+ — TABELA DISCRIMINADA ═══
+        // ═══ TABELA DISCRIMINADA ═══
         doc.addPage();
         doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.escura);
         doc.text(p.tabelaTitulo || 'Tabela discriminada', m, m + 3);
