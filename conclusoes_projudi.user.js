@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.3
+// @version      10.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1214,11 +1214,26 @@
         console.log('[Projudi TM] flag auto_iniciar definida; submeterá em 1,5s');
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi TM] botão de pesquisa: tag=${btn ? btn.tagName : 'null'} id=${btn ? btn.id : ''} type=${btn ? btn.type : ''} disabled=${btn ? btn.disabled : ''}`);
+        console.log(`[Projudi TM] botão de pesquisa: tag=${btn ? btn.tagName : 'null'} id=${btn ? btn.id : ''} type=${btn ? btn.type : ''} disabled=${btn ? btn.disabled : ''} onclick="${btn ? (btn.getAttribute('onclick') || '') : ''}"`);
+        console.log(`[Projudi TM] form: action="${form.action}" method="${form.method}" onsubmit="${form.getAttribute('onsubmit') || ''}"`);
+        console.log(`[Projudi TM] estado final dos campos — situacao(A).checked=${radioAnalisadas ? radioAnalisadas.checked : '?'} analitico(true).checked=${radioAnalitico ? radioAnalitico.checked : '?'} dataInicio.disabled=${campoInicio ? campoInicio.disabled : '?'} dataFim.disabled=${campoFim ? campoFim.disabled : '?'}`);
 
-        const urlAntes = location.href;
+        // Intercepta alert/confirm temporariamente: se o clique disparar uma validação
+        // JS do Projudi (ex.: "preencha as datas"), o alert() bloqueia a thread e por
+        // isso nenhum log aparecia depois do clique — isso deve expor a mensagem.
+        const alertOriginal = window.alert;
+        const confirmOriginal = window.confirm;
+        window.alert = (msg) => { console.warn('[Projudi TM] window.alert interceptado:', msg); return alertOriginal.call(window, msg); };
+        window.confirm = (msg) => { console.warn('[Projudi TM] window.confirm interceptado:', msg); return confirmOriginal.call(window, msg); };
+        const restaurarDialogos = () => { window.alert = alertOriginal; window.confirm = confirmOriginal; };
+
+        // OBS: o action do formulário aponta para a MESMA url (estatistica.do), então uma
+        // navegação real via POST não muda location.href — não dá para usar isso como sinal
+        // de sucesso/falha. Em vez disso, só diagnosticamos (sem reenviar automaticamente,
+        // para não arriscar um duplo POST) e deixamos o bootstrap()/detectarConfig() da
+        // próxima carga de página confirmarem se os resultados apareceram.
         setTimeout(() => {
-            console.log('[Projudi TM] disparando pesquisa (click no botão + fallback submit)');
+            console.log('[Projudi TM] disparando pesquisa (click no botão)');
             if (btn && !btn.disabled) {
                 btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
                 btn.click();
@@ -1226,13 +1241,18 @@
                 console.warn('[Projudi TM] botão ausente/desabilitado — usando form.submit() diretamente');
                 form.submit();
             }
-            // Se após um tempo a página não navegou nem recarregou, tenta submit() puro como último recurso.
+            console.log('[Projudi TM] clique disparado — se a página recarregar, o próximo log será "[Projudi] bootstrap"');
+            // Diagnóstico tardio: se depois de 3s o MESMO formulário de filtros ainda estiver
+            // na tela (nenhum reload ocorreu), algo bloqueou o clique antes mesmo do submit.
             setTimeout(() => {
-                if (location.href === urlAntes && document.getElementById('estatisticaConclusaoForm')) {
-                    console.warn('[Projudi TM] URL não mudou após o clique — tentando form.submit() como fallback');
-                    form.submit();
+                const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
+                const temResultado = !!document.querySelector('table.resultTable');
+                console.log(`[Projudi TM] diagnóstico 3s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado} url="${location.href}"`);
+                if (aindaNoFormulario && !temResultado) {
+                    console.error('[Projudi TM] a página NÃO recarregou/atualizou após o clique — o clique não chegou a acionar o submit (possível handler JS bloqueando; veja se algum alert/confirm foi interceptado acima).');
                 }
-            }, 1200);
+                restaurarDialogos();
+            }, 3000);
         }, 1500);
     }
 
