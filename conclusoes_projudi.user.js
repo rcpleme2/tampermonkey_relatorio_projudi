@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.1
+// @version      12.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -86,17 +86,27 @@
 
     // Processo prioritário: o número recebe uma classe de cor extra (attentionBlue,
     // attentionPurple, attentionRed, ...); o normal fica apenas com "attention" (preto).
+    // Memoiza o fallback de cor computada por className: getComputedStyle força um
+    // recálculo de estilo (reflow) a cada chamada, e em páginas com 500 linhas quase
+    // todas compartilham a mesma classe "normal" — sem cache isso travava o navegador
+    // (centenas de reflows síncronos ao coletar uma página só).
+    const _corPrioritarioCache = new Map();
     function emPrioritario(em) {
         if (!em) return false;
+        const cls = em.className || '';
         // Verifica classes de cor (attentionRed, attentionBlue, attentionPurple …)
-        if ((em.className || '').split(/\s+/).some(c => /^attention[A-Z]/.test(c) && c !== 'attentionBold')) return true;
+        if (cls.split(/\s+/).some(c => /^attention[A-Z]/.test(c) && c !== 'attentionBold')) return true;
         // Fallback: cor computada — vermelho indica processo prioritário (relatório tempoMédio)
+        const chave = cls || '(sem-classe)';
+        if (_corPrioritarioCache.has(chave)) return _corPrioritarioCache.get(chave);
+        let resultado = false;
         try {
             const cor = window.getComputedStyle(em).color;
             const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(cor);
-            if (m && +m[1] > 150 && +m[2] < 100 && +m[3] < 100) return true;
+            if (m && +m[1] > 150 && +m[2] < 100 && +m[3] < 100) resultado = true;
         } catch (e) {}
-        return false;
+        _corPrioritarioCache.set(chave, resultado);
+        return resultado;
     }
 
     // ── Configurações dos dois relatórios ───────────────────────────────────────
