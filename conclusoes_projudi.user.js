@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.5
+// @version      10.6
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1162,12 +1162,10 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
-    // Marca Situação=Analisadas, Tipo=Analítico e define a data inicial como "hoje - 3 anos".
-    // NÃO submete automaticamente: testamos clique programático (.click(), MouseEvent,
-    // form.submit()) e nenhum deles aciona o envio real — a página tem algum handler de
-    // clique (via addEventListener, não visível em onclick/onsubmit) que não reage a
-    // eventos sintéticos. O usuário ainda precisa clicar em "Pesquisar" manualmente, mas a
-    // extração inicia sozinha assim que os resultados aparecerem (flag auto_iniciar).
+    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial como "hoje - 3 anos"
+    // e clica em Pesquisar. O diagnóstico anterior (3s) apontava falha, mas era falso
+    // negativo: o site do Projudi é lento e a navegação real ainda estava em andamento
+    // quando o diagnóstico rodou — por isso o timeout de checagem agora é bem mais longo.
     function preencherEPesquisarTempoMedio() {
         const form = formularioTempoMedio();
         if (!form) return;
@@ -1199,10 +1197,27 @@
             fim: campoFim ? campoFim.value : '',
         }));
 
-        // Sinaliza que, ao carregar a página de resultados (após o usuário clicar em
-        // Pesquisar), a extração deve iniciar automaticamente.
+        // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
+        // automaticamente (sem esta flag a página de resultados só renderiza os botões).
         store.setItem('projudi_tempomedio_auto_iniciar', '1');
-        console.log('[Projudi TM] campos preenchidos e flag auto_iniciar definida — clique em "Pesquisar" para buscar; a extração começará sozinha.');
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi TM] flag auto_iniciar definida; clicando em Pesquisar em 1,5s (btn encontrado=${!!btn})`);
+
+        setTimeout(() => {
+            console.log('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
+            setTimeout(() => {
+                const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
+                const temResultado = !!document.querySelector('table.resultTable');
+                console.log(`[Projudi TM] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                if (aindaNoFormulario && !temResultado) {
+                    console.warn('[Projudi TM] ainda sem resultado após 15s — o site pode estar lento; se persistir por muito mais tempo, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
     }
 
     function injetarBotoes() {
@@ -1216,8 +1231,8 @@
             b.id = 'btn-preencher-pesquisar-tm';
             b.type = 'button';
             b.className = 'projudi-btn';
-            b.title = 'Marca Analisadas + Analítico e define a data inicial 3 anos atrás — depois clique em Pesquisar';
-            b.textContent = 'Preencher Filtros (3 anos)';
+            b.title = 'Marca Analisadas + Analítico, define a data inicial 3 anos atrás e pesquisa (o site pode demorar a responder)';
+            b.textContent = 'Preencher e Pesquisar (3 anos)';
             b.onclick = preencherEPesquisarTempoMedio;
             buttonBar.appendChild(b);
             return;
