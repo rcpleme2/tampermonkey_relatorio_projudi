@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.1
+// @version      10.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -349,7 +349,6 @@
         }
 
         function coletarPaginaAtual() {
-            // Sempre lê a Atuação (usada para a competência nos relatórios de retorno/juntadas)
             const atuacao = lerAtuacao();
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
             const dados = [];
@@ -358,6 +357,7 @@
                 if (tds.length < cfg.minTds) return;
                 dados.push(cfg.extrai(tds, atuacao));
             });
+            console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             return dados;
         }
 
@@ -368,12 +368,14 @@
             // será chamado automaticamente ao reiniciar (bloco rodando && !obsoleta).
             const sel = document.querySelector('select[name="estatisticaPageSizeOptions"]');
             if (sel && sel.value !== '500') {
+                console.log(`[Projudi] alterando pageSize de ${sel.value} para 500 — aguardando reload`);
                 store.setItem(KEY_RODANDO, '1');
                 marcarAtividade();
                 sel.value = '500';
                 sel.dispatchEvent(new Event('change', { bubbles: true }));
                 return;
             }
+            console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
             marcarAtividade();
             continuar();
@@ -382,6 +384,7 @@
         function continuar() {
             desabilitarBotoes(true);
             marcarAtividade();
+            console.log('[Projudi] continuar() — coletando página atual');
 
             const dadosPagina = coletarPaginaAtual();
             let total;
@@ -1143,12 +1146,14 @@
     function detectarConfig() {
         const thead = document.querySelector('table.resultTable thead');
         const cab = thead ? thead.textContent : '';
-        if (CFG_TEMPOMEDIO.detecta(cab)) return CFG_TEMPOMEDIO;
-        if (CFG_JUNTADAS.detecta(cab)) return CFG_JUNTADAS;
-        if (CFG_RETORNO.detecta(cab)) return CFG_RETORNO;
-        if (CFG_CONCLUSOES.detecta(cab)) return CFG_CONCLUSOES;
-        if (/analisarJuntada\.do/i.test(location.pathname + location.search)) return CFG_JUNTADAS;
-        return null; // sem tabela de resultados reconhecível (página de conclusao.do sem resultados)
+        let cfg = null;
+        if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
+        else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
+        else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
+        else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
+        else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
+        console.log(`[Projudi] detectarConfig — thead=${!!thead} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
+        return cfg;
     }
 
     // Tela de filtros do relatório "Estatísticas de Conclusões" (tempo médio), antes da pesquisa.
@@ -1188,10 +1193,16 @@
             fim: campoFim ? campoFim.value : '',
         }));
 
+        // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
+        // automaticamente (sem esta flag a página de resultados só renderiza os botões).
+        store.setItem('projudi_tempomedio_auto_iniciar', '1');
+        console.log('[Projudi TM] flag auto_iniciar definida; submeterá em 1,5s');
+
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        // Aguarda um breve instante para o Projudi processar as alterações nos campos
-        // antes de submeter (sem o delay, o clique pode ocorrer antes dos eventos internos).
-        setTimeout(() => { if (btn) btn.click(); else form.submit(); }, 1500);
+        setTimeout(() => {
+            console.log('[Projudi TM] clicando em Pesquisar');
+            if (btn) btn.click(); else form.submit();
+        }, 1500);
     }
 
     function injetarBotoes() {
@@ -1246,12 +1257,22 @@
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const querColetarAuto = (estadoAuto === 'coletando_juntadas' && cfg === CFG_JUNTADAS) ||
                                 (estadoAuto === 'coletando_retorno' && cfg === CFG_RETORNO);
+        const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
+
+        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM}`);
 
         if (coletor.rodando() && !coletor.obsoleta()) {
+            console.log('[Projudi] retomando coleta após reload de paginação');
             coletor.continuar(); // retoma após o reload da paginação
         } else if (querColetarAuto) {
+            console.log('[Projudi] automação: iniciando coleta ao chegar no relatório');
             coletor.iniciar();   // automação: inicia a coleta ao chegar no relatório
+        } else if (autoIniciarTM) {
+            store.removeItem('projudi_tempomedio_auto_iniciar');
+            console.log('[Projudi TM] flag auto_iniciar detectada — iniciando extração automaticamente');
+            coletor.iniciar();   // início automático após "Preencher e Pesquisar"
         } else {
+            console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
             coletor.render();
         }
@@ -1459,6 +1480,7 @@
     `);
 
     function bootstrap() {
+        console.log(`[Projudi] bootstrap — URL: ${location.href}`);
         injetarBotoes();       // botões nos relatórios (buttonBar)
         injetarPainel();       // painel de automação (página com o menu)
         passoAutomacao();      // avança a automação se estiver em estado de navegação
