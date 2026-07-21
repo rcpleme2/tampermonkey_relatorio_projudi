@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.2
+// @version      12.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -246,6 +246,8 @@
                 { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 12 },
                 // Largura total (span 2) para caber o nome completo do tipo de documento
                 { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 14, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
+                // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o restante)
+                { titulo: 'Top 10 Processos com Mais Juntadas Pendentes', campo: 'processo', topN: 10, span: 2, semOutros: true },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -371,19 +373,30 @@
             return dados;
         }
 
+        // Tamanho de página alvo para o seletor "estatisticaPageSizeOptions" (só existe na
+        // tela de resultados do Tempo Médio). 500 travava o site do Projudi — a tabela com
+        // 1000 <tr> (500 processos + linhas de detalhe) era pesada demais para o próprio
+        // Projudi renderizar/paginar, então usamos um valor bem menor.
+        const TAMANHO_PAGINA_ALVO = '50';
+
         function iniciar() {
-            // Antes de iniciar, garante que a página exibe 500 registros por vez para
-            // minimizar o número de recargas. Quando o valor do select muda, o Projudi
-            // recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
+            // Antes de iniciar, ajusta a página para exibir TAMANHO_PAGINA_ALVO registros
+            // por vez (se essa opção existir no seletor). Quando o valor do select muda, o
+            // Projudi recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
             // será chamado automaticamente ao reiniciar (bloco rodando && !obsoleta).
             const sel = document.querySelector('select[name="estatisticaPageSizeOptions"]');
-            if (sel && sel.value !== '500') {
-                console.log(`[Projudi] alterando pageSize de ${sel.value} para 500 — aguardando reload`);
-                store.setItem(KEY_RODANDO, '1');
-                marcarAtividade();
-                sel.value = '500';
-                sel.dispatchEvent(new Event('change', { bubbles: true }));
-                return;
+            if (sel) {
+                const opcoesDisponiveis = [...sel.options].map(o => o.value);
+                const alvo = opcoesDisponiveis.includes(TAMANHO_PAGINA_ALVO) ? TAMANHO_PAGINA_ALVO : null;
+                if (alvo && sel.value !== alvo) {
+                    console.log(`[Projudi] alterando pageSize de ${sel.value} para ${alvo} — aguardando reload`);
+                    store.setItem(KEY_RODANDO, '1');
+                    marcarAtividade();
+                    sel.value = alvo;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return;
+                }
+                if (!alvo) console.log(`[Projudi] opção ${TAMANHO_PAGINA_ALVO} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
             }
             console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
@@ -578,7 +591,9 @@
         return best;
     }
 
-    function contarPorCampo(dados, campo, topN, limpar) {
+    // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
+    // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
+    function contarPorCampo(dados, campo, topN, limpar, semOutros) {
         const mapa = new Map();
         dados.forEach(d => {
             let k = (d[campo] || '').trim();
@@ -588,9 +603,13 @@
         });
         let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
         if (arr.length > topN) {
-            const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
-            arr = arr.slice(0, topN);
-            arr.push({ label: 'Outros', valor: resto });
+            if (semOutros) {
+                arr = arr.slice(0, topN);
+            } else {
+                const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
+                arr = arr.slice(0, topN);
+                arr.push({ label: 'Outros', valor: resto });
+            }
         }
         return arr;
     }
@@ -697,18 +716,23 @@
         const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(...itens.map(i => i.valor)) || 1;
         const linhaH = Math.min(9, areaH / itens.length);
-        const barH = Math.max(3, linhaH * 0.58);
+        const barH = Math.max(1.5, linhaH * 0.58);
+        // A fonte acompanha a altura da linha: quando há muitos itens numa área pequena
+        // (ex.: grades com várias seções na mesma página), reduz o texto em vez de
+        // sobrepor uma linha na outra — nunca deixa o texto ilegível por colisão.
+        const fonte = Math.max(5.5, Math.min(8, linhaH * 0.85));
+        const offsetY = fonte * 0.15;
 
-        doc.setFontSize(8);
+        doc.setFontSize(fonte);
         itens.forEach((it, i) => {
             const meio = topo + i * linhaH + linhaH / 2;
             doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.tintaSec);
-            doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + 1.2);
+            doc.text(doc.splitTextToSize(it.label, rotuloW - 3)[0], x, meio + offsetY);
             const bw = Math.max(0.6, (it.valor / maxVal) * barMaxW);
             doc.setFillColor(...(it.cor || cor));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.6, 0.6, 'F');
             doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.tinta);
-            doc.text(fmt(it.valor), barX + bw + 2, meio + 1.2);
+            doc.text(fmt(it.valor), barX + bw + 2, meio + offsetY);
         });
     }
 
@@ -728,8 +752,15 @@
         doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
         doc.text('Normais', q2 + 4, legY);
 
+        // Legenda "Como ler": quebrada para a largura da coluna (nunca vaza para a coluna
+        // vizinha) e com espaço reservado dinamicamente conforme o número de linhas.
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6);
+        const captionTexto = 'Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.';
+        const captionLinhas = doc.splitTextToSize(captionTexto, w);
+        const captionH = captionLinhas.length * 2.8;
+
         const topo = y + 15;
-        const areaH = h - 15;
+        const areaH = h - 15 - captionH;
         const rotuloW = Math.min(36, w * 0.32);
         const valorW = 10;
         const barX = x + rotuloW;
@@ -760,7 +791,7 @@
         });
 
         doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
-        doc.text('Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.', x, y + h - 0.5);
+        doc.text(captionLinhas, x, y + h - captionH + 2.4);
     }
 
     // comIndice: se true, desenha um link "Voltar ao Índice" centralizado no rodapé,
@@ -849,7 +880,7 @@
             // Gráficos (grade de 2 colunas; um gráfico pode ocupar as 2 colunas com span:2)
             const charts = [
                 { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now) },
-                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar) })),
+                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros) })),
             ];
             let col = 0, row = 0;
             charts.forEach(c => {
@@ -1678,6 +1709,24 @@
         catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
     }
 
+    // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
+    // completo (concluidos) e a fração correspondente (0 a 1, com meio ponto de crédito
+    // para o relatório em andamento no momento — só conta como completo quando termina).
+    function progressoAutomacao(estado, fila) {
+        const totalFila = fila.length;
+        if (!totalFila) return { concluidos: 0, frac: 0 };
+        if (estado === 'inativo' || !estado) return { concluidos: 0, frac: 0 };
+        if (estado === 'concluido' || estado === 'ir_fim') return { concluidos: totalFila, frac: 1 };
+        let key = null, emAndamento = false;
+        if (estado === 'preenchendo_tempomedio') { key = 'tempomedio'; emAndamento = true; }
+        else if (estado.startsWith('coletando_')) { key = estado.slice(10); emAndamento = true; }
+        else if (estado.startsWith('ir_')) { key = estado.slice(3); emAndamento = false; }
+        const idx = key ? fila.indexOf(key) : -1;
+        if (idx < 0) return { concluidos: 0, frac: 0 };
+        const concluidos = idx; // relatórios antes deste na fila já foram coletados
+        return { concluidos, frac: (idx + (emAndamento ? 0.5 : 0)) / totalFila };
+    }
+
     // Painel flutuante (na página que tem o menu principal / página inicial)
     function atualizarPainel() {
         const painel = document.getElementById('painel-automacao');
@@ -1703,6 +1752,21 @@
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => { el.disabled = emCurso; });
+
+        // Barra de progresso: proporção da fila já coletada (fica escondida quando não há
+        // fila registrada — ex.: antes da primeira automação, ou depois de "Limpar").
+        const fila = lerFilaAutomacao();
+        const { concluidos, frac } = progressoAutomacao(estado, fila);
+        const pct = Math.round(frac * 100);
+        const wrap = painel.querySelector('.pa-progresso');
+        const barra = painel.querySelector('.pa-progresso-barra');
+        const label = painel.querySelector('.pa-progresso-label');
+        if (wrap && barra && label) {
+            wrap.style.display = fila.length ? '' : 'none';
+            barra.style.width = pct + '%';
+            barra.classList.toggle('pa-progresso-completo', estado === 'concluido');
+            label.textContent = `${concluidos} de ${fila.length} relatório(s)  •  ${pct}%`;
+        }
     }
 
     function injetarPainel() {
@@ -1730,6 +1794,10 @@
             </div>
             <div class="pa-body">
                 <div class="pa-status">—</div>
+                <div class="pa-progresso" style="display:none;">
+                    <div class="pa-progresso-track"><div class="pa-progresso-barra"></div></div>
+                    <div class="pa-progresso-label">—</div>
+                </div>
                 <div class="pa-selecao">${linhasCheckbox}</div>
                 <div class="pa-marcar">
                     <button id="pa-marcar-tudo" class="pa-link-btn" type="button">Marcar tudo</button>
@@ -1782,6 +1850,16 @@
         }
         #painel-automacao .pa-btn-colapsar:hover, #painel-automacao .pa-btn-fechar:hover { background: #ddd; }
         #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
+        #painel-automacao .pa-progresso { margin-bottom: 8px; }
+        #painel-automacao .pa-progresso-track {
+            background: #dedbcf; border-radius: 5px; height: 8px; overflow: hidden;
+        }
+        #painel-automacao .pa-progresso-barra {
+            background: #34556b; height: 100%; width: 0%; border-radius: 5px;
+            transition: width .4s ease;
+        }
+        #painel-automacao .pa-progresso-barra.pa-progresso-completo { background: #1e6b1e; }
+        #painel-automacao .pa-progresso-label { font-size: .68em; color: #555; margin-top: 3px; text-align: right; }
         #painel-automacao .pa-selecao { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
         #painel-automacao .pa-item { font-size: .74em; color: #333; display: flex; align-items: center; gap: 4px; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
