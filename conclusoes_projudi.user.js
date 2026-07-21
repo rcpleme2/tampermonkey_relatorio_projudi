@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.0
+// @version      12.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -437,7 +437,11 @@
                 const dados = lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
                 if (cfg.pdfCustom) cfg.pdfCustom(dados); else gerarPDF(dados, cfg);
-                atualizarStatus(`✓ PDF gerado com ${dados.length} registros.`);
+                // Após exportar o PDF, limpa os dados acumulados automaticamente — evita
+                // que uma coleta antiga fique acumulada/misturada com a próxima.
+                limparTudo();
+                render();
+                atualizarStatus(`✓ PDF gerado com ${dados.length} registros. Dados acumulados apagados — pronto para nova coleta.`);
             } catch (err) {
                 atualizarStatus(`Erro ao gerar PDF: ${err.message}`);
                 console.error('[Exportar Projudi]', err);
@@ -1294,8 +1298,10 @@
         if (el) el.textContent = msg;
     }
 
+    // "Limpar" nunca é desabilitado — é o botão de resgate caso a coleta trave (evita o
+    // usuário ficar sem forma de apagar os dados presos e recomeçar).
     function desabilitarBotoes(desabilitar) {
-        ['btn-coletar', 'btn-baixar', 'btn-pdf', 'btn-limpar'].forEach(id => {
+        ['btn-coletar', 'btn-baixar', 'btn-pdf'].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.disabled = desabilitar;
         });
@@ -1653,7 +1659,12 @@
             .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
             .filter(s => s.dados.length);
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
-        try { gerarPDFConjunto(secoes); }
+        try {
+            gerarPDFConjunto(secoes);
+            // Após exportar o PDF conjunto, limpa tudo automaticamente — evita que uma
+            // coleta antiga fique acumulada/misturada com a próxima automação.
+            limparTudoAutomacao();
+        }
         catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
     }
 
@@ -1679,7 +1690,8 @@
         painel.querySelector('.pa-status').textContent = `Estado: ${rotuloEstado}  •  ${detalhe}`;
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
-        painel.querySelector('#pa-limpar').disabled = emCurso;
+        // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
+        // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => { el.disabled = emCurso; });
     }
 
