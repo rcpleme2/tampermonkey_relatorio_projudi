@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.7
+// @version      11.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -287,6 +287,7 @@
         linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados) => gerarPDFTempoMedio(dados),
+        montarConjunto: (doc, dados, ehPrimeiraSecao) => montarRelatorioTempoMedio(doc, dados, ehPrimeiraSecao),
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -900,7 +901,10 @@
     // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]
     function gerarPDFConjunto(secoes) {
         const doc = novoDocPDF();
-        secoes.forEach((s, i) => montarRelatorio(doc, s.dados, s.cfg, i === 0));
+        secoes.forEach((s, i) => {
+            if (s.cfg.montarConjunto) s.cfg.montarConjunto(doc, s.dados, i === 0);
+            else montarRelatorio(doc, s.dados, s.cfg, i === 0);
+        });
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi_${dataArquivo()}.pdf`);
     }
 
@@ -973,6 +977,15 @@
 
     function gerarPDFTempoMedio(dados) {
         const doc = novoDocPDF();
+        montarRelatorioTempoMedio(doc, dados, true);
+        baixarBlob(doc.output('blob'), `tempo_medio_projudi_${dataArquivo()}.pdf`);
+    }
+
+    // Desenha o relatório de Tempo Médio dentro de um doc jsPDF já existente (usado tanto
+    // pelo download individual quanto pelo PDF conjunto da automação). ehPrimeiraSecao=false
+    // começa em página nova, para poder ser combinado com outras seções no mesmo PDF.
+    function montarRelatorioTempoMedio(doc, dados, ehPrimeiraSecao) {
+        if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -1108,8 +1121,6 @@
             },
             didDrawPage: () => desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m),
         });
-
-        baixarBlob(doc.output('blob'), `tempo_medio_projudi_${dataArquivo()}.pdf`);
     }
 
     // ── Interface ───────────────────────────────────────────────────────────────
@@ -1245,6 +1256,16 @@
         // período + botão de preencher+pesquisar; os botões de coleta/exportação fazem
         // sentido depois da busca.
         if (formularioTempoMedio() && !document.querySelector('table.resultTable')) {
+            // Automação: se chegamos aqui vindos do fluxo de automação, preenche e
+            // pesquisa sozinho (sem esperar clique manual), usando o período escolhido no painel.
+            if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
+                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '3a';
+                console.log(`[Projudi TM] automação: preenchendo e pesquisando com período="${periodoTM}"`);
+                store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
+                preencherEPesquisarTempoMedio(periodoTM);
+                return;
+            }
+
             const sel = document.createElement('select');
             sel.id = 'sel-periodo-tm';
             sel.className = 'projudi-select';
@@ -1301,8 +1322,8 @@
         buttonBar.appendChild(status);
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
-        const querColetarAuto = (estadoAuto === 'coletando_juntadas' && cfg === CFG_JUNTADAS) ||
-                                (estadoAuto === 'coletando_retorno' && cfg === CFG_RETORNO);
+        const relAtual = relatorioPorCfg(cfg);
+        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO;
         const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
 
         console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM}`);
@@ -1349,6 +1370,21 @@
         return dados;
     }
 
+    // Relatórios disponíveis para a automação, na ordem padrão de execução. 'precisaPreencher'
+    // marca o Tempo Médio, cuja página de destino é um formulário de filtros (não os
+    // resultados diretamente) — precisa ser preenchido e pesquisado antes de coletar.
+    const REPORTS_AUTOMACAO = [
+        { key: 'juntadas',   cfg: CFG_JUNTADAS,   navAlvo: 'juntadas',   rotulo: 'Juntadas',             precisaPreencher: false },
+        { key: 'retorno',    cfg: CFG_RETORNO,    navAlvo: 'retorno',    rotulo: 'Retorno de Conclusos',  precisaPreencher: false },
+        { key: 'tempomedio', cfg: CFG_TEMPOMEDIO, navAlvo: 'tempomedio', rotulo: 'Tempo Médio',           precisaPreencher: true },
+    ];
+    function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
+    function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
+
+    function lerFilaAutomacao() {
+        try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
+    }
+
     // Procura um link de menu (por URL e/ou texto) no documento atual e nos frames pai/topo.
     function acharLinkMenu(urlRe, textoRe) {
         const docs = [document];
@@ -1368,6 +1404,7 @@
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
+        else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         link.click();
@@ -1375,13 +1412,16 @@
     }
 
     // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
-    // e tenta avançar (o próprio frame do relatório costuma ter o menu; senão o poll do
-    // painel assume).
+    // (próximo relatório da fila, ou "ir_fim") e tenta avançar (o próprio frame do relatório
+    // costuma ter o menu; senão o poll do painel assume).
     function avancarAutomacao(cfg) {
         const estado = store.getItem(AUTO_ESTADO);
-        if (estado === 'coletando_juntadas' && cfg === CFG_JUNTADAS) store.setItem(AUTO_ESTADO, 'ir_retorno');
-        else if (estado === 'coletando_retorno' && cfg === CFG_RETORNO) store.setItem(AUTO_ESTADO, 'ir_fim');
-        else return;
+        const rel = relatorioPorCfg(cfg);
+        if (!rel || estado !== 'coletando_' + rel.key) return;
+        const fila = lerFilaAutomacao();
+        const idx = fila.indexOf(rel.key);
+        const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         setTimeout(passoAutomacao, 900);
     }
 
@@ -1390,32 +1430,47 @@
     function passoAutomacao() {
         const estado = store.getItem(AUTO_ESTADO);
         if (!estado || estado === 'concluido') return;
-        // Durante a coleta, quem conduz é injetarBotoes (no frame do relatório)
-        if (estado === 'coletando_juntadas' || estado === 'coletando_retorno') return;
+        // Durante a coleta ou o preenchimento do formulário, quem conduz é a própria
+        // página atual (injetarBotoes / preencherEPesquisarTempoMedio).
+        if (estado.startsWith('coletando_') || estado === 'preenchendo_tempomedio') return;
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
         if (agora - lock < 4000) return; // já houve tentativa recente em algum frame
 
-        if (estado === 'ir_retorno') {
-            store.setItem('projudi_auto_lock', String(agora));
-            if (navegarMenu('retorno')) store.setItem(AUTO_ESTADO, 'coletando_retorno');
-        } else if (estado === 'ir_fim') {
+        if (estado === 'ir_fim') {
             store.setItem('projudi_auto_lock', String(agora));
             store.setItem(AUTO_ESTADO, 'concluido');
             navegarMenu('inicio');
+            return;
+        }
+        if (estado.startsWith('ir_')) {
+            const key = estado.slice(3);
+            const rel = relatorioPorChave(key);
+            if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
+            store.setItem('projudi_auto_lock', String(agora));
+            if (navegarMenu(rel.navAlvo)) {
+                store.setItem(AUTO_ESTADO, rel.precisaPreencher ? 'preenchendo_tempomedio' : ('coletando_' + key));
+            }
         }
     }
 
-    function iniciarAutomacao() {
-        store.setItem(AUTO_ESTADO, 'coletando_juntadas');
+    // fila: array de chaves ('juntadas'|'retorno'|'tempomedio') na ordem a executar.
+    // periodoTM: id do período pré-configurado para a data inicial do Tempo Médio.
+    function iniciarAutomacao(fila, periodoTM) {
+        fila = (fila || []).filter(k => relatorioPorChave(k));
+        if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
+        store.setItem('projudi_auto_fila', JSON.stringify(fila));
+        store.setItem('projudi_auto_periodo_tm', periodoTM || '3a');
+        const primeiro = relatorioPorChave(fila[0]);
+        store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? 'preenchendo_tempomedio' : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
         atualizarPainel();
-        setTimeout(() => navegarMenu('juntadas'), 300);
+        setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
     }
 
     function limparTudoAutomacao() {
-        [CFG_JUNTADAS, CFG_RETORNO].forEach(c => {
+        REPORTS_AUTOMACAO.forEach(({ cfg: c }) => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
             store.removeItem(c.prefixo + 'num_paginas');
@@ -1423,15 +1478,16 @@
             store.removeItem(c.prefixo + 'ts');
         });
         store.removeItem(AUTO_ESTADO);
+        store.removeItem('projudi_auto_fila');
+        store.removeItem('projudi_auto_periodo_tm');
+        store.removeItem('projudi_tempomedio_auto_iniciar');
         atualizarPainel();
     }
 
     function baixarPDFConjunto() {
-        const dj = lerDadosDe(CFG_JUNTADAS.prefixo);
-        const dr = lerDadosDe(CFG_RETORNO.prefixo);
-        const secoes = [];
-        if (dj.length) secoes.push({ dados: dj, cfg: CFG_JUNTADAS });
-        if (dr.length) secoes.push({ dados: dr, cfg: CFG_RETORNO });
+        const secoes = REPORTS_AUTOMACAO
+            .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
+            .filter(s => s.dados.length);
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try { gerarPDFConjunto(secoes); }
         catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
@@ -1442,19 +1498,25 @@
         const painel = document.getElementById('painel-automacao');
         if (!painel) return;
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
-        const nj = lerDadosDe(CFG_JUNTADAS.prefixo).length;
-        const nr = lerDadosDe(CFG_RETORNO.prefixo).length;
-        const emCurso = ['coletando_juntadas', 'coletando_retorno', 'ir_retorno', 'ir_fim'].includes(estado);
-        const rotuloEstado = ({
-            inativo: 'pronto', coletando_juntadas: 'coletando juntadas…', ir_retorno: 'indo ao retorno…',
-            coletando_retorno: 'coletando retorno…', ir_fim: 'finalizando…', concluido: 'concluído',
-        })[estado] || estado;
+        const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: lerDadosDe(r.cfg.prefixo).length }));
+        const total = contagens.reduce((s, c) => s + c.n, 0);
+        const emCurso = estado !== 'inativo' && estado !== 'concluido';
+        const rotuloEstado = (() => {
+            if (estado === 'inativo') return 'pronto';
+            if (estado === 'concluido') return 'concluído';
+            if (estado === 'ir_fim') return 'finalizando…';
+            if (estado === 'preenchendo_tempomedio') return 'preenchendo filtros do tempo médio…';
+            if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `coletando ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
+            if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `indo para ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
+            return estado;
+        })();
 
-        painel.querySelector('.pa-status').textContent =
-            `Estado: ${rotuloEstado}  •  Juntadas: ${nj}  •  Retorno: ${nr}`;
+        const detalhe = contagens.map(c => `${c.r.rotulo}: ${c.n}`).join('  •  ');
+        painel.querySelector('.pa-status').textContent = `Estado: ${rotuloEstado}  •  ${detalhe}`;
         painel.querySelector('#pa-iniciar').disabled = emCurso;
-        painel.querySelector('#pa-pdf').disabled = (nj + nr) === 0;
+        painel.querySelector('#pa-pdf').disabled = total === 0;
         painel.querySelector('#pa-limpar').disabled = emCurso;
+        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => { el.disabled = emCurso; });
     }
 
     function injetarPainel() {
@@ -1466,6 +1528,12 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
+        const opcoesPeriodo = PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '3a' ? ' selected' : ''}>${p.rotulo}</option>`).join('');
+        const linhasCheckbox = REPORTS_AUTOMACAO.map(r => `
+                    <label class="pa-item">
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" checked> ${r.rotulo}
+                        ${r.key === 'tempomedio' ? `<select id="pa-periodo-tm" class="projudi-select" title="Período usado como data inicial">${opcoesPeriodo}</select>` : ''}
+                    </label>`).join('');
         painel.innerHTML = `
             <div class="pa-header">
                 <span class="pa-titulo">Automação de relatórios</span>
@@ -1476,17 +1544,28 @@
             </div>
             <div class="pa-body">
                 <div class="pa-status">—</div>
+                <div class="pa-selecao">${linhasCheckbox}</div>
+                <div class="pa-marcar">
+                    <button id="pa-marcar-tudo" class="pa-link-btn" type="button">Marcar tudo</button>
+                    <button id="pa-desmarcar-tudo" class="pa-link-btn" type="button">Desmarcar tudo</button>
+                </div>
                 <div class="pa-botoes">
-                    <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai Juntadas e Retorno automaticamente">▶ Automatizar</button>
-                    <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com Juntadas + Retorno">⬇ PDF conjunto</button>
-                    <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados dos dois relatórios">Limpar</button>
+                    <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
+                    <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ PDF conjunto</button>
+                    <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências.</div>
             </div>`;
         document.body.appendChild(painel);
-        painel.querySelector('#pa-iniciar').onclick = iniciarAutomacao;
+        painel.querySelector('#pa-iniciar').onclick = () => {
+            const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key);
+            const periodoTM = painel.querySelector('#pa-periodo-tm').value;
+            iniciarAutomacao(fila, periodoTM);
+        };
         painel.querySelector('#pa-pdf').onclick = baixarPDFConjunto;
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
+        painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
         painel.querySelector('.pa-btn-colapsar').onclick = () => {
             const body = painel.querySelector('.pa-body');
             const btn = painel.querySelector('.pa-btn-colapsar');
@@ -1517,6 +1596,16 @@
         }
         #painel-automacao .pa-btn-colapsar:hover, #painel-automacao .pa-btn-fechar:hover { background: #ddd; }
         #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
+        #painel-automacao .pa-selecao { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
+        #painel-automacao .pa-item { font-size: .74em; color: #333; display: flex; align-items: center; gap: 4px; }
+        #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
+        #painel-automacao .pa-item .projudi-select { margin-left: 4px; padding: 1px 2px; font-size: 1em; }
+        #painel-automacao .pa-marcar { display: flex; gap: 8px; margin-bottom: 6px; }
+        #painel-automacao .pa-link-btn {
+            background: none; border: none; padding: 0; cursor: pointer;
+            font-size: .7em; color: #34556b; text-decoration: underline;
+        }
+        #painel-automacao .pa-link-btn:disabled { color: #999; cursor: not-allowed; }
         #painel-automacao .pa-botoes { display: flex; gap: 4px; flex-wrap: wrap; }
         #painel-automacao .projudi-btn { margin-left: 0; }
         #painel-automacao #pa-iniciar { background-color: #1e6b1e; border-color: #145214; }
