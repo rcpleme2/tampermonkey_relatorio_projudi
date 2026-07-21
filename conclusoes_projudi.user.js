@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      10.0
+// @version      10.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -88,8 +88,15 @@
     // attentionPurple, attentionRed, ...); o normal fica apenas com "attention" (preto).
     function emPrioritario(em) {
         if (!em) return false;
-        return (em.className || '').split(/\s+/)
-            .some(c => /^attention[A-Z]/.test(c) && c !== 'attentionBold');
+        // Verifica classes de cor (attentionRed, attentionBlue, attentionPurple …)
+        if ((em.className || '').split(/\s+/).some(c => /^attention[A-Z]/.test(c) && c !== 'attentionBold')) return true;
+        // Fallback: cor computada — vermelho indica processo prioritário (relatório tempoMédio)
+        try {
+            const cor = window.getComputedStyle(em).color;
+            const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(cor);
+            if (m && +m[1] > 150 && +m[2] < 100 && +m[3] < 100) return true;
+        } catch (e) {}
+        return false;
     }
 
     // ── Configurações dos dois relatórios ───────────────────────────────────────
@@ -355,6 +362,18 @@
         }
 
         function iniciar() {
+            // Antes de iniciar, garante que a página exibe 500 registros por vez para
+            // minimizar o número de recargas. Quando o valor do select muda, o Projudi
+            // recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
+            // será chamado automaticamente ao reiniciar (bloco rodando && !obsoleta).
+            const sel = document.querySelector('select[name="estatisticaPageSizeOptions"]');
+            if (sel && sel.value !== '500') {
+                store.setItem(KEY_RODANDO, '1');
+                marcarAtividade();
+                sel.value = '500';
+                sel.dispatchEvent(new Event('change', { bubbles: true }));
+                return;
+            }
             store.setItem(KEY_RODANDO, '1');
             marcarAtividade();
             continuar();
@@ -975,30 +994,48 @@
             return db - da;
         });
 
+        // Período de referência (salvo quando o usuário preencheu o formulário)
+        let periodoStr = '';
+        try {
+            const per = JSON.parse(store.getItem('projudi_tempomedio_periodo') || '{}');
+            if (per.ini || per.fim) periodoStr = `${per.ini || '?'} a ${per.fim || '?'}`;
+        } catch (e) {}
+
+        // Decisões ainda não cumpridas (dtCartorio vazia = cartório não analisou ainda)
+        const naoCumpridas = dados.filter(d => !d.dtCartorio);
+        const maisAntigaNC = naoCumpridas.reduce((best, d) => {
+            const ts = parseDataBR(d.dtAnalise);
+            return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
+        }, null);
+
         // ═══ PÁGINA 1 — RESUMO ═══
         doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
         doc.text(titulo, m, m + 2);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`, m, m + 8);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
+        if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
+        doc.text(subtitulo, m, m + 8);
         doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
 
         const gap = 6;
-        // Linha 1: registros analisados / tempo médio geral / prioritários analisados
+        // Linha 1: 4 KPIs centralizados — analisados / tempo médio geral / prioritários / não cumpridas
         const kY = m + 16;
-        const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m, kY, kW3, 26, 'Registros analisados', String(dados.length), [`${validos.length} com datas válidas`]);
-        desenharCard(doc, m + kW3 + gap, kY, kW3, 26, 'Tempo médio geral', fmtDias(geral), []);
+        const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 26, 'Prioritários analisados', String(prioritarios.length), [`${prioPct}% do total`]);
+        desenharCard(doc, m,                   kY, kW4, 28, 'Registros analisados',       String(dados.length),          [], true);
+        desenharCard(doc, m + kW4 + gap,       kY, kW4, 28, 'Tempo médio geral',           fmtDias(geral),                [], true);
+        desenharCard(doc, m + 2*(kW4+gap),     kY, kW4, 28, 'Prioritários',                String(prioritarios.length),   [`${prioPct}% do total`], true);
+        desenharCard(doc, m + 3*(kW4+gap),     kY, kW4, 28, 'Não cumpridas',               String(naoCumpridas.length),
+            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true);
 
-        // Linha 2: tempo médio prioritários vs não prioritários
-        const k2Y = kY + 26 + gap;
+        // Linha 2: tempo médio prioritários vs não prioritários (centralizados)
+        const k2Y = kY + 28 + gap;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m, k2Y, kW2, 26, 'Tempo médio — Prioritários', fmtDias(mediaPrio), [`${prioritarios.length} processo(s)`]);
-        desenharCard(doc, m + kW2 + gap, k2Y, kW2, 26, 'Tempo médio — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`]);
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true);
 
         // Card largo: processo com cumprimento mais demorado (centralizado)
-        const k3Y = k2Y + 26 + gap;
+        const k3Y = k2Y + 26 + gap; // k2Y usa h=26
         let valMD = '—', subsMD = ['Nenhum registro com datas válidas'];
         if (maisDemorado) {
             valMD = `${maisDemorado.dias} dia${maisDemorado.dias === 1 ? '' : 's'}`;
@@ -1145,8 +1182,16 @@
         const campoFim = form.querySelector('input[name="dataFim"]');
         if (campoFim) campoFim.disabled = false; // também precisa ir habilitado para ser enviado
 
+        // Salva o período para uso posterior no PDF
+        store.setItem('projudi_tempomedio_periodo', JSON.stringify({
+            ini: campoInicio ? campoInicio.value : '',
+            fim: campoFim ? campoFim.value : '',
+        }));
+
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        if (btn) btn.click(); else form.submit();
+        // Aguarda um breve instante para o Projudi processar as alterações nos campos
+        // antes de submeter (sem o delay, o clique pode ocorrer antes dos eventos internos).
+        setTimeout(() => { if (btn) btn.click(); else form.submit(); }, 1500);
     }
 
     function injetarBotoes() {
@@ -1355,18 +1400,34 @@
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
         painel.innerHTML = `
-            <div class="pa-titulo">Automação de relatórios</div>
-            <div class="pa-status">—</div>
-            <div class="pa-botoes">
-                <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai Juntadas e Retorno automaticamente">▶ Automatizar</button>
-                <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com Juntadas + Retorno">⬇ PDF conjunto</button>
-                <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados dos dois relatórios">Limpar</button>
+            <div class="pa-header">
+                <span class="pa-titulo">Automação de relatórios</span>
+                <div class="pa-controles">
+                    <button class="pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-btn-fechar" type="button" title="Fechar">✕</button>
+                </div>
             </div>
-            <div class="pa-dica">Rode em cada Atuação para acumular várias competências.</div>`;
+            <div class="pa-body">
+                <div class="pa-status">—</div>
+                <div class="pa-botoes">
+                    <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai Juntadas e Retorno automaticamente">▶ Automatizar</button>
+                    <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com Juntadas + Retorno">⬇ PDF conjunto</button>
+                    <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados dos dois relatórios">Limpar</button>
+                </div>
+                <div class="pa-dica">Rode em cada Atuação para acumular várias competências.</div>
+            </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = iniciarAutomacao;
         painel.querySelector('#pa-pdf').onclick = baixarPDFConjunto;
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        painel.querySelector('.pa-btn-colapsar').onclick = () => {
+            const body = painel.querySelector('.pa-body');
+            const btn = painel.querySelector('.pa-btn-colapsar');
+            const recolhido = body.style.display === 'none';
+            body.style.display = recolhido ? '' : 'none';
+            btn.textContent = recolhido ? '▲' : '▼';
+        };
+        painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
         atualizarPainel();
         // Mantém o painel vivo e conduz a navegação da automação (a coleta ocorre no
         // frame de conteúdo, que pode não recarregar este frame) — poll leve.
@@ -1380,7 +1441,14 @@
             padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
             font-family: Verdana, Arial, sans-serif; width: 300px;
         }
-        #painel-automacao .pa-titulo { font-weight: bold; font-size: .8em; color: #2d3748; margin-bottom: 4px; }
+        #painel-automacao .pa-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+        #painel-automacao .pa-titulo { font-weight: bold; font-size: .8em; color: #2d3748; }
+        #painel-automacao .pa-controles { display: flex; gap: 3px; }
+        #painel-automacao .pa-btn-colapsar, #painel-automacao .pa-btn-fechar {
+            background: none; border: 1px solid #aaa; border-radius: 3px; cursor: pointer;
+            font-size: .7em; padding: 1px 5px; color: #555; line-height: 1.3;
+        }
+        #painel-automacao .pa-btn-colapsar:hover, #painel-automacao .pa-btn-fechar:hover { background: #ddd; }
         #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
         #painel-automacao .pa-botoes { display: flex; gap: 4px; flex-wrap: wrap; }
         #painel-automacao .projudi-btn { margin-left: 0; }
