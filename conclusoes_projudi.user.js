@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      8.2
+// @version      8.3
 // @description  Coleta conclusões (remessa), retorno de conclusos ou juntadas, acumula e exporta em Excel ou PDF (retrato, resumo com KPIs e gráficos, prioritários destacados)
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/processo/conclusao.do*
@@ -63,11 +63,9 @@
         };
     }
 
-    // Competência = a Atuação até antes do primeiro " de "
-    // (ex.: "Vara Cível de Piraquara" -> "Vara Cível")
+    // Competência = o nome completo da Atuação (ex.: "Vara de Família de Curitiba")
     function competenciaDe(atuacao) {
-        if (!atuacao) return '';
-        return atuacao.split(/\s+de\s+/i)[0].trim();
+        return (atuacao || '').trim();
     }
 
     // Processo prioritário: o número recebe uma classe de cor extra (attentionBlue,
@@ -193,7 +191,7 @@
                 especificacao,
                 dataEnvio: textoCelula(tds[7]),
                 juntadoPor: textoSemNegrito(tds[8]), // nome, sem o cargo em negrito
-                funcao: bFunc ? norm(bFunc.textContent) : '',
+                funcao: (bFunc ? norm(bFunc.textContent) : '') || 'Sistema',
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
@@ -675,14 +673,28 @@
         function desenharPaginaResumo(sub, contexto, primeira) {
             if (!primeira) doc.addPage();
 
+            // Cabeçalho: título, competência em destaque (com quebra), e a data em linha própria
+            let hy = m + 2;
             doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.escura);
-            doc.text(p.titulo, m, m + 2);
+            doc.text(p.titulo, m, hy);
+            hy += 8;
+            if (contexto.competencia) {
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.media);
+                const linhas = doc.splitTextToSize('Competência: ' + contexto.competencia, uw);
+                doc.text(linhas, m, hy);
+                hy += linhas.length * 5.2 + 1.5;
+            } else if (contexto.rotulo) {
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.media);
+                doc.text(contexto.rotulo, m, hy);
+                hy += 7;
+            }
             doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.suave);
-            doc.text(`${contexto}  •  extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`, m, m + 8);
-            doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, m + 11, pw - m, m + 11);
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`, m, hy);
+            hy += 3;
+            doc.setDrawColor(...COR.linha); doc.setLineWidth(0.3); doc.line(m, hy, pw - m, hy);
 
             // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
-            const kY = m + 16;
+            const kY = hy + 5;
             const prio = contarPrioritarios(sub);
             const kpis = [
                 { titulo: p.atosTitulo, valor: String(sub.length), subs: [] },
@@ -742,7 +754,7 @@
         }
 
         // ═══ RESUMO GERAL ═══
-        desenharPaginaResumo(dados, 'Resumo geral', true);
+        desenharPaginaResumo(dados, { rotulo: 'Resumo geral' }, true);
 
         // ═══ RESUMO POR COMPETÊNCIA (quando há mais de uma) ═══
         const porComp = new Map();
@@ -755,7 +767,7 @@
         if (porComp.size > 1) {
             [...porComp.entries()]
                 .sort((a, b) => b[1].length - a[1].length)
-                .forEach(([comp, sub]) => desenharPaginaResumo(sub, `Competência: ${comp}`, false));
+                .forEach(([comp, sub]) => desenharPaginaResumo(sub, { competencia: comp }, false));
         }
 
         // ═══ TABELA DISCRIMINADA ═══
