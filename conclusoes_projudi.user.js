@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.3
+// @version      12.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1698,6 +1698,24 @@
         catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
     }
 
+    // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
+    // completo (concluidos) e a fração correspondente (0 a 1, com meio ponto de crédito
+    // para o relatório em andamento no momento — só conta como completo quando termina).
+    function progressoAutomacao(estado, fila) {
+        const totalFila = fila.length;
+        if (!totalFila) return { concluidos: 0, frac: 0 };
+        if (estado === 'inativo' || !estado) return { concluidos: 0, frac: 0 };
+        if (estado === 'concluido' || estado === 'ir_fim') return { concluidos: totalFila, frac: 1 };
+        let key = null, emAndamento = false;
+        if (estado === 'preenchendo_tempomedio') { key = 'tempomedio'; emAndamento = true; }
+        else if (estado.startsWith('coletando_')) { key = estado.slice(10); emAndamento = true; }
+        else if (estado.startsWith('ir_')) { key = estado.slice(3); emAndamento = false; }
+        const idx = key ? fila.indexOf(key) : -1;
+        if (idx < 0) return { concluidos: 0, frac: 0 };
+        const concluidos = idx; // relatórios antes deste na fila já foram coletados
+        return { concluidos, frac: (idx + (emAndamento ? 0.5 : 0)) / totalFila };
+    }
+
     // Painel flutuante (na página que tem o menu principal / página inicial)
     function atualizarPainel() {
         const painel = document.getElementById('painel-automacao');
@@ -1723,6 +1741,21 @@
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => { el.disabled = emCurso; });
+
+        // Barra de progresso: proporção da fila já coletada (fica escondida quando não há
+        // fila registrada — ex.: antes da primeira automação, ou depois de "Limpar").
+        const fila = lerFilaAutomacao();
+        const { concluidos, frac } = progressoAutomacao(estado, fila);
+        const pct = Math.round(frac * 100);
+        const wrap = painel.querySelector('.pa-progresso');
+        const barra = painel.querySelector('.pa-progresso-barra');
+        const label = painel.querySelector('.pa-progresso-label');
+        if (wrap && barra && label) {
+            wrap.style.display = fila.length ? '' : 'none';
+            barra.style.width = pct + '%';
+            barra.classList.toggle('pa-progresso-completo', estado === 'concluido');
+            label.textContent = `${concluidos} de ${fila.length} relatório(s)  •  ${pct}%`;
+        }
     }
 
     function injetarPainel() {
@@ -1750,6 +1783,10 @@
             </div>
             <div class="pa-body">
                 <div class="pa-status">—</div>
+                <div class="pa-progresso" style="display:none;">
+                    <div class="pa-progresso-track"><div class="pa-progresso-barra"></div></div>
+                    <div class="pa-progresso-label">—</div>
+                </div>
                 <div class="pa-selecao">${linhasCheckbox}</div>
                 <div class="pa-marcar">
                     <button id="pa-marcar-tudo" class="pa-link-btn" type="button">Marcar tudo</button>
@@ -1802,6 +1839,16 @@
         }
         #painel-automacao .pa-btn-colapsar:hover, #painel-automacao .pa-btn-fechar:hover { background: #ddd; }
         #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
+        #painel-automacao .pa-progresso { margin-bottom: 8px; }
+        #painel-automacao .pa-progresso-track {
+            background: #dedbcf; border-radius: 5px; height: 8px; overflow: hidden;
+        }
+        #painel-automacao .pa-progresso-barra {
+            background: #34556b; height: 100%; width: 0%; border-radius: 5px;
+            transition: width .4s ease;
+        }
+        #painel-automacao .pa-progresso-barra.pa-progresso-completo { background: #1e6b1e; }
+        #painel-automacao .pa-progresso-label { font-size: .68em; color: #555; margin-top: 3px; text-align: right; }
         #painel-automacao .pa-selecao { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
         #painel-automacao .pa-item { font-size: .74em; color: #333; display: flex; align-items: center; gap: 4px; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
