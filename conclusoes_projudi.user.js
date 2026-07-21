@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.4
+// @version      12.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -373,19 +373,30 @@
             return dados;
         }
 
+        // Tamanho de página alvo para o seletor "estatisticaPageSizeOptions" (só existe na
+        // tela de resultados do Tempo Médio). 500 travava o site do Projudi — a tabela com
+        // 1000 <tr> (500 processos + linhas de detalhe) era pesada demais para o próprio
+        // Projudi renderizar/paginar, então usamos um valor bem menor.
+        const TAMANHO_PAGINA_ALVO = '50';
+
         function iniciar() {
-            // Antes de iniciar, garante que a página exibe 500 registros por vez para
-            // minimizar o número de recargas. Quando o valor do select muda, o Projudi
-            // recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
+            // Antes de iniciar, ajusta a página para exibir TAMANHO_PAGINA_ALVO registros
+            // por vez (se essa opção existir no seletor). Quando o valor do select muda, o
+            // Projudi recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
             // será chamado automaticamente ao reiniciar (bloco rodando && !obsoleta).
             const sel = document.querySelector('select[name="estatisticaPageSizeOptions"]');
-            if (sel && sel.value !== '500') {
-                console.log(`[Projudi] alterando pageSize de ${sel.value} para 500 — aguardando reload`);
-                store.setItem(KEY_RODANDO, '1');
-                marcarAtividade();
-                sel.value = '500';
-                sel.dispatchEvent(new Event('change', { bubbles: true }));
-                return;
+            if (sel) {
+                const opcoesDisponiveis = [...sel.options].map(o => o.value);
+                const alvo = opcoesDisponiveis.includes(TAMANHO_PAGINA_ALVO) ? TAMANHO_PAGINA_ALVO : null;
+                if (alvo && sel.value !== alvo) {
+                    console.log(`[Projudi] alterando pageSize de ${sel.value} para ${alvo} — aguardando reload`);
+                    store.setItem(KEY_RODANDO, '1');
+                    marcarAtividade();
+                    sel.value = alvo;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return;
+                }
+                if (!alvo) console.log(`[Projudi] opção ${TAMANHO_PAGINA_ALVO} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
             }
             console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
