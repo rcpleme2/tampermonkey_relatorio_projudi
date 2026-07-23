@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      12.5
-// @description  Coleta conclusões/retorno/juntadas/tempo médio, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
+// @version      13.0
+// @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
@@ -299,6 +299,41 @@
         linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados) => gerarPDFTempoMedio(dados),
+    };
+
+    // Relatório de Processos Paralisados (processoBuscaParalisado.do). Colunas da tabela:
+    // [0]semáforo [1]checkbox [2]Processo [3]Seq. [4]Classe Processual [5]Dias Paralisado
+    // [6]Razão Externa [7]Último Movimento
+    const CFG_PARALISADOS = {
+        prefixo: 'projudi_paralisados_',
+        detecta: (cab) => /dias\s+paralisado/i.test(cab),
+        minTds: 8,
+        usaAtuacao: false,
+        nomeArquivo: 'paralisados_projudi',
+        rotulos: { coletar: 'Extrair Paralisados', coletarMais: 'Extrair mais (Paralisados)', baixar: '⬇ Baixar Paralisados' },
+        cabecalhos: ['Processo', 'Seq.', 'Classe Processual', 'Dias Paralisado', 'Razão Externa', 'Último Movimento', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 10 }, { wch: 40 }, { wch: 16 }, { wch: 30 }, { wch: 50 }, { wch: 11 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[2].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[2]);
+            const diasTexto = textoCelula(tds[5]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            const razaoExterna = textoCelula(tds[6]);
+            return {
+                processo,
+                seq: textoCelula(tds[3]),
+                classe: textoCelula(tds[4]),
+                dias,
+                razaoExterna,
+                razaoInformada: !/^informar$/i.test(razaoExterna.trim()),
+                ultimoMovimento: textoCelula(tds[7]),
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.seq, d.classe, (d.dias == null ? '' : String(d.dias)), d.razaoExterna, d.ultimoMovimento, d.prioritario ? 'Sim' : 'Não'],
+        pdfCustom: (dados) => gerarPDFParalisados(dados),
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -1008,6 +1043,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_PARALISADOS) {
+            return {
+                rotulo: TITULO_PARALISADOS,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoParalisados(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaParalisados(doc, dados, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -1332,6 +1374,155 @@
         return paginaInicial;
     }
 
+    // ── PDF do relatório de Processos Paralisados ───────────────────────────────
+    // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
+    // calcular a partir de duas datas): KPIs + top 10 mais tempo parados + média por classe.
+
+    const TITULO_PARALISADOS = 'Processos Paralisados';
+
+    function gerarPDFParalisados(dados) {
+        const doc = novoDocPDF();
+        montarResumoParalisados(doc, dados, true, false);
+        const pgTabela = montarTabelaParalisados(doc, dados, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        baixarBlob(doc.output('blob'), `paralisados_projudi_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO (KPIs + gráficos) do relatório de Paralisados, dentro de um doc
+    // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
+    function montarResumoParalisados(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const validos = dados.filter(d => d.dias != null);
+        const prioritarios = validos.filter(d => d.prioritario);
+        const naoPrioritarios = validos.filter(d => !d.prioritario);
+        const geral = mediaSimples(validos, 'dias');
+        const mediaPrio = mediaSimples(prioritarios, 'dias');
+        const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
+        const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
+        const semRazao = dados.filter(d => !d.razaoInformada);
+
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_PARALISADOS, m, m + 2);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) paralisado(s)`, m, m + 8);
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 11, pw - m, m + 11);
+
+        const gap = 6;
+        // Linha 1: 4 KPIs centralizados — paralisados / tempo médio parado / prioritários / sem razão externa
+        const kY = m + 16;
+        const kW4 = (uw - 3 * gap) / 4;
+        const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
+        desenharCard(doc, m,               kY, kW4, 28, 'Processos paralisados', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio parado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, 'Sem razão externa', String(semRazao.length),
+            [`${dados.length ? Math.round(semRazao.length / dados.length * 100) : 0}% do total`], true, COR.ambar);
+
+        // Linha 2: tempo médio parado prioritários vs não prioritários (centralizados)
+        const k2Y = kY + 28 + gap;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio parado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio parado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
+
+        // Card largo: processo parado há mais tempo (centralizado)
+        const k3Y = k2Y + 26 + gap;
+        let valMP = '—', subsMP = ['Nenhum registro com dados válidos'];
+        if (maisParado) {
+            valMP = `${maisParado.dias} dia${maisParado.dias === 1 ? '' : 's'}`;
+            subsMP = [
+                `Processo ${maisParado.processo}${maisParado.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                maisParado.classe || '',
+            ];
+        }
+        desenharCard(doc, m, k3Y, uw, 26, 'Processo parado há mais tempo', valMP, subsMP, true, COR.vermelho);
+
+        // Gráficos 1 e 2 (largura total, empilhados): dividem o espaço vertical restante da
+        // página de forma que a soma das duas alturas + o espaçamento sempre caiba.
+        const chartY = k3Y + 26 + gap + 2;
+        const chartGap = 8;
+        const disponivel = ph - m - chartY - 14; // reserva a faixa do rodapé
+        const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10)
+            .map(d => ({ processo: d.processo, classe: d.classe, dias: d.dias, prioritario: d.prioritario }));
+        const chart1Desejado = Math.max(30, top10.length * 8 + 8);
+        const chart1H = Math.min(chart1Desejado, Math.max(30, disponivel - chartGap - 40));
+        const chart2H = Math.max(30, disponivel - chart1H - chartGap);
+        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos parados há mais tempo', top10);
+
+        const chart2Y = chartY + chart1H + chartGap;
+        const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
+        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio parado por Classe Processual', porClasse, fmtDias, COR.aqua);
+
+        desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Tabela discriminada do relatório de Paralisados (sempre inicia em página nova).
+    // Retorna o número da página inicial (para o índice/bookmarks do PDF conjunto).
+    function montarTabelaParalisados(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        // Do maior tempo parado para o menor (sem dados vai ao final)
+        const ordenados = dados.slice().sort((a, b) => {
+            const da = a.dias == null ? -Infinity : a.dias;
+            const db = b.dias == null ? -Infinity : b.dias;
+            return db - da;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — todos os resultados');
+
+        const colunas = [
+            { header: 'Processo', width: 30, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 46, get: (d) => d.classe },
+            { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            { header: 'Razão Externa', width: 30, get: (d) => d.razaoExterna },
+            { header: 'Último Movimento', width: 50, get: (d) => d.ultimoMovimento },
+        ];
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const idxProcesso = 0;
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                    data.cell.styles.textColor = COR_PRIORITARIO;
+                    data.cell.styles.fontStyle = 'bold';
+                }
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
@@ -1374,10 +1565,12 @@
         const cab = thead ? thead.textContent : '';
         let cfg = null;
         if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
+        else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
+        else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) cfg = CFG_PARALISADOS;
         console.log(`[Projudi] detectarConfig — thead=${!!thead} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
         return cfg;
     }
@@ -1585,9 +1778,10 @@
     // marca o Tempo Médio, cuja página de destino é um formulário de filtros (não os
     // resultados diretamente) — precisa ser preenchido e pesquisado antes de coletar.
     const REPORTS_AUTOMACAO = [
-        { key: 'juntadas',   cfg: CFG_JUNTADAS,   navAlvo: 'juntadas',   rotulo: 'Juntadas',             precisaPreencher: false },
-        { key: 'retorno',    cfg: CFG_RETORNO,    navAlvo: 'retorno',    rotulo: 'Retorno de Conclusos',  precisaPreencher: false },
-        { key: 'tempomedio', cfg: CFG_TEMPOMEDIO, navAlvo: 'tempomedio', rotulo: 'Tempo Médio',           precisaPreencher: true },
+        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
+        { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
+        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
+        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: false },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
@@ -1597,10 +1791,33 @@
     }
 
     // Procura um link de menu (por URL e/ou texto) no documento atual e nos frames pai/topo.
+    // Percorre toda a árvore de frames (a partir de window.top) coletando os documentos
+    // acessíveis (mesma origem). Alguns links de menu ficam em widgets aninhados vários
+    // níveis abaixo (ex.: o card de "Processos Paralisados" da página inicial), fora do
+    // alcance de document/parent/top isolados — por isso a busca recursiva.
+    function todosDocumentosAcessiveis() {
+        const vistos = new Set();
+        const docs = [];
+        function visitar(win) {
+            let doc;
+            try { doc = win.document; } catch (e) { return; }
+            if (!doc || vistos.has(doc)) return;
+            vistos.add(doc);
+            docs.push(doc);
+            let frames;
+            try { frames = win.frames; } catch (e) { return; }
+            if (!frames) return;
+            for (let i = 0; i < frames.length; i++) {
+                try { visitar(frames[i]); } catch (e) {}
+            }
+        }
+        try { visitar(window.top); } catch (e) { visitar(window); }
+        if (!docs.length) docs.push(document);
+        return docs;
+    }
+
     function acharLinkMenu(urlRe, textoRe) {
-        const docs = [document];
-        try { if (window.parent && window.parent !== window) docs.push(window.parent.document); } catch (e) {}
-        try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+        const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
             for (const a of d.querySelectorAll('a[href]')) {
                 if (urlRe && !urlRe.test(a.href)) continue;
@@ -1616,6 +1833,7 @@
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
+        else if (alvo === 'paralisados') link = acharLinkMenu(/processoBuscaParalisado\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         link.click();
