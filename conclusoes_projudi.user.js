@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.1
+// @version      13.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -247,7 +247,7 @@
                 // Largura total (span 2) para caber o nome completo do tipo de documento
                 { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 14, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o restante)
-                { titulo: 'Top 10 Processos com Mais Juntadas Pendentes', campo: 'processo', topN: 10, span: 2, semOutros: true },
+                { titulo: 'Processos com Mais Juntadas Pendentes (10 maiores)', campo: 'processo', topN: 10, span: 2, semOutros: true },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -630,17 +630,19 @@
     // fixo: azul = métrica principal, vermelho = prioritário (sempre), âmbar = atenção/
     // tempo de espera intermediário, aqua = positivo/secundário. Cor nunca é o único
     // sinal — sempre acompanhada de rótulo ou legenda.
+    // Paleta sóbria (tons dessaturados, ar institucional) — mesmo papel semântico de
+    // antes, mas com menos saturação/brilho para não parecer um dashboard "colorido".
     const COR = {
-        tinta:    [17, 17, 17],     // títulos fortes
+        tinta:    [26, 26, 26],     // títulos fortes
         tintaSec: [82, 81, 78],     // texto secundário
-        muted:    [137, 135, 129],  // eixos / rótulos em maiúsculas
-        grade:    [225, 224, 217],  // hairline / bordas
+        muted:    [130, 128, 122],  // eixos / rótulos em maiúsculas
+        grade:    [222, 221, 214],  // hairline / bordas
         base:     [195, 194, 183],  // linhas de base
-        cartao:   [244, 247, 251],  // fundo de card
-        azul:     [42, 120, 214],   // métrica principal / série "normal"
-        aqua:     [27, 175, 122],   // secundário / positivo
-        ambar:    [250, 178, 25],   // atenção / faixa intermediária
-        vermelho: [208, 59, 59],    // PRIORITÁRIO / crítico
+        cartao:   [244, 244, 241],  // fundo de card (neutro, não azulado)
+        azul:     [58, 90, 125],    // métrica principal / série "normal" (slate blue)
+        aqua:     [82, 116, 103],   // secundário / positivo (verde-acinzentado)
+        ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
+        vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
     };
 
     const DIA_MS = 86400000;
@@ -836,34 +838,46 @@
         const captionH = captionLinhas.length * 2.8;
 
         const topo = y + 15;
-        const areaH = h - 15 - captionH;
+        const areaH = Math.max(6, h - 15 - captionH);
         const rotuloW = Math.min(36, w * 0.32);
-        const valorW = 10;
+        const valorW = 11;
         const barX = x + rotuloW;
         const barMaxW = Math.max(6, w - rotuloW - valorW);
         const maxVal = Math.max(1, ...faixas.map(f => Math.max(f.prioritarios, f.normais)));
         const linhaH = areaH / faixas.length;
-        const subH = Math.max(2.4, linhaH * 0.24);
 
-        doc.setFontSize(7.5);
+        // Tudo deriva de linhaH (altura de cada faixa) — evita rótulos de faixas vizinhas
+        // colidirem quando o gráfico ganha pouco espaço (várias seções na mesma página).
+        // Antes usava tamanhos fixos (fonte 7.5, offsets fixos) que só cabiam quando havia
+        // bastante altura disponível; com mais gráficos na grade, os textos se sobrepunham.
+        const subH = Math.max(1.3, Math.min(4.2, linhaH * 0.24));
+        const gapMeio = Math.max(0.4, Math.min(1.3, linhaH * 0.06));
+        const fonteRotulo = Math.max(5.2, Math.min(7.5, linhaH * 0.5));
+        const fonteValor = Math.max(5.3, Math.min(7.5, linhaH * 0.42));
+
         faixas.forEach((f, i) => {
             const base = topo + i * linhaH;
             const meio = base + linhaH / 2;
             doc.setFillColor(...(COR_SEVERIDADE[i] || COR.muted));
             doc.circle(x + 1.4, meio - 0.4, 1.1, 'F');
-            doc.setFont('helvetica', 'normal'); doc.setTextColor(...COR.tintaSec);
-            doc.text(doc.splitTextToSize(f.label, rotuloW - 6)[0], x + 4, meio + 1);
-            // prioritários (acima)
+            doc.setFont('helvetica', 'normal'); doc.setFontSize(fonteRotulo); doc.setTextColor(...COR.tintaSec);
+            doc.text(doc.splitTextToSize(f.label, rotuloW - 6)[0], x + 4, meio + fonteRotulo * 0.15);
+
+            // prioritários (acima do centro da faixa) — rótulo sempre centralizado na
+            // própria barra, nunca a uma distância fixa de "meio".
             const wp = Math.max(0.5, (f.prioritarios / maxVal) * barMaxW);
+            const yBarP = meio - gapMeio - subH;
             doc.setFillColor(...COR_PRIORITARIO);
-            doc.roundedRect(barX, meio - subH - 1, wp, subH, 0.5, 0.5, 'F');
-            doc.setFont('helvetica', 'bold'); doc.setTextColor(...COR.tinta);
-            doc.text(String(f.prioritarios), barX + wp + 1.5, meio - 1.4);
-            // normais (abaixo)
+            doc.roundedRect(barX, yBarP, wp, subH, 0.5, 0.5, 'F');
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+            doc.text(String(f.prioritarios), barX + wp + 1.5, yBarP + subH / 2 + fonteValor * 0.15);
+
+            // normais (abaixo do centro da faixa)
             const wn = Math.max(0.5, (f.normais / maxVal) * barMaxW);
+            const yBarN = meio + gapMeio;
             doc.setFillColor(...COR.azul);
-            doc.roundedRect(barX, meio + 1, wn, subH, 0.5, 0.5, 'F');
-            doc.text(String(f.normais), barX + wn + 1.5, meio + subH + 0.6);
+            doc.roundedRect(barX, yBarN, wn, subH, 0.5, 0.5, 'F');
+            doc.text(String(f.normais), barX + wn + 1.5, yBarN + subH / 2 + fonteValor * 0.15);
         });
 
         doc.setFont('helvetica', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
@@ -1234,29 +1248,41 @@
     function desenharTopDemorados(doc, x, y, w, h, titulo, itens) {
         tituloSecao(doc, x, y + 4, w, titulo, COR.vermelho);
         const topo = y + 10;
-        const areaH = h - 10;
+        const areaH = Math.max(6, h - 10);
         if (!itens.length) return;
         const labelW = Math.min(w * 0.62, 120);
         const barX = x + labelW;
         const barMaxW = Math.max(6, w - labelW - 14);
         const maxVal = Math.max(...itens.map(i => i.dias)) || 1;
         const linhaH = areaH / itens.length;
-        const barH = Math.max(2.2, linhaH * 0.3);
+        const barH = Math.max(1.6, linhaH * 0.3);
+        // Fonte e offsets das duas linhas de rótulo (processo + classe) acompanham a altura
+        // da linha, para nunca invadir a linha seguinte quando o gráfico fica espremido.
+        const fonteProcesso = Math.max(5.3, Math.min(7.5, linhaH * 0.46));
+        const fonteClasse = Math.max(4.8, Math.min(6.8, linhaH * 0.4));
+        const temDuasLinhas = linhaH >= (fonteProcesso + fonteClasse) * 1.15;
 
         itens.forEach((it, i) => {
             const rowY = topo + i * linhaH;
             const cor = it.prioritario ? COR_PRIORITARIO : COR.tinta;
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...cor);
-            doc.text(doc.splitTextToSize(it.processo || '', labelW - 3)[0], x, rowY + 3.3);
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...COR.muted);
-            doc.text(doc.splitTextToSize(it.classe || '', labelW - 3)[0], x, rowY + 6.8);
+            if (temDuasLinhas) {
+                const yProc = rowY + fonteProcesso * 0.62;
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(fonteProcesso); doc.setTextColor(...cor);
+                doc.text(doc.splitTextToSize(it.processo || '', labelW - 3)[0], x, yProc);
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(fonteClasse); doc.setTextColor(...COR.muted);
+                doc.text(doc.splitTextToSize(it.classe || '', labelW - 3)[0], x, yProc + fonteClasse * 0.95 + 1);
+            } else {
+                // Sem espaço para duas linhas: mostra só o processo, centralizado na linha.
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(fonteProcesso); doc.setTextColor(...cor);
+                doc.text(doc.splitTextToSize(it.processo || '', labelW - 3)[0], x, rowY + linhaH / 2 + fonteProcesso * 0.32);
+            }
 
             const meio = rowY + linhaH / 2;
             const bw = Math.max(0.6, (it.dias / maxVal) * barMaxW);
             doc.setFillColor(...(it.prioritario ? COR_PRIORITARIO : COR.azul));
             doc.roundedRect(barX, meio - barH / 2, bw, barH, 0.5, 0.5, 'F');
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.tinta);
-            doc.text(`${it.dias} dia${it.dias === 1 ? '' : 's'}`, barX + bw + 2, meio + 1.2);
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(fonteProcesso); doc.setTextColor(...COR.tinta);
+            doc.text(`${it.dias} dia${it.dias === 1 ? '' : 's'}`, barX + bw + 2, meio + fonteProcesso * 0.16);
         });
     }
 
