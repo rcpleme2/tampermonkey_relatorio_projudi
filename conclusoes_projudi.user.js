@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.2
+// @version      13.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -243,11 +243,13 @@
             mediaLabel: 'juntadas / dia',
             distribuicoes: [
                 { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
-                { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 12 },
+                // Os três gráficos abaixo vão para a 2ª página do resumo (pagina2), com
+                // mais itens (15) já que ganham a página inteira só para eles.
+                { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 15, pagina2: true },
                 // Largura total (span 2) para caber o nome completo do tipo de documento
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 14, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, '') },
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o restante)
-                { titulo: 'Processos com Mais Juntadas Pendentes (10 maiores)', campo: 'processo', topN: 10, span: 2, semOutros: true },
+                { titulo: 'Processos com Mais Juntadas Pendentes (15 maiores)', campo: 'processo', topN: 15, span: 2, semOutros: true, pagina2: true },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -897,6 +899,37 @@
         }
     }
 
+    // Distribui uma lista de gráficos numa grade de 2 colunas (span:2 ocupa a largura
+    // toda) dentro da área (x, y, w, hDisponivel) informada — reutilizado tanto para os
+    // gráficos da 1ª página do resumo quanto para os que foram para a 2ª página.
+    function desenharGradeGraficos(doc, x, y, w, hDisponivel, charts) {
+        if (!charts.length) return;
+        let col = 0, row = 0;
+        charts.forEach(c => {
+            if (c.span === 2) {
+                if (col !== 0) { row++; col = 0; }
+                c.pos = { row, col: 0, span: 2 }; row++; col = 0;
+            } else {
+                c.pos = { row, col, span: 1 }; col++;
+                if (col >= 2) { col = 0; row++; }
+            }
+        });
+        const nLinhas = Math.max(...charts.map(c => c.pos.row)) + 1;
+        const gap = 6;
+        const colW = (w - gap) / 2;
+        // Teto generoso (não 96mm como antes): com poucos gráficos numa página (ex.: só 2
+        // depois de mover 3 para a 2ª página), a divisão por nLinhas já cresce sozinha —
+        // um teto baixo só deixava espaço vazio sem necessidade.
+        const chartH = Math.min(170, (hDisponivel - (nLinhas - 1) * 10) / nLinhas);
+        charts.forEach(c => {
+            const cx = x + c.pos.col * (colW + gap);
+            const cy = y + c.pos.row * (chartH + 10);
+            const cw = c.pos.span === 2 ? w : colW;
+            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
+            else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
+        });
+    }
+
     // Monta as páginas de RESUMO (geral + por competência) de um relatório genérico
     // (Retorno/Juntadas) dentro de um documento jsPDF já criado. ehPrimeiraSecao=false
     // começa em página nova (uso no conjunto). comIndice ativa o link de rodapé.
@@ -949,7 +982,7 @@
                 kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
             }
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
-            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, false, k.acento));
+            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
             // KPI do mais atrasado (card largo, texto centralizado)
             const aY = kY + 28 + gap;
@@ -967,34 +1000,45 @@
             }
             desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
 
-            // Gráficos (grade de 2 colunas; um gráfico pode ocupar as 2 colunas com span:2)
-            const charts = [
-                { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now) },
-                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros) })),
+            // Gráficos: os marcados com pagina2 vão para uma segunda página do resumo,
+            // ganhando a página inteira (útil para rankings maiores, ex.: 15 itens em vez
+            // de 10, sem espremer os gráficos que ficam na página 1).
+            const chartsTodos = [
+                { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
+                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros), pagina2: !!g.pagina2 })),
             ];
-            let col = 0, row = 0;
-            charts.forEach(c => {
-                if (c.span === 2) {
-                    if (col !== 0) { row++; col = 0; }
-                    c.pos = { row, col: 0, span: 2 }; row++; col = 0;
-                } else {
-                    c.pos = { row, col, span: 1 }; col++;
-                    if (col >= 2) { col = 0; row++; }
-                }
-            });
-            const nLinhas = Math.max(...charts.map(c => c.pos.row)) + 1;
-            const gY0 = aY + 28 + gap + 2;
-            const colW = (uw - gap) / 2;
-            const chartH = Math.min(96, (ph - m - gY0 - (nLinhas - 1) * 10) / nLinhas);
-            charts.forEach(c => {
-                const cx = m + c.pos.col * (colW + gap);
-                const cy = gY0 + c.pos.row * (chartH + 10);
-                const cw = c.pos.span === 2 ? uw : colW;
-                if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
-                else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
-            });
+            const chartsP1 = chartsTodos.filter(c => !c.pagina2);
+            const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
 
+            const gY0 = aY + 28 + gap + 2;
+            desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, chartsP1);
             desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
+
+            if (chartsP2.length) {
+                doc.addPage();
+                let hy2 = m + 2;
+                doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+                doc.text(p.titulo, m, hy2);
+                hy2 += 8;
+                if (contexto.competencia) {
+                    doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
+                    const linhas2 = doc.splitTextToSize('Competência: ' + contexto.competencia, uw);
+                    doc.text(linhas2, m, hy2);
+                    hy2 += linhas2.length * 5.2 + 1.5;
+                } else if (contexto.rotulo) {
+                    doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
+                    doc.text(contexto.rotulo, m, hy2);
+                    hy2 += 7;
+                }
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+                doc.text('Gráficos complementares', m, hy2);
+                hy2 += 3;
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy2, pw - m, hy2);
+
+                const gY0b = hy2 + 6;
+                desenharGradeGraficos(doc, m, gY0b, uw, ph - m - gY0b, chartsP2);
+                desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
+            }
         }
 
         // ═══ RESUMO GERAL ═══
