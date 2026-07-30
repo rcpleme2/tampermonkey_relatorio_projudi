@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.3
+// @version      13.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2045,7 +2045,12 @@
     const REPORTS_AUTOMACAO = [
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
-        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
+        // DESATIVADO TEMPORARIAMENTE (a pedido do usuário — o relatório de Tempo Médio
+        // ainda não está do jeito desejado). O relatório continua funcionando normalmente
+        // na própria página dele (botões "Preencher e Pesquisar"/"Extrair"); só não
+        // participa da automação/painel enquanto isso. Reative descomentando a linha
+        // abaixo quando o ajuste do Tempo Médio estiver pronto.
+        // { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: false },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     precisaPreencher: false },
     ];
@@ -2261,7 +2266,12 @@
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => { el.disabled = emCurso; });
+        // O checkbox do Tempo Médio (.pa-item-desativado) fica de fora — ele deve
+        // permanecer sempre desabilitado, mesmo quando os demais são reabilitados.
+        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+            if (el.closest('.pa-item-desativado')) return;
+            el.disabled = emCurso;
+        });
 
         // Barra de progresso: proporção da fila já coletada (fica escondida quando não há
         // fila registrada — ex.: antes da primeira automação, ou depois de "Limpar").
@@ -2288,12 +2298,20 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
-        const opcoesPeriodo = PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '3a' ? ' selected' : ''}>${p.rotulo}</option>`).join('');
-        const linhasCheckbox = REPORTS_AUTOMACAO.map(r => `
+        const linhasCheckboxArr = REPORTS_AUTOMACAO.map(r => `
                     <label class="pa-item">
                         <input type="checkbox" class="pa-check" data-key="${r.key}" checked> ${r.rotulo}
-                        ${r.key === 'tempomedio' ? `<select id="pa-periodo-tm" class="projudi-select" title="Período usado como data inicial">${opcoesPeriodo}</select>` : ''}
-                    </label>`).join('');
+                    </label>`);
+        // Tempo Médio foi retirado de REPORTS_AUTOMACAO (temporariamente desativado — ver
+        // comentário lá), mas continua aparecendo na lista, só que travado/escurecido, para
+        // deixar claro que a opção existe e vai voltar quando o relatório for ajustado.
+        const idxRetorno = REPORTS_AUTOMACAO.findIndex(r => r.key === 'retorno');
+        linhasCheckboxArr.splice(idxRetorno + 1, 0, `
+                    <label class="pa-item pa-item-desativado" title="Temporariamente desativado enquanto o relatório de Tempo Médio está em ajuste">
+                        <input type="checkbox" class="pa-check" disabled> Tempo Médio
+                        <span class="pa-nota-desativado">(temporariamente desativado)</span>
+                    </label>`);
+        const linhasCheckbox = linhasCheckboxArr.join('');
         painel.innerHTML = `
             <div class="pa-header">
                 <span class="pa-titulo">Automação de relatórios</span>
@@ -2322,8 +2340,10 @@
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = () => {
-            const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key);
-            const periodoTM = painel.querySelector('#pa-periodo-tm').value;
+            const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key).filter(Boolean);
+            // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
+            const periodoSelTM = painel.querySelector('#pa-periodo-tm');
+            const periodoTM = periodoSelTM ? periodoSelTM.value : '3a';
             iniciarAutomacao(fila, periodoTM);
         };
         painel.querySelector('#pa-pdf').onclick = baixarPDFConjunto;
@@ -2374,6 +2394,11 @@
         #painel-automacao .pa-item { font-size: .74em; color: #333; display: flex; align-items: center; gap: 4px; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .projudi-select { margin-left: 4px; padding: 1px 2px; font-size: 1em; }
+        #painel-automacao .pa-item-desativado { color: #999; cursor: not-allowed; }
+        #painel-automacao .pa-item-desativado input[type="checkbox"] {
+            filter: grayscale(1); opacity: .55; cursor: not-allowed;
+        }
+        #painel-automacao .pa-nota-desativado { font-style: italic; font-size: .92em; color: #999; }
         #painel-automacao .pa-marcar { display: flex; gap: 8px; margin-bottom: 6px; }
         #painel-automacao .pa-link-btn {
             background: none; border: none; padding: 0; cursor: pointer;
