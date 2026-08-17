@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.4
+// @version      13.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -300,7 +300,7 @@
         },
         linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
-        pdfCustom: (dados) => gerarPDFTempoMedio(dados),
+        pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedio(dados, somenteResumo),
     };
 
     // "Processos Paralisados" e "Remessas em Aberto" usam a MESMA tabela/URL
@@ -345,7 +345,7 @@
             };
         },
         linha: (d) => [d.processo, d.seq, d.classe, (d.dias == null ? '' : String(d.dias)), d.ultimoMovimento, d.prioritario ? 'Sim' : 'Não'],
-        pdfCustom: (dados) => gerarPDFParalisados(dados),
+        pdfCustom: (dados, somenteResumo) => gerarPDFParalisados(dados, somenteResumo),
     };
 
     // Relatório de Remessas em Aberto — mesma tabela do Paralisados, mas com o filtro
@@ -376,7 +376,7 @@
             };
         },
         linha: (d) => [d.processo, d.classe, (d.dias == null ? '' : String(d.dias)), d.ultimoMovimento, d.prioritario ? 'Sim' : 'Não'],
-        pdfCustom: (dados) => gerarPDFRemessas(dados),
+        pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados, somenteResumo),
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -533,16 +533,17 @@
             }
         }
 
-        function pdf() {
+        function pdf(somenteResumo) {
             try {
                 const dados = lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
-                if (cfg.pdfCustom) cfg.pdfCustom(dados); else gerarPDF(dados, cfg);
+                if (cfg.pdfCustom) cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
                 // Após exportar o PDF, limpa os dados acumulados automaticamente — evita
                 // que uma coleta antiga fique acumulada/misturada com a próxima.
                 limparTudo();
                 render();
-                atualizarStatus(`✓ PDF gerado com ${dados.length} registros. Dados acumulados apagados — pronto para nova coleta.`);
+                const extraResumo = somenteResumo ? ' (apenas resumo)' : '';
+                atualizarStatus(`✓ PDF gerado com ${dados.length} registros${extraResumo}. Dados acumulados apagados — pronto para nova coleta.`);
             } catch (err) {
                 atualizarStatus(`Erro ao gerar PDF: ${err.message}`);
                 console.error('[Exportar Projudi]', err);
@@ -1123,13 +1124,18 @@
         return doc;
     }
 
-    function gerarPDF(dados, cfg) {
+    // somenteResumo: quando true, gera só a página de resumo (KPIs + gráficos), sem a
+    // tabela discriminada de processos.
+    function gerarPDF(dados, cfg, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoGenerico(doc, dados, cfg, true, false);
-        const pgTabela = montarTabelaGenerico(doc, dados, cfg, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        baixarBlob(doc.output('blob'), `${cfg.nomeArquivo}_${dataArquivo()}.pdf`);
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, cfg, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${cfg.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
@@ -1166,7 +1172,7 @@
     // Capa + índice clicável (página 1). Retorna as linhas desenhadas — cada uma com a
     // posição Y, a seção e o tipo ("Resumo"/"Tabela detalhada") — para depois (após montar
     // todo o conteúdo e já sabendo os números de página) voltar e completar os links.
-    function desenharCapaIndice(doc, secoes, agora) {
+    function desenharCapaIndice(doc, secoes, agora, somenteResumo) {
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
         const m = 16;
@@ -1192,7 +1198,8 @@
             doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.muted);
             doc.text(`${s.dados.length} registro(s)`, pw - m, y, { align: 'right' });
             y += 6;
-            ['Resumo', 'Tabela detalhada'].forEach(tipo => {
+            const tipos = somenteResumo ? ['Resumo'] : ['Resumo', 'Tabela detalhada'];
+            tipos.forEach(tipo => {
                 doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
                 doc.text(`•  ${tipo}`, m + 4, y);
                 linhas.push({ y, secaoIdx: i, tipo });
@@ -1202,23 +1209,30 @@
         });
 
         doc.setFont('helvetica', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
-        doc.text('Todos os resumos vêm primeiro; as tabelas discriminadas ficam ao final. Clique num item para navegar.', m, ph - 16);
+        const legenda = somenteResumo
+            ? 'Relatório apenas com os resumos (KPIs e gráficos) — sem a relação detalhada dos processos. Clique num item para navegar.'
+            : 'Todos os resumos vêm primeiro; as tabelas discriminadas ficam ao final. Clique num item para navegar.';
+        doc.text(legenda, m, ph - 16);
         return linhas;
     }
 
     // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]. Estrutura:
     // capa+índice clicável (pág. 1) → todos os resumos → todas as tabelas discriminadas,
     // com marcadores (bookmarks) no leitor e link "Voltar ao Índice" no rodapé das tabelas.
-    function gerarPDFConjunto(secoesEntrada) {
+    // somenteResumo: quando true, o conjunto sai só com a capa/índice + os resumos de
+    // cada relatório — sem o bloco de tabelas discriminadas (nem o marcador "Tabelas
+    // detalhadas", nem as entradas correspondentes no índice).
+    function gerarPDFConjunto(secoesEntrada, somenteResumo) {
         const doc = novoDocPDF();
         const agora = new Date();
         const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados }, descreverSecaoPDF(s.cfg)));
 
         // PASSO A: capa + índice (números de página ainda em branco)
-        const linhasIndice = desenharCapaIndice(doc, secoes, agora);
+        const linhasIndice = desenharCapaIndice(doc, secoes, agora, somenteResumo);
 
-        // PASSO B: bloco de RESUMOS, depois bloco de TABELAS — todos os resumos antes de
-        // qualquer tabela, conforme pedido. Marcadores agrupam por bloco.
+        // PASSO B: bloco de RESUMOS, depois bloco de TABELAS (se não for somenteResumo) —
+        // todos os resumos antes de qualquer tabela, conforme pedido. Marcadores agrupam
+        // por bloco.
         const paginaResumo = [], paginaTabela = [];
         const bmResumos = doc.outline.add(null, 'Resumos', { pageNumber: 2 });
         secoes.forEach(s => {
@@ -1227,13 +1241,15 @@
             paginaResumo.push(pg);
             doc.outline.add(bmResumos, s.rotulo, { pageNumber: pg });
         });
-        const primeiraTabelaPg = doc.internal.getNumberOfPages() + 1;
-        const bmTabelas = doc.outline.add(null, 'Tabelas detalhadas', { pageNumber: primeiraTabelaPg });
-        secoes.forEach(s => {
-            const pg = s.montarTabela(doc, s.dados, true);
-            paginaTabela.push(pg);
-            doc.outline.add(bmTabelas, s.rotulo, { pageNumber: pg });
-        });
+        if (!somenteResumo) {
+            const primeiraTabelaPg = doc.internal.getNumberOfPages() + 1;
+            const bmTabelas = doc.outline.add(null, 'Tabelas detalhadas', { pageNumber: primeiraTabelaPg });
+            secoes.forEach(s => {
+                const pg = s.montarTabela(doc, s.dados, true);
+                paginaTabela.push(pg);
+                doc.outline.add(bmTabelas, s.rotulo, { pageNumber: pg });
+            });
+        }
 
         // PASSO C: volta à página 1 e completa os números + links do índice
         doc.setPage(1);
@@ -1249,7 +1265,8 @@
             doc.setTextColor(...COR.tintaSec); doc.text(String(pg), pw - m, l.y, { align: 'right' });
         });
 
-        baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi_${dataArquivo()}.pdf`);
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // ── PDF do relatório de Tempo Médio de Cumprimento ──────────────────────────
@@ -1332,13 +1349,16 @@
 
     const TITULO_TEMPOMEDIO = 'Tempo Médio de Cumprimento';
 
-    function gerarPDFTempoMedio(dados) {
+    function gerarPDFTempoMedio(dados, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoTempoMedio(doc, dados, true, false);
-        const pgTabela = montarTabelaTempoMedio(doc, dados, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        baixarBlob(doc.output('blob'), `tempo_medio_projudi_${dataArquivo()}.pdf`);
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaTempoMedio(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `tempo_medio_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Tempo Médio, dentro de um doc
@@ -1498,13 +1518,16 @@
 
     const TITULO_PARALISADOS = 'Processos Paralisados';
 
-    function gerarPDFParalisados(dados) {
+    function gerarPDFParalisados(dados, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoParalisados(doc, dados, true, false);
-        const pgTabela = montarTabelaParalisados(doc, dados, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        baixarBlob(doc.output('blob'), `paralisados_projudi_${dataArquivo()}.pdf`);
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaParalisados(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `paralisados_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Paralisados, dentro de um doc
@@ -1646,13 +1669,16 @@
 
     const TITULO_REMESSAS = 'Remessas em Aberto';
 
-    function gerarPDFRemessas(dados) {
+    function gerarPDFRemessas(dados, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoRemessas(doc, dados, true, false);
-        const pgTabela = montarTabelaRemessas(doc, dados, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        baixarBlob(doc.output('blob'), `remessas_abertas_projudi_${dataArquivo()}.pdf`);
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaRemessas(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `remessas_abertas_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Remessas em Aberto, dentro de um
@@ -1818,6 +1844,11 @@
             font-family: Verdana, Arial, sans-serif; border-radius: 3px; border: 1px solid #999;
         }
         #exportar-status { font-size: 0.8em; color: #555; margin-left: 8px; font-family: Verdana, Arial, sans-serif; }
+        .projudi-chk-resumo {
+            display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+            font-size: 0.8em; color: #444; font-family: Verdana, Arial, sans-serif; cursor: pointer;
+        }
+        .projudi-chk-resumo input[type="checkbox"] { margin: 0; }
     `);
 
     // Detecta qual relatório está na tela pelo cabeçalho da resultTable; se não houver
@@ -1982,7 +2013,15 @@
         buttonBar.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
         buttonBar.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
         if (cfg.pdf || cfg.pdfCustom) {
-            buttonBar.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => coletor.pdf()));
+            buttonBar.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
+                const chk = document.getElementById('chk-somente-resumo');
+                coletor.pdf(!!(chk && chk.checked));
+            }));
+            const rotuloResumo = document.createElement('label');
+            rotuloResumo.className = 'projudi-chk-resumo';
+            rotuloResumo.title = 'Gera o PDF só com o resumo (KPIs e gráficos), sem a tabela discriminada de processos';
+            rotuloResumo.innerHTML = '<input type="checkbox" id="chk-somente-resumo"> Só resumo (sem tabela)';
+            buttonBar.appendChild(rotuloResumo);
         }
         buttonBar.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
 
@@ -2210,13 +2249,13 @@
         atualizarPainel();
     }
 
-    function baixarPDFConjunto() {
+    function baixarPDFConjunto(somenteResumo) {
         const secoes = REPORTS_AUTOMACAO
             .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
             .filter(s => s.dados.length);
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
-            gerarPDFConjunto(secoes);
+            gerarPDFConjunto(secoes, somenteResumo);
             // Após exportar o PDF conjunto, limpa tudo automaticamente — evita que uma
             // coleta antiga fique acumulada/misturada com a próxima automação.
             limparTudoAutomacao();
@@ -2331,6 +2370,9 @@
                     <button id="pa-marcar-tudo" class="pa-link-btn" type="button">Marcar tudo</button>
                     <button id="pa-desmarcar-tudo" class="pa-link-btn" type="button">Desmarcar tudo</button>
                 </div>
+                <label class="pa-item projudi-chk-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
+                    <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas)
+                </label>
                 <div class="pa-botoes">
                     <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ PDF conjunto</button>
@@ -2346,7 +2388,10 @@
             const periodoTM = periodoSelTM ? periodoSelTM.value : '3a';
             iniciarAutomacao(fila, periodoTM);
         };
-        painel.querySelector('#pa-pdf').onclick = baixarPDFConjunto;
+        painel.querySelector('#pa-pdf').onclick = () => {
+            const chk = painel.querySelector('#pa-somente-resumo');
+            baixarPDFConjunto(!!(chk && chk.checked));
+        };
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
         painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
@@ -2400,6 +2445,7 @@
         }
         #painel-automacao .pa-nota-desativado { font-style: italic; font-size: .92em; color: #999; }
         #painel-automacao .pa-marcar { display: flex; gap: 8px; margin-bottom: 6px; }
+        #painel-automacao .projudi-chk-resumo { margin-left: 0; margin-bottom: 8px; }
         #painel-automacao .pa-link-btn {
             background: none; border: none; padding: 0; cursor: pointer;
             font-size: .7em; color: #34556b; text-decoration: underline;
