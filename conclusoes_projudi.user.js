@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.7
+// @version      13.8
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -701,6 +701,26 @@
         return dados.reduce((n, d) => n + (d.prioritario ? 1 : 0), 0);
     }
 
+    // Lista as competências distintas presentes num conjunto de dados (ordem de
+    // primeira ocorrência) — usado para indicar, no cabeçalho dos relatórios
+    // individuais, a que atuação(ões) os dados se referem.
+    function listaCompetencias(dados) {
+        const vistas = new Set();
+        dados.forEach(d => {
+            const c = (d.competencia || '').trim();
+            if (c) vistas.add(c);
+        });
+        return [...vistas];
+    }
+
+    // Frase "Competência: X" / "Competências: X, Y" para compor no subtítulo dos
+    // relatórios — vazia quando não há dado de competência disponível.
+    function fraseCompetencias(dados) {
+        const comps = listaCompetencias(dados);
+        if (!comps.length) return '';
+        return `${comps.length > 1 ? 'Competências' : 'Competência'}: ${comps.join(', ')}`;
+    }
+
     // Média de registros por dia (com base nos dias distintos presentes nas datas)
     function mediaPorDia(dados, campoData) {
         const dias = new Set();
@@ -967,7 +987,12 @@
                 hy += 7;
             }
             doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-            doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`, m, hy);
+            let linhaInfo = `Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`;
+            if (!contexto.competencia) {
+                const fraseComp = fraseCompetencias(sub);
+                if (fraseComp) linhaInfo += `  •  ${fraseComp}`;
+            }
+            doc.text(linhaInfo, m, hy);
             hy += 3;
             doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
@@ -1432,6 +1457,8 @@
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
         if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
+        const fraseCompTM = fraseCompetencias(dados);
+        if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
         doc.text(subtitulo, m, m + 8);
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 11, pw - m, m + 11);
 
@@ -1586,7 +1613,10 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_PARALISADOS, m, m + 2);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) paralisado(s)`, m, m + 8);
+        let subtituloParalisados = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) paralisado(s)`;
+        const fraseCompParalisados = fraseCompetencias(dados);
+        if (fraseCompParalisados) subtituloParalisados += `  •  ${fraseCompParalisados}`;
+        doc.text(subtituloParalisados, m, m + 8);
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 11, pw - m, m + 11);
 
         const gap = 6;
@@ -1736,7 +1766,10 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`, m, m + 8);
+        let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`;
+        const fraseCompRemessas = fraseCompetencias(dados);
+        if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
+        doc.text(subtituloRemessas, m, m + 8);
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 11, pw - m, m + 11);
 
         const gap = 6;
