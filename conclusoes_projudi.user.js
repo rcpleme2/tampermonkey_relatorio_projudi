@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.5
+// @version      13.6
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -979,7 +979,12 @@
                 { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
             ];
             if (p.mediaLabel) {
-                const media = mediaPorDia(sub, p.dataCampo);
+                // Quando há mais de uma competência, a média diária do "Resumo geral" é a
+                // SOMA da média de cada competência (contexto.mediaSoma), não a média
+                // calculada sobre os dados agrupados — tirar a média da média mistura as
+                // distribuições de dias ativos de cada competência e distorce o resultado
+                // (erro estatístico do tipo Simpson).
+                const media = (typeof contexto.mediaSoma === 'number') ? contexto.mediaSoma : mediaPorDia(sub, p.dataCampo);
                 kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
             }
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -1042,10 +1047,8 @@
             }
         }
 
-        // ═══ RESUMO GERAL ═══
-        desenharPaginaResumo(dados, { rotulo: 'Resumo geral' }, ehPrimeiraSecao);
-
-        // ═══ RESUMO POR COMPETÊNCIA (quando há mais de uma) ═══
+        // ═══ RESUMO POR COMPETÊNCIA (calculado antes do geral para permitir a soma das
+        // médias — ver comentário no cálculo do KPI acima) ═══
         const porComp = new Map();
         dados.forEach(d => {
             const c = (d.competencia || '').trim();
@@ -1053,6 +1056,14 @@
             if (!porComp.has(c)) porComp.set(c, []);
             porComp.get(c).push(d);
         });
+
+        // ═══ RESUMO GERAL ═══
+        const contextoGeral = { rotulo: 'Resumo geral' };
+        if (porComp.size > 1) {
+            contextoGeral.mediaSoma = [...porComp.values()].reduce((soma, sub) => soma + mediaPorDia(sub, p.dataCampo), 0);
+        }
+        desenharPaginaResumo(dados, contextoGeral, ehPrimeiraSecao);
+
         if (porComp.size > 1) {
             [...porComp.entries()]
                 .sort((a, b) => b[1].length - a[1].length)
@@ -1172,7 +1183,7 @@
     // Capa + índice clicável (página 1). Retorna as linhas desenhadas — cada uma com a
     // posição Y, a seção e o tipo ("Resumo"/"Tabela detalhada") — para depois (após montar
     // todo o conteúdo e já sabendo os números de página) voltar e completar os links.
-    function desenharCapaIndice(doc, secoes, agora, somenteResumo) {
+    function desenharCapaIndice(doc, secoes, agora, somenteResumo, competencias) {
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
         const m = 16;
@@ -1185,7 +1196,14 @@
         doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
 
-        let y = 48;
+        let y = 42;
+        if (competencias && competencias.size) {
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.tinta);
+            const linhasComp = doc.splitTextToSize(`Competências incluídas: ${[...competencias].join(', ')}`, pw - 2 * m);
+            doc.text(linhasComp, m, y);
+            y += linhasComp.length * 4.6 + 2;
+        }
+        y = Math.max(y, 48);
         doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
         doc.text('Conteúdo', m, y); y += 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, y, m + 26, y); y += 8;
@@ -1227,17 +1245,28 @@
         const agora = new Date();
         const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados }, descreverSecaoPDF(s.cfg)));
 
-        // PASSO A: capa + índice (números de página ainda em branco)
-        const linhasIndice = desenharCapaIndice(doc, secoes, agora, somenteResumo);
+        // Capa + índice só fazem sentido quando o relatório reúne mais de uma atuação
+        // (competência) — com uma única atuação, "relatório conjunto" e "relatório
+        // único" são a mesma coisa, então a capa/índice não agrega nada e só teria uma
+        // única entrada por seção.
+        const competencias = new Set();
+        secoes.forEach(s => s.dados.forEach(d => {
+            const c = (d.competencia || '').trim();
+            if (c) competencias.add(c);
+        }));
+        const temCapa = competencias.size > 1;
+
+        // PASSO A: capa + índice (números de página ainda em branco), quando aplicável
+        const linhasIndice = temCapa ? desenharCapaIndice(doc, secoes, agora, somenteResumo, competencias) : [];
 
         // PASSO B: bloco de RESUMOS, depois bloco de TABELAS (se não for somenteResumo) —
         // todos os resumos antes de qualquer tabela, conforme pedido. Marcadores agrupam
         // por bloco.
         const paginaResumo = [], paginaTabela = [];
-        const bmResumos = doc.outline.add(null, 'Resumos', { pageNumber: 2 });
-        secoes.forEach(s => {
+        const bmResumos = doc.outline.add(null, 'Resumos', { pageNumber: temCapa ? 2 : 1 });
+        secoes.forEach((s, i) => {
             const pg = doc.internal.getNumberOfPages() + 1;
-            s.montarResumo(doc, s.dados, false, true);
+            s.montarResumo(doc, s.dados, !temCapa && i === 0, true);
             paginaResumo.push(pg);
             doc.outline.add(bmResumos, s.rotulo, { pageNumber: pg });
         });
@@ -1251,19 +1280,22 @@
             });
         }
 
-        // PASSO C: volta à página 1 e completa os números + links do índice
-        doc.setPage(1);
-        const pw = doc.internal.pageSize.getWidth();
-        const m = 16;
-        linhasIndice.forEach(l => {
-            const pg = l.tipo === 'Resumo' ? paginaResumo[l.secaoIdx] : paginaTabela[l.secaoIdx];
-            doc.setDrawColor(...COR.grade); doc.setLineWidth(0.2); doc.setLineDashPattern([0.5, 1], 0);
-            doc.line(m + 40, l.y - 0.8, pw - m - 10, l.y - 0.8);
-            doc.setLineDashPattern([], 0);
-            doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
-            doc.textWithLink(`•  ${l.tipo}`, m + 4, l.y, { pageNumber: pg });
-            doc.setTextColor(...COR.tintaSec); doc.text(String(pg), pw - m, l.y, { align: 'right' });
-        });
+        // PASSO C: volta à página 1 e completa os números + links do índice (só existe
+        // quando há capa)
+        if (temCapa) {
+            doc.setPage(1);
+            const pw = doc.internal.pageSize.getWidth();
+            const m = 16;
+            linhasIndice.forEach(l => {
+                const pg = l.tipo === 'Resumo' ? paginaResumo[l.secaoIdx] : paginaTabela[l.secaoIdx];
+                doc.setDrawColor(...COR.grade); doc.setLineWidth(0.2); doc.setLineDashPattern([0.5, 1], 0);
+                doc.line(m + 40, l.y - 0.8, pw - m - 10, l.y - 0.8);
+                doc.setLineDashPattern([], 0);
+                doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+                doc.textWithLink(`•  ${l.tipo}`, m + 4, l.y, { pageNumber: pg });
+                doc.setTextColor(...COR.tintaSec); doc.text(String(pg), pw - m, l.y, { align: 'right' });
+            });
+        }
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
@@ -1948,6 +1980,58 @@
         }, 1500);
     }
 
+    // Tela de filtros de Processos Paralisados/Remessas (processoBuscaParalisado.do) —
+    // as duas páginas de resultado são a MESMA tela, só muda o rádio "opcaoBusca"
+    // marcado (ver opcaoBuscaParalisadoSelecionada) e o "Mínimo de dias paralisado".
+    function formularioParalisado() {
+        const form = document.getElementById('processoBuscaParalisadoForm');
+        return form && form.querySelector('input[name="opcaoBusca"]') ? form : null;
+    }
+
+    // opcaoBuscaValor: '1' = Na secretaria (Paralisados), '3' = Em remessa, exceto
+    // processos conclusos (Remessas em Aberto). chaveParaAutoIniciar, se informada, marca
+    // a extração para começar sozinha assim que os resultados aparecerem.
+    function preencherEPesquisarParalisado(opcaoBuscaValor, diasMinimo, chaveParaAutoIniciar) {
+        const form = formularioParalisado();
+        if (!form) return;
+
+        const radio = form.querySelector(`input[name="opcaoBusca"][value="${opcaoBuscaValor}"]`);
+        console.log(`[Projudi Paralisado] radio opcaoBusca=${opcaoBuscaValor} encontrado=${!!radio}`);
+        if (radio) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('click', { bubbles: true }));
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        const campoDias = form.querySelector('input[name="numeroDiasParalisados"]');
+        if (campoDias) {
+            campoDias.value = String(diasMinimo);
+            campoDias.dispatchEvent(new Event('input', { bubbles: true }));
+            campoDias.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        console.log(`[Projudi Paralisado] campos preenchidos — opcaoBusca=${opcaoBuscaValor} diasMinimo="${campoDias ? campoDias.value : '?'}"`);
+
+        if (chaveParaAutoIniciar) store.setItem('projudi_paralisado_auto_iniciar', chaveParaAutoIniciar);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Paralisado] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+
+        setTimeout(() => {
+            console.log('[Projudi Paralisado] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
+            setTimeout(() => {
+                const aindaNoFormulario = !!document.getElementById('processoBuscaParalisadoForm');
+                const temResultado = !!document.querySelector('table.resultTable');
+                console.log(`[Projudi Paralisado] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                if (aindaNoFormulario && !temResultado) {
+                    console.warn('[Projudi Paralisado] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
     function injetarBotoes() {
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
         if (!buttonBar) return;
@@ -1987,6 +2071,39 @@
             b.textContent = 'Preencher e Pesquisar';
             b.onclick = () => preencherEPesquisarTempoMedio(sel.value);
             buttonBar.appendChild(b);
+            return;
+        }
+
+        // Tela de filtros de Processos Paralisados/Remessas (mesma página para os dois
+        // relatórios — só muda o rádio "opcaoBusca" marcado e o mínimo de dias).
+        if (formularioParalisado() && !document.querySelector('table.resultTable')) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_paralisados' || estadoAtual === 'preenchendo_remessas') {
+                const chave = estadoAtual.slice('preenchendo_'.length);
+                const opcaoBuscaValor = chave === 'remessas' ? '3' : '1';
+                console.log(`[Projudi Paralisado] automação: preenchendo e pesquisando (${chave})`);
+                store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+                preencherEPesquisarParalisado(opcaoBuscaValor, 30, chave);
+                return;
+            }
+
+            // Uso manual (fora da automação): a página é compartilhada pelos dois
+            // relatórios, então oferecemos um botão para cada um.
+            const bParalisados = document.createElement('button');
+            bParalisados.type = 'button';
+            bParalisados.className = 'projudi-btn';
+            bParalisados.title = 'Marca "Na secretaria", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
+            bParalisados.textContent = 'Preencher e Pesquisar (Paralisados)';
+            bParalisados.onclick = () => preencherEPesquisarParalisado('1', 30, 'paralisados');
+            buttonBar.appendChild(bParalisados);
+
+            const bRemessas = document.createElement('button');
+            bRemessas.type = 'button';
+            bRemessas.className = 'projudi-btn';
+            bRemessas.title = 'Marca "Em remessa, exceto processos conclusos", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
+            bRemessas.textContent = 'Preencher e Pesquisar (Remessas)';
+            bRemessas.onclick = () => preencherEPesquisarParalisado('3', 30, 'remessas');
+            buttonBar.appendChild(bRemessas);
             return;
         }
 
@@ -2033,8 +2150,10 @@
         const relAtual = relatorioPorCfg(cfg);
         const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO;
         const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
+        const chaveAutoIniciarParalisado = store.getItem('projudi_paralisado_auto_iniciar');
+        const autoIniciarParalisado = !!chaveAutoIniciarParalisado && !!relAtual && relAtual.key === chaveAutoIniciarParalisado;
 
-        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM}`);
+        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado}`);
 
         if (coletor.rodando() && !coletor.obsoleta()) {
             console.log('[Projudi] retomando coleta após reload de paginação');
@@ -2045,6 +2164,10 @@
         } else if (autoIniciarTM) {
             store.removeItem('projudi_tempomedio_auto_iniciar');
             console.log('[Projudi TM] flag auto_iniciar detectada — iniciando extração automaticamente');
+            coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
+        } else if (autoIniciarParalisado) {
+            store.removeItem('projudi_paralisado_auto_iniciar');
+            console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
             coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
         } else {
             console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
@@ -2090,8 +2213,11 @@
         // participa da automação/painel enquanto isso. Reative descomentando a linha
         // abaixo quando o ajuste do Tempo Médio estiver pronto.
         // { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
-        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: false },
-        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     precisaPreencher: false },
+        // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
+        // situação), não direto nos resultados — por isso também precisam do passo de
+        // preencher+pesquisar antes de coletar.
+        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: true },
+        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     precisaPreencher: true },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
@@ -2196,8 +2322,9 @@
         const estado = store.getItem(AUTO_ESTADO);
         if (!estado || estado === 'concluido') return;
         // Durante a coleta ou o preenchimento do formulário, quem conduz é a própria
-        // página atual (injetarBotoes / preencherEPesquisarTempoMedio).
-        if (estado.startsWith('coletando_') || estado === 'preenchendo_tempomedio') return;
+        // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
+        // preencherEPesquisarParalisado).
+        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_')) return;
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
@@ -2215,7 +2342,7 @@
             if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
             if (navegarMenu(rel.navAlvo)) {
-                store.setItem(AUTO_ESTADO, rel.precisaPreencher ? 'preenchendo_tempomedio' : ('coletando_' + key));
+                store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
             }
         }
     }
@@ -2228,7 +2355,7 @@
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '3a');
         const primeiro = relatorioPorChave(fila[0]);
-        store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? 'preenchendo_tempomedio' : ('coletando_' + primeiro.key));
+        store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
         atualizarPainel();
         setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
@@ -2246,6 +2373,7 @@
         store.removeItem('projudi_auto_fila');
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
+        store.removeItem('projudi_paralisado_auto_iniciar');
         atualizarPainel();
     }
 
@@ -2272,7 +2400,7 @@
         if (estado === 'inativo' || !estado) return { concluidos: 0, frac: 0 };
         if (estado === 'concluido' || estado === 'ir_fim') return { concluidos: totalFila, frac: 1 };
         let key = null, emAndamento = false;
-        if (estado === 'preenchendo_tempomedio') { key = 'tempomedio'; emAndamento = true; }
+        if (estado.startsWith('preenchendo_')) { key = estado.slice('preenchendo_'.length); emAndamento = true; }
         else if (estado.startsWith('coletando_')) { key = estado.slice(10); emAndamento = true; }
         else if (estado.startsWith('ir_')) { key = estado.slice(3); emAndamento = false; }
         const idx = key ? fila.indexOf(key) : -1;
@@ -2293,7 +2421,7 @@
             if (estado === 'inativo') return 'pronto';
             if (estado === 'concluido') return 'concluído';
             if (estado === 'ir_fim') return 'finalizando…';
-            if (estado === 'preenchendo_tempomedio') return 'preenchendo filtros do tempo médio…';
+            if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `preenchendo filtros de ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
             if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `coletando ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `indo para ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
             return estado;
