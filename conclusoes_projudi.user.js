@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.8
+// @version      13.9
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2384,6 +2384,14 @@
             store.setItem('projudi_auto_lock', String(agora));
             if (navegarMenu(rel.navAlvo)) {
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
+            } else if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas') {
+                // O link de Paralisados/Remessas só existe no card da página inicial — se
+                // a automação estiver saindo de outro relatório (ex.: resultados de
+                // Paralisados), esse link não está na página atual e navegarMenu falha
+                // silenciosamente sem nunca sair dali. Volta à início primeiro; o estado
+                // continua "ir_X" para tentar de novo assim que a home carregar.
+                console.log(`[Auto Projudi] link de "${rel.navAlvo}" não está nesta página — voltando à início para tentar de lá`);
+                navegarMenu('inicio');
             }
         }
     }
