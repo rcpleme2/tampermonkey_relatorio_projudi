@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.6
+// @version      13.7
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2013,7 +2013,7 @@
 
         if (chaveParaAutoIniciar) store.setItem('projudi_paralisado_auto_iniciar', chaveParaAutoIniciar);
 
-        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
         console.log(`[Projudi Paralisado] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
 
         setTimeout(() => {
@@ -2023,7 +2023,7 @@
             // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('processoBuscaParalisadoForm');
-                const temResultado = !!document.querySelector('table.resultTable');
+                const temResultado = !!document.querySelector('table.resultTable tbody tr');
                 console.log(`[Projudi Paralisado] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
                     console.warn('[Projudi Paralisado] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
@@ -2075,8 +2075,12 @@
         }
 
         // Tela de filtros de Processos Paralisados/Remessas (mesma página para os dois
-        // relatórios — só muda o rádio "opcaoBusca" marcado e o mínimo de dias).
-        if (formularioParalisado() && !document.querySelector('table.resultTable')) {
+        // relatórios — só muda o rádio "opcaoBusca" marcado e o mínimo de dias). Diferente
+        // do Tempo Médio, aqui o form e a table.resultTable (com cabeçalho, mesmo sem
+        // linhas) convivem na MESMA página desde o primeiro carregamento — por isso a
+        // automação precisa decidir com base no ESTADO (preenchendo_X), e não na presença
+        // de table.resultTable, senão nunca preenche nem pesquisa (fica "parado").
+        if (formularioParalisado()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_paralisados' || estadoAtual === 'preenchendo_remessas') {
                 const chave = estadoAtual.slice('preenchendo_'.length);
@@ -2087,24 +2091,28 @@
                 return;
             }
 
-            // Uso manual (fora da automação): a página é compartilhada pelos dois
-            // relatórios, então oferecemos um botão para cada um.
-            const bParalisados = document.createElement('button');
-            bParalisados.type = 'button';
-            bParalisados.className = 'projudi-btn';
-            bParalisados.title = 'Marca "Na secretaria", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
-            bParalisados.textContent = 'Preencher e Pesquisar (Paralisados)';
-            bParalisados.onclick = () => preencherEPesquisarParalisado('1', 30, 'paralisados');
-            buttonBar.appendChild(bParalisados);
+            // Uso manual (fora da automação), só antes de qualquer pesquisa ter sido feita:
+            // a página é compartilhada pelos dois relatórios, então oferecemos um botão
+            // para cada um. Uma vez que já há resultados na tela, cai para o fluxo normal
+            // de coleta/exportação mais abaixo.
+            if (!document.querySelector('table.resultTable tbody tr')) {
+                const bParalisados = document.createElement('button');
+                bParalisados.type = 'button';
+                bParalisados.className = 'projudi-btn';
+                bParalisados.title = 'Marca "Na secretaria", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
+                bParalisados.textContent = 'Preencher e Pesquisar (Paralisados)';
+                bParalisados.onclick = () => preencherEPesquisarParalisado('1', 30, 'paralisados');
+                buttonBar.appendChild(bParalisados);
 
-            const bRemessas = document.createElement('button');
-            bRemessas.type = 'button';
-            bRemessas.className = 'projudi-btn';
-            bRemessas.title = 'Marca "Em remessa, exceto processos conclusos", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
-            bRemessas.textContent = 'Preencher e Pesquisar (Remessas)';
-            bRemessas.onclick = () => preencherEPesquisarParalisado('3', 30, 'remessas');
-            buttonBar.appendChild(bRemessas);
-            return;
+                const bRemessas = document.createElement('button');
+                bRemessas.type = 'button';
+                bRemessas.className = 'projudi-btn';
+                bRemessas.title = 'Marca "Em remessa, exceto processos conclusos", define 30 dias mínimos e pesquisa (o site pode demorar a responder)';
+                bRemessas.textContent = 'Preencher e Pesquisar (Remessas)';
+                bRemessas.onclick = () => preencherEPesquisarParalisado('3', 30, 'remessas');
+                buttonBar.appendChild(bRemessas);
+                return;
+            }
         }
 
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
