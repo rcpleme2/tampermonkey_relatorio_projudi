@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.9
+// @version      13.10
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2316,6 +2316,13 @@
         for (const d of docs) {
             for (const a of d.querySelectorAll('a[href]')) {
                 if (urlRe && !urlRe.test(a.href)) continue;
+                // Ignora os ícones de ajuda ("i" ao lado dos rádios do próprio formulário
+                // de filtros) — têm a MESMA URL base (processoBuscaParalisado.do) e o texto
+                // do rótulo do rádio como "irmão anterior" também bate no rotuloRe, então
+                // sem essa exclusão o script clica no botão de ajuda em vez do link do
+                // card da página inicial. Esses ícones sempre têm class "ajaxCalloutHelp…"
+                // e terminam a URL em "#" (âncora vazia, sem token de navegação real).
+                if (/ajaxCalloutHelp/i.test(a.className) || /#$/.test(a.href)) continue;
                 let rotulo = '';
                 let node = a.previousSibling;
                 while (node && node.nodeType !== 1) {
