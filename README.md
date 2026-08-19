@@ -2,6 +2,8 @@
 
 Userscript para [Tampermonkey](https://www.tampermonkey.net/) que automatiza a coleta de dados no sistema [Projudi (TJPR)](https://projudi2.tjpr.jus.br/) e exporta relatórios em planilha Excel (`.xlsx`) ou PDF — com resumo, gráficos e a lista detalhada dos processos.
 
+Exige login de servidor ou Corregedoria, assim como vinculação à unidade judicial cujos dados pretende se exportar.
+
 📘 Manual do usuário (instalação e uso passo a passo): [`manual_usuario.pdf`](./manual_usuario.pdf) / [`manual_usuario.docx`](./manual_usuario.docx)
 
 ## Relatórios suportados
@@ -68,6 +70,3 @@ Carregadas via `@require` pelo Tampermonkey:
 - [jsPDF](https://cdnjs.com/libraries/jspdf) — geração de PDF
 - [jspdf-autotable](https://cdnjs.com/libraries/jspdf-autotable) — tabelas no PDF
 
-## Autor
-
-[@rcpleme2](https://github.com/rcpleme2)
