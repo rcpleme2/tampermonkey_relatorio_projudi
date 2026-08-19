@@ -1,4 +1,4 @@
-# Exportar Conclusões Projudi para Excel
+# Exportar Dados Projudi para Excel ou Relatório PDF
 
 Userscript para [Tampermonkey](https://www.tampermonkey.net/) que automatiza a coleta de dados no sistema [Projudi (TJPR)](https://projudi2.tjpr.jus.br/) e exporta relatórios em planilha Excel (`.xlsx`) ou PDF — com resumo, gráficos e a lista detalhada dos processos.
 
