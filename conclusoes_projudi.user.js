@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.14
+// @version      13.15
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -121,7 +121,7 @@
         usaAtuacao: true,
         nomeArquivo: 'conclusoes_projudi',
         rotulos: { coletar: 'Coletar esta Atuação', coletarMais: 'Coletar mais uma Atuação', baixar: '⬇ Baixar planilha' },
-        cabecalhos: ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Dt. Pré-análise', 'Agrupador', 'Prioritário'],
+        cabecalhos: ['Atuação', 'Dt. Conclusão', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Magistrado(a)', 'Pré-análise', 'Dt. Pré-análise', 'Agrupador', 'Prioritário'],
         larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const pc = processoEclasse(tds[2]);
@@ -161,20 +161,25 @@
             tipoCampo: 'tipoConclusao',
             mediaLabel: 'conclusões / dia',
             distribuicoes: [
-                { titulo: 'Conclusões por Responsável', campo: 'responsavel', topN: 12 },
+                { titulo: 'Conclusões por Magistrado(a)', campo: 'responsavel', topN: 12 },
                 { titulo: 'Conclusões por Agrupador', campo: 'agrupador', topN: 12 },
                 { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
             ],
+            // Larguras somam 178mm — cabem na área útil (~186mm em A4 retrato com margem
+            // de 12mm); antes somavam 206mm e a tabela vazava a borda direita da página.
             colunas: [
-                { header: 'Atuação', width: 26, get: (d) => d.atuacao },
-                { header: 'Processo', width: 30, get: (d) => d.processo },
-                { header: 'Classe', width: 20, get: (d) => d.classe },
-                { header: 'Tipo de Conclusão', width: 34, get: (d) => d.tipoConclusao },
-                { header: 'Responsável', width: 34, get: (d) => d.responsavel },
-                { header: 'Agrupador', width: 26, get: (d) => d.agrupador },
-                { header: 'Dt. Remessa', width: 24, get: (d) => d.dtRemessa },
-                { header: 'Dias', width: 12, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
+                { header: 'Atuação', width: 24, get: (d) => d.atuacao },
+                { header: 'Processo', width: 28, get: (d) => d.processo },
+                { header: 'Classe', width: 18, get: (d) => d.classe },
+                { header: 'Tipo de Conclusão', width: 28, get: (d) => d.tipoConclusao },
+                { header: 'Magistrado(a)', width: 30, get: (d) => d.responsavel },
+                { header: 'Agrupador', width: 20, get: (d) => d.agrupador },
+                { header: 'Dt. Conclusão', width: 20, get: (d) => d.dtRemessa },
+                { header: 'Dias', width: 10, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
             ],
+            // Conclusões prioritárias primeiro; dentro de cada grupo (prioritárias/normais),
+            // da data de conclusão mais antiga para a mais nova (ver montarTabelaGenerico).
+            ordenarPrioritarioPrimeiro: true,
         },
         pdfPorJuiz: true, // habilita o botão extra "PDF por Juiz" (ver injetarBotoes)
     };
@@ -1165,7 +1170,14 @@
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const carimbo = `${hoje} ${hora}`;
 
+        // ordenarPrioritarioPrimeiro (ex.: Conclusões): prioritárias primeiro; dentro de
+        // cada grupo (e sempre que a flag não estiver ligada), da data mais antiga à mais
+        // nova.
         const ordenados = dados.slice().sort((a, b) => {
+            if (p.ordenarPrioritarioPrimeiro) {
+                const pa = a.prioritario ? 0 : 1, pb = b.prioritario ? 0 : 1;
+                if (pa !== pb) return pa - pb;
+            }
             const ta = parseDataBR(a[p.dataCampo]); const tb = parseDataBR(b[p.dataCampo]);
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
@@ -1299,7 +1311,11 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
+        // Prioritárias primeiro; dentro de cada grupo, da data de conclusão mais antiga
+        // para a mais nova.
         const ordenados = sub.slice().sort((a, b) => {
+            const pa = a.prioritario ? 0 : 1, pb = b.prioritario ? 0 : 1;
+            if (pa !== pb) return pa - pb;
             const ta = parseDataBR(a.dtRemessa); const tb = parseDataBR(b.dtRemessa);
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
@@ -1310,21 +1326,23 @@
         const tabInicioY = m + 8;
 
         doc.autoTable({
+            // As duas últimas colunas são sempre Dt. Conclusão e Dias desde pré-análise.
             columns: [
                 { header: 'Processo', dataKey: 'processo' },
                 { header: 'Classe', dataKey: 'classe' },
                 { header: 'Tipo de Conclusão', dataKey: 'tipo' },
                 { header: 'Agrupador', dataKey: 'agrupador' },
                 { header: 'Pré-análise', dataKey: 'preAnalise' },
-                { header: 'Dias desde pré-análise', dataKey: 'diasPreAnalise' },
-                { header: 'Dt. Remessa', dataKey: 'dtRemessa' },
                 { header: 'Dias', dataKey: 'dias' },
+                { header: 'Dt. Conclusão', dataKey: 'dtRemessa' },
+                { header: 'Dias desde pré-análise', dataKey: 'diasPreAnalise' },
             ],
             body: ordenados.map(d => ({
                 processo: d.processo, classe: d.classe, tipo: d.tipoConclusao, agrupador: d.agrupador,
                 preAnalise: temPreAnalise(d) ? 'Sim' : 'Não',
+                dias: diasDecorridos(d.dtRemessa, now),
+                dtRemessa: d.dtRemessa,
                 diasPreAnalise: diasDesdePreAnalise(d, now) || '—',
-                dtRemessa: d.dtRemessa, dias: diasDecorridos(d.dtRemessa, now),
             })),
             startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
@@ -1335,8 +1353,8 @@
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles: {
                 processo: { cellWidth: 28 }, classe: { cellWidth: 20 }, tipo: { cellWidth: 26 },
-                agrupador: { cellWidth: 22 }, preAnalise: { cellWidth: 18 }, diasPreAnalise: { cellWidth: 20 },
-                dtRemessa: { cellWidth: 18 }, dias: { cellWidth: 12 },
+                agrupador: { cellWidth: 22 }, preAnalise: { cellWidth: 16 }, dias: { cellWidth: 12 },
+                dtRemessa: { cellWidth: 18 }, diasPreAnalise: { cellWidth: 20 },
             },
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'processo' && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
