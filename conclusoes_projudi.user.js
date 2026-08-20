@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.15
+// @version      13.16
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2465,8 +2465,9 @@
     // Relatórios disponíveis para a automação, na ordem padrão de execução. 'precisaPreencher'
     // marca o Tempo Médio, cuja página de destino é um formulário de filtros (não os
     // resultados diretamente) — precisa ser preenchido e pesquisado antes de coletar.
+    // Ordem pedida pelo usuário: Juntadas, Retorno de Conclusão, Processos Paralisados,
+    // Remessas em Aberto e, por último, Conclusões pendentes.
     const REPORTS_AUTOMACAO = [
-        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             precisaPreencher: false },
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
         // DESATIVADO TEMPORARIAMENTE (a pedido do usuário — o relatório de Tempo Médio
@@ -2480,6 +2481,7 @@
         // preencher+pesquisar antes de coletar.
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: true },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     precisaPreencher: true },
+        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             precisaPreencher: false },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
@@ -2612,8 +2614,10 @@
         if (!estado || estado === 'concluido') return;
         // Durante a coleta ou o preenchimento do formulário, quem conduz é a própria
         // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
-        // preencherEPesquisarParalisado).
-        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_')) return;
+        // preencherEPesquisarParalisado). "travado_X" = desistiu de navegar depois de
+        // várias tentativas (ver ir_ abaixo) — só sai desse estado com "Limpar" ou
+        // retomando a automação do zero.
+        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')) return;
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
@@ -2631,8 +2635,30 @@
             if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
             if (navegarMenu(rel.navAlvo)) {
+                store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
-            } else if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas') {
+                return;
+            }
+            // Conta tentativas malsucedidas para este alvo — se o link nunca aparecer
+            // (ex.: o widget da página inicial não carregou o card esperado), depois de
+            // várias tentativas paramos em vez de ficar tentando pra sempre em silêncio
+            // (o usuário via isso como o script "travado", sem nenhuma indicação do que
+            // fazer). O contador é zerado sempre que o estado muda de alvo.
+            const chaveFalhas = 'projudi_auto_nav_falhas';
+            const registro = JSON.parse(store.getItem(chaveFalhas) || '{}');
+            if (registro.key !== key) { registro.key = key; registro.n = 0; }
+            registro.n = (registro.n || 0) + 1;
+            store.setItem(chaveFalhas, JSON.stringify(registro));
+            console.warn(`[Auto Projudi] tentativa ${registro.n} sem sucesso para "${rel.navAlvo}" — URL atual: ${location.href}`);
+
+            const LIMITE_TENTATIVAS = 8; // ~8 tentativas * 4s de trava = ~32s
+            if (registro.n >= LIMITE_TENTATIVAS) {
+                store.removeItem(chaveFalhas);
+                store.setItem(AUTO_ESTADO, 'travado_' + key);
+                console.error(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
+                return;
+            }
+            if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas') {
                 // O link de Paralisados/Remessas só existe no card da página inicial — se
                 // a automação estiver saindo de outro relatório (ex.: resultados de
                 // Paralisados), esse link não está na página atual e navegarMenu falha
@@ -2671,6 +2697,7 @@
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem('projudi_paralisado_auto_iniciar');
+        store.removeItem('projudi_auto_nav_falhas');
         atualizarPainel();
     }
 
@@ -2700,6 +2727,7 @@
         if (estado.startsWith('preenchendo_')) { key = estado.slice('preenchendo_'.length); emAndamento = true; }
         else if (estado.startsWith('coletando_')) { key = estado.slice(10); emAndamento = true; }
         else if (estado.startsWith('ir_')) { key = estado.slice(3); emAndamento = false; }
+        else if (estado.startsWith('travado_')) { key = estado.slice(8); emAndamento = false; }
         const idx = key ? fila.indexOf(key) : -1;
         if (idx < 0) return { concluidos: 0, frac: 0 };
         const concluidos = idx; // relatórios antes deste na fila já foram coletados
@@ -2721,6 +2749,11 @@
             if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `preenchendo filtros de ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
             if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `coletando ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `indo para ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
+            if (estado.startsWith('travado_')) {
+                const rel = relatorioPorChave(estado.slice(8));
+                const nome = rel ? rel.rotulo : estado.slice(8);
+                return `⚠ não encontrou o link para "${nome}" — navegue manualmente até lá pela página inicial, ou clique em Limpar para recomeçar`;
+            }
             return estado;
         })();
 
