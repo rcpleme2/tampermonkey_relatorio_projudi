@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.10
+// @version      13.11
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -127,6 +127,7 @@
             const pc = processoEclasse(tds[2]);
             return {
                 atuacao,
+                competencia: competenciaDe(atuacao),
                 dtRemessa: textoCelula(tds[1]),
                 processo: pc.processo,
                 classe: pc.classe,
@@ -140,6 +141,32 @@
             };
         },
         linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
+        pdf: {
+            titulo: 'Conclusões',
+            atosTitulo: 'Conclusões pendentes',
+            agingTitulo: 'Conclusões por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada das conclusões pendentes',
+            dataCampo: 'dtRemessa',
+            dataTitulo: 'Remessa para conclusão mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'tipoConclusao',
+            mediaLabel: 'conclusões / dia',
+            distribuicoes: [
+                { titulo: 'Conclusões por Responsável', campo: 'responsavel', topN: 12 },
+                { titulo: 'Conclusões por Agrupador', campo: 'agrupador', topN: 12 },
+                { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Atuação', width: 26, get: (d) => d.atuacao },
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe', width: 20, get: (d) => d.classe },
+                { header: 'Tipo de Conclusão', width: 34, get: (d) => d.tipoConclusao },
+                { header: 'Responsável', width: 34, get: (d) => d.responsavel },
+                { header: 'Agrupador', width: 26, get: (d) => d.agrupador },
+                { header: 'Dt. Remessa', width: 24, get: (d) => d.dtRemessa },
+                { header: 'Dias', width: 12, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
+            ],
+        },
     };
 
     const CFG_RETORNO = {
@@ -2246,6 +2273,7 @@
     // marca o Tempo Médio, cuja página de destino é um formulário de filtros (não os
     // resultados diretamente) — precisa ser preenchido e pesquisado antes de coletar.
     const REPORTS_AUTOMACAO = [
+        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             precisaPreencher: false },
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
         // DESATIVADO TEMPORARIAMENTE (a pedido do usuário — o relatório de Tempo Médio
@@ -2305,6 +2333,25 @@
         return null;
     }
 
+    // Variante de acharLinkMenu para o caso de Conclusões: o link fica na mesma
+    // conclusao.do do Retorno de Processos Conclusos (não há um texto fixo conhecido
+    // para "Conclusões" isoladamente), então em vez de exigir um rótulo específico,
+    // pega o primeiro link com URL compatível cujo texto NÃO menciona "retorno" — a
+    // mesma distinção já usada para separar os dois relatórios pelo cabeçalho da tabela.
+    function acharLinkMenuExcluindo(urlRe, excluirTextoRe) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (urlRe && !urlRe.test(a.href)) continue;
+                const texto = (a.textContent || '').trim();
+                if (!texto) continue;
+                if (excluirTextoRe && excluirTextoRe.test(texto)) continue;
+                return a;
+            }
+        }
+        return null;
+    }
+
     // Alguns cards da página inicial têm vários links com a MESMA URL na mesma célula,
     // cada um precedido de um rótulo em texto puro (não um <a> nem um elemento à parte) —
     // ex.: "Secretaria: <a>74</a> Em Remessa: <a>1221</a> ...". Nesses casos, o texto do
@@ -2338,6 +2385,7 @@
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
+        else if (alvo === 'conclusoes') link = acharLinkMenuExcluindo(/conclusao\.do/i, /retorno/i);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
         else if (alvo === 'paralisados') {
