@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.11
+// @version      13.12
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -121,10 +121,17 @@
         usaAtuacao: true,
         nomeArquivo: 'conclusoes_projudi',
         rotulos: { coletar: 'Coletar esta Atuação', coletarMais: 'Coletar mais uma Atuação', baixar: '⬇ Baixar planilha' },
-        cabecalhos: ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Agrupador', 'Prioritário'],
-        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 20 }, { wch: 11 }],
+        cabecalhos: ['Atuação', 'Dt. Remessa', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Responsável', 'Pré-análise', 'Dt. Pré-análise', 'Agrupador', 'Prioritário'],
+        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const pc = processoEclasse(tds[2]);
+            const preAnaliseTexto = textoCelula(tds[7]);
+            // A célula de Pré-análise normalmente traz o nome de quem analisou; quando
+            // também contém uma data (formato dd/mm/aaaa, em qualquer posição do texto),
+            // extraímos separadamente para calcular há quanto tempo a pré-análise ocorreu.
+            // Se não houver data no texto da célula, preAnaliseData fica vazio e o tempo
+            // decorrido é exibido como "—" no PDF (sem quebrar nada).
+            const mData = /(\d{2}\/\d{2}\/\d{4})/.exec(preAnaliseTexto);
             return {
                 atuacao,
                 competencia: competenciaDe(atuacao),
@@ -135,12 +142,13 @@
                 tipoConclusao: textoCelula(tds[4]),
                 privativa: textoCelula(tds[5]),
                 responsavel: textoCelula(tds[6]),
-                preAnalise: textoCelula(tds[7]),
+                preAnalise: preAnaliseTexto,
+                preAnaliseData: mData ? mData[1] : '',
                 agrupador: textoCelula(tds[8]),
                 prioritario: emPrioritario(tds[2].querySelector('em')),
             };
         },
-        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
+        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.preAnaliseData, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
         pdf: {
             titulo: 'Conclusões',
             atosTitulo: 'Conclusões pendentes',
@@ -167,6 +175,7 @@
                 { header: 'Dias', width: 12, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
             ],
         },
+        pdfPorJuiz: true, // habilita o botão extra "PDF por Juiz" (ver injetarBotoes)
     };
 
     const CFG_RETORNO = {
@@ -577,6 +586,22 @@
             }
         }
 
+        // Só usado pelo relatório de Conclusões (cfg.pdfPorJuiz === true): um PDF com uma
+        // seção por juiz responsável, para poder ser expedido individualmente.
+        function pdfPorJuiz() {
+            try {
+                const dados = lerTudo();
+                if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
+                gerarPDFConclusoesPorJuiz(dados);
+                limparTudo();
+                render();
+                atualizarStatus(`✓ PDF por juiz gerado com ${dados.length} registros. Dados acumulados apagados — pronto para nova coleta.`);
+            } catch (err) {
+                atualizarStatus(`Erro ao gerar PDF por juiz: ${err.message}`);
+                console.error('[Exportar Projudi]', err);
+            }
+        }
+
         function limpar() {
             limparTudo();
             render();
@@ -596,6 +621,8 @@
             bBaixar.textContent = `${cfg.rotulos.baixar} (${total})`;
             const bPdf = document.getElementById('btn-pdf');
             if (bPdf) { bPdf.disabled = total === 0; bPdf.textContent = `⬇ Baixar PDF (${total})`; }
+            const bPdfJuiz = document.getElementById('btn-pdf-juiz');
+            if (bPdfJuiz) { bPdfJuiz.disabled = total === 0; bPdfJuiz.textContent = `PDF por Juiz (${total})`; }
             bLimpar.disabled = total === 0;
 
             if (total > 0) {
@@ -606,7 +633,7 @@
             }
         }
 
-        return { iniciar, continuar, baixar, pdf, limpar, render, rodando, obsoleta,
+        return { iniciar, continuar, baixar, pdf, pdfPorJuiz, limpar, render, rodando, obsoleta,
                  limparFlags: () => { store.removeItem(KEY_RODANDO); store.removeItem(KEY_TS); } };
     }
 
@@ -1199,6 +1226,145 @@
         }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `${cfg.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // ── PDF de Conclusões — uma seção por juiz responsável ──────────────────────
+    // Pensado para "expedir" individualmente: cada juiz ganha um resumo (quantas
+    // pendentes, por tipo, por agrupador, quantas com/sem pré-análise) seguido da
+    // tabela discriminada dos processos dele, com marcador (bookmark) próprio.
+
+    // "Sim"/"Não" a partir do texto bruto da célula de Pré-análise (não vazio = houve).
+    function temPreAnalise(d) { return !!(d.preAnalise && d.preAnalise.trim()); }
+
+    // Dias entre hoje e a data extraída da pré-análise (preAnaliseData); '' quando essa
+    // data não pôde ser identificada no texto da célula (ver comentário em CFG_CONCLUSOES).
+    function diasDesdePreAnalise(d, now) {
+        if (!d.preAnaliseData) return '';
+        return diasDecorridos(d.preAnaliseData, now);
+    }
+
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira) {
+        if (!primeira) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const gap = 6;
+
+        const comPreAnalise = sub.filter(temPreAnalise);
+        const semPreAnalise = sub.length - comPreAnalise.length;
+        const prio = contarPrioritarios(sub);
+
+        let hy = m + 2;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_CONCLUSOES_POR_JUIZ, m, hy);
+        hy += 8;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
+        const linhasJuiz = doc.splitTextToSize('Juiz(a): ' + juiz, uw);
+        doc.text(linhasJuiz, m, hy);
+        hy += linhasJuiz.length * 5.2 + 1.5;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} conclusão(ões) pendente(s)`, m, hy);
+        hy += 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
+
+        const kY = hy + 6;
+        const kpis = [
+            { titulo: 'Pendentes', valor: String(sub.length), subs: [], acento: COR.azul },
+            { titulo: 'Prioritários', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
+            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
+            { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
+        ];
+        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
+
+        const gY0 = kY + 28 + gap + 2;
+        const charts = [
+            { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
+            { tipo: 'barras', span: 1, titulo: 'Pendentes por Agrupador', itens: contarPorCampo(sub, 'agrupador', 10) },
+        ];
+        desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, charts);
+        desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false);
+    }
+
+    function montarTabelaJuizConclusoes(doc, juiz, sub, now) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = sub.slice().sort((a, b) => {
+            const ta = parseDataBR(a.dtRemessa); const tb = parseDataBR(b.dtRemessa);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${juiz}`);
+        const tabInicioY = m + 8;
+
+        doc.autoTable({
+            columns: [
+                { header: 'Processo', dataKey: 'processo' },
+                { header: 'Classe', dataKey: 'classe' },
+                { header: 'Tipo de Conclusão', dataKey: 'tipo' },
+                { header: 'Agrupador', dataKey: 'agrupador' },
+                { header: 'Pré-análise', dataKey: 'preAnalise' },
+                { header: 'Dias desde pré-análise', dataKey: 'diasPreAnalise' },
+                { header: 'Dt. Remessa', dataKey: 'dtRemessa' },
+                { header: 'Dias', dataKey: 'dias' },
+            ],
+            body: ordenados.map(d => ({
+                processo: d.processo, classe: d.classe, tipo: d.tipoConclusao, agrupador: d.agrupador,
+                preAnalise: temPreAnalise(d) ? 'Sim' : 'Não',
+                diasPreAnalise: diasDesdePreAnalise(d, now) || '—',
+                dtRemessa: d.dtRemessa, dias: diasDecorridos(d.dtRemessa, now),
+            })),
+            startY: tabInicioY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                processo: { cellWidth: 28 }, classe: { cellWidth: 20 }, tipo: { cellWidth: 26 },
+                agrupador: { cellWidth: 22 }, preAnalise: { cellWidth: 18 }, diasPreAnalise: { cellWidth: 20 },
+                dtRemessa: { cellWidth: 18 }, dias: { cellWidth: 12 },
+            },
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.dataKey === 'processo' && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                    data.cell.styles.textColor = COR_PRIORITARIO;
+                    data.cell.styles.fontStyle = 'bold';
+                }
+            },
+            didDrawPage: () => desenharRodape(doc, `Tabela — ${juiz}`, `${hoje} ${hora}`, pw, ph, m, false),
+        });
+
+        return paginaInicial;
+    }
+
+    const TITULO_CONCLUSOES_POR_JUIZ = 'Conclusões Pendentes por Juiz';
+
+    function gerarPDFConclusoesPorJuiz(dados) {
+        const doc = novoDocPDF();
+        const now = Date.now();
+        const juizes = [...new Set(dados.map(d => (d.responsavel || '').trim() || '(sem responsável)'))]
+            .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+        juizes.forEach((juiz, i) => {
+            const sub = dados.filter(d => ((d.responsavel || '').trim() || '(sem responsável)') === juiz);
+            const pgResumo = doc.internal.getNumberOfPages() + (i === 0 ? 0 : 1);
+            montarResumoJuizConclusoes(doc, juiz, sub, now, i === 0);
+            const bmJuiz = doc.outline.add(null, `${juiz} (${sub.length})`, { pageNumber: pgResumo });
+            const pgTabela = montarTabelaJuizConclusoes(doc, juiz, sub, now);
+            doc.outline.add(bmJuiz, 'Tabela detalhada', { pageNumber: pgTabela });
+        });
+        baixarBlob(doc.output('blob'), `conclusoes_por_juiz_projudi_${dataArquivo()}.pdf`);
     }
 
     // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
@@ -1913,7 +2079,7 @@
     // "Limpar" nunca é desabilitado — é o botão de resgate caso a coleta trave (evita o
     // usuário ficar sem forma de apagar os dados presos e recomeçar).
     function desabilitarBotoes(desabilitar) {
-        ['btn-coletar', 'btn-baixar', 'btn-pdf'].forEach(id => {
+        ['btn-coletar', 'btn-baixar', 'btn-pdf', 'btn-pdf-juiz'].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.disabled = desabilitar;
         });
@@ -2207,6 +2373,11 @@
             rotuloResumo.title = 'Gera o PDF só com o resumo (KPIs e gráficos), sem a tabela discriminada de processos';
             rotuloResumo.innerHTML = '<input type="checkbox" id="chk-somente-resumo"> Só resumo (sem tabela)';
             buttonBar.appendChild(rotuloResumo);
+        }
+        if (cfg.pdfPorJuiz) {
+            buttonBar.appendChild(mk('btn-pdf-juiz',
+                'Gera um PDF com uma seção por juiz responsável (pendências por tipo, agrupador e pré-análise) — pronto para expedir a cada um',
+                () => coletor.pdfPorJuiz(), 'PDF por Juiz'));
         }
         buttonBar.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
 
