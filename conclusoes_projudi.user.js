@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.19
+// @version      14.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -765,6 +765,60 @@
         return dados.reduce((n, d) => n + (d.prioritario ? 1 : 0), 0);
     }
 
+    // ── Classificação de situação (Cartório/Gabinete) ───────────────────────────
+    // Usada na página "Situação da Unidade" do relatório conjunto: dá um veredito
+    // objetivo (não só números) sobre cada tarefa do Cartório e cada magistrado(a) do
+    // Gabinete, pensado para leitura rápida numa correição.
+
+    // Dias decorridos (número) a partir de uma data BR; null quando não há data válida.
+    function diasNum(str, now) {
+        const ts = parseDataBR(str);
+        return ts == null ? null : Math.max(0, Math.floor((now - ts) / DIA_MS));
+    }
+
+    // Critério: 'critico' quando há prioritário parado há mais de 90 dias, ou mais da
+    // metade das pendências passa de 30 dias; 'atencao' quando há alguma pendência acima
+    // de 30 dias sem chegar ao critério crítico; 'regular' quando tudo está em dia.
+    // itens: [{ dias, prioritario }].
+    function classificarSituacao(itens) {
+        const comDias = itens.filter(it => it.dias != null);
+        if (!comDias.length) return 'regular';
+        const acima30 = comDias.filter(it => it.dias > 30);
+        const prioCritico = comDias.some(it => it.prioritario && it.dias > 90);
+        if (prioCritico || acima30.length / comDias.length > 0.5) return 'critico';
+        if (acima30.length > 0) return 'atencao';
+        return 'regular';
+    }
+
+    const SITUACAO_INFO = {
+        critico: { rotulo: 'Crítico', cor: COR.vermelho },
+        atencao: { rotulo: 'Atenção', cor: COR.ambar },
+        regular: { rotulo: 'Regular', cor: COR.aqua },
+    };
+
+    // A pior situação entre várias — usada para o veredito geral de um domínio (Cartório
+    // ou Gabinete) a partir da situação de cada item que o compõe.
+    function piorSituacao(situacoes) {
+        if (situacoes.includes('critico')) return 'critico';
+        if (situacoes.includes('atencao')) return 'atencao';
+        return 'regular';
+    }
+
+    function maiorDias(itens) {
+        return itens.reduce((max, it) => (it.dias != null && (max == null || it.dias > max) ? it.dias : max), null);
+    }
+
+    // Converte os dados de uma tarefa/relatório em itens {dias, prioritario} para
+    // classificarSituacao(). Paralisados/Remessas já trazem "dias" pronto (não uma data);
+    // os demais calculam a partir do campo de data do próprio cfg.pdf.
+    function itensParaClassificacao(dados, cfg, now) {
+        if (cfg === CFG_PARALISADOS || cfg === CFG_REMESSAS) {
+            return dados.map(d => ({ dias: d.dias, prioritario: !!d.prioritario }));
+        }
+        const campo = cfg.pdf.dataCampo;
+        return dados.map(d => ({ dias: diasNum(d[campo], now), prioritario: !!d.prioritario }));
+    }
+
     // Lista as competências distintas presentes num conjunto de dados (ordem de
     // primeira ocorrência) — usado para indicar, no cabeçalho dos relatórios
     // individuais, a que atuação(ões) os dados se referem.
@@ -1440,122 +1494,251 @@
         };
     }
 
-    // Capa + índice clicável (página 1). Retorna as linhas desenhadas — cada uma com a
-    // posição Y, a seção e o tipo ("Resumo"/"Tabela detalhada") — para depois (após montar
-    // todo o conteúdo e já sabendo os números de página) voltar e completar os links.
-    function desenharCapaIndice(doc, secoes, agora, somenteResumo, competencias) {
+    // Desenha uma caixa de domínio (Cartório ou Gabinete) na página "Situação da
+    // Unidade": cabeçalho com selo de situação, KPIs e uma mini-tabela por item (tarefa
+    // do Cartório, ou magistrado(a) do Gabinete). Retorna o Y logo abaixo da tabela.
+    function desenharBlocoDominio(doc, x, y, w, cfg) {
         const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
+
+        const headH = 15;
+        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3); doc.setFillColor(...COR.cartao);
+        doc.rect(x, y, w, headH, 'FD');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+        doc.text(cfg.titulo, x + 6, y + 9.5);
+        const tituloW = doc.getTextWidth(cfg.titulo);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+        doc.text(cfg.subtitulo, x + 6 + tituloW + 6, y + 9.5);
+
+        const info = SITUACAO_INFO[cfg.situacao] || SITUACAO_INFO.regular;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5);
+        const seloW = doc.getTextWidth(info.rotulo) + 8;
+        const seloX = x + w - 6 - seloW;
+        doc.setFillColor(...info.cor);
+        doc.rect(seloX, y + headH / 2 - 3, 3, 6, 'F');
+        doc.setTextColor(...info.cor);
+        doc.text(info.rotulo, seloX + 6, y + headH / 2 + 1.5);
+
+        let yy = y + headH + 6;
+        const gap = 5;
+        const kW = (w - (cfg.kpis.length - 1) * gap) / cfg.kpis.length;
+        const acentoKpi = cfg.situacao === 'critico' ? COR.vermelho : (cfg.situacao === 'atencao' ? COR.ambar : COR.azul);
+        cfg.kpis.forEach((k, i) => desenharCard(doc, x + i * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, acentoKpi));
+        yy += 22 + 7;
+
+        if (!cfg.itens.length) return yy;
+        const corpo = cfg.itens.map(it => {
+            const infoIt = SITUACAO_INFO[it.status] || SITUACAO_INFO.regular;
+            return {
+                rotulo: it.rotulo, pendentes: String(it.pendentes), prioritarios: String(it.prioritarios),
+                antiga: it.maisAntiga != null ? `${it.maisAntiga} dias` : '—', situacao: infoIt.rotulo, _cor: infoIt.cor,
+            };
+        });
+        doc.autoTable({
+            columns: [
+                { header: cfg.colunaRotulo, dataKey: 'rotulo' },
+                { header: 'Pendentes', dataKey: 'pendentes' },
+                { header: 'Prioritários', dataKey: 'prioritarios' },
+                { header: 'Mais antiga', dataKey: 'antiga' },
+                { header: 'Situação', dataKey: 'situacao' },
+            ],
+            body: corpo,
+            startY: yy,
+            margin: { left: x, right: pw - x - w },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                rotulo: { cellWidth: w * 0.34, fontStyle: 'bold', textColor: COR.tinta },
+                pendentes: { cellWidth: w * 0.16, halign: 'right' },
+                prioritarios: { cellWidth: w * 0.16, halign: 'right' },
+                antiga: { cellWidth: w * 0.16, halign: 'right' },
+                situacao: { cellWidth: w * 0.18 },
+            },
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.dataKey === 'situacao') {
+                    data.cell.styles.textColor = corpo[data.row.index]._cor;
+                    data.cell.styles.fontStyle = 'bold';
+                }
+            },
+        });
+        return doc.lastAutoTable.finalY;
+    }
+
+    // Página "Situação da Unidade" (substitui a antiga capa/índice): separa a unidade em
+    // duas frentes — Cartório (tramitação) e Gabinete (decisão) — cada uma com seu
+    // próprio veredito de situação, pensada para leitura rápida numa correição.
+    function desenharCapaSituacao(doc, cartorio, gabinete, agora) {
+        const pw = doc.internal.pageSize.getWidth();
         const m = 16;
+        const uw = pw - 2 * m;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
-        doc.text('Relatório Conjunto', m, 17);
+        doc.text('Situação da Unidade', m, 17);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
 
-        let y = 42;
-        if (competencias && competencias.size) {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.tinta);
-            const linhasComp = doc.splitTextToSize(`Competências incluídas: ${[...competencias].join(', ')}`, pw - 2 * m);
-            doc.text(linhasComp, m, y);
-            y += linhasComp.length * 4.6 + 2;
-        }
-        y = Math.max(y, 48);
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
-        doc.text('Conteúdo', m, y); y += 3;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, y, m + 26, y); y += 8;
+        let y = 44;
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(8.3); doc.setTextColor(...COR.muted);
+        const legenda = 'A unidade é avaliada em duas frentes distintas: Cartório — juntadas, retorno de processos '
+            + 'conclusos, processos paralisados e remessas pendentes, tarefas de tramitação da secretaria — e '
+            + 'Gabinete — conclusões pendentes de decisão, responsabilidade de cada magistrado(a). Situação de cada '
+            + 'frente: Crítico — há prioritário parado há mais de 90 dias, ou mais da metade das pendências passa '
+            + 'de 30 dias; Atenção — há pendência com mais de 30 dias, sem nada acima do limite crítico; Regular — '
+            + 'tudo dentro do prazo de 30 dias.';
+        const linhasLegenda = doc.splitTextToSize(legenda, uw);
+        doc.text(linhasLegenda, m, y);
+        y += linhasLegenda.length * 3.6 + 10;
 
-        const linhas = [];
-        doc.setFontSize(10);
-        secoes.forEach((s, i) => {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
-            doc.text(`${i + 1}. ${s.rotulo}`, m, y);
-            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.muted);
-            doc.text(`${s.dados.length} registro(s)`, pw - m, y, { align: 'right' });
-            y += 6;
-            const tipos = somenteResumo ? ['Resumo'] : ['Resumo', 'Tabela detalhada'];
-            tipos.forEach(tipo => {
-                doc.setFont('PublicSans', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
-                doc.text(`•  ${tipo}`, m + 4, y);
-                linhas.push({ y, secaoIdx: i, tipo });
-                y += 5.5;
-            });
-            y += 3;
+        y = desenharBlocoDominio(doc, m, y, uw, {
+            titulo: 'Cartório',
+            subtitulo: 'Juntadas · Retorno de Conclusos · Paralisados · Remessas Pendentes',
+            situacao: cartorio.situacao,
+            colunaRotulo: 'Tarefa',
+            itens: cartorio.itens,
+            kpis: [
+                { titulo: 'Pendências totais', valor: String(cartorio.totalPendentes) },
+                { titulo: 'Prioritários', valor: String(cartorio.totalPrioritarios),
+                  sub: cartorio.totalPendentes ? `${Math.round(cartorio.totalPrioritarios / cartorio.totalPendentes * 100)}% do total` : '' },
+                { titulo: 'Acima de 30 dias', valor: String(cartorio.acima30),
+                  sub: cartorio.totalPendentes ? `${Math.round(cartorio.acima30 / cartorio.totalPendentes * 100)}% do total` : '' },
+                { titulo: 'Pendência mais antiga', valor: cartorio.maisAntiga != null ? `${cartorio.maisAntiga} dias` : '—' },
+            ],
         });
 
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
-        const legenda = somenteResumo
-            ? 'Relatório apenas com os resumos (KPIs e gráficos) — sem a relação detalhada dos processos. Clique num item para navegar.'
-            : 'Todos os resumos vêm primeiro; as tabelas discriminadas ficam ao final. Clique num item para navegar.';
-        doc.text(legenda, m, ph - 16);
-        return linhas;
+        y += 8;
+
+        desenharBlocoDominio(doc, m, y, uw, {
+            titulo: 'Gabinete',
+            subtitulo: 'Conclusões pendentes de decisão, por magistrado(a)',
+            situacao: gabinete.situacao,
+            colunaRotulo: 'Magistrado(a)',
+            itens: gabinete.itens,
+            kpis: [
+                { titulo: 'Conclusões pendentes', valor: String(gabinete.totalPendentes) },
+                { titulo: 'Prioritários', valor: String(gabinete.totalPrioritarios),
+                  sub: gabinete.totalPendentes ? `${Math.round(gabinete.totalPrioritarios / gabinete.totalPendentes * 100)}% do total` : '' },
+                { titulo: 'Magistrados em situação crítica', valor: `${gabinete.itens.filter(it => it.status === 'critico').length} de ${gabinete.itens.length}` },
+            ],
+        });
     }
 
-    // PDF único com as seções na ordem informada. secoes: [{ dados, cfg }, ...]. Estrutura:
-    // capa+índice clicável (pág. 1) → todos os resumos → todas as tabelas discriminadas,
-    // com marcadores (bookmarks) no leitor e link "Voltar ao Índice" no rodapé das tabelas.
-    // somenteResumo: quando true, o conjunto sai só com a capa/índice + os resumos de
-    // cada relatório — sem o bloco de tabelas discriminadas (nem o marcador "Tabelas
-    // detalhadas", nem as entradas correspondentes no índice).
+    // PDF único com os relatórios coletados, organizado em duas frentes: CARTÓRIO
+    // (Juntadas, Retorno de Conclusos, Paralisados, Remessas Pendentes — tramitação da
+    // secretaria) e GABINETE (Conclusões, uma seção por magistrado(a) — trabalho de
+    // decisão). Abre com a página "Situação da Unidade" (veredito objetivo de cada
+    // frente), seguida das seções do Cartório e depois do Gabinete, cada uma com
+    // marcadores (bookmarks) no leitor de PDF. somenteResumo omite as tabelas
+    // discriminadas, mantendo só os resumos (KPIs e gráficos) de cada seção.
     function gerarPDFConjunto(secoesEntrada, somenteResumo) {
         const doc = novoDocPDF();
         const agora = new Date();
-        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados }, descreverSecaoPDF(s.cfg)));
+        const now = agora.getTime();
+        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
 
-        // Capa + índice só fazem sentido quando o relatório reúne mais de uma atuação
-        // (competência) — com uma única atuação, "relatório conjunto" e "relatório
-        // único" são a mesma coisa, então a capa/índice não agrega nada e só teria uma
-        // única entrada por seção.
-        const competencias = new Set();
-        secoes.forEach(s => s.dados.forEach(d => {
-            const c = (d.competencia || '').trim();
-            if (c) competencias.add(c);
-        }));
-        const temCapa = competencias.size > 1;
+        const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS];
+        const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal) && s.dados.length);
+        const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES && s.dados.length);
+        // Seções fora do esquema Cartório/Gabinete (hoje só o Tempo Médio, desativado da
+        // automação, mas ainda aceito se alguém montar a fila manualmente) entram depois,
+        // sem capa/veredito dedicado — mantém o relatório funcional mesmo nesse caso.
+        const outrasSecoes = secoes.filter(s => !CFGS_CARTORIO.includes(s.cfgOriginal) && s.cfgOriginal !== CFG_CONCLUSOES && s.dados.length);
 
-        // PASSO A: capa + índice (números de página ainda em branco), quando aplicável
-        const linhasIndice = temCapa ? desenharCapaIndice(doc, secoes, agora, somenteResumo, competencias) : [];
-
-        // PASSO B: bloco de RESUMOS, depois bloco de TABELAS (se não for somenteResumo) —
-        // todos os resumos antes de qualquer tabela, conforme pedido. Marcadores agrupam
-        // por bloco.
-        const paginaResumo = [], paginaTabela = [];
-        const bmResumos = doc.outline.add(null, 'Resumos', { pageNumber: temCapa ? 2 : 1 });
-        secoes.forEach((s, i) => {
-            const pg = doc.internal.getNumberOfPages() + 1;
-            s.montarResumo(doc, s.dados, !temCapa && i === 0, true);
-            paginaResumo.push(pg);
-            doc.outline.add(bmResumos, s.rotulo, { pageNumber: pg });
+        const itensCartorio = secoesCartorio.map(s => {
+            const itens = itensParaClassificacao(s.dados, s.cfgOriginal, now);
+            return {
+                rotulo: s.rotulo, dados: s.dados, secao: s, _itens: itens,
+                pendentes: s.dados.length,
+                prioritarios: contarPrioritarios(s.dados),
+                maisAntiga: maiorDias(itens),
+                status: classificarSituacao(itens),
+            };
         });
-        if (!somenteResumo) {
-            const primeiraTabelaPg = doc.internal.getNumberOfPages() + 1;
-            const bmTabelas = doc.outline.add(null, 'Tabelas detalhadas', { pageNumber: primeiraTabelaPg });
-            secoes.forEach(s => {
-                const pg = s.montarTabela(doc, s.dados, true);
-                paginaTabela.push(pg);
-                doc.outline.add(bmTabelas, s.rotulo, { pageNumber: pg });
+        const cartorio = {
+            itens: itensCartorio,
+            totalPendentes: itensCartorio.reduce((s, t) => s + t.pendentes, 0),
+            totalPrioritarios: itensCartorio.reduce((s, t) => s + t.prioritarios, 0),
+            acima30: itensCartorio.reduce((s, t) => s + t._itens.filter(it => it.dias != null && it.dias > 30).length, 0),
+            maisAntiga: maiorDias(itensCartorio.flatMap(t => t._itens)),
+            situacao: piorSituacao(itensCartorio.map(t => t.status)),
+        };
+
+        let gabinete = { itens: [], totalPendentes: 0, totalPrioritarios: 0, situacao: 'regular' };
+        if (secaoGabinete) {
+            const porJuiz = new Map();
+            secaoGabinete.dados.forEach(d => {
+                const nome = (d.responsavel || '').trim() || '(sem responsável)';
+                if (!porJuiz.has(nome)) porJuiz.set(nome, []);
+                porJuiz.get(nome).push(d);
+            });
+            const itensGabinete = [...porJuiz.entries()].map(([nome, sub]) => {
+                const itens = sub.map(d => ({ dias: diasNum(d.dtRemessa, now), prioritario: !!d.prioritario }));
+                return {
+                    rotulo: nome, dados: sub,
+                    pendentes: sub.length,
+                    prioritarios: contarPrioritarios(sub),
+                    maisAntiga: maiorDias(itens),
+                    status: classificarSituacao(itens),
+                };
+            }).sort((a, b) => b.pendentes - a.pendentes);
+            gabinete = {
+                itens: itensGabinete,
+                totalPendentes: secaoGabinete.dados.length,
+                totalPrioritarios: contarPrioritarios(secaoGabinete.dados),
+                situacao: piorSituacao(itensGabinete.map(it => it.status)),
+            };
+        }
+
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0;
+        let usouPagina1 = false;
+        if (temConteudo) { desenharCapaSituacao(doc, cartorio, gabinete, agora); usouPagina1 = true; }
+
+        // ═══ CARTÓRIO — uma seção por tarefa ═══
+        if (itensCartorio.length) {
+            let bmCartorio = null;
+            itensCartorio.forEach(t => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                t.secao.montarResumo(doc, t.dados, primeira, false);
+                if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
+                doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+                if (!somenteResumo) t.secao.montarTabela(doc, t.dados, false);
             });
         }
 
-        // PASSO C: volta à página 1 e completa os números + links do índice (só existe
-        // quando há capa)
-        if (temCapa) {
-            doc.setPage(1);
-            const pw = doc.internal.pageSize.getWidth();
-            const m = 16;
-            linhasIndice.forEach(l => {
-                const pg = l.tipo === 'Resumo' ? paginaResumo[l.secaoIdx] : paginaTabela[l.secaoIdx];
-                doc.setDrawColor(...COR.grade); doc.setLineWidth(0.2); doc.setLineDashPattern([0.5, 1], 0);
-                doc.line(m + 40, l.y - 0.8, pw - m - 10, l.y - 0.8);
-                doc.setLineDashPattern([], 0);
-                doc.setFont('PublicSans', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
-                doc.textWithLink(`•  ${l.tipo}`, m + 4, l.y, { pageNumber: pg });
-                doc.setTextColor(...COR.tintaSec); doc.text(String(pg), pw - m, l.y, { align: 'right' });
+        // ═══ GABINETE — uma seção por magistrado(a) ═══
+        if (gabinete.itens.length) {
+            let bmGabinete = null;
+            gabinete.itens.forEach(info => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
+                if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
+                const bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+                if (!somenteResumo) {
+                    const pgTabela = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now);
+                    doc.outline.add(bmJuiz, 'Tabela detalhada', { pageNumber: pgTabela });
+                }
             });
         }
+
+        // ═══ Outras seções (fora do esquema Cartório/Gabinete) ═══
+        outrasSecoes.forEach(s => {
+            const primeira = !usouPagina1;
+            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+            usouPagina1 = true;
+            s.montarResumo(doc, s.dados, primeira, false);
+            const bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
+            if (!somenteResumo) {
+                const pgTabela = s.montarTabela(doc, s.dados, false);
+                doc.outline.add(bmOutra, 'Tabela detalhada', { pageNumber: pgTabela });
+            }
+        });
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
