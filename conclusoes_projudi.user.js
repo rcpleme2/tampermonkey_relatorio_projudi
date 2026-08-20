@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.18
+// @version      13.19
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2306,9 +2306,41 @@
         }, 1500);
     }
 
+    // URL esperada da tela de resultados de cada relatório — usada só para confirmar que
+    // estamos mesmo na página certa antes de considerar "0 registros" (ver injetarBotoes).
+    function urlEsperadaRelatorio(navAlvo) {
+        if (navAlvo === 'juntadas') return /analisarJuntada\.do/i;
+        if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
+        if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
+        if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
+        return null;
+    }
+
     function injetarBotoes() {
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
-        if (!buttonBar) return;
+        if (!buttonBar) {
+            // Quando uma busca não encontra NENHUM registro, algumas telas do Projudi
+            // (Juntadas/Retorno/Conclusões) nem chegam a renderizar a tabela de
+            // resultados nem a buttonBar — só um aviso de "nenhum resultado". Sem esse
+            // tratamento, a automação ficava parada para sempre em "coletando_X" nessa
+            // tela (nunca chamava coletor.iniciar()), e ao trocar de atuação manualmente
+            // o usuário podia achar que travou e clicar em "Limpar", apagando os dados já
+            // acumulados de atuações anteriores — o que parecia "o relatório ignorou os
+            // dados da atuação anterior". Agora, se a automação está esperando coletar
+            // exatamente este relatório e a URL bate com a esperada, tratamos como "0
+            // registros" e avançamos para o próximo item da fila, sem perder nada do que
+            // já foi coletado (esse relatório só entra 0 no PDF conjunto).
+            const estadoAuto = store.getItem(AUTO_ESTADO);
+            if (estadoAuto && estadoAuto.startsWith('coletando_')) {
+                const rel = relatorioPorChave(estadoAuto.slice('coletando_'.length));
+                const urlRe = rel && urlEsperadaRelatorio(rel.navAlvo);
+                if (rel && urlRe && urlRe.test(location.href)) {
+                    console.log(`[Auto Projudi] "${rel.rotulo}" sem tabela de resultados (0 registros) — avançando automação`);
+                    avancarAutomacao(rel.cfg);
+                }
+            }
+            return;
+        }
 
         // Tela de filtros do relatório de Tempo Médio (ainda sem resultados): select do
         // período + botão de preencher+pesquisar; os botões de coleta/exportação fazem
