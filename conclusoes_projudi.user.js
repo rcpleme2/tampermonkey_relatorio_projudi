@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.16
+// @version      13.17
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2490,11 +2490,30 @@
         try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
     }
 
-    // Procura um link de menu (por URL e/ou texto) no documento atual e nos frames pai/topo.
-    // Percorre toda a árvore de frames (a partir de window.top) coletando os documentos
-    // acessíveis (mesma origem). Alguns links de menu ficam em widgets aninhados vários
-    // níveis abaixo (ex.: o card de "Processos Paralisados" da página inicial), fora do
-    // alcance de document/parent/top isolados — por isso a busca recursiva.
+    // Sobe por window.parent enquanto for a mesma origem, parando um passo antes de
+    // qualquer cruzamento de origem. Importante: o frameset MAIS externo do Projudi roda
+    // em "projudi.tjpr.jus.br" (sem o "2"), enquanto todo o conteúdo — inclusive o widget
+    // com os links de Paralisados/Remessas — fica em frames "projudi2.tjpr.jus.br". Como
+    // são origens diferentes, window.top é cross-origin a partir de qualquer frame do
+    // Projudi e SEMPRE lança erro ao acessar window.top.document — por isso não dá pra
+    // simplesmente começar a busca em window.top (ver todosDocumentosAcessiveis).
+    function maiorAncestralAcessivel() {
+        let w = window;
+        for (let i = 0; i < 10; i++) {
+            let pai;
+            try { pai = w.parent; } catch (e) { break; }
+            if (!pai || pai === w) break;
+            try { void pai.document; } catch (e) { break; } // cross-origin — para aqui
+            w = pai;
+        }
+        return w;
+    }
+
+    // Procura um link de menu (por URL e/ou texto) no documento atual e em toda a árvore
+    // de frames a partir do maior ancestral de mesma origem acessível (ver comentário
+    // acima — não dá pra usar window.top direto). Alguns links de menu ficam em widgets
+    // aninhados vários níveis abaixo (ex.: o card de "Processos Paralisados" da página
+    // inicial), fora do alcance de document/parent isolados — por isso a busca recursiva.
     function todosDocumentosAcessiveis() {
         const vistos = new Set();
         const docs = [];
@@ -2511,7 +2530,7 @@
                 try { visitar(frames[i]); } catch (e) {}
             }
         }
-        try { visitar(window.top); } catch (e) { visitar(window); }
+        visitar(maiorAncestralAcessivel());
         if (!docs.length) docs.push(document);
         return docs;
     }
