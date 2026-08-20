@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.12
+// @version      13.13
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -126,12 +126,13 @@
         extrai: (tds, atuacao) => {
             const pc = processoEclasse(tds[2]);
             const preAnaliseTexto = textoCelula(tds[7]);
-            // A célula de Pré-análise normalmente traz o nome de quem analisou; quando
-            // também contém uma data (formato dd/mm/aaaa, em qualquer posição do texto),
-            // extraímos separadamente para calcular há quanto tempo a pré-análise ocorreu.
-            // Se não houver data no texto da célula, preAnaliseData fica vazio e o tempo
+            // A célula de Pré-análise traz "<matrícula>.asr - <nome do assessor>
+            // (dd/mm/aaaa)" — a data de realização fica sempre entre parênteses, logo
+            // após o nome. Extraímos separadamente para calcular há quanto tempo a
+            // pré-análise ocorreu. Se não houver essa data entre parênteses (célula
+            // vazia ou formato inesperado), preAnaliseData fica vazio e o tempo
             // decorrido é exibido como "—" no PDF (sem quebrar nada).
-            const mData = /(\d{2}\/\d{2}\/\d{4})/.exec(preAnaliseTexto);
+            const mData = /\((\d{2}\/\d{2}\/\d{4})\)/.exec(preAnaliseTexto);
             return {
                 atuacao,
                 competencia: competenciaDe(atuacao),
@@ -2363,7 +2364,10 @@
 
         buttonBar.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
         buttonBar.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
-        if (cfg.pdf || cfg.pdfCustom) {
+        // Conclusões só oferece planilha ou PDF por Juiz (abaixo) — o botão genérico de
+        // PDF (resumo único + tabela, sem distinguir por juiz) não faz sentido aqui e
+        // ficaria redundante ao lado do PDF por Juiz.
+        if ((cfg.pdf || cfg.pdfCustom) && !cfg.pdfPorJuiz) {
             buttonBar.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
                 const chk = document.getElementById('chk-somente-resumo');
                 coletor.pdf(!!(chk && chk.checked));
