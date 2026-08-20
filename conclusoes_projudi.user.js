@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      13.13
+// @version      13.14
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2094,7 +2094,7 @@
         }
         #btn-coletar { background-color: #1e6b1e; border-color: #145214; }
         #btn-baixar  { background-color: #b8860b; border-color: #8a6508; }
-        #btn-pdf     { background-color: #34556b; border-color: #26404f; }
+        #btn-pdf, #btn-pdf-juiz { background-color: #34556b; border-color: #26404f; }
         #btn-limpar  { background-color: #8a3b3b; border-color: #6e2f2f; }
         #btn-preencher-pesquisar-tm { background-color: #1e6b1e; border-color: #145214; }
         .projudi-btn:disabled { background-color: #999; border-color: #777; cursor: not-allowed; }
