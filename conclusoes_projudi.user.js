@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.1
+// @version      14.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -35,6 +35,37 @@
 
     function textoCelula(td) {
         return td ? (td.textContent || '').trim() : '';
+    }
+
+    // ── Estatísticas Gerais (processos ativos por atuação) ──────────────────────
+    // Lê "Processos Ativos > Eletrônicos: N" da página inicial. Só existe nessa página
+    // (fora dela retorna null, sem custo real — chamado sempre no bootstrap).
+    function lerProcessosAtivos() {
+        const labels = document.querySelectorAll('td.label label');
+        for (const label of labels) {
+            if (!/eletr[ôo]nicos\s*:/i.test(label.textContent)) continue;
+            const tr = label.closest('tr');
+            const tds = tr ? tr.querySelectorAll('td') : [];
+            const txt = tds[1] ? tds[1].textContent : '';
+            const m = /([\d.]+)/.exec(txt);
+            if (m) { const n = parseInt(m[1].replace(/\./g, ''), 10); if (!isNaN(n)) return n; }
+        }
+        return null;
+    }
+
+    function lerMapaAtivos() {
+        try { return JSON.parse(store.getItem('projudi_estatisticas_ativos') || '{}'); } catch (e) { return {}; }
+    }
+
+    // Grava/atualiza a contagem de processos ativos da atuação atual — acumulado entre
+    // rodadas da automação (uma por atuação), como os demais relatórios.
+    function gravarProcessosAtivosSeDisponivel() {
+        const n = lerProcessosAtivos();
+        if (n == null) return;
+        const atuacao = lerAtuacao() || '(sem atuação)';
+        const mapa = lerMapaAtivos();
+        mapa[atuacao] = n;
+        store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
     }
 
     function norm(s) {
@@ -419,6 +450,38 @@
         },
         linha: (d) => [d.processo, d.classe, (d.dias == null ? '' : String(d.dias)), d.ultimoMovimento, d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados, somenteResumo),
+    };
+
+    // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
+    // acessado pelo número na página inicial). Colunas da tabela: [0]Processo
+    // [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão [5]Dias Paralisado.
+    // Sem pdf/pdfCustom próprio — entra na seção "Estatísticas Gerais" do relatório
+    // conjunto (ver gerarPDFConjunto), não como relatório individual com resumo/gráficos.
+    const CFG_SUSPENSOS = {
+        prefixo: 'projudi_suspensos_',
+        detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'suspensos_indeterminado_projudi',
+        rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
+        cabecalhos: ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[5]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                inicioSuspensao: textoCelula(tds[3]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -1567,10 +1630,98 @@
         return doc.lastAutoTable.finalY;
     }
 
+    // Página "Estatísticas Gerais" — o primeiro dado do relatório conjunto, separado do
+    // Cartório e do Gabinete: número de processos ativos por atuação (lido da página
+    // inicial) e a lista de processos suspensos por prazo indeterminado.
+    function desenharEstatisticasGerais(doc, mapaAtivos, dadosSuspensos, somenteResumo, agora) {
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 16;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
+        doc.text('Estatísticas Gerais', m, 17);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
+
+        let y = 48;
+        const atuacoes = Object.keys(mapaAtivos);
+        if (atuacoes.length) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text('Processos Ativos', m, y);
+            y += 8;
+
+            const total = atuacoes.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
+            if (atuacoes.length === 1) {
+                desenharCard(doc, m, y, uw, 26, atuacoes[0], String(total), [], true, COR.azul);
+                y += 26 + 10;
+            } else {
+                const corpo = atuacoes.map(a => ({ atuacao: a, total: String(mapaAtivos[a]), _forte: false }));
+                corpo.push({ atuacao: 'Total', total: String(total), _forte: true });
+                doc.autoTable({
+                    columns: [{ header: 'Atuação', dataKey: 'atuacao' }, { header: 'Processos Ativos', dataKey: 'total' }],
+                    body: corpo,
+                    startY: y,
+                    margin: { left: m, right: m },
+                    theme: 'grid',
+                    styles: { font: 'PublicSans', fontSize: 9, cellPadding: 3, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                    headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 9 },
+                    alternateRowStyles: { fillColor: COR.cartao },
+                    columnStyles: { atuacao: { cellWidth: uw * 0.7 }, total: { cellWidth: uw * 0.3, halign: 'right' } },
+                    didParseCell: (data) => {
+                        if (data.section === 'body' && corpo[data.row.index]._forte) {
+                            data.cell.styles.fontStyle = 'bold'; data.cell.styles.textColor = COR.tinta;
+                        }
+                    },
+                });
+                y = doc.lastAutoTable.finalY + 10;
+            }
+        }
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+        doc.text('Processos Suspensos por Prazo Indeterminado', m, y);
+        y += 8;
+        desenharCard(doc, m, y, uw, 26, 'Processos suspensos', String(dadosSuspensos.length), [], true, COR.ambar);
+        y += 26 + 10;
+
+        if (!somenteResumo && dadosSuspensos.length) {
+            const corpoS = dadosSuspensos.slice()
+                .sort((a, b) => (b.dias == null ? -1 : b.dias) - (a.dias == null ? -1 : a.dias))
+                .map(d => ({ processo: d.processo, classe: d.classe, inicio: d.inicioSuspensao, dias: d.dias == null ? '—' : String(d.dias) }));
+            doc.autoTable({
+                columns: [
+                    { header: 'Processo', dataKey: 'processo' },
+                    { header: 'Classe', dataKey: 'classe' },
+                    { header: 'Início Suspensão', dataKey: 'inicio' },
+                    { header: 'Dias Paralisado', dataKey: 'dias' },
+                ],
+                body: corpoS,
+                startY: y,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8.5 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: {
+                    processo: { cellWidth: uw * 0.3 }, classe: { cellWidth: uw * 0.3 },
+                    inicio: { cellWidth: uw * 0.2, halign: 'right' }, dias: { cellWidth: uw * 0.2, halign: 'right' },
+                },
+                didDrawPage: () => desenharRodape(doc, 'Estatísticas Gerais', carimbo, pw, ph, m, false),
+            });
+        } else {
+            desenharRodape(doc, 'Estatísticas Gerais', carimbo, pw, ph, m, false);
+        }
+    }
+
     // Página "Situação da Unidade" (substitui a antiga capa/índice): separa a unidade em
     // duas frentes — Cartório (tramitação) e Gabinete (decisão) — cada uma com seu
     // próprio veredito de situação, pensada para leitura rápida numa correição.
-    function desenharCapaSituacao(doc, cartorio, gabinete, agora) {
+    function desenharCapaSituacao(doc, cartorio, gabinete, agora, primeira) {
+        if (!primeira) doc.addPage();
         const pw = doc.internal.pageSize.getWidth();
         const m = 16;
         const uw = pw - 2 * m;
@@ -1636,15 +1787,22 @@
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
-        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
+        // CFG_SUSPENSOS não tem resumo/tabela genéricos (cfg.pdf) — vai para a seção
+        // "Estatísticas Gerais", tratada à parte logo abaixo, então fica de fora daqui.
+        const secoes = secoesEntrada
+            .filter(s => s.cfg !== CFG_SUSPENSOS)
+            .map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
 
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS];
         const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal) && s.dados.length);
         const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES && s.dados.length);
-        // Seções fora do esquema Cartório/Gabinete (hoje só o Tempo Médio, desativado da
-        // automação, mas ainda aceito se alguém montar a fila manualmente) entram depois,
-        // sem capa/veredito dedicado — mantém o relatório funcional mesmo nesse caso.
-        const outrasSecoes = secoes.filter(s => !CFGS_CARTORIO.includes(s.cfgOriginal) && s.cfgOriginal !== CFG_CONCLUSOES && s.dados.length);
+        const secaoSuspensos = secoesEntrada.find(s => s.cfg === CFG_SUSPENSOS);
+        // Seções fora do esquema Cartório/Gabinete/Estatísticas Gerais (hoje só o Tempo
+        // Médio, desativado da automação, mas ainda aceito se alguém montar a fila
+        // manualmente) entram depois, sem capa/veredito dedicado — mantém o relatório
+        // funcional mesmo nesse caso.
+        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES, CFG_SUSPENSOS];
+        const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal) && s.dados.length);
 
         // Limites de dias (pendência mais antiga) por domínio — ver legenda em
         // desenharCapaSituacao. Cartório: regular ≤30, atenção 31–90, crítico >90.
@@ -1699,9 +1857,28 @@
             };
         }
 
+        const mapaAtivos = lerMapaAtivos();
+        const dadosSuspensos = secaoSuspensos ? secaoSuspensos.dados : [];
+        const temEstatisticas = Object.keys(mapaAtivos).length > 0 || dadosSuspensos.length > 0;
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0;
         let usouPagina1 = false;
-        if (temConteudo) { desenharCapaSituacao(doc, cartorio, gabinete, agora); usouPagina1 = true; }
+
+        // ═══ ESTATÍSTICAS GERAIS — primeiro dado do relatório (nem Cartório, nem
+        // Gabinete): processos ativos por atuação e processos suspensos por prazo
+        // indeterminado ═══
+        if (temEstatisticas) {
+            desenharEstatisticasGerais(doc, mapaAtivos, dadosSuspensos, somenteResumo, agora);
+            doc.outline.add(null, 'Estatísticas Gerais', { pageNumber: 1 });
+            usouPagina1 = true;
+        }
+
+        if (temConteudo) {
+            const primeira = !usouPagina1;
+            const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+            desenharCapaSituacao(doc, cartorio, gabinete, agora, primeira);
+            doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
+            usouPagina1 = true;
+        }
 
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -2380,13 +2557,18 @@
         const thead = document.querySelector('table.resultTable thead');
         const cab = thead ? thead.textContent : '';
         let cfg = null;
-        if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
+        // CFG_SUSPENSOS vem antes de CFG_PARALISADOS: a tabela de Suspensos por Prazo
+        // Indeterminado também tem a coluna "Dias Paralisado" (o regex de Paralisados
+        // sozinho a reconheceria por engano), mas só ela tem "Início Suspensão".
+        if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
+        else if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
+        else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
@@ -2530,6 +2712,7 @@
         if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
         if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
+        if (navAlvo === 'suspensos') return /processoBuscaSuspenso\.do/i;
         return null;
     }
 
@@ -2746,6 +2929,9 @@
     // Ordem pedida pelo usuário: Juntadas, Retorno de Conclusão, Processos Paralisados,
     // Remessas em Aberto e, por último, Conclusões pendentes.
     const REPORTS_AUTOMACAO = [
+        // O link de Suspensos por Prazo Indeterminado abre a tabela de resultados
+        // direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
+        { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', precisaPreencher: false },
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
         // DESATIVADO TEMPORARIAMENTE (a pedido do usuário — o relatório de Tempo Médio
@@ -2874,6 +3060,23 @@
         return null;
     }
 
+    // Acha um link que fica na mesma linha (<tr>) de um <label> específico — usado para
+    // o número de "Processos Suspensos por Tempo Indeterminado" na página inicial, que
+    // (ao contrário do card de Paralisados) tem o rótulo numa célula própria antes do
+    // link, sem texto solto entre os dois.
+    function acharLinkAoLadoDoLabel(labelRe) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('td.label label')) {
+                if (!labelRe.test(label.textContent)) continue;
+                const tr = label.closest('tr');
+                const a = tr && tr.querySelector('a[href]');
+                if (a) return a;
+            }
+        }
+        return null;
+    }
+
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
@@ -2884,6 +3087,7 @@
             link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /secretaria/i) || acharLinkMenu(/processoBuscaParalisado\.do/i, null);
         }
         else if (alvo === 'remessas') link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /em\s+remessa.*exceto\s+processos\s+conclusos/i);
+        else if (alvo === 'suspensos') link = acharLinkAoLadoDoLabel(/suspensos\s+por\s+tempo\s+indeterminado/i);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         link.click();
@@ -2955,12 +3159,13 @@
                 console.error(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
                 return;
             }
-            if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas') {
-                // O link de Paralisados/Remessas só existe no card da página inicial — se
-                // a automação estiver saindo de outro relatório (ex.: resultados de
-                // Paralisados), esse link não está na página atual e navegarMenu falha
-                // silenciosamente sem nunca sair dali. Volta à início primeiro; o estado
-                // continua "ir_X" para tentar de novo assim que a home carregar.
+            if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas' || rel.navAlvo === 'suspensos') {
+                // O link de Paralisados/Remessas/Suspensos só existe no card da página
+                // inicial — se a automação estiver saindo de outro relatório (ex.:
+                // resultados de Paralisados), esse link não está na página atual e
+                // navegarMenu falha silenciosamente sem nunca sair dali. Volta à início
+                // primeiro; o estado continua "ir_X" para tentar de novo assim que a
+                // home carregar.
                 console.log(`[Auto Projudi] link de "${rel.navAlvo}" não está nesta página — voltando à início para tentar de lá`);
                 navegarMenu('inicio');
             }
@@ -2995,6 +3200,7 @@
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
+        store.removeItem('projudi_estatisticas_ativos');
         atualizarPainel();
     }
 
@@ -3216,6 +3422,7 @@
 
     function bootstrap() {
         console.log(`[Projudi] bootstrap — URL: ${location.href}`);
+        gravarProcessosAtivosSeDisponivel(); // nº de processos ativos, só existe na página inicial
         injetarBotoes();       // botões nos relatórios (buttonBar)
         injetarPainel();       // painel de automação (página com o menu)
         passoAutomacao();      // avança a automação se estiver em estado de navegação
