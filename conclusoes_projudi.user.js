@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.4
+// @version      14.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -514,6 +514,11 @@
         const KEY_NUM_PAGINAS = cfg.prefixo + 'num_paginas';
         const KEY_PAGINA_PREF = cfg.prefixo + 'pagina_';
         const KEY_TS          = cfg.prefixo + 'ts';
+        // Marca que a coleta chegou ao fim ao menos uma vez — diferente de KEY_NUM_PAGINAS
+        // (que fica em 0 tanto quando nunca rodou quanto quando rodou e não achou nada),
+        // isso permite ao PDF conjunto distinguir "não coletado" de "coletado, zero registros"
+        // (ver Suspensos por Prazo Indeterminado em gerarPDFConjunto/baixarPDFConjunto).
+        const KEY_COLETADO    = cfg.prefixo + 'coletado';
 
         function marcarAtividade() { store.setItem(KEY_TS, String(Date.now())); }
         function obsoleta() {
@@ -528,6 +533,7 @@
             store.removeItem(KEY_NUM_PAGINAS);
             store.removeItem(KEY_RODANDO);
             store.removeItem(KEY_TS);
+            store.removeItem(KEY_COLETADO);
         }
 
         function adicionarPagina(dadosPagina) {
@@ -640,6 +646,7 @@
             } else {
                 store.removeItem(KEY_RODANDO);
                 store.removeItem(KEY_TS);
+                store.setItem(KEY_COLETADO, '1');
                 render();
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
                 const dica = cfg.usaAtuacao ? ' Troque de atuação e colete mais, ou baixe a planilha.' : ' Baixe a planilha ou colete mais.';
@@ -1731,7 +1738,10 @@
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS];
-        const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal) && s.dados.length);
+        // Suspensos aparece mesmo com dados.length === 0, desde que já tenha sido coletado
+        // (ver KEY_COLETADO/baixarPDFConjunto) — "zero pendências" é um dado, não um vazio.
+        const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal)
+            && (s.dados.length || (s.cfgOriginal === CFG_SUSPENSOS && store.getItem(CFG_SUSPENSOS.prefixo + 'coletado') === '1')));
         const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES && s.dados.length);
         // Seções fora do esquema Cartório/Gabinete (hoje só o Tempo Médio) entram depois,
         // sem capa/veredito dedicado — mantém o relatório funcional mesmo nesse caso.
@@ -2510,9 +2520,8 @@
     // Períodos pré-configurados para a data inicial do relatório de Tempo Médio.
     const PERIODOS_TEMPOMEDIO = [
         { id: '1m',  rotulo: 'Último mês inteiro', calc: () => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d; } },
+        { id: '6m',  rotulo: 'Últimos seis meses',  calc: () => { const d = new Date(); d.setMonth(d.getMonth() - 6); return d; } },
         { id: '1a',  rotulo: 'Último 1 ano',        calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return d; } },
-        { id: '2a',  rotulo: 'Últimos 2 anos',       calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 2); return d; } },
-        { id: '3a',  rotulo: 'Últimos 3 anos',       calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 3); return d; } },
     ];
 
     function formatarDataBR(d) {
@@ -2530,7 +2539,7 @@
         const form = formularioTempoMedio();
         if (!form) return;
 
-        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO.find(p => p.id === '1a');
+        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO.find(p => p.id === '1m');
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
@@ -2674,7 +2683,7 @@
             // Automação: se chegamos aqui vindos do fluxo de automação, preenche e
             // pesquisa sozinho (sem esperar clique manual), usando o período escolhido no painel.
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
-                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1a';
+                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1m';
                 console.log(`[Projudi TM] automação: preenchendo e pesquisando com período="${periodoTM}"`);
                 store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
                 preencherEPesquisarTempoMedio(periodoTM);
@@ -2691,7 +2700,7 @@
                 opt.textContent = p.rotulo;
                 sel.appendChild(opt);
             });
-            sel.value = '1a'; // padrão: último 1 ano
+            sel.value = '1m'; // padrão: último mês inteiro
             buttonBar.appendChild(sel);
 
             const b = document.createElement('button');
@@ -2868,11 +2877,17 @@
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true },
         { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
-        // Reabilitado (v14.3) — mas fica DESMARCADO por padrão no painel (ver
-        // injetarPainel): o usuário precisa marcar explicitamente para incluí-lo na
-        // automação.
-        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'gabinete', precisaPreencher: true },
+        // DESATIVADO TEMPORARIAMENTE de novo (a pedido do usuário). O relatório continua
+        // funcionando normalmente na própria página dele (botões "Preencher e
+        // Pesquisar"/"Extrair"/"Baixar"); só não participa da fila de automação, da barra
+        // de progresso, do PDF conjunto nem do "Limpar" do painel enquanto isso. Reative
+        // descomentando a linha abaixo (o rótulo/posição do painel usam TEMPOMEDIO_DESATIVADO
+        // logo adiante, que deve ser removido junto).
+        // { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'cartorio', precisaPreencher: true },
     ];
+    // Linha desabilitada mostrada no grupo Cartório do painel enquanto o Tempo Médio
+    // estiver fora de REPORTS_AUTOMACAO — ver comentário acima.
+    const TEMPOMEDIO_DESATIVADO = { rotulo: 'Tempo Médio', dominio: 'cartorio' };
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
@@ -3108,7 +3123,7 @@
         fila = (fila || []).filter(k => relatorioPorChave(k));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
-        store.setItem('projudi_auto_periodo_tm', periodoTM || '1a');
+        store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
         const primeiro = relatorioPorChave(fila[0]);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
@@ -3123,6 +3138,7 @@
             store.removeItem(c.prefixo + 'num_paginas');
             store.removeItem(c.prefixo + 'rodando');
             store.removeItem(c.prefixo + 'ts');
+            store.removeItem(c.prefixo + 'coletado');
         });
         store.removeItem(AUTO_ESTADO);
         store.removeItem('projudi_auto_fila');
@@ -3135,9 +3151,12 @@
     }
 
     function baixarPDFConjunto(somenteResumo) {
+        // Suspensos por Prazo Indeterminado entra mesmo com zero registros, desde que a
+        // coleta tenha rodado até o fim — "zero pendências" é uma informação relevante para
+        // o card, diferente de "nunca foi coletado" (ver KEY_COLETADO em criarColetor).
         const secoes = REPORTS_AUTOMACAO
             .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
-            .filter(s => s.dados.length);
+            .filter(s => s.dados.length || (s.cfg === CFG_SUSPENSOS && store.getItem(CFG_SUSPENSOS.prefixo + 'coletado') === '1'));
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             gerarPDFConjunto(secoes, somenteResumo);
@@ -3204,7 +3223,10 @@
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
+        // O checkbox do Tempo Médio (.pa-item-desativado) fica de fora — ele deve
+        // permanecer sempre desabilitado, mesmo quando os demais são reabilitados.
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+            if (el.closest('.pa-item-desativado')) return;
             el.disabled = emCurso;
         });
 
@@ -3233,21 +3255,20 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
-        // Tempo Médio vem DESMARCADO por padrão (o usuário precisa optar por incluí-lo);
-        // os demais relatórios continuam marcados por padrão, como sempre. Os checkboxes
-        // são agrupados por domínio (Cartório/Gabinete), espelhando a divisão do PDF conjunto.
+        // Todos os relatórios de REPORTS_AUTOMACAO vêm marcados por padrão. Os checkboxes
+        // são agrupados por domínio (Cartório/Gabinete), espelhando a divisão do PDF
+        // conjunto; o Tempo Médio (fora de REPORTS_AUTOMACAO — ver TEMPOMEDIO_DESATIVADO)
+        // aparece travado no grupo Cartório, com nota explicando o motivo.
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
-            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => {
-                const seletorPeriodo = r.key === 'tempomedio'
-                    ? `<select id="pa-periodo-tm" class="sel-periodo" title="Período usado como data inicial da pesquisa">${
-                        PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1a' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
-                      }</select>`
-                    : '';
-                return `
+            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => `
                     <label class="pa-item">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}${seletorPeriodo}
-                    </label>`;
-            }).join('');
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" checked> ${r.rotulo}
+                    </label>`).join('')
+                + (TEMPOMEDIO_DESATIVADO.dominio === g.chave ? `
+                    <label class="pa-item pa-item-desativado" title="Temporariamente desativado enquanto o relatório de Tempo Médio está em ajuste">
+                        <input type="checkbox" class="pa-check" disabled> ${TEMPOMEDIO_DESATIVADO.rotulo}
+                        <span class="pa-nota-desativado">(indisponível)</span>
+                    </label>` : '');
             return `
                 <div class="pa-group">
                     <p class="pa-group-lbl">${g.rotulo}</p>
@@ -3296,7 +3317,7 @@
             const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key).filter(Boolean);
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
-            const periodoTM = periodoSelTM ? periodoSelTM.value : '1a';
+            const periodoTM = periodoSelTM ? periodoSelTM.value : '1m';
             iniciarAutomacao(fila, periodoTM);
         };
         painel.querySelector('#pa-pdf').onclick = () => {
@@ -3377,6 +3398,9 @@
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
+        #painel-automacao .pa-item-desativado { color: #82807A; cursor: not-allowed; }
+        #painel-automacao .pa-item-desativado input[type="checkbox"] { cursor: not-allowed; }
+        #painel-automacao .pa-nota-desativado { margin-left: auto; font-style: italic; font-size: .82em; color: #82807A; }
 
         #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
         #painel-automacao .pa-link {
