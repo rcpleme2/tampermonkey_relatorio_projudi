@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.0
+// @version      14.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -360,7 +360,7 @@
 
     // Relatório de Processos Paralisados (processoBuscaParalisado.do, opcaoBusca=1 "Na
     // secretaria"). Colunas da tabela: [0]semáforo [1]checkbox [2]Processo [3]Seq.
-    // [4]Classe Processual [5]Dias Paralisado [6]Razão Externa [7]Último Movimento
+    // [4]Classe Processual [5]Dias Paralisado [6]Razão Externa (não usado) [7]Último Movimento
     const CFG_PARALISADOS = {
         prefixo: 'projudi_paralisados_',
         detecta: (cab) => /dias\s+paralisado/i.test(cab) && opcaoBuscaParalisadoSelecionada() !== '3',
@@ -375,15 +375,11 @@
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[2]);
             const diasTexto = textoCelula(tds[5]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
-            // Razão Externa não aparece mais na tabela (Excel/PDF), mas ainda usamos se foi
-            // informada ou não para o KPI "Sem razão externa" no resumo do PDF.
-            const razaoExterna = textoCelula(tds[6]);
             return {
                 processo,
                 seq: textoCelula(tds[3]),
                 classe: textoCelula(tds[4]),
                 dias,
-                razaoInformada: !/^informar$/i.test(razaoExterna.trim()),
                 ultimoMovimento: textoCelula(tds[7]),
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
@@ -776,17 +772,14 @@
         return ts == null ? null : Math.max(0, Math.floor((now - ts) / DIA_MS));
     }
 
-    // Critério: 'critico' quando há prioritário parado há mais de 90 dias, ou mais da
-    // metade das pendências passa de 30 dias; 'atencao' quando há alguma pendência acima
-    // de 30 dias sem chegar ao critério crítico; 'regular' quando tudo está em dia.
-    // itens: [{ dias, prioritario }].
-    function classificarSituacao(itens) {
-        const comDias = itens.filter(it => it.dias != null);
-        if (!comDias.length) return 'regular';
-        const acima30 = comDias.filter(it => it.dias > 30);
-        const prioCritico = comDias.some(it => it.prioritario && it.dias > 90);
-        if (prioCritico || acima30.length / comDias.length > 0.5) return 'critico';
-        if (acima30.length > 0) return 'atencao';
+    // Classifica pela pendência mais antiga (em dias), com limites próprios por domínio:
+    // Cartório — regular até 30 dias, atenção de 31 a 90, crítico acima de 90; Gabinete —
+    // regular até 30 dias, atenção de 31 a 120, crítico acima de 120 (ver limites em
+    // gerarPDFConjunto).
+    function classificarSituacaoPorDias(dias, limiteAtencao, limiteCritico) {
+        if (dias == null) return 'regular';
+        if (dias > limiteCritico) return 'critico';
+        if (dias > limiteAtencao) return 'atencao';
         return 'regular';
     }
 
@@ -809,7 +802,7 @@
     }
 
     // Converte os dados de uma tarefa/relatório em itens {dias, prioritario} para
-    // classificarSituacao(). Paralisados/Remessas já trazem "dias" pronto (não uma data);
+    // classificarSituacaoPorDias(). Paralisados/Remessas já trazem "dias" pronto (não uma data);
     // os demais calculam a partir do campo de data do próprio cfg.pdf.
     function itensParaClassificacao(dados, cfg, now) {
         if (cfg === CFG_PARALISADOS || cfg === CFG_REMESSAS) {
@@ -1025,17 +1018,26 @@
         doc.text(captionLinhas, x, y + h - captionH + 2.4);
     }
 
-    // comIndice: se true, desenha um link "Voltar ao Índice" centralizado no rodapé,
-    // apontando para a página 1 (usado apenas no PDF conjunto). Evita o glifo "↑" — fora
-    // da codificação padrão das fontes do jsPDF e corrompe o texto renderizado.
-    function desenharRodape(doc, titulo, quando, pw, ph, m, comIndice) {
+    // link: quando informado (`{ label, pageNumber }`), desenha um link de navegação
+    // centralizado no rodapé — usado pelo relatório conjunto para amarrar cada resumo à
+    // sua tabela discriminada ("Ver tabela detalhada →") e cada tabela de volta ao seu
+    // resumo ("← Voltar ao resumo"). Evita o glifo "↑" — fora da codificação padrão das
+    // fontes do jsPDF e corrompe o texto renderizado.
+    function desenharRodape(doc, titulo, quando, pw, ph, m, link) {
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
         doc.text(`${titulo}  •  Página ${doc.internal.getNumberOfPages()}`, m, ph - 6);
         doc.text(quando, pw - m, ph - 6, { align: 'right' });
-        if (comIndice) {
-            doc.setFont('PublicSans', 'bold'); doc.setTextColor(...COR.azul);
-            doc.textWithLink('Voltar ao Índice', pw / 2 - 16, ph - 6, { pageNumber: 1 });
-        }
+        if (link) desenharLinkRodape(doc, link.label, link.pageNumber, pw, ph);
+    }
+
+    // Desenha só o link de navegação do rodapé (mesmo estilo de desenharRodape), sem
+    // repetir o título/data — usado para "consertar" o link "Ver tabela detalhada →" de
+    // um resumo já desenhado, depois que a tabela (mais à frente no PDF) é montada e sua
+    // página passa a ser conhecida (ver PASSO 3 em gerarPDFConjunto).
+    function desenharLinkRodape(doc, label, pageNumber, pw, ph) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.azul);
+        const w = doc.getTextWidth(label);
+        doc.textWithLink(label, pw / 2 - w / 2, ph - 6, { pageNumber });
     }
 
     // Distribui uma lista de gráficos numa grade de 2 colunas (span:2 ocupa a largura
@@ -1380,7 +1382,7 @@
         desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false);
     }
 
-    function montarTabelaJuizConclusoes(doc, juiz, sub, now) {
+    function montarTabelaJuizConclusoes(doc, juiz, sub, now, link) {
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -1439,7 +1441,7 @@
                     data.cell.styles.fontStyle = 'bold';
                 }
             },
-            didDrawPage: () => desenharRodape(doc, `Tabela — ${juiz}`, `${hoje} ${hora}`, pw, ph, m, false),
+            didDrawPage: () => desenharRodape(doc, `Tabela — ${juiz}`, `${hoje} ${hora}`, pw, ph, m, link),
         });
 
         return paginaInicial;
@@ -1583,12 +1585,9 @@
 
         let y = 44;
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(8.3); doc.setTextColor(...COR.muted);
-        const legenda = 'A unidade é avaliada em duas frentes distintas: Cartório — juntadas, retorno de processos '
-            + 'conclusos, processos paralisados e remessas pendentes, tarefas de tramitação da secretaria — e '
-            + 'Gabinete — conclusões pendentes de decisão, responsabilidade de cada magistrado(a). Situação de cada '
-            + 'frente: Crítico — há prioritário parado há mais de 90 dias, ou mais da metade das pendências passa '
-            + 'de 30 dias; Atenção — há pendência com mais de 30 dias, sem nada acima do limite crítico; Regular — '
-            + 'tudo dentro do prazo de 30 dias.';
+        const legenda = 'Situação calculada pela pendência mais antiga de cada tarefa/magistrado(a). Cartório — '
+            + 'Regular até 30 dias, Atenção de 31 a 90 dias, Crítico acima de 90 dias. Gabinete — Regular até 30 '
+            + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.';
         const linhasLegenda = doc.splitTextToSize(legenda, uw);
         doc.text(linhasLegenda, m, y);
         y += linhasLegenda.length * 3.6 + 10;
@@ -1647,14 +1646,21 @@
         // sem capa/veredito dedicado — mantém o relatório funcional mesmo nesse caso.
         const outrasSecoes = secoes.filter(s => !CFGS_CARTORIO.includes(s.cfgOriginal) && s.cfgOriginal !== CFG_CONCLUSOES && s.dados.length);
 
+        // Limites de dias (pendência mais antiga) por domínio — ver legenda em
+        // desenharCapaSituacao. Cartório: regular ≤30, atenção 31–90, crítico >90.
+        // Gabinete: regular ≤30, atenção 31–120, crítico >120.
+        const LIMITES_CARTORIO = { atencao: 30, critico: 90 };
+        const LIMITES_GABINETE = { atencao: 30, critico: 120 };
+
         const itensCartorio = secoesCartorio.map(s => {
             const itens = itensParaClassificacao(s.dados, s.cfgOriginal, now);
+            const maisAntiga = maiorDias(itens);
             return {
                 rotulo: s.rotulo, dados: s.dados, secao: s, _itens: itens,
                 pendentes: s.dados.length,
                 prioritarios: contarPrioritarios(s.dados),
-                maisAntiga: maiorDias(itens),
-                status: classificarSituacao(itens),
+                maisAntiga,
+                status: classificarSituacaoPorDias(maisAntiga, LIMITES_CARTORIO.atencao, LIMITES_CARTORIO.critico),
             };
         });
         const cartorio = {
@@ -1676,12 +1682,13 @@
             });
             const itensGabinete = [...porJuiz.entries()].map(([nome, sub]) => {
                 const itens = sub.map(d => ({ dias: diasNum(d.dtRemessa, now), prioritario: !!d.prioritario }));
+                const maisAntiga = maiorDias(itens);
                 return {
                     rotulo: nome, dados: sub,
                     pendentes: sub.length,
                     prioritarios: contarPrioritarios(sub),
-                    maisAntiga: maiorDias(itens),
-                    status: classificarSituacao(itens),
+                    maisAntiga,
+                    status: classificarSituacaoPorDias(maisAntiga, LIMITES_GABINETE.atencao, LIMITES_GABINETE.critico),
                 };
             }).sort((a, b) => b.pendentes - a.pendentes);
             gabinete = {
@@ -1696,49 +1703,79 @@
         let usouPagina1 = false;
         if (temConteudo) { desenharCapaSituacao(doc, cartorio, gabinete, agora); usouPagina1 = true; }
 
-        // ═══ CARTÓRIO — uma seção por tarefa ═══
-        if (itensCartorio.length) {
-            let bmCartorio = null;
-            itensCartorio.forEach(t => {
-                const primeira = !usouPagina1;
-                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-                usouPagina1 = true;
-                t.secao.montarResumo(doc, t.dados, primeira, false);
-                if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
-                doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
-                if (!somenteResumo) t.secao.montarTabela(doc, t.dados, false);
-            });
-        }
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
 
-        // ═══ GABINETE — uma seção por magistrado(a) ═══
-        if (gabinete.itens.length) {
-            let bmGabinete = null;
-            gabinete.itens.forEach(info => {
-                const primeira = !usouPagina1;
-                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-                usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
-                if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
-                const bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
-                if (!somenteResumo) {
-                    const pgTabela = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now);
-                    doc.outline.add(bmJuiz, 'Tabela detalhada', { pageNumber: pgTabela });
-                }
-            });
-        }
+        // ═══ PASSO 1: todos os RESUMOS (Cartório, depois Gabinete, depois outras) ═══
+        // As tabelas discriminadas só vêm depois de TODOS os resumos — por isso o link
+        // "Ver tabela detalhada →" de cada resumo só pode ser desenhado no passo 3,
+        // quando a página real da tabela já é conhecida.
+        let bmCartorio = null;
+        itensCartorio.forEach(t => {
+            const primeira = !usouPagina1;
+            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+            usouPagina1 = true;
+            t.secao.montarResumo(doc, t.dados, primeira, false);
+            t.pgResumoInicio = pg;
+            t.pgResumoFim = doc.internal.getNumberOfPages();
+            if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
+            doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+        });
 
-        // ═══ Outras seções (fora do esquema Cartório/Gabinete) ═══
+        let bmGabinete = null;
+        gabinete.itens.forEach(info => {
+            const primeira = !usouPagina1;
+            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+            usouPagina1 = true;
+            montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
+            info.pgResumoInicio = pg;
+            info.pgResumoFim = doc.internal.getNumberOfPages();
+            if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
+            info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+        });
+
         outrasSecoes.forEach(s => {
             const primeira = !usouPagina1;
             const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
             usouPagina1 = true;
             s.montarResumo(doc, s.dados, primeira, false);
-            const bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
-            if (!somenteResumo) {
-                const pgTabela = s.montarTabela(doc, s.dados, false);
-                doc.outline.add(bmOutra, 'Tabela detalhada', { pageNumber: pgTabela });
-            }
+            s.pgResumoInicio = pg;
+            s.pgResumoFim = doc.internal.getNumberOfPages();
+            s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
         });
+
+        // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
+        // ao resumo" (a página do resumo já é conhecida, desenhada no passo 1) ═══
+        if (!somenteResumo) {
+            itensCartorio.forEach(t => {
+                t.pgTabela = t.secao.montarTabela(doc, t.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
+                doc.outline.add(bmCartorio, `${t.rotulo} — tabela detalhada`, { pageNumber: t.pgTabela });
+            });
+            gabinete.itens.forEach(info => {
+                info.pgTabela = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now,
+                    { label: '← Voltar ao resumo', pageNumber: info.pgResumoInicio });
+                doc.outline.add(info._bmJuiz, 'Tabela detalhada', { pageNumber: info.pgTabela });
+            });
+            outrasSecoes.forEach(s => {
+                s.pgTabela = s.montarTabela(doc, s.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
+                doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: s.pgTabela });
+            });
+
+            // ═══ PASSO 3: volta a cada resumo e desenha "Ver tabela detalhada →" agora
+            // que a página da tabela é conhecida ═══
+            itensCartorio.forEach(t => {
+                doc.setPage(t.pgResumoFim);
+                desenharLinkRodape(doc, 'Ver tabela detalhada →', t.pgTabela, pw, ph);
+            });
+            gabinete.itens.forEach(info => {
+                doc.setPage(info.pgResumoFim);
+                desenharLinkRodape(doc, 'Ver tabela detalhada →', info.pgTabela, pw, ph);
+            });
+            outrasSecoes.forEach(s => {
+                doc.setPage(s.pgResumoFim);
+                desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
+            });
+        }
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
@@ -1993,7 +2030,7 @@
 
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
     // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
-    // calcular a partir de duas datas): KPIs + top 10 mais tempo parados + média por classe.
+    // calcular a partir de duas datas): KPIs + top 10 mais tempo paralisados + média por classe.
 
     const TITULO_PARALISADOS = 'Processos Paralisados';
 
@@ -2028,7 +2065,6 @@
         const mediaPrio = mediaSimples(prioritarios, 'dias');
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
-        const semRazao = dados.filter(d => !d.razaoInformada);
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_PARALISADOS, m, m + 2);
@@ -2042,23 +2078,21 @@
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaParalisados, pw - m, yLinhaParalisados);
 
         const gap = 6;
-        // Linha 1: 4 KPIs centralizados — paralisados / tempo médio parado / prioritários / sem razão externa
+        // Linha 1: 3 KPIs centralizados — paralisados / tempo médio paralisado / prioritários
         const kY = yLinhaParalisados + 5;
-        const kW4 = (uw - 3 * gap) / 4;
+        const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,               kY, kW4, 28, 'Processos paralisados', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio parado', fmtDias(geral), [], true, COR.aqua);
-        desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
-        desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, 'Sem razão externa', String(semRazao.length),
-            [`${dados.length ? Math.round(semRazao.length / dados.length * 100) : 0}% do total`], true, COR.ambar);
+        desenharCard(doc, m,               kY, kW3, 28, 'Processos paralisados', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
-        // Linha 2: tempo médio parado prioritários vs não prioritários (centralizados)
+        // Linha 2: tempo médio paralisado prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio parado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
-        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio parado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio paralisado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio paralisado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
 
-        // Card largo: processo parado há mais tempo (centralizado)
+        // Card largo: processo paralisado há mais tempo (centralizado)
         const k3Y = k2Y + 26 + gap;
         let valMP = '—', subsMP = ['Nenhum registro com dados válidos'];
         if (maisParado) {
@@ -2068,7 +2102,7 @@
                 maisParado.classe || '',
             ];
         }
-        desenharCard(doc, m, k3Y, uw, 26, 'Processo parado há mais tempo', valMP, subsMP, true, COR.vermelho);
+        desenharCard(doc, m, k3Y, uw, 26, 'Processo paralisado há mais tempo', valMP, subsMP, true, COR.vermelho);
 
         // Gráficos 1 e 2 (largura total, empilhados): dividem o espaço vertical restante da
         // página de forma que a soma das duas alturas + o espaçamento sempre caiba.
@@ -2080,11 +2114,11 @@
         const chart1Desejado = Math.max(30, top10.length * 8 + 8);
         const chart1H = Math.min(chart1Desejado, Math.max(30, disponivel - chartGap - 40));
         const chart2H = Math.max(30, disponivel - chart1H - chartGap);
-        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos parados há mais tempo', top10);
+        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos paralisados há mais tempo', top10);
 
         const chart2Y = chartY + chart1H + chartGap;
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
-        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio parado por Classe Processual', porClasse, fmtDias, COR.aqua);
+        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
@@ -2099,7 +2133,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        // Do maior tempo parado para o menor (sem dados vai ao final)
+        // Do maior tempo paralisado para o menor (sem dados vai ao final)
         const ordenados = dados.slice().sort((a, b) => {
             const da = a.dias == null ? -Infinity : a.dias;
             const db = b.dias == null ? -Infinity : b.dias;
@@ -2197,21 +2231,21 @@
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaRemessas, pw - m, yLinhaRemessas);
 
         const gap = 6;
-        // Linha 1: 3 KPIs centralizados — em remessa / tempo médio parado / prioritários
+        // Linha 1: 3 KPIs centralizados — em remessa / tempo médio paralisado / prioritários
         const kY = yLinhaRemessas + 5;
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio parado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.aqua);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
-        // Linha 2: tempo médio parado prioritários vs não prioritários (centralizados)
+        // Linha 2: tempo médio paralisado prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio parado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
-        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio parado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio paralisado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio paralisado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
 
-        // Card largo: processo parado há mais tempo (centralizado)
+        // Card largo: processo paralisado há mais tempo (centralizado)
         const k3Y = k2Y + 26 + gap;
         let valMP = '—', subsMP = ['Nenhum registro com dados válidos'];
         if (maisParado) {
@@ -2221,7 +2255,7 @@
                 maisParado.classe || '',
             ];
         }
-        desenharCard(doc, m, k3Y, uw, 26, 'Processo parado há mais tempo', valMP, subsMP, true, COR.vermelho);
+        desenharCard(doc, m, k3Y, uw, 26, 'Processo paralisado há mais tempo', valMP, subsMP, true, COR.vermelho);
 
         // Gráficos 1 e 2 (largura total, empilhados): dividem o espaço vertical restante da
         // página de forma que a soma das duas alturas + o espaçamento sempre caiba.
@@ -2233,11 +2267,11 @@
         const chart1Desejado = Math.max(30, top10.length * 8 + 8);
         const chart1H = Math.min(chart1Desejado, Math.max(30, disponivel - chartGap - 40));
         const chart2H = Math.max(30, disponivel - chart1H - chartGap);
-        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos parados há mais tempo', top10);
+        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos paralisados há mais tempo', top10);
 
         const chart2Y = chartY + chart1H + chartGap;
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
-        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio parado por Classe Processual', porClasse, fmtDias, COR.aqua);
+        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
@@ -2252,7 +2286,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        // Do maior tempo parado para o menor (sem dados vai ao final)
+        // Do maior tempo paralisado para o menor (sem dados vai ao final)
         const ordenados = dados.slice().sort((a, b) => {
             const da = a.dias == null ? -Infinity : a.dias;
             const db = b.dias == null ? -Infinity : b.dias;
