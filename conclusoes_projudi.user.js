@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.3
+// @version      14.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2853,22 +2853,29 @@
     // resultados diretamente) — precisa ser preenchido e pesquisado antes de coletar.
     // Ordem pedida pelo usuário: Juntadas, Retorno de Conclusão, Processos Paralisados,
     // Remessas em Aberto e, por último, Conclusões pendentes.
+    // "dominio" agrupa os checkboxes do painel de automação (ver injetarPainel), espelhando
+    // a mesma divisão Cartório/Gabinete usada no PDF conjunto; "curto" é o rótulo compacto
+    // usado na grade de contagens.
     const REPORTS_AUTOMACAO = [
         // O link de Suspensos por Prazo Indeterminado abre a tabela de resultados
         // direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
-        { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', precisaPreencher: false },
-        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
-        { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
-        // Reabilitado (v14.3) — mas fica DESMARCADO por padrão no painel (ver
-        // injetarPainel): o usuário precisa marcar explicitamente para incluí-lo na
-        // automação.
-        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
+        { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false },
+        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false },
+        { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false },
         // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
         // situação), não direto nos resultados — por isso também precisam do passo de
         // preencher+pesquisar antes de coletar.
-        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  precisaPreencher: true },
-        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     precisaPreencher: true },
-        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             precisaPreencher: false },
+        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true },
+        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true },
+        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
+        // Reabilitado (v14.3) — mas fica DESMARCADO por padrão no painel (ver
+        // injetarPainel): o usuário precisa marcar explicitamente para incluí-lo na
+        // automação.
+        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'gabinete', precisaPreencher: true },
+    ];
+    const GRUPOS_AUTOMACAO = [
+        { chave: 'cartorio', rotulo: 'Cartório' },
+        { chave: 'gabinete', rotulo: 'Gabinete' },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
@@ -3168,23 +3175,31 @@
         const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: lerDadosDe(r.cfg.prefixo).length }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
         const emCurso = estado !== 'inativo' && estado !== 'concluido';
-        const rotuloEstado = (() => {
-            if (estado === 'inativo') return 'pronto';
-            if (estado === 'concluido') return 'concluído';
-            if (estado === 'ir_fim') return 'finalizando…';
-            if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `preenchendo filtros de ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
-            if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `coletando ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
-            if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `indo para ${rel ? rel.rotulo.toLowerCase() : estado}…`; }
-            if (estado.startsWith('travado_')) {
+        const travado = estado.startsWith('travado_');
+        const estadoTexto = (() => {
+            if (estado === 'inativo') return 'Pronto para iniciar';
+            if (estado === 'concluido') return 'Coleta concluída';
+            if (estado === 'ir_fim') return 'Finalizando…';
+            if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `Preenchendo filtros de <strong>${rel ? rel.rotulo : estado}</strong>…`; }
+            if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `Coletando <strong>${rel ? rel.rotulo : estado}</strong>…`; }
+            if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
+            if (travado) {
                 const rel = relatorioPorChave(estado.slice(8));
                 const nome = rel ? rel.rotulo : estado.slice(8);
-                return `⚠ não encontrou o link para "${nome}" — navegue manualmente até lá pela página inicial, ou clique em Limpar para recomeçar`;
+                return `Não encontrou o link para "<strong>${nome}</strong>" — navegue manualmente até lá pela página inicial, ou clique em Limpar para recomeçar`;
             }
             return estado;
         })();
 
-        const detalhe = contagens.map(c => `${c.r.rotulo}: ${c.n}`).join('  •  ');
-        painel.querySelector('.pa-status').textContent = `Estado: ${rotuloEstado}  •  ${detalhe}`;
+        const dot = painel.querySelector('.pa-dot');
+        painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
+        if (dot) dot.classList.toggle('on', emCurso);
+        if (dot) dot.classList.toggle('alerta', travado);
+        painel.querySelectorAll('.pa-count').forEach(el => {
+            const c = contagens.find(c => c.r.key === el.dataset.key);
+            const n = el.querySelector('.n');
+            if (c && n) n.textContent = String(c.n);
+        });
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
@@ -3198,14 +3213,14 @@
         const fila = lerFilaAutomacao();
         const { concluidos, frac } = progressoAutomacao(estado, fila);
         const pct = Math.round(frac * 100);
-        const wrap = painel.querySelector('.pa-progresso');
-        const barra = painel.querySelector('.pa-progresso-barra');
-        const label = painel.querySelector('.pa-progresso-label');
+        const wrap = painel.querySelector('.pa-progress');
+        const barra = painel.querySelector('.pa-progress-bar');
+        const label = painel.querySelector('.pa-progress-lbl');
         if (wrap && barra && label) {
             wrap.style.display = fila.length ? '' : 'none';
             barra.style.width = pct + '%';
-            barra.classList.toggle('pa-progresso-completo', estado === 'concluido');
-            label.textContent = `${concluidos} de ${fila.length} relatório(s)  •  ${pct}%`;
+            barra.classList.toggle('pa-progress-completo', estado === 'concluido');
+            label.innerHTML = `<span>${concluidos} de ${fila.length} concluído(s)</span><span>${pct}%</span>`;
         }
     }
 
@@ -3219,40 +3234,62 @@
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
         // Tempo Médio vem DESMARCADO por padrão (o usuário precisa optar por incluí-lo);
-        // os demais relatórios continuam marcados por padrão, como sempre.
-        const linhasCheckboxArr = REPORTS_AUTOMACAO.map(r => `
+        // os demais relatórios continuam marcados por padrão, como sempre. Os checkboxes
+        // são agrupados por domínio (Cartório/Gabinete), espelhando a divisão do PDF conjunto.
+        const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
+            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => {
+                const seletorPeriodo = r.key === 'tempomedio'
+                    ? `<select id="pa-periodo-tm" class="sel-periodo" title="Período usado como data inicial da pesquisa">${
+                        PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1a' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                      }</select>`
+                    : '';
+                return `
                     <label class="pa-item">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}
-                    </label>`);
-        const linhasCheckbox = linhasCheckboxArr.join('');
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}${seletorPeriodo}
+                    </label>`;
+            }).join('');
+            return `
+                <div class="pa-group">
+                    <p class="pa-group-lbl">${g.rotulo}</p>
+                    ${itens}
+                </div>`;
+        }).join('');
+        const linhasContagem = REPORTS_AUTOMACAO.map(r => `
+                    <div class="pa-count" data-key="${r.key}"><span class="l">${r.curto}</span><span class="n">0</span></div>`).join('');
         painel.innerHTML = `
-            <div class="pa-header">
+            <div class="pa-head">
                 <span class="pa-titulo">Automação de relatórios</span>
-                <div class="pa-controles">
-                    <button class="pa-btn-colapsar" type="button" title="Recolher">▲</button>
-                    <button class="pa-btn-fechar" type="button" title="Fechar">✕</button>
+                <div class="pa-icons">
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
             <div class="pa-body">
-                <div class="pa-status">—</div>
-                <div class="pa-progresso" style="display:none;">
-                    <div class="pa-progresso-track"><div class="pa-progresso-barra"></div></div>
-                    <div class="pa-progresso-label">—</div>
+                <div class="pa-state-row">
+                    <span class="pa-dot"></span>
+                    <span class="pa-state-txt">—</span>
                 </div>
-                <div class="pa-selecao">${linhasCheckbox}</div>
-                <div class="pa-marcar">
-                    <button id="pa-marcar-tudo" class="pa-link-btn" type="button">Marcar tudo</button>
-                    <button id="pa-desmarcar-tudo" class="pa-link-btn" type="button">Desmarcar tudo</button>
+                <div class="pa-progress" style="display:none;">
+                    <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
+                    <div class="pa-progress-lbl">—</div>
                 </div>
-                <label class="pa-item projudi-chk-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
-                    <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas)
+                <div class="pa-counts">${linhasContagem}</div>
+                ${linhasGrupos}
+                <div class="pa-links">
+                    <button id="pa-marcar-tudo" class="pa-link" type="button">Marcar tudo</button>
+                    <button id="pa-desmarcar-tudo" class="pa-link" type="button">Desmarcar tudo</button>
+                </div>
+                <label class="pa-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
+                    <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
                 </label>
-                <div class="pa-botoes">
-                    <button id="pa-iniciar" class="projudi-btn" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
-                    <button id="pa-pdf" class="projudi-btn" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ PDF conjunto</button>
-                    <button id="pa-limpar" class="projudi-btn" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
+                <div class="pa-actions">
+                    <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
+                    <div class="pa-btn-row">
+                        <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ PDF conjunto</button>
+                        <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
+                    </div>
                 </div>
-                <div class="pa-dica">Rode em cada Atuação para acumular várias competências.</div>
+                <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o PDF conjunto.</div>
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = () => {
@@ -3285,52 +3322,86 @@
 
     GM_addStyle(`
         #painel-automacao {
-            position: fixed; top: 8px; right: 8px; z-index: 999999;
-            background: #f7f7f2; border: 1px solid #63735f; border-radius: 6px;
-            padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,.25);
-            font-family: Verdana, Arial, sans-serif; width: 300px;
+            position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
+            background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
+            box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
+            font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
         }
-        #painel-automacao .pa-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-        #painel-automacao .pa-titulo { font-weight: bold; font-size: .8em; color: #2d3748; }
-        #painel-automacao .pa-controles { display: flex; gap: 3px; }
-        #painel-automacao .pa-btn-colapsar, #painel-automacao .pa-btn-fechar {
-            background: none; border: 1px solid #aaa; border-radius: 3px; cursor: pointer;
-            font-size: .7em; padding: 1px 5px; color: #555; line-height: 1.3;
+        #painel-automacao .pa-head {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 11px; border-bottom: 1px solid #DEDDD6;
+            border-left: 3px solid #3A5A7D; background: #F4F4F1;
         }
-        #painel-automacao .pa-btn-colapsar:hover, #painel-automacao .pa-btn-fechar:hover { background: #ddd; }
-        #painel-automacao .pa-status { font-size: .72em; color: #444; margin-bottom: 6px; }
-        #painel-automacao .pa-progresso { margin-bottom: 8px; }
-        #painel-automacao .pa-progresso-track {
-            background: #dedbcf; border-radius: 5px; height: 8px; overflow: hidden;
+        #painel-automacao .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
+        #painel-automacao .pa-icons { display: flex; gap: 4px; }
+        #painel-automacao .pa-icon-btn {
+            width: 20px; height: 20px; border: 1px solid #DEDDD6; border-radius: 5px;
+            background: #FFFFFF; cursor: pointer; color: #52514E; font-size: .68em;
+            line-height: 1; padding: 0;
         }
-        #painel-automacao .pa-progresso-barra {
-            background: #34556b; height: 100%; width: 0%; border-radius: 5px;
-            transition: width .4s ease;
+        #painel-automacao .pa-icon-btn:hover { background: #F4F4F1; }
+        #painel-automacao .pa-body { padding: 11px; }
+
+        #painel-automacao .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+        #painel-automacao .pa-dot {
+            width: 7px; height: 7px; border-radius: 50%; background: #C3C2B7; flex: none;
+            box-shadow: 0 0 0 3px rgba(195,194,183,.2);
         }
-        #painel-automacao .pa-progresso-barra.pa-progresso-completo { background: #1e6b1e; }
-        #painel-automacao .pa-progresso-label { font-size: .68em; color: #555; margin-top: 3px; text-align: right; }
-        #painel-automacao .pa-selecao { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
-        #painel-automacao .pa-item { font-size: .74em; color: #333; display: flex; align-items: center; gap: 4px; }
+        #painel-automacao .pa-dot.on { background: #9C742E; box-shadow: 0 0 0 3px rgba(156,116,46,.16); }
+        #painel-automacao .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
+        #painel-automacao .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
+        #painel-automacao .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
+
+        #painel-automacao .pa-progress { margin-bottom: 10px; }
+        #painel-automacao .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
+        #painel-automacao .pa-progress-bar {
+            background: #3A5A7D; height: 100%; width: 0%; border-radius: 4px; transition: width .4s ease;
+        }
+        #painel-automacao .pa-progress-bar.pa-progress-completo { background: #527467; }
+        #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
+
+        #painel-automacao .pa-counts {
+            display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
+            margin-bottom: 12px; padding: 8px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px;
+        }
+        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; }
+        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; }
+        #painel-automacao .pa-count .l { color: #52514E; }
+
+        #painel-automacao .pa-group { margin-bottom: 10px; }
+        #painel-automacao .pa-group-lbl {
+            display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
+            letter-spacing: .05em; text-transform: uppercase; color: #82807A; margin: 0 0 5px;
+        }
+        #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
+        #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
-        #painel-automacao .pa-item .projudi-select { margin-left: 4px; padding: 1px 2px; font-size: 1em; }
-        #painel-automacao .pa-item-desativado { color: #999; cursor: not-allowed; }
-        #painel-automacao .pa-item-desativado input[type="checkbox"] {
-            filter: grayscale(1); opacity: .55; cursor: not-allowed;
-        }
-        #painel-automacao .pa-nota-desativado { font-style: italic; font-size: .92em; color: #999; }
-        #painel-automacao .pa-marcar { display: flex; gap: 8px; margin-bottom: 6px; }
-        #painel-automacao .projudi-chk-resumo { margin-left: 0; margin-bottom: 8px; }
-        #painel-automacao .pa-link-btn {
+        #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
+
+        #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
+        #painel-automacao .pa-link {
             background: none; border: none; padding: 0; cursor: pointer;
-            font-size: .7em; color: #34556b; text-decoration: underline;
+            font-size: .68em; font-weight: 600; color: #3A5A7D;
         }
-        #painel-automacao .pa-link-btn:disabled { color: #999; cursor: not-allowed; }
-        #painel-automacao .pa-botoes { display: flex; gap: 4px; flex-wrap: wrap; }
-        #painel-automacao .projudi-btn { margin-left: 0; }
-        #painel-automacao #pa-iniciar { background-color: #1e6b1e; border-color: #145214; }
-        #painel-automacao #pa-pdf { background-color: #34556b; border-color: #26404f; }
-        #painel-automacao #pa-limpar { background-color: #8a3b3b; border-color: #6e2f2f; }
-        #painel-automacao .pa-dica { font-size: .66em; color: #777; margin-top: 5px; }
+        #painel-automacao .pa-link:disabled { color: #82807A; cursor: not-allowed; }
+
+        #painel-automacao .pa-resumo {
+            display: flex; align-items: center; gap: 7px; font-size: .72em; color: #52514E;
+            padding: 7px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px; margin-bottom: 10px;
+        }
+
+        #painel-automacao .pa-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+        #painel-automacao .pa-btn {
+            border-radius: 6px; padding: 7px 10px; font-size: .78em; font-weight: 600;
+            cursor: pointer; border: 1px solid transparent; flex: 1;
+        }
+        #painel-automacao .pa-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #painel-automacao .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
+        #painel-automacao .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
+        #painel-automacao .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
+        #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
+
+        #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
     `);
 
     function bootstrap() {
