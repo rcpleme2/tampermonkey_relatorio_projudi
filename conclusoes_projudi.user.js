@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.2
+// @version      14.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -311,7 +311,7 @@
         pdf: {
             titulo: 'Juntadas',
             atosTitulo: 'Juntadas pendentes',
-            agingTitulo: 'Juntadas por tempo de espera',
+            agingTitulo: 'Tempo de pendência da juntada',
             tabelaTitulo: 'Tabela discriminada das juntadas pendentes',
             dataCampo: 'dataEnvio',
             dataTitulo: 'Juntada pendente mais antiga',
@@ -482,6 +482,29 @@
             };
         },
         linha: (d) => [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
+        // Tratado como mais uma tarefa do Cartório (mesmo esquema genérico de Juntadas/
+        // Retorno — ver gerarPDFConjunto): entra no resumo/tabela por seção e na mini-
+        // tabela de situação da capa, sem precisar de uma página "Estatísticas Gerais"
+        // separada.
+        pdf: {
+            titulo: 'Suspensos por Prazo Indeterminado',
+            atosTitulo: 'Processos suspensos',
+            agingTitulo: 'Tempo de suspensão',
+            tabelaTitulo: 'Tabela discriminada dos processos suspensos por prazo indeterminado',
+            dataCampo: 'inicioSuspensao',
+            dataTitulo: 'Suspensão mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'classe',
+            distribuicoes: [
+                { titulo: 'Suspensos por Classe Processual', campo: 'classe', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe', width: 40, get: (d) => d.classe },
+                { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
+                { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
     };
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -868,7 +891,7 @@
     // classificarSituacaoPorDias(). Paralisados/Remessas já trazem "dias" pronto (não uma data);
     // os demais calculam a partir do campo de data do próprio cfg.pdf.
     function itensParaClassificacao(dados, cfg, now) {
-        if (cfg === CFG_PARALISADOS || cfg === CFG_REMESSAS) {
+        if (cfg === CFG_PARALISADOS || cfg === CFG_REMESSAS || cfg === CFG_SUSPENSOS) {
             return dados.map(d => ({ dias: d.dias, prioritario: !!d.prioritario }));
         }
         const campo = cfg.pdf.dataCampo;
@@ -1015,8 +1038,8 @@
     // marcador de ponto ao lado do rótulo — reforça a leitura sem depender só das barras.
     const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
 
-    // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha, com
-    // legenda e uma legenda de "como ler" — o vermelho é sempre prioritário, nunca a faixa.
+    // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha —
+    // o vermelho é sempre prioritário, nunca a faixa.
     function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
         tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
         const legY = y + 10;
@@ -1027,15 +1050,8 @@
         doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
         doc.text('Normais', q2 + 4, legY);
 
-        // Legenda "Como ler": quebrada para a largura da coluna (nunca vaza para a coluna
-        // vizinha) e com espaço reservado dinamicamente conforme o número de linhas.
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(6.6);
-        const captionTexto = 'Como ler: cada faixa separa processos prioritários (vermelho) dos normais (azul), pelo tempo de espera.';
-        const captionLinhas = doc.splitTextToSize(captionTexto, w);
-        const captionH = captionLinhas.length * 2.8;
-
         const topo = y + 15;
-        const areaH = Math.max(6, h - 15 - captionH);
+        const areaH = Math.max(6, h - 15);
         const rotuloW = Math.min(36, w * 0.32);
         const valorW = 11;
         const barX = x + rotuloW;
@@ -1076,9 +1092,6 @@
             doc.roundedRect(barX, yBarN, wn, subH, 0.5, 0.5, 'F');
             doc.text(String(f.normais), barX + wn + 1.5, yBarN + subH / 2 + fonteValor * 0.15);
         });
-
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
-        doc.text(captionLinhas, x, y + h - captionH + 2.4);
     }
 
     // link: quando informado (`{ label, pageNumber }`), desenha um link de navegação
@@ -1560,8 +1573,10 @@
     }
 
     // Desenha uma caixa de domínio (Cartório ou Gabinete) na página "Situação da
-    // Unidade": cabeçalho com selo de situação, KPIs e uma mini-tabela por item (tarefa
-    // do Cartório, ou magistrado(a) do Gabinete). Retorna o Y logo abaixo da tabela.
+    // Unidade": cabeçalho, KPIs e uma mini-tabela por item (tarefa do Cartório, ou
+    // magistrado(a) do Gabinete) — a situação (Crítico/Atenção/Regular) só aparece por
+    // item, na última coluna da tabela, nunca como veredito agregado do domínio inteiro.
+    // Retorna o Y logo abaixo da tabela.
     function desenharBlocoDominio(doc, x, y, w, cfg) {
         const pw = doc.internal.pageSize.getWidth();
 
@@ -1574,20 +1589,10 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
         doc.text(cfg.subtitulo, x + 6 + tituloW + 6, y + 9.5);
 
-        const info = SITUACAO_INFO[cfg.situacao] || SITUACAO_INFO.regular;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5);
-        const seloW = doc.getTextWidth(info.rotulo) + 8;
-        const seloX = x + w - 6 - seloW;
-        doc.setFillColor(...info.cor);
-        doc.rect(seloX, y + headH / 2 - 3, 3, 6, 'F');
-        doc.setTextColor(...info.cor);
-        doc.text(info.rotulo, seloX + 6, y + headH / 2 + 1.5);
-
         let yy = y + headH + 6;
         const gap = 5;
         const kW = (w - (cfg.kpis.length - 1) * gap) / cfg.kpis.length;
-        const acentoKpi = cfg.situacao === 'critico' ? COR.vermelho : (cfg.situacao === 'atencao' ? COR.ambar : COR.azul);
-        cfg.kpis.forEach((k, i) => desenharCard(doc, x + i * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, acentoKpi));
+        cfg.kpis.forEach((k, i) => desenharCard(doc, x + i * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
         yy += 22 + 7;
 
         if (!cfg.itens.length) return yy;
@@ -1630,97 +1635,10 @@
         return doc.lastAutoTable.finalY;
     }
 
-    // Página "Estatísticas Gerais" — o primeiro dado do relatório conjunto, separado do
-    // Cartório e do Gabinete: número de processos ativos por atuação (lido da página
-    // inicial) e a lista de processos suspensos por prazo indeterminado.
-    function desenharEstatisticasGerais(doc, mapaAtivos, dadosSuspensos, somenteResumo, agora) {
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 16;
-        const uw = pw - 2 * m;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const carimbo = `${hoje} ${hora}`;
-
-        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
-        doc.text('Estatísticas Gerais', m, 17);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
-
-        let y = 48;
-        const atuacoes = Object.keys(mapaAtivos);
-        if (atuacoes.length) {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
-            doc.text('Processos Ativos', m, y);
-            y += 8;
-
-            const total = atuacoes.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            if (atuacoes.length === 1) {
-                desenharCard(doc, m, y, uw, 26, atuacoes[0], String(total), [], true, COR.azul);
-                y += 26 + 10;
-            } else {
-                const corpo = atuacoes.map(a => ({ atuacao: a, total: String(mapaAtivos[a]), _forte: false }));
-                corpo.push({ atuacao: 'Total', total: String(total), _forte: true });
-                doc.autoTable({
-                    columns: [{ header: 'Atuação', dataKey: 'atuacao' }, { header: 'Processos Ativos', dataKey: 'total' }],
-                    body: corpo,
-                    startY: y,
-                    margin: { left: m, right: m },
-                    theme: 'grid',
-                    styles: { font: 'PublicSans', fontSize: 9, cellPadding: 3, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                    headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 9 },
-                    alternateRowStyles: { fillColor: COR.cartao },
-                    columnStyles: { atuacao: { cellWidth: uw * 0.7 }, total: { cellWidth: uw * 0.3, halign: 'right' } },
-                    didParseCell: (data) => {
-                        if (data.section === 'body' && corpo[data.row.index]._forte) {
-                            data.cell.styles.fontStyle = 'bold'; data.cell.styles.textColor = COR.tinta;
-                        }
-                    },
-                });
-                y = doc.lastAutoTable.finalY + 10;
-            }
-        }
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
-        doc.text('Processos Suspensos por Prazo Indeterminado', m, y);
-        y += 8;
-        desenharCard(doc, m, y, uw, 26, 'Processos suspensos', String(dadosSuspensos.length), [], true, COR.ambar);
-        y += 26 + 10;
-
-        if (!somenteResumo && dadosSuspensos.length) {
-            const corpoS = dadosSuspensos.slice()
-                .sort((a, b) => (b.dias == null ? -1 : b.dias) - (a.dias == null ? -1 : a.dias))
-                .map(d => ({ processo: d.processo, classe: d.classe, inicio: d.inicioSuspensao, dias: d.dias == null ? '—' : String(d.dias) }));
-            doc.autoTable({
-                columns: [
-                    { header: 'Processo', dataKey: 'processo' },
-                    { header: 'Classe', dataKey: 'classe' },
-                    { header: 'Início Suspensão', dataKey: 'inicio' },
-                    { header: 'Dias Paralisado', dataKey: 'dias' },
-                ],
-                body: corpoS,
-                startY: y,
-                margin: { left: m, right: m, top: m, bottom: 14 },
-                theme: 'grid',
-                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8.5 },
-                alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: {
-                    processo: { cellWidth: uw * 0.3 }, classe: { cellWidth: uw * 0.3 },
-                    inicio: { cellWidth: uw * 0.2, halign: 'right' }, dias: { cellWidth: uw * 0.2, halign: 'right' },
-                },
-                didDrawPage: () => desenharRodape(doc, 'Estatísticas Gerais', carimbo, pw, ph, m, false),
-            });
-        } else {
-            desenharRodape(doc, 'Estatísticas Gerais', carimbo, pw, ph, m, false);
-        }
-    }
-
-    // Página "Situação da Unidade" (substitui a antiga capa/índice): separa a unidade em
-    // duas frentes — Cartório (tramitação) e Gabinete (decisão) — cada uma com seu
-    // próprio veredito de situação, pensada para leitura rápida numa correição.
-    function desenharCapaSituacao(doc, cartorio, gabinete, agora, primeira) {
+    // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
+    // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
+    // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
+    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira) {
         if (!primeira) doc.addPage();
         const pw = doc.internal.pageSize.getWidth();
         const m = 16;
@@ -1735,6 +1653,27 @@
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
 
         let y = 44;
+
+        // ═══ PROCESSOS ATIVOS — condensado, uma linha, sem tabela ═══
+        const atuacoes = Object.keys(mapaAtivos);
+        if (atuacoes.length) {
+            const total = atuacoes.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
+            const detalheAtivos = atuacoes.length > 1
+                ? atuacoes.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
+                : atuacoes[0];
+            doc.setFillColor(...COR.cartao); doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
+            doc.roundedRect(m, y, uw, 18, 1.5, 1.5, 'FD');
+            doc.setFillColor(...COR.azul); doc.roundedRect(m, y, 1.8, 18, 0.9, 0.9, 'F');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
+            doc.text('PROCESSOS ATIVOS', m + 6, y + 7);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(String(total), m + 6, y + 14.5);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            const linhasDetalhe = doc.splitTextToSize(detalheAtivos, uw - 55);
+            doc.text(linhasDetalhe[0], m + 45, y + 11);
+            y += 18 + 10;
+        }
+
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(8.3); doc.setTextColor(...COR.muted);
         const legenda = 'Situação calculada pela pendência mais antiga de cada tarefa/magistrado(a). Cartório — '
             + 'Regular até 30 dias, Atenção de 31 a 90 dias, Crítico acima de 90 dias. Gabinete — Regular até 30 '
@@ -1745,7 +1684,7 @@
 
         y = desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Cartório',
-            subtitulo: 'Juntadas · Retorno de Conclusos · Paralisados · Remessas Pendentes',
+            subtitulo: 'Juntadas · Retorno de Conclusos · Paralisados · Remessas Pendentes · Suspensos p/ Prazo Indeterminado',
             situacao: cartorio.situacao,
             colunaRotulo: 'Tarefa',
             itens: cartorio.itens,
@@ -1787,21 +1726,16 @@
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
-        // CFG_SUSPENSOS não tem resumo/tabela genéricos (cfg.pdf) — vai para a seção
-        // "Estatísticas Gerais", tratada à parte logo abaixo, então fica de fora daqui.
-        const secoes = secoesEntrada
-            .filter(s => s.cfg !== CFG_SUSPENSOS)
-            .map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
+        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
 
-        const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS];
+        // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
+        // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
+        const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS];
         const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal) && s.dados.length);
         const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES && s.dados.length);
-        const secaoSuspensos = secoesEntrada.find(s => s.cfg === CFG_SUSPENSOS);
-        // Seções fora do esquema Cartório/Gabinete/Estatísticas Gerais (hoje só o Tempo
-        // Médio, desativado da automação, mas ainda aceito se alguém montar a fila
-        // manualmente) entram depois, sem capa/veredito dedicado — mantém o relatório
-        // funcional mesmo nesse caso.
-        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES, CFG_SUSPENSOS];
+        // Seções fora do esquema Cartório/Gabinete (hoje só o Tempo Médio) entram depois,
+        // sem capa/veredito dedicado — mantém o relatório funcional mesmo nesse caso.
+        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES];
         const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal) && s.dados.length);
 
         // Limites de dias (pendência mais antiga) por domínio — ver legenda em
@@ -1858,24 +1792,15 @@
         }
 
         const mapaAtivos = lerMapaAtivos();
-        const dadosSuspensos = secaoSuspensos ? secaoSuspensos.dados : [];
-        const temEstatisticas = Object.keys(mapaAtivos).length > 0 || dadosSuspensos.length > 0;
-        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0;
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || Object.keys(mapaAtivos).length > 0;
         let usouPagina1 = false;
 
-        // ═══ ESTATÍSTICAS GERAIS — primeiro dado do relatório (nem Cartório, nem
-        // Gabinete): processos ativos por atuação e processos suspensos por prazo
-        // indeterminado ═══
-        if (temEstatisticas) {
-            desenharEstatisticasGerais(doc, mapaAtivos, dadosSuspensos, somenteResumo, agora);
-            doc.outline.add(null, 'Estatísticas Gerais', { pageNumber: 1 });
-            usouPagina1 = true;
-        }
-
+        // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
+        // Gabinete. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            desenharCapaSituacao(doc, cartorio, gabinete, agora, primeira);
+            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
             doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
             usouPagina1 = true;
         }
@@ -2605,7 +2530,7 @@
         const form = formularioTempoMedio();
         if (!form) return;
 
-        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO[3];
+        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO.find(p => p.id === '1a');
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
@@ -2749,7 +2674,7 @@
             // Automação: se chegamos aqui vindos do fluxo de automação, preenche e
             // pesquisa sozinho (sem esperar clique manual), usando o período escolhido no painel.
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
-                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '3a';
+                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1a';
                 console.log(`[Projudi TM] automação: preenchendo e pesquisando com período="${periodoTM}"`);
                 store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
                 preencherEPesquisarTempoMedio(periodoTM);
@@ -2766,7 +2691,7 @@
                 opt.textContent = p.rotulo;
                 sel.appendChild(opt);
             });
-            sel.value = '3a'; // padrão: últimos 3 anos
+            sel.value = '1a'; // padrão: último 1 ano
             buttonBar.appendChild(sel);
 
             const b = document.createElement('button');
@@ -2934,12 +2859,10 @@
         { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', precisaPreencher: false },
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              precisaPreencher: false },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   precisaPreencher: false },
-        // DESATIVADO TEMPORARIAMENTE (a pedido do usuário — o relatório de Tempo Médio
-        // ainda não está do jeito desejado). O relatório continua funcionando normalmente
-        // na própria página dele (botões "Preencher e Pesquisar"/"Extrair"); só não
-        // participa da automação/painel enquanto isso. Reative descomentando a linha
-        // abaixo quando o ajuste do Tempo Médio estiver pronto.
-        // { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
+        // Reabilitado (v14.3) — mas fica DESMARCADO por padrão no painel (ver
+        // injetarPainel): o usuário precisa marcar explicitamente para incluí-lo na
+        // automação.
+        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            precisaPreencher: true },
         // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
         // situação), não direto nos resultados — por isso também precisam do passo de
         // preencher+pesquisar antes de coletar.
@@ -3178,7 +3101,7 @@
         fila = (fila || []).filter(k => relatorioPorChave(k));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
-        store.setItem('projudi_auto_periodo_tm', periodoTM || '3a');
+        store.setItem('projudi_auto_periodo_tm', periodoTM || '1a');
         const primeiro = relatorioPorChave(fila[0]);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
@@ -3266,10 +3189,7 @@
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        // O checkbox do Tempo Médio (.pa-item-desativado) fica de fora — ele deve
-        // permanecer sempre desabilitado, mesmo quando os demais são reabilitados.
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
-            if (el.closest('.pa-item-desativado')) return;
             el.disabled = emCurso;
         });
 
@@ -3298,18 +3218,11 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
+        // Tempo Médio vem DESMARCADO por padrão (o usuário precisa optar por incluí-lo);
+        // os demais relatórios continuam marcados por padrão, como sempre.
         const linhasCheckboxArr = REPORTS_AUTOMACAO.map(r => `
                     <label class="pa-item">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" checked> ${r.rotulo}
-                    </label>`);
-        // Tempo Médio foi retirado de REPORTS_AUTOMACAO (temporariamente desativado — ver
-        // comentário lá), mas continua aparecendo na lista, só que travado/escurecido, para
-        // deixar claro que a opção existe e vai voltar quando o relatório for ajustado.
-        const idxRetorno = REPORTS_AUTOMACAO.findIndex(r => r.key === 'retorno');
-        linhasCheckboxArr.splice(idxRetorno + 1, 0, `
-                    <label class="pa-item pa-item-desativado" title="Temporariamente desativado enquanto o relatório de Tempo Médio está em ajuste">
-                        <input type="checkbox" class="pa-check" disabled> Tempo Médio
-                        <span class="pa-nota-desativado">(temporariamente desativado)</span>
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}
                     </label>`);
         const linhasCheckbox = linhasCheckboxArr.join('');
         painel.innerHTML = `
@@ -3346,7 +3259,7 @@
             const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key).filter(Boolean);
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
-            const periodoTM = periodoSelTM ? periodoSelTM.value : '3a';
+            const periodoTM = periodoSelTM ? periodoSelTM.value : '1a';
             iniciarAutomacao(fila, periodoTM);
         };
         painel.querySelector('#pa-pdf').onclick = () => {
