@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.2
+// @version      16.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2039,10 +2039,19 @@
 
         // Período de referência (salvo quando o usuário preencheu o formulário)
         let periodoStr = '';
-        try {
-            const per = JSON.parse(store.getItem('projudi_tempomedio_periodo') || '{}');
+        let fimPeriodo = '';
+        {
+            // Mesma proteção contra JSON codificado em camadas usada em lerFilaMesesTempoMedio.
+            let v = store.getItem('projudi_tempomedio_periodo') || '{}';
+            let t = 0;
+            while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { v = {}; break; } t++; }
+            const per = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
             if (per.ini || per.fim) periodoStr = `${per.ini || '?'} a ${per.fim || '?'}`;
-        } catch (e) {}
+            fimPeriodo = per.fim || '';
+        }
+        // "Até dd/mm" (sem o ano — o termo final é sempre dentro do período já mostrado no
+        // subtítulo) usado no rótulo do KPI de não cumpridas, ver abaixo.
+        const fimCurto = fimPeriodo ? fimPeriodo.slice(0, 5) : '';
 
         // Decisões ainda não cumpridas (dtCartorio vazia = cartório não analisou ainda)
         const naoCumpridas = dados.filter(d => !d.dtCartorio);
@@ -2071,7 +2080,7 @@
         desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [], true, COR.azul);
         desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.aqua);
         desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
-        desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, 'Não cumpridas', String(naoCumpridas.length),
+        desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, `Não cumpridas${fimCurto ? ` (até ${fimCurto})` : ''}`, String(naoCumpridas.length),
             [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.ambar);
 
         // Linha 2: tempo médio prioritários vs não prioritários (centralizados)
