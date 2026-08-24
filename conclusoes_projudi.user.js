@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      15.2
+// @version      15.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3411,9 +3411,6 @@
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
         atualizarPainel();
-        // Mantém o painel vivo e conduz a navegação da automação (a coleta ocorre no
-        // frame de conteúdo, que pode não recarregar este frame) — poll leve.
-        setInterval(() => { atualizarPainel(); passoAutomacao(); }, 2000);
     }
 
     GM_addStyle(`
@@ -3508,12 +3505,26 @@
         #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
     `);
 
+    // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
+    // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
+    // sem a qual a automação fica parada sem nenhum aviso ao usuário.
+    function chamarSeguro(fn, nome) {
+        try { fn(); }
+        catch (err) { console.error(`[Projudi] erro em ${nome}:`, err); }
+    }
+
     function bootstrap() {
         console.log(`[Projudi] bootstrap — URL: ${location.href}`);
-        gravarProcessosAtivosSeDisponivel(); // nº de processos ativos, só existe na página inicial
-        injetarBotoes();       // botões nos relatórios (buttonBar)
-        injetarPainel();       // painel de automação (página com o menu)
-        passoAutomacao();      // avança a automação se estiver em estado de navegação
+        chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
+        chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
+        chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
+        chamarSeguro(passoAutomacao, 'passoAutomacao'); // avança a automação se estiver em estado de navegação
+        // Conduz a navegação da automação em QUALQUER página (não só na página inicial,
+        // onde fica o painel) — a coleta ocorre no frame de conteúdo, que pode não ser o
+        // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
+        // página, uma falha na tentativa imediata (ex.: frame ainda carregando) deixava a
+        // automação parada até uma ação manual do usuário.
+        setInterval(() => { chamarSeguro(atualizarPainel, 'atualizarPainel'); chamarSeguro(passoAutomacao, 'passoAutomacao'); }, 2000);
     }
 
     if (document.readyState === 'loading') {
