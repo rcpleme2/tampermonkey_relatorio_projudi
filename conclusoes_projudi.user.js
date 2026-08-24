@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.0
+// @version      16.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2598,7 +2598,11 @@
     }
 
     function lerFilaMesesTempoMedio() {
-        try { return JSON.parse(store.getItem(CHAVE_FILA_MESES_TM) || '[]'); } catch (e) { return []; }
+        // Mesma proteção usada em lerDadosDe/desembrulharArray: o valor às vezes volta
+        // JSON-codificado em camadas (visto em outros relatórios) — sem isso, um
+        // JSON.parse único deixava "fila" como STRING (não array), e fila[0] virava um
+        // caractere solto em vez do objeto do mês, gerando datas "undefined" na pesquisa.
+        return desembrulharArray(store.getItem(CHAVE_FILA_MESES_TM)) || [];
     }
 
     // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial/final com o PRÓXIMO
@@ -2639,7 +2643,11 @@
         // pesquisa (mês mais recente) e o "ini" vai sendo sobrescrito a cada mês seguinte,
         // terminando no início do mês mais antigo depois que a fila inteira for processada.
         const periodoAnterior = (() => {
-            try { return JSON.parse(store.getItem('projudi_tempomedio_periodo') || '{}'); } catch (e) { return {}; }
+            // Mesma proteção contra JSON codificado em camadas usada em lerFilaMesesTempoMedio.
+            let v = store.getItem('projudi_tempomedio_periodo') || '{}';
+            let t = 0;
+            while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { return {}; } t++; }
+            return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
         })();
         store.setItem('projudi_tempomedio_periodo', JSON.stringify({
             ini: campoInicio ? campoInicio.value : '',
