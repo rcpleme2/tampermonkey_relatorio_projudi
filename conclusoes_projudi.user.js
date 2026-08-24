@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.6
+// @version      16.7
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -113,9 +113,20 @@
     // Extrai o login do usuário do mesmo texto da célula "Dt. Análise Cartório" (ex.:
     // "16/07/2026" + "12849252930.est" em linhas separadas) — usado para agrupar o Tempo
     // Médio por usuário do cartório, já que o Projudi não expõe essa coluna separada.
+    // Antes procurava o padrão "dígitos.sufixo" em td.textContent inteiro — mas a célula
+    // pode ter OUTRO token nesse mesmo formato em algum elemento anterior (ex.: um ícone
+    // de ajuda escondido), e o regex sempre casava com o primeiro que aparecesse — na
+    // prática, sempre um token com o mesmo sufixo fixo (".tec"), nunca o login de verdade
+    // quando o sufixo era outro (".anl", ".est" etc.). Em vez de casar por padrão em
+    // qualquer lugar da célula, pega pela POSIÇÃO: a linha depois do <br> — a data fica
+    // na primeira linha, o login sempre na última.
     function usuarioDeTexto(td) {
-        const m = /(\d{5,}\.\w+)/.exec(td ? td.textContent : '');
-        return m ? m[1] : '';
+        if (!td) return '';
+        const partes = (td.innerHTML || '').split(/<br\s*\/?>/i);
+        if (partes.length < 2) return '';
+        const ultimaLinha = norm(partes[partes.length - 1].replace(/<[^>]+>/g, ' '));
+        const m = /(\d{5,}\.\w+)/.exec(ultimaLinha);
+        return m ? m[1] : ultimaLinha;
     }
 
     // Competência = o nome completo da Atuação (ex.: "Vara de Família de Curitiba")
