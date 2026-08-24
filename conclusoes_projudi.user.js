@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      15.1
+// @version      15.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3339,11 +3339,11 @@
             <div class="pa-head">
                 <span class="pa-titulo">Automação de relatórios</span>
                 <div class="pa-icons">
-                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Expandir">▼</button>
                     <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
-            <div class="pa-body">
+            <div class="pa-body" style="display:none;">
                 <div class="pa-state-row">
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
@@ -3407,6 +3407,7 @@
             const recolhido = body.style.display === 'none';
             body.style.display = recolhido ? '' : 'none';
             btn.textContent = recolhido ? '▲' : '▼';
+            btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
         atualizarPainel();
@@ -3423,6 +3424,9 @@
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
             box-shadow: 0 1px 4px rgba(26,26,26,.08); overflow: hidden;
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
+            /* +50% no tamanho todo (texto, ícones, espaçamentos) de uma vez só — escala o
+               que já estava desenhado em vez de recalcular cada valor em px/em. */
+            zoom: 1.5;
         }
         #painel-automacao .pa-head {
             display: flex; align-items: center; justify-content: space-between;
