@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.5
+// @version      15.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -325,8 +325,10 @@
                 { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 15, pagina2: true },
                 // Largura total (span 2) para caber o nome completo do tipo de documento
                 { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
-                // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o restante)
-                { titulo: 'Processos com Mais Juntadas Pendentes (15 maiores)', campo: 'processo', topN: 15, span: 2, semOutros: true, pagina2: true },
+                // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o
+                // restante). minValor: 2 — só processos com MAIS DE UMA juntada pendente;
+                // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
+                { titulo: 'Processos com mais de uma juntada pendente (15 maiores)', campo: 'processo', topN: 15, span: 2, semOutros: true, minValor: 2, pagina2: true },
             ],
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
@@ -827,7 +829,7 @@
 
     // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
     // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
-    function contarPorCampo(dados, campo, topN, limpar, semOutros) {
+    function contarPorCampo(dados, campo, topN, limpar, semOutros, minValor) {
         const mapa = new Map();
         dados.forEach(d => {
             let k = (d[campo] || '').trim();
@@ -836,6 +838,9 @@
             mapa.set(k, (mapa.get(k) || 0) + 1);
         });
         let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
+        // minValor descarta contagens baixas antes do corte de topN (ex.: "processos com
+        // mais de uma juntada pendente" não deve trazer processos com apenas uma).
+        if (minValor != null) arr = arr.filter(i => i.valor >= minValor);
         if (arr.length > topN) {
             if (semOutros) {
                 arr = arr.slice(0, topN);
@@ -1243,7 +1248,12 @@
             // de 10, sem espremer os gráficos que ficam na página 1).
             const chartsTodos = [
                 { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
-                ...p.distribuicoes.map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros), pagina2: !!g.pagina2 })),
+                // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
+                // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
+                // vez de aparecer vazios.
+                ...p.distribuicoes
+                    .map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros, g.minValor), pagina2: !!g.pagina2 }))
+                    .filter(c => c.itens.length),
             ];
             const chartsP1 = chartsTodos.filter(c => !c.pagina2);
             const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
@@ -1592,32 +1602,52 @@
         doc.rect(x, y, w, headH, 'FD');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
         doc.text(cfg.titulo, x + 6, y + 9.5);
-        const tituloW = doc.getTextWidth(cfg.titulo);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
-        doc.text(cfg.subtitulo, x + 6 + tituloW + 6, y + 9.5);
 
-        let yy = y + headH + 6;
+        let yy = y + headH + 5;
+        // Observação (substitui o antigo subtítulo com a lista de tarefas) — explica o
+        // critério de situação usado especificamente neste domínio.
+        if (cfg.observacao) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+            const linhasObs = doc.splitTextToSize(cfg.observacao, w - 12);
+            doc.text(linhasObs, x + 6, yy);
+            yy += linhasObs.length * 3.4 + 5;
+        }
+
         const gap = 5;
         const kW = (w - (cfg.kpis.length - 1) * gap) / cfg.kpis.length;
         cfg.kpis.forEach((k, i) => desenharCard(doc, x + i * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
         yy += 22 + 7;
 
         if (!cfg.itens.length) return yy;
+        // colunaExtra (opcional): coluna adicional entre Prioritários e Mais antiga,
+        // calculada a partir dos dados brutos do item (ex.: pré-analisados no Gabinete).
+        const temExtra = !!cfg.colunaExtra;
         const corpo = cfg.itens.map(it => {
             const infoIt = SITUACAO_INFO[it.status] || SITUACAO_INFO.regular;
-            return {
+            const linha = {
                 rotulo: it.rotulo, pendentes: String(it.pendentes), prioritarios: String(it.prioritarios),
                 antiga: it.maisAntiga != null ? `${it.maisAntiga} dias` : '—', situacao: infoIt.rotulo, _cor: infoIt.cor,
             };
+            if (temExtra) linha.extra = String(cfg.colunaExtra.get(it.dados || []));
+            return linha;
         });
+        const colunas = [
+            { header: cfg.colunaRotulo, dataKey: 'rotulo' },
+            { header: 'Pendentes', dataKey: 'pendentes' },
+            { header: 'Prioritários', dataKey: 'prioritarios' },
+        ];
+        if (temExtra) colunas.push({ header: cfg.colunaExtra.header, dataKey: 'extra' });
+        colunas.push({ header: 'Mais antiga', dataKey: 'antiga' }, { header: 'Situação', dataKey: 'situacao' });
+        const columnStyles = {
+            rotulo: { cellWidth: w * (temExtra ? 0.28 : 0.34), fontStyle: 'bold', textColor: COR.tinta },
+            pendentes: { cellWidth: w * (temExtra ? 0.13 : 0.16), halign: 'right' },
+            prioritarios: { cellWidth: w * (temExtra ? 0.13 : 0.16), halign: 'right' },
+            antiga: { cellWidth: w * (temExtra ? 0.14 : 0.16), halign: 'right' },
+            situacao: { cellWidth: w * (temExtra ? 0.16 : 0.18) },
+        };
+        if (temExtra) columnStyles.extra = { cellWidth: w * 0.16, halign: 'right' };
         doc.autoTable({
-            columns: [
-                { header: cfg.colunaRotulo, dataKey: 'rotulo' },
-                { header: 'Pendentes', dataKey: 'pendentes' },
-                { header: 'Prioritários', dataKey: 'prioritarios' },
-                { header: 'Mais antiga', dataKey: 'antiga' },
-                { header: 'Situação', dataKey: 'situacao' },
-            ],
+            columns: colunas,
             body: corpo,
             startY: yy,
             margin: { left: x, right: pw - x - w },
@@ -1625,13 +1655,7 @@
             styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                rotulo: { cellWidth: w * 0.34, fontStyle: 'bold', textColor: COR.tinta },
-                pendentes: { cellWidth: w * 0.16, halign: 'right' },
-                prioritarios: { cellWidth: w * 0.16, halign: 'right' },
-                antiga: { cellWidth: w * 0.16, halign: 'right' },
-                situacao: { cellWidth: w * 0.18 },
-            },
+            columnStyles,
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'situacao') {
                     data.cell.styles.textColor = corpo[data.row.index]._cor;
@@ -1681,17 +1705,12 @@
             y += 18 + 10;
         }
 
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(8.3); doc.setTextColor(...COR.muted);
-        const legenda = 'Situação calculada pela pendência mais antiga de cada tarefa/magistrado(a). Cartório — '
-            + 'Regular até 30 dias, Atenção de 31 a 90 dias, Crítico acima de 90 dias. Gabinete — Regular até 30 '
-            + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.';
-        const linhasLegenda = doc.splitTextToSize(legenda, uw);
-        doc.text(linhasLegenda, m, y);
-        y += linhasLegenda.length * 3.6 + 10;
-
+        // A observação sobre o critério de situação (Regular/Atenção/Crítico) fica dentro
+        // de cada bloco (ver cfg.observacao em desenharBlocoDominio), não mais aqui em cima.
         y = desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Cartório',
-            subtitulo: 'Juntadas · Retorno de Conclusos · Paralisados · Remessas Pendentes · Suspensos p/ Prazo Indeterminado',
+            observacao: 'Situação calculada pela pendência mais antiga de cada tarefa. Regular até 30 dias, '
+                + 'Atenção de 31 a 90 dias, Crítico acima de 90 dias.',
             situacao: cartorio.situacao,
             colunaRotulo: 'Tarefa',
             itens: cartorio.itens,
@@ -1709,15 +1728,16 @@
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
-            subtitulo: 'Conclusões pendentes de decisão, por magistrado(a)',
+            observacao: 'Situação calculada pela pendência mais antiga de cada magistrado(a). Regular até 30 '
+                + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.',
             situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
+            colunaExtra: { header: 'Pré-analisados', get: (dados) => dados.filter(d => !!d.preAnalise).length },
             kpis: [
                 { titulo: 'Conclusões pendentes', valor: String(gabinete.totalPendentes) },
                 { titulo: 'Prioritários', valor: String(gabinete.totalPrioritarios),
                   sub: gabinete.totalPendentes ? `${Math.round(gabinete.totalPrioritarios / gabinete.totalPendentes * 100)}% do total` : '' },
-                { titulo: 'Magistrados em situação crítica', valor: `${gabinete.itens.filter(it => it.status === 'critico').length} de ${gabinete.itens.length}` },
             ],
         });
     }
@@ -1859,7 +1879,9 @@
         // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
         // ao resumo" (a página do resumo já é conhecida, desenhada no passo 1) ═══
         if (!somenteResumo) {
-            itensCartorio.forEach(t => {
+            // Sem pendências, não há o que discriminar — dispensa a tabela (mas o resumo com
+            // o KPI já foi desenhado no passo 1 de qualquer forma, ex.: Suspensos zerado).
+            itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
                 t.pgTabela = t.secao.montarTabela(doc, t.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
                 doc.outline.add(bmCartorio, `${t.rotulo} — tabela detalhada`, { pageNumber: t.pgTabela });
             });
@@ -1875,7 +1897,7 @@
 
             // ═══ PASSO 3: volta a cada resumo e desenha "Ver tabela detalhada →" agora
             // que a página da tabela é conhecida ═══
-            itensCartorio.forEach(t => {
+            itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
                 doc.setPage(t.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', t.pgTabela, pw, ph);
             });
@@ -2099,7 +2121,7 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — todos os resultados');
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo Médio de Cumprimento');
 
         const colunas = [
             { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -2254,7 +2276,7 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — todos os resultados');
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Processos Paralisados');
 
         const colunas = [
             { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -2407,7 +2429,7 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — todos os resultados');
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Remessas em Aberto');
 
         const colunas = [
             { header: 'Processo', width: 32, get: (d) => d.processo },
@@ -2670,6 +2692,10 @@
                 const urlRe = rel && urlEsperadaRelatorio(rel.navAlvo);
                 if (rel && urlRe && urlRe.test(location.href)) {
                     console.log(`[Auto Projudi] "${rel.rotulo}" sem tabela de resultados (0 registros) — avançando automação`);
+                    // Sem isso, "0 registros" (nunca chega a passar por criarColetor) ficava
+                    // indistinguível de "nunca coletado" — e o card sumia do PDF conjunto em
+                    // vez de mostrar 0 pendências (ver KEY_COLETADO em criarColetor).
+                    store.setItem(rel.cfg.prefixo + 'coletado', '1');
                     avancarAutomacao(rel.cfg);
                 }
             }
@@ -2775,13 +2801,21 @@
             return b;
         };
 
-        buttonBar.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
-        buttonBar.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
+        // Os botões de extração individual ficam ocultos por padrão (ver
+        // CHAVE_MOSTRAR_BOTOES) — a extração automatizada não depende deles, chama
+        // coletor.iniciar()/pdf()/etc. diretamente. O usuário reabilita pelo painel.
+        const wrapExtracao = document.createElement('span');
+        wrapExtracao.id = 'projudi-extracao-individual';
+        if (!mostrarBotoesIndividuais()) wrapExtracao.style.display = 'none';
+        buttonBar.appendChild(wrapExtracao);
+
+        wrapExtracao.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
+        wrapExtracao.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
         // Conclusões só oferece planilha ou PDF por Juiz (abaixo) — o botão genérico de
         // PDF (resumo único + tabela, sem distinguir por juiz) não faz sentido aqui e
         // ficaria redundante ao lado do PDF por Juiz.
         if ((cfg.pdf || cfg.pdfCustom) && !cfg.pdfPorJuiz) {
-            buttonBar.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
+            wrapExtracao.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
                 const chk = document.getElementById('chk-somente-resumo');
                 coletor.pdf(!!(chk && chk.checked));
             }));
@@ -2789,18 +2823,18 @@
             rotuloResumo.className = 'projudi-chk-resumo';
             rotuloResumo.title = 'Gera o PDF só com o resumo (KPIs e gráficos), sem a tabela discriminada de processos';
             rotuloResumo.innerHTML = '<input type="checkbox" id="chk-somente-resumo"> Só resumo (sem tabela)';
-            buttonBar.appendChild(rotuloResumo);
+            wrapExtracao.appendChild(rotuloResumo);
         }
         if (cfg.pdfPorJuiz) {
-            buttonBar.appendChild(mk('btn-pdf-juiz',
+            wrapExtracao.appendChild(mk('btn-pdf-juiz',
                 'Gera um PDF com uma seção por juiz responsável (pendências por tipo, agrupador e pré-análise) — pronto para expedir a cada um',
                 () => coletor.pdfPorJuiz(), 'PDF por Juiz'));
         }
-        buttonBar.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
+        wrapExtracao.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
 
         const status = document.createElement('span');
         status.id = 'exportar-status';
-        buttonBar.appendChild(status);
+        wrapExtracao.appendChild(status);
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const relAtual = relatorioPorCfg(cfg);
@@ -2837,6 +2871,12 @@
     //        -> início -> habilita "PDF conjunto". O estado persiste no localStorage,
     //        então dá para rodar de novo em outra Atuação e ACUMULAR várias competências.
     const AUTO_ESTADO = 'projudi_auto_estado';
+
+    // Botões de extração individual (Extrair/Baixar/PDF/Limpar) em cada tela de relatório
+    // ficam OCULTOS por padrão — a extração normal é pelo painel de automação da página
+    // inicial. O usuário reabilita marcando a opção no próprio painel (ver injetarPainel).
+    const CHAVE_MOSTRAR_BOTOES = 'projudi_mostrar_botoes_individuais';
+    function mostrarBotoesIndividuais() { return store.getItem(CHAVE_MOSTRAR_BOTOES) === '1'; }
 
     function desembrulharArray(valor) {
         let v = valor, t = 0;
@@ -3248,7 +3288,10 @@
 
     function injetarPainel() {
         if (document.getElementById('painel-automacao')) return;
-        // Só na página que hospeda o menu principal (evita duplicar em outros frames)
+        // Só na página que hospeda o menu principal (evita duplicar em outros frames).
+        // Tentativa anterior de inserir como "quarto menu" da página inicial (ao lado de
+        // Dados do Juízo/Processos Ativos/Últimas Mensagens) não deu certo na prática —
+        // volta a ser um painel flutuante, como antes.
         if (!document.querySelector('#main-menu')) return;
         // Não injeta sobre a tela de resultados de um relatório
         if (detectarConfig()) return;
@@ -3281,11 +3324,11 @@
             <div class="pa-head">
                 <span class="pa-titulo">Automação de relatórios</span>
                 <div class="pa-icons">
-                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Expandir">▼</button>
                     <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
-            <div class="pa-body">
+            <div class="pa-body" style="display:none;">
                 <div class="pa-state-row">
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
@@ -3302,6 +3345,9 @@
                 </div>
                 <label class="pa-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
                     <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
+                </label>
+                <label class="pa-resumo" title="Reexibe os botões de Extrair/Baixar/PDF/Limpar em cada tela de relatório (fora do painel de automação)">
+                    <input type="checkbox" id="pa-mostrar-botoes"${mostrarBotoesIndividuais() ? ' checked' : ''}> Mostrar botões individuais nos relatórios
                 </label>
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
@@ -3325,6 +3371,9 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
+            store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
+        };
         painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
         painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
         painel.querySelector('.pa-btn-colapsar').onclick = () => {
@@ -3333,12 +3382,10 @@
             const recolhido = body.style.display === 'none';
             body.style.display = recolhido ? '' : 'none';
             btn.textContent = recolhido ? '▲' : '▼';
+            btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
         atualizarPainel();
-        // Mantém o painel vivo e conduz a navegação da automação (a coleta ocorre no
-        // frame de conteúdo, que pode não recarregar este frame) — poll leve.
-        setInterval(() => { atualizarPainel(); passoAutomacao(); }, 2000);
     }
 
     GM_addStyle(`
@@ -3428,12 +3475,26 @@
         #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
     `);
 
+    // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
+    // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
+    // sem a qual a automação fica parada sem nenhum aviso ao usuário.
+    function chamarSeguro(fn, nome) {
+        try { fn(); }
+        catch (err) { console.error(`[Projudi] erro em ${nome}:`, err); }
+    }
+
     function bootstrap() {
         console.log(`[Projudi] bootstrap — URL: ${location.href}`);
-        gravarProcessosAtivosSeDisponivel(); // nº de processos ativos, só existe na página inicial
-        injetarBotoes();       // botões nos relatórios (buttonBar)
-        injetarPainel();       // painel de automação (página com o menu)
-        passoAutomacao();      // avança a automação se estiver em estado de navegação
+        chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
+        chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
+        chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
+        chamarSeguro(passoAutomacao, 'passoAutomacao'); // avança a automação se estiver em estado de navegação
+        // Conduz a navegação da automação em QUALQUER página (não só na página inicial,
+        // onde fica o painel) — a coleta ocorre no frame de conteúdo, que pode não ser o
+        // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
+        // página, uma falha na tentativa imediata (ex.: frame ainda carregando) deixava a
+        // automação parada até uma ação manual do usuário.
+        setInterval(() => { chamarSeguro(atualizarPainel, 'atualizarPainel'); chamarSeguro(passoAutomacao, 'passoAutomacao'); }, 2000);
     }
 
     if (document.readyState === 'loading') {
