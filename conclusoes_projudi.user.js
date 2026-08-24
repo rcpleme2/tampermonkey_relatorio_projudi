@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.4
+// @version      16.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2135,7 +2135,10 @@
         // complementar não cabe na primeira (que já vem cheia com os 4+2+1 KPIs e os
         // dois gráficos anteriores). Login extraído da própria célula "Dt. Análise
         // Cartório" (ver usuarioDeTexto) — o Projudi não expõe essa coluna separada.
-        const porUsuario = agregarMedia(validos, 'usuarioCartorio', 'dias', 20);
+        // Quantidade de atos cumpridos por pessoa entre parênteses no próprio rótulo
+        // (agregarMedia já calcula "n" — só falta compor o texto).
+        const porUsuario = agregarMedia(validos, 'usuarioCartorio', 'dias', 20)
+            .map(it => ({ ...it, label: `${it.label} (${it.n})` }));
         if (porUsuario.length) {
             doc.addPage();
             let hy2 = m + 2;
@@ -2600,6 +2603,7 @@
         { id: '1m',  rotulo: 'Último mês completo',          meses: 1 },
         { id: '6m',  rotulo: 'Últimos 6 meses completos',    meses: 6 },
         { id: '1a',  rotulo: 'Últimos 12 meses completos',   meses: 12 },
+        { id: '2a',  rotulo: 'Últimos 24 meses completos',   meses: 24 },
     ];
 
     function formatarDataBR(d) {
