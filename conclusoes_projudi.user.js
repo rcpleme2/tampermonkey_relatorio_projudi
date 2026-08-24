@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.3
+// @version      16.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -107,6 +107,14 @@
     // Extrai a primeira data dd/mm/aaaa de um texto (ex.: "03/07/2026 04680494956.est")
     function dataDeTexto(td) {
         const m = /(\d{2}\/\d{2}\/\d{4})/.exec(td ? td.textContent : '');
+        return m ? m[1] : '';
+    }
+
+    // Extrai o login do usuário do mesmo texto da célula "Dt. Análise Cartório" (ex.:
+    // "16/07/2026" + "12849252930.est" em linhas separadas) — usado para agrupar o Tempo
+    // Médio por usuário do cartório, já que o Projudi não expõe essa coluna separada.
+    function usuarioDeTexto(td) {
+        const m = /(\d{5,}\.\w+)/.exec(td ? td.textContent : '');
         return m ? m[1] : '';
     }
 
@@ -353,13 +361,14 @@
         usaAtuacao: false,
         nomeArquivo: 'tempo_medio_projudi',
         rotulos: { coletar: 'Extrair Tempo Médio', coletarMais: 'Extrair mais (Tempo Médio)', baixar: '⬇ Baixar Tempo Médio' },
-        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
+        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Usuário Cartório', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[1].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
             const dtAnalise = dataDeTexto(tds[3]);
             const dtCartorio = dataDeTexto(tds[4]);
+            const usuarioCartorio = usuarioDeTexto(tds[4]); // login abaixo da data, na mesma célula
             const classeCompleta = textoAteBr(tds[6]) || textoCelula(tds[6]);
             const classe = classeCompleta.split(' (')[0].trim(); // classe sem o "(Assunto Principal)"
             // Dias para cumprimento = Dt. Análise Cartório - Dt. Análise
@@ -369,6 +378,7 @@
                 processo,
                 dtAnalise,
                 dtCartorio,
+                usuarioCartorio,
                 tipoConclusao: textoAteBr(tds[5]),
                 classe,
                 dias,
@@ -377,7 +387,7 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.tipoConclusao, d.classe,
+        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedio(dados, somenteResumo),
     };
@@ -2119,6 +2129,29 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        // ═══ PÁGINA 2 (só quando há dados de usuário): Tempo médio por Usuário do
+        // Cartório — o resumo agora pode passar de uma página quando esse gráfico
+        // complementar não cabe na primeira (que já vem cheia com os 4+2+1 KPIs e os
+        // dois gráficos anteriores). Login extraído da própria célula "Dt. Análise
+        // Cartório" (ver usuarioDeTexto) — o Projudi não expõe essa coluna separada.
+        const porUsuario = agregarMedia(validos, 'usuarioCartorio', 'dias', 20);
+        if (porUsuario.length) {
+            doc.addPage();
+            let hy2 = m + 2;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_TEMPOMEDIO, m, hy2);
+            hy2 += 8;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Gráficos complementares', m, hy2);
+            hy2 += 3;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy2, pw - m, hy2);
+
+            const gY0b = hy2 + 6;
+            const disponivel2 = ph - m - gY0b - 14;
+            desenharBarras(doc, m, gY0b, uw, disponivel2, 'Tempo médio por Usuário (Cartório)', porUsuario, fmtDias, COR.aqua);
+            desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
     }
 
     // Tabela discriminada do relatório de Tempo Médio (sempre inicia em página nova).
@@ -2143,12 +2176,13 @@
         tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo Médio de Cumprimento');
 
         const colunas = [
-            { header: 'Processo', width: 30, get: (d) => d.processo },
-            { header: 'Dt. Análise', width: 22, get: (d) => d.dtAnalise },
-            { header: 'Dt. Análise Cartório', width: 26, get: (d) => d.dtCartorio },
-            { header: 'Tipo de Conclusão', width: 30, get: (d) => d.tipoConclusao },
-            { header: 'Classe Processual', width: 42, get: (d) => d.classe },
-            { header: 'Dias p/ Cumprimento', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            { header: 'Processo', width: 28, get: (d) => d.processo },
+            { header: 'Dt. Análise', width: 20, get: (d) => d.dtAnalise },
+            { header: 'Dt. Análise Cartório', width: 20, get: (d) => d.dtCartorio },
+            { header: 'Usuário Cartório', width: 20, get: (d) => d.usuarioCartorio },
+            { header: 'Tipo de Conclusão', width: 28, get: (d) => d.tipoConclusao },
+            { header: 'Classe Processual', width: 40, get: (d) => d.classe },
+            { header: 'Dias p/ Cumprimento', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
