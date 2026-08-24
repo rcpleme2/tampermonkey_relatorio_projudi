@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      15.5
+// @version      16.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -653,7 +653,16 @@
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
                 const dica = cfg.usaAtuacao ? ' Troque de atuação e colete mais, ou baixe a planilha.' : ' Baixe a planilha ou colete mais.';
                 atualizarStatus(`Coleta concluída. Acumulado: ${total} registros${extra}.${dica}`);
-                avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
+                // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — se ainda
+                // restam meses na fila, volta para a tela de filtros e pesquisa o próximo em
+                // vez de avançar para o próximo relatório da automação.
+                if (cfg === CFG_TEMPOMEDIO && lerFilaMesesTempoMedio().length > 0) {
+                    console.log('[Projudi TM] mês concluído — ainda restam meses na fila, buscando o próximo');
+                    store.setItem(AUTO_ESTADO, 'ir_tempomedio');
+                    setTimeout(passoAutomacao, 900);
+                } else {
+                    avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
+                }
             }
         }
 
@@ -2539,11 +2548,14 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
-    // Períodos pré-configurados para a data inicial do relatório de Tempo Médio.
+    // Quantidade de meses completos buscados pelo relatório de Tempo Médio. Um período
+    // grande (ex.: 1 ano de uma vez) deixa a pesquisa do Projudi lenta — em vez de um único
+    // intervalo, cada opção dispara N pesquisas separadas, uma por mês completo (ver
+    // mesesCompletos/prepararFilaMesesTempoMedio), acumulando tudo no mesmo relatório.
     const PERIODOS_TEMPOMEDIO = [
-        { id: '1m',  rotulo: 'Último mês inteiro', calc: () => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d; } },
-        { id: '6m',  rotulo: 'Últimos seis meses',  calc: () => { const d = new Date(); d.setMonth(d.getMonth() - 6); return d; } },
-        { id: '1a',  rotulo: 'Último 1 ano',        calc: () => { const d = new Date(); d.setFullYear(d.getFullYear() - 1); return d; } },
+        { id: '1m',  rotulo: 'Último mês completo',          meses: 1 },
+        { id: '6m',  rotulo: 'Últimos 6 meses completos',    meses: 6 },
+        { id: '1a',  rotulo: 'Últimos 12 meses completos',   meses: 12 },
     ];
 
     function formatarDataBR(d) {
@@ -2552,20 +2564,62 @@
         return `${dd}/${mm}/${d.getFullYear()}`;
     }
 
-    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial conforme o período
-    // escolhido (select ao lado do botão) e clica em Pesquisar. O diagnóstico anterior (3s)
-    // apontava falha, mas era falso negativo: o site do Projudi é lento e a navegação real
-    // ainda estava em andamento quando o diagnóstico rodou — por isso o timeout de checagem
-    // agora é bem mais longo.
-    function preencherEPesquisarTempoMedio(periodoId) {
+    // Gera os últimos "n" meses completos — o mês atual, ainda em andamento, NUNCA entra —,
+    // do mais recente para o mais antigo. Ex.: hoje 24/08/2026, n=6 -> julho, junho, maio,
+    // abril, março, fevereiro/2026, nessa ordem.
+    function mesesCompletos(n, agora) {
+        const base = agora || new Date();
+        const meses = [];
+        for (let i = 1; i <= n; i++) {
+            const ini = new Date(base.getFullYear(), base.getMonth() - i, 1);
+            const fim = new Date(base.getFullYear(), base.getMonth() - i + 1, 0); // dia 0 = último dia do mês anterior
+            meses.push({
+                ini: formatarDataBR(ini),
+                fim: formatarDataBR(fim),
+                rotulo: `${String(ini.getMonth() + 1).padStart(2, '0')}/${ini.getFullYear()}`,
+            });
+        }
+        return meses;
+    }
+
+    const CHAVE_FILA_MESES_TM = 'projudi_tempomedio_fila_meses';
+
+    // Monta (ou reinicia) a fila de meses a pesquisar para o Tempo Médio, a partir do
+    // período escolhido — chamado uma única vez, no início da extração (automação ou botão
+    // manual), nunca a cada mês (senão a fila voltaria sempre ao tamanho cheio).
+    function prepararFilaMesesTempoMedio(periodoId) {
+        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO.find(p => p.id === '1m');
+        const fila = mesesCompletos(periodo.meses);
+        store.setItem(CHAVE_FILA_MESES_TM, JSON.stringify(fila));
+        // Limpa o período acumulado de uma rodada anterior (ver preencherEPesquisarTempoMedio)
+        // para não herdar por engano o "fim" de uma extração antiga.
+        store.removeItem('projudi_tempomedio_periodo');
+        return fila;
+    }
+
+    function lerFilaMesesTempoMedio() {
+        try { return JSON.parse(store.getItem(CHAVE_FILA_MESES_TM) || '[]'); } catch (e) { return []; }
+    }
+
+    // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial/final com o PRÓXIMO
+    // mês da fila (ver prepararFilaMesesTempoMedio — nunca busca mais de um mês de cada
+    // vez) e clica em Pesquisar. O diagnóstico anterior (3s) apontava falha, mas era falso
+    // negativo: o site do Projudi é lento e a navegação real ainda estava em andamento
+    // quando o diagnóstico rodou — por isso o timeout de checagem agora é bem mais longo.
+    function preencherEPesquisarTempoMedio() {
         const form = formularioTempoMedio();
         if (!form) return;
 
-        const periodo = PERIODOS_TEMPOMEDIO.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO.find(p => p.id === '1m');
+        const fila = lerFilaMesesTempoMedio();
+        const mes = fila[0];
+        if (!mes) { console.warn('[Projudi TM] preencherEPesquisarTempoMedio chamado sem fila de meses — nada a pesquisar'); return; }
+        // Remove o mês do início da fila agora — quando essa pesquisa terminar de coletar
+        // (ver criarColetor/continuar), o próximo item (se houver) dispara uma nova rodada.
+        store.setItem(CHAVE_FILA_MESES_TM, JSON.stringify(fila.slice(1)));
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
-        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico} período="${periodo.rotulo}"`);
+        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico} mês="${mes.rotulo}" (${fila.length - 1} restante(s) na fila)`);
         if (radioAnalisadas) radioAnalisadas.checked = true;
         if (radioAnalitico) radioAnalitico.checked = true;
 
@@ -2574,16 +2628,22 @@
             // Campos de data vêm com "disabled" no HTML original: se ficarem desabilitados,
             // o navegador NÃO os envia no submit. Precisamos habilitar antes de definir o valor.
             campoInicio.disabled = false;
-            campoInicio.value = formatarDataBR(periodo.calc());
+            campoInicio.value = mes.ini;
         }
         const campoFim = form.querySelector('input[name="dataFim"]');
-        if (campoFim) campoFim.disabled = false; // também precisa ir habilitado para ser enviado
+        if (campoFim) { campoFim.disabled = false; campoFim.value = mes.fim; } // idem — sem isso a busca não teria fim de mês
         console.log(`[Projudi TM] campos preenchidos — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
 
-        // Salva o período para uso posterior no PDF
+        // Salva o período ACUMULADO (não só o deste mês) para uso posterior no PDF — como a
+        // fila roda do mês mais recente para o mais antigo, o "fim" só é gravado na primeira
+        // pesquisa (mês mais recente) e o "ini" vai sendo sobrescrito a cada mês seguinte,
+        // terminando no início do mês mais antigo depois que a fila inteira for processada.
+        const periodoAnterior = (() => {
+            try { return JSON.parse(store.getItem('projudi_tempomedio_periodo') || '{}'); } catch (e) { return {}; }
+        })();
         store.setItem('projudi_tempomedio_periodo', JSON.stringify({
             ini: campoInicio ? campoInicio.value : '',
-            fim: campoFim ? campoFim.value : '',
+            fim: periodoAnterior.fim || (campoFim ? campoFim.value : ''),
         }));
 
         // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
@@ -2706,36 +2766,46 @@
         // período + botão de preencher+pesquisar; os botões de coleta/exportação fazem
         // sentido depois da busca.
         if (formularioTempoMedio() && !document.querySelector('table.resultTable')) {
-            // Automação: se chegamos aqui vindos do fluxo de automação, preenche e
-            // pesquisa sozinho (sem esperar clique manual), usando o período escolhido no painel.
+            // Automação: se chegamos aqui vindos do fluxo de automação, preenche e pesquisa
+            // sozinho (sem esperar clique manual) — a fila de meses já foi preparada em
+            // iniciarAutomacao() (ou por uma rodada anterior, ver criarColetor/continuar).
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
-                const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1m';
-                console.log(`[Projudi TM] automação: preenchendo e pesquisando com período="${periodoTM}"`);
+                console.log('[Projudi TM] automação: preenchendo e pesquisando o próximo mês da fila');
                 store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
-                preencherEPesquisarTempoMedio(periodoTM);
+                preencherEPesquisarTempoMedio();
                 return;
             }
 
             const sel = document.createElement('select');
             sel.id = 'sel-periodo-tm';
             sel.className = 'projudi-select';
-            sel.title = 'Período usado como data inicial da pesquisa';
+            sel.title = 'Quantos meses completos buscar (sempre em pesquisas separadas por mês)';
             PERIODOS_TEMPOMEDIO.forEach(p => {
                 const opt = document.createElement('option');
                 opt.value = p.id;
                 opt.textContent = p.rotulo;
                 sel.appendChild(opt);
             });
-            sel.value = '1m'; // padrão: último mês inteiro
+            sel.value = '1m'; // padrão: último mês completo
             buttonBar.appendChild(sel);
 
             const b = document.createElement('button');
             b.id = 'btn-preencher-pesquisar-tm';
             b.type = 'button';
             b.className = 'projudi-btn';
-            b.title = 'Marca Analisadas + Analítico, define a data inicial conforme o período escolhido e pesquisa (o site pode demorar a responder)';
+            b.title = 'Marca Analisadas + Analítico e pesquisa mês a mês, do mais recente ao mais antigo (o site pode demorar a responder)';
             b.textContent = 'Preencher e Pesquisar';
-            b.onclick = () => preencherEPesquisarTempoMedio(sel.value);
+            b.onclick = () => {
+                // Fora da automação (uso avulso, direto nesta página): monta a fila de
+                // meses e conduz o mesmo fluxo de "coletando_tempomedio" usado pela
+                // automação — é o que permite avançar sozinho de mês em mês a cada
+                // recarregamento de página (ver criarColetor/continuar).
+                prepararFilaMesesTempoMedio(sel.value);
+                store.setItem('projudi_auto_fila', JSON.stringify(['tempomedio']));
+                store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
+                store.setItem('projudi_auto_lock', String(Date.now()));
+                preencherEPesquisarTempoMedio();
+            };
             buttonBar.appendChild(b);
             return;
         }
@@ -2917,17 +2987,12 @@
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true },
         { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
-        // DESATIVADO TEMPORARIAMENTE de novo (a pedido do usuário). O relatório continua
-        // funcionando normalmente na própria página dele (botões "Preencher e
-        // Pesquisar"/"Extrair"/"Baixar"); só não participa da fila de automação, da barra
-        // de progresso, do PDF conjunto nem do "Limpar" do painel enquanto isso. Reative
-        // descomentando a linha abaixo (o rótulo/posição do painel usam TEMPOMEDIO_DESATIVADO
-        // logo adiante, que deve ser removido junto).
-        // { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'cartorio', precisaPreencher: true },
+        // Reabilitado (branch tempo-medio-teste) — busca em meses completos separados em
+        // vez de um período único (ver mesesCompletos/prepararFilaMesesTempoMedio), para
+        // evitar pesquisas grandes e lentas no Projudi. Vem DESMARCADO por padrão no
+        // painel (ver injetarPainel): o usuário precisa marcar explicitamente para incluí-lo.
+        { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'cartorio', precisaPreencher: true },
     ];
-    // Linha desabilitada mostrada no grupo Cartório do painel enquanto o Tempo Médio
-    // estiver fora de REPORTS_AUTOMACAO — ver comentário acima.
-    const TEMPOMEDIO_DESATIVADO = { rotulo: 'Tempo Médio', dominio: 'cartorio' };
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
@@ -3164,6 +3229,10 @@
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
+        // Monta a fila de meses do Tempo Médio uma única vez aqui, no início — nunca dentro
+        // do loop mês a mês (ver criarColetor/continuar), senão ela voltaria sempre ao
+        // tamanho cheio a cada mês coletado.
+        if (fila.includes('tempomedio')) prepararFilaMesesTempoMedio(periodoTM || '1m');
         const primeiro = relatorioPorChave(fila[0]);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
@@ -3184,6 +3253,7 @@
         store.removeItem('projudi_auto_fila');
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
+        store.removeItem(CHAVE_FILA_MESES_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
@@ -3263,10 +3333,7 @@
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        // O checkbox do Tempo Médio (.pa-item-desativado) fica de fora — ele deve
-        // permanecer sempre desabilitado, mesmo quando os demais são reabilitados.
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
-            if (el.closest('.pa-item-desativado')) return;
             el.disabled = emCurso;
         });
 
@@ -3298,20 +3365,22 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
-        // Todos os relatórios de REPORTS_AUTOMACAO vêm marcados por padrão. Os checkboxes
-        // são agrupados por domínio (Cartório/Gabinete), espelhando a divisão do PDF
-        // conjunto; o Tempo Médio (fora de REPORTS_AUTOMACAO — ver TEMPOMEDIO_DESATIVADO)
-        // aparece travado no grupo Cartório, com nota explicando o motivo.
+        // Todos os relatórios de REPORTS_AUTOMACAO vêm marcados por padrão, exceto Tempo
+        // Médio (precisa ser habilitado explicitamente — ver seletor de período ao lado).
+        // Os checkboxes são agrupados por domínio (Cartório/Gabinete), espelhando a
+        // divisão do PDF conjunto.
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
-            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => `
+            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => {
+                const seletorPeriodo = r.key === 'tempomedio'
+                    ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
+                        PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                      }</select>`
+                    : '';
+                return `
                     <label class="pa-item">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" checked> ${r.rotulo}
-                    </label>`).join('')
-                + (TEMPOMEDIO_DESATIVADO.dominio === g.chave ? `
-                    <label class="pa-item pa-item-desativado" title="Temporariamente desativado enquanto o relatório de Tempo Médio está em ajuste">
-                        <input type="checkbox" class="pa-check" disabled> ${TEMPOMEDIO_DESATIVADO.rotulo}
-                        <span class="pa-nota-desativado">(indisponível)</span>
-                    </label>` : '');
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}${seletorPeriodo}
+                    </label>`;
+            }).join('');
             return `
                 <div class="pa-group">
                     <p class="pa-group-lbl">${g.rotulo}</p>
@@ -3445,9 +3514,6 @@
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
-        #painel-automacao .pa-item-desativado { color: #82807A; cursor: not-allowed; }
-        #painel-automacao .pa-item-desativado input[type="checkbox"] { cursor: not-allowed; }
-        #painel-automacao .pa-nota-desativado { margin-left: auto; font-style: italic; font-size: .82em; color: #82807A; }
 
         #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
         #painel-automacao .pa-link {
