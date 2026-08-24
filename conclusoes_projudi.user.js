@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      15.3
+// @version      15.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3286,28 +3286,13 @@
         }
     }
 
-    // Localiza a <tr> (dentro da table width="90%" da página inicial) que contém o menu
-    // "Últimas Mensagens" — cada menu da página inicial (Dados do Juízo/Processos Ativos,
-    // Últimas Mensagens) é um <fieldset><table class="form"> com um <h4> de título, dentro
-    // de uma <tr><td valign="top"> própria. Usamos isso como âncora para inserir um QUARTO
-    // menu logo abaixo, na mesma coluna — em vez de mexer em #main-menu, que é na verdade
-    // o <ul> da barra de navegação do topo do site (nada a ver com esses menus; inserir o
-    // painel ali colocava um card grande dentro de um espaço estreito, quebrando o layout).
-    function acharTrUltimasMensagens() {
-        const h4 = [...document.querySelectorAll('fieldset table.form h4')]
-            .find(h => /últimas mensagens/i.test(h.textContent));
-        if (!h4) return null;
-        const fieldset = h4.closest('fieldset');
-        const td = fieldset && fieldset.closest('td');
-        return td ? td.closest('tr') : null;
-    }
-
     function injetarPainel() {
         if (document.getElementById('painel-automacao')) return;
-        // Só na página inicial, onde existem os menus "Dados do Juízo"/"Processos
-        // Ativos"/"Últimas Mensagens" — o painel entra como um quarto menu, logo abaixo.
-        const trAncora = acharTrUltimasMensagens();
-        if (!trAncora) return;
+        // Só na página que hospeda o menu principal (evita duplicar em outros frames).
+        // Tentativa anterior de inserir como "quarto menu" da página inicial (ao lado de
+        // Dados do Juízo/Processos Ativos/Últimas Mensagens) não deu certo na prática —
+        // volta a ser um painel flutuante, como antes.
+        if (!document.querySelector('#main-menu')) return;
         // Não injeta sobre a tela de resultados de um relatório
         if (detectarConfig()) return;
 
@@ -3373,17 +3358,7 @@
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o PDF conjunto.</div>
             </div>`;
-        // Entra como um QUARTO menu da página inicial, na mesma coluna dos demais (Dados do
-        // Juízo/Processos Ativos, Últimas Mensagens) — uma nova <tr><td valign="top"> logo
-        // depois da <tr> de Últimas Mensagens, igual ao padrão dos outros menus da página
-        // (não mais um popup sobreposto, nem inserido em cima de outro elemento).
-        const novaLinha = document.createElement('tr');
-        const novaCelula = document.createElement('td');
-        novaCelula.setAttribute('valign', 'top');
-        novaCelula.appendChild(document.createElement('br'));
-        novaCelula.appendChild(painel);
-        novaLinha.appendChild(novaCelula);
-        trAncora.parentNode.insertBefore(novaLinha, trAncora.nextSibling);
+        document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = () => {
             const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key).filter(Boolean);
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
@@ -3415,11 +3390,9 @@
 
     GM_addStyle(`
         #painel-automacao {
-            /* Faz parte do fluxo normal da página — não mais um popup flutuante (sem
-               position: fixed, sem sobrepor conteúdo). */
-            width: 100%; max-width: 420px; margin: 10px 0 16px;
+            position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
-            box-shadow: 0 1px 4px rgba(26,26,26,.08); overflow: hidden;
+            box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
             /* +50% no tamanho todo (texto, ícones, espaçamentos) de uma vez só — escala o
                que já estava desenhado em vez de recalcular cada valor em px/em. */
