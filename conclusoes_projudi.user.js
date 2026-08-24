@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.5
+// @version      16.6
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2130,16 +2130,19 @@
 
         desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
 
-        // ═══ PÁGINA 2 (só quando há dados de usuário): Tempo médio por Usuário do
-        // Cartório — o resumo agora pode passar de uma página quando esse gráfico
-        // complementar não cabe na primeira (que já vem cheia com os 4+2+1 KPIs e os
-        // dois gráficos anteriores). Login extraído da própria célula "Dt. Análise
-        // Cartório" (ver usuarioDeTexto) — o Projudi não expõe essa coluna separada.
-        // Quantidade de atos cumpridos por pessoa entre parênteses no próprio rótulo
+        // ═══ PÁGINA 2 (só quando há dados): Tempo médio por Usuário do Cartório e por
+        // Tipo de Conclusão — o resumo agora pode passar de uma página quando esses
+        // gráficos complementares não cabem na primeira (que já vem cheia com os 4+2+1
+        // KPIs e os dois gráficos anteriores). Login extraído da própria célula "Dt.
+        // Análise Cartório" (ver usuarioDeTexto) — o Projudi não expõe essa coluna
+        // separada; "Tipo de Conclusão" já vem numa coluna própria (ex.: DECISÃO,
+        // DESPACHO, SENTENÇA). Quantidade de atos entre parênteses no rótulo em ambos
         // (agregarMedia já calcula "n" — só falta compor o texto).
         const porUsuario = agregarMedia(validos, 'usuarioCartorio', 'dias', 20)
             .map(it => ({ ...it, label: `${it.label} (${it.n})` }));
-        if (porUsuario.length) {
+        const porTipo = agregarMedia(validos, 'tipoConclusao', 'dias', 12)
+            .map(it => ({ ...it, label: `${it.label} (${it.n})` }));
+        if (porUsuario.length || porTipo.length) {
             doc.addPage();
             let hy2 = m + 2;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -2152,7 +2155,20 @@
 
             const gY0b = hy2 + 6;
             const disponivel2 = ph - m - gY0b - 14;
-            desenharBarras(doc, m, gY0b, uw, disponivel2, 'Tempo médio por Usuário (Cartório)', porUsuario, fmtDias, COR.aqua);
+            if (porUsuario.length && porTipo.length) {
+                // Divide o espaço entre os dois, dando mais altura ao que tem mais itens
+                // (mesma lógica de proporção usada nos dois gráficos da página 1).
+                const chartGap2 = 8;
+                const totalItens = porUsuario.length + porTipo.length;
+                const alturaA = Math.max(30, (disponivel2 - chartGap2) * (porUsuario.length / totalItens));
+                const alturaB = Math.max(30, disponivel2 - chartGap2 - alturaA);
+                desenharBarras(doc, m, gY0b, uw, alturaA, 'Tempo médio por Usuário (Cartório)', porUsuario, fmtDias, COR.aqua);
+                desenharBarras(doc, m, gY0b + alturaA + chartGap2, uw, alturaB, 'Tempo médio por Tipo de Conclusão', porTipo, fmtDias, COR.azul);
+            } else if (porUsuario.length) {
+                desenharBarras(doc, m, gY0b, uw, disponivel2, 'Tempo médio por Usuário (Cartório)', porUsuario, fmtDias, COR.aqua);
+            } else {
+                desenharBarras(doc, m, gY0b, uw, disponivel2, 'Tempo médio por Tipo de Conclusão', porTipo, fmtDias, COR.azul);
+            }
             desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
     }
