@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.1
+// @version      16.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -590,8 +590,9 @@
         // Tamanho de página alvo para o seletor "estatisticaPageSizeOptions" (só existe na
         // tela de resultados do Tempo Médio). 500 travava o site do Projudi — a tabela com
         // 1000 <tr> (500 processos + linhas de detalhe) era pesada demais para o próprio
-        // Projudi renderizar/paginar, então usamos um valor bem menor.
-        const TAMANHO_PAGINA_ALVO = '50';
+        // Projudi renderizar/paginar. Com a busca agora feita mês a mês (bem menos
+        // registros por pesquisa — ver preencherEPesquisarTempoMedio), 100 já é seguro.
+        const TAMANHO_PAGINA_ALVO = '100';
 
         function iniciar() {
             // Antes de iniciar, ajusta a página para exibir TAMANHO_PAGINA_ALVO registros
