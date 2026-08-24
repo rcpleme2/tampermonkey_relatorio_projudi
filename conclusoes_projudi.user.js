@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      14.6
+// @version      15.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2801,13 +2801,21 @@
             return b;
         };
 
-        buttonBar.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
-        buttonBar.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
+        // Os botões de extração individual ficam ocultos por padrão (ver
+        // CHAVE_MOSTRAR_BOTOES) — a extração automatizada não depende deles, chama
+        // coletor.iniciar()/pdf()/etc. diretamente. O usuário reabilita pelo painel.
+        const wrapExtracao = document.createElement('span');
+        wrapExtracao.id = 'projudi-extracao-individual';
+        if (!mostrarBotoesIndividuais()) wrapExtracao.style.display = 'none';
+        buttonBar.appendChild(wrapExtracao);
+
+        wrapExtracao.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
+        wrapExtracao.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
         // Conclusões só oferece planilha ou PDF por Juiz (abaixo) — o botão genérico de
         // PDF (resumo único + tabela, sem distinguir por juiz) não faz sentido aqui e
         // ficaria redundante ao lado do PDF por Juiz.
         if ((cfg.pdf || cfg.pdfCustom) && !cfg.pdfPorJuiz) {
-            buttonBar.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
+            wrapExtracao.appendChild(mk('btn-pdf', 'Gera um PDF com painel, gráficos e a tabela completa', () => {
                 const chk = document.getElementById('chk-somente-resumo');
                 coletor.pdf(!!(chk && chk.checked));
             }));
@@ -2815,18 +2823,18 @@
             rotuloResumo.className = 'projudi-chk-resumo';
             rotuloResumo.title = 'Gera o PDF só com o resumo (KPIs e gráficos), sem a tabela discriminada de processos';
             rotuloResumo.innerHTML = '<input type="checkbox" id="chk-somente-resumo"> Só resumo (sem tabela)';
-            buttonBar.appendChild(rotuloResumo);
+            wrapExtracao.appendChild(rotuloResumo);
         }
         if (cfg.pdfPorJuiz) {
-            buttonBar.appendChild(mk('btn-pdf-juiz',
+            wrapExtracao.appendChild(mk('btn-pdf-juiz',
                 'Gera um PDF com uma seção por juiz responsável (pendências por tipo, agrupador e pré-análise) — pronto para expedir a cada um',
                 () => coletor.pdfPorJuiz(), 'PDF por Juiz'));
         }
-        buttonBar.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
+        wrapExtracao.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
 
         const status = document.createElement('span');
         status.id = 'exportar-status';
-        buttonBar.appendChild(status);
+        wrapExtracao.appendChild(status);
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const relAtual = relatorioPorCfg(cfg);
@@ -2863,6 +2871,12 @@
     //        -> início -> habilita "PDF conjunto". O estado persiste no localStorage,
     //        então dá para rodar de novo em outra Atuação e ACUMULAR várias competências.
     const AUTO_ESTADO = 'projudi_auto_estado';
+
+    // Botões de extração individual (Extrair/Baixar/PDF/Limpar) em cada tela de relatório
+    // ficam OCULTOS por padrão — a extração normal é pelo painel de automação da página
+    // inicial. O usuário reabilita marcando a opção no próprio painel (ver injetarPainel).
+    const CHAVE_MOSTRAR_BOTOES = 'projudi_mostrar_botoes_individuais';
+    function mostrarBotoesIndividuais() { return store.getItem(CHAVE_MOSTRAR_BOTOES) === '1'; }
 
     function desembrulharArray(valor) {
         let v = valor, t = 0;
@@ -3329,6 +3343,9 @@
                 <label class="pa-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
                     <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
                 </label>
+                <label class="pa-resumo" title="Reexibe os botões de Extrair/Baixar/PDF/Limpar em cada tela de relatório (fora do painel de automação)">
+                    <input type="checkbox" id="pa-mostrar-botoes"${mostrarBotoesIndividuais() ? ' checked' : ''}> Mostrar botões individuais nos relatórios
+                </label>
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
@@ -3338,7 +3355,10 @@
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o PDF conjunto.</div>
             </div>`;
-        document.body.appendChild(painel);
+        // Faz parte do fluxo normal da página (não mais um popup flutuante): entra logo
+        // antes do menu principal, empurrando o conteúdo abaixo em vez de sobrepor.
+        const mainMenu = document.querySelector('#main-menu');
+        mainMenu.parentNode.insertBefore(painel, mainMenu);
         painel.querySelector('#pa-iniciar').onclick = () => {
             const fila = [...painel.querySelectorAll('.pa-check:checked')].map(c => c.dataset.key).filter(Boolean);
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
@@ -3351,6 +3371,9 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
+            store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
+        };
         painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
         painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
         painel.querySelector('.pa-btn-colapsar').onclick = () => {
@@ -3369,9 +3392,11 @@
 
     GM_addStyle(`
         #painel-automacao {
-            position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
+            /* Faz parte do fluxo normal da página — não mais um popup flutuante (sem
+               position: fixed, sem sobrepor conteúdo). */
+            width: 100%; max-width: 420px; margin: 10px 0 16px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
-            box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
+            box-shadow: 0 1px 4px rgba(26,26,26,.08); overflow: hidden;
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
         }
         #painel-automacao .pa-head {
