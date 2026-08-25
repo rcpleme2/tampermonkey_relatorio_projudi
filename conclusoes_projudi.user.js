@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.2
+// @version      18.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3068,6 +3068,7 @@
         // sozinho a reconheceria por engano), mas só ela tem "Início Suspensão".
         if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
         else if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
+        else if (CFG_AUDIENCIAS.detecta(cab)) cfg = CFG_AUDIENCIAS;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
@@ -3078,7 +3079,7 @@
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
-        console.log(`[Projudi] detectarConfig — thead=${!!thead} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
+        console.log(`[Projudi] detectarConfig — url=${location.pathname} thead=${!!thead} situacaoAudiencia=${situacaoAudienciaSelecionada()} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
         return cfg;
     }
 
@@ -3324,6 +3325,7 @@
     }
 
     function injetarBotoes() {
+        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${store.getItem(AUTO_ESTADO)}`);
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
         if (!buttonBar) {
             // Quando uma busca não encontra NENHUM registro, algumas telas do Projudi
@@ -3805,6 +3807,7 @@
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
+        console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
         return true;
     }
@@ -3815,10 +3818,14 @@
     function avancarAutomacao(cfg) {
         const estado = store.getItem(AUTO_ESTADO);
         const rel = relatorioPorCfg(cfg);
-        if (!rel || estado !== 'coletando_' + rel.key) return;
+        if (!rel || estado !== 'coletando_' + rel.key) {
+            console.log(`[Auto Projudi] avancarAutomacao ignorado — estado="${estado}" cfg=${cfg ? cfg.prefixo : 'null'} rel=${rel ? rel.key : 'null'}`);
+            return;
+        }
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}"`);
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         setTimeout(passoAutomacao, 900);
     }
