@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.0
+// @version      20.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1129,6 +1129,136 @@
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
     }
 
+    // ── Apreensões Pendentes (Crime) — processo/criminal/apreensao.do ───────────────
+    // Página de filtros + resultado na MESMA tela (mesmo padrão de Paralisados/
+    // Audiências): o Projudi já vem com "Motivo do encerramento = (Apreensão não
+    // encerrada)" e "Status = ATIVO" marcados por padrão — que é exatamente o filtro de
+    // "pendente" pedido pelo usuário — então não mexemos em nenhum desses selects, só
+    // clicamos em Pesquisar.
+    function colunasApreensoes(sufixoRotulo) {
+        return {
+            cabecalhos: ['Data do Registro', 'Número', 'Tipo da Apreensão', 'Processo', 'Classe Processual', 'Data de Encerramento', 'Motivo do Encerramento', 'Localização Interna', 'Descrição', 'Prioritário'],
+            larguras: [{ wch: 14 }, { wch: 14 }, { wch: 26 }, { wch: 26 }, { wch: 24 }, { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 34 }, { wch: 11 }],
+            extrai: (tds, atuacao) => {
+                const emProc = tds[3].querySelector('em');
+                const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[3]);
+                const classeCompleta = textoAteBr(tds[4]) || textoCelula(tds[4]);
+                const classe = classeCompleta.split(' (')[0].trim();
+                return {
+                    dataRegistro: textoCelula(tds[0]),
+                    numero: textoCelula(tds[1]),
+                    tipo: textoCelula(tds[2]),
+                    processo,
+                    classe,
+                    dataEncerramento: textoCelula(tds[5]),
+                    motivoEncerramento: textoCelula(tds[6]),
+                    localizacao: textoCelula(tds[7]),
+                    descricao: textoCelula(tds[8]),
+                    prioritario: emPrioritario(emProc),
+                    atuacao: atuacao || '',
+                    competencia: competenciaDe(atuacao),
+                };
+            },
+            linha: (d) => [d.dataRegistro, d.numero, d.tipo, d.processo, d.classe, d.dataEncerramento, d.motivoEncerramento, d.localizacao, d.descricao, d.prioritario ? 'Sim' : 'Não'],
+        };
+    }
+
+    const COLS_APREENSOES = colunasApreensoes();
+
+    const LISTA_TIPOS_APREENSAO = [
+        'Armas de fogo', 'Munições', 'Explosivos', 'Objetos', 'Entorpecentes', 'Valores', 'Plantas', 'Animais',
+        'Armas brancas', 'Aeronaves', 'Alimentos, bebidas, medicamentos e outros produtos perecíveis',
+        'Ativos Financeiros, cheques e outros títulos de crédito',
+        'Computadores, acessórios, insumos e outros produtos de informática', 'Documentos',
+        'Eletroeletrônicos diversos', 'Embarcações', 'Equipamentos de Caça e Pesca (exceto armas)',
+        'Material Biológico', 'Outros Bens Móveis', 'Outros Meios de Transporte',
+        'Objetos Pessoais ou Domésticos', 'Produtos Florestais', 'Veículos Automotores', 'Bens Imóveis',
+        'Pedras, Metais Preciosos, jóias, quadros, objetos de arte, objeto de coleção e antiguidade',
+        'Acessórios de Armas de Fogo e Produtos Controlados pelo EB',
+    ];
+
+    const CFG_APREENSOES = {
+        prefixo: 'projudi_apreensoes_',
+        // Mostra a linha "Bens Apreendidos" mesmo com zero pendências, desde que já
+        // coletado — "zero apreensões pendentes" é uma informação, não um vazio a esconder.
+        mostrarSeVazio: true,
+        detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab),
+        minTds: 9,
+        usaAtuacao: false,
+        nomeArquivo: 'apreensoes_pendentes_projudi',
+        rotulos: { coletar: 'Extrair Apreensões', coletarMais: 'Extrair mais (Apreensões)', baixar: '⬇ Baixar Apreensões' },
+        cabecalhos: COLS_APREENSOES.cabecalhos,
+        larguras: COLS_APREENSOES.larguras,
+        extrai: COLS_APREENSOES.extrai,
+        linha: COLS_APREENSOES.linha,
+        pdf: {
+            titulo: 'Bens Apreendidos Pendentes',
+            atosTitulo: 'Apreensões pendentes',
+            agingTitulo: 'Apreensões por tempo de registro',
+            tabelaTitulo: 'Tabela discriminada das apreensões pendentes',
+            dataCampo: 'dataRegistro',
+            dataTitulo: 'Registro de apreensão mais antigo',
+            processoCampo: 'processo',
+            tipoCampo: 'tipo',
+            // Apreensões não distingue prioritário/normal (não faz sentido pra esse
+            // relatório) — some com o KPI "Prioritários pendentes" e com a separação por
+            // prioridade no gráfico de aging (vira barra única por faixa).
+            semPrioridade: true,
+            // Tabela discriminada dividida em subtabelas por Tipo da Apreensão, na mesma
+            // ordem do <select name="idTipoApreensaoBusca"> do Projudi.
+            agruparPor: 'tipo',
+            ordemGrupos: LISTA_TIPOS_APREENSAO,
+            distribuicoes: [
+                { titulo: 'Apreensões por Tipo', campo: 'tipo', topN: 12 },
+                { titulo: 'Apreensões por Localização Interna', campo: 'localizacao', topN: 10 },
+                { titulo: 'Apreensões por Classe Processual', campo: 'classe', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Número', width: 18, get: (d) => d.numero },
+                { header: 'Tipo', width: 28, get: (d) => d.tipo },
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe', width: 24, get: (d) => d.classe },
+                { header: 'Dt. Registro', width: 20, get: (d) => d.dataRegistro },
+                { header: 'Localização', width: 24, get: (d) => d.localizacao },
+                { header: 'Descrição', width: 28, get: (d) => d.descricao },
+            ],
+        },
+    };
+
+    function formularioApreensoes() {
+        const form = document.getElementById('apreensaoForm');
+        return form && form.querySelector('#idMotivoEncerramentoApreensaoBusca') ? form : null;
+    }
+
+    // Força o motivo de encerramento para "(Apreensão não encerrada)" e clica em
+    // Pesquisar — os demais filtros ficam no padrão da tela.
+    function preencherEPesquisarApreensoes() {
+        const form = formularioApreensoes();
+        if (!form) return;
+
+        const selMotivo = form.querySelector('#idMotivoEncerramentoApreensaoBusca');
+        if (selMotivo && selMotivo.value !== '0') {
+            selMotivo.value = '0';
+            selMotivo.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        console.log(`[Projudi Apreensões] motivo de encerramento definido como "(Apreensão não encerrada)" (value=${selMotivo ? selMotivo.value : 'n/d'})`);
+
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Apreensões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Apreensões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Apreensões] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Apreensões] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
     function criarColetor(cfg) {
@@ -1890,8 +2020,10 @@
             const prio = contarPrioritarios(sub);
             const kpis = [
                 { titulo: p.atosTitulo, valor: String(sub.length), subs: [], acento: COR.azul },
-                { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
             ];
+            if (!p.semPrioridade) {
+                kpis.push({ titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
+            }
             if (p.mediaLabel) {
                 // Quando há mais de uma competência, a média diária do "Resumo geral" é a
                 // SOMA da média de cada competência (contexto.mediaSoma), não a média
@@ -1924,7 +2056,9 @@
             // ganhando a página inteira (útil para rankings maiores, ex.: 15 itens em vez
             // de 10, sem espremer os gráficos que ficam na página 1).
             const chartsTodos = [
-                { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
+                p.semPrioridade
+                    ? { tipo: 'barras', span: 1, titulo: p.agingTitulo, itens: faixasPorPrioridade(sub, p.dataCampo, now).map(f => ({ label: f.label, valor: f.prioritarios + f.normais })), pagina2: false }
+                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
@@ -2025,14 +2159,11 @@
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
         const idxProcesso = colunas.findIndex(c => /processo/i.test(c.header));
 
-        doc.autoTable({
+        // Opções comuns ao autoTable, reaproveitadas tanto no caminho de tabela única
+        // quanto no caminho agrupado (p.agruparPor) — mantém aparência/alinhamento
+        // idênticos nos dois casos.
+        const opcoesComuns = {
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-            body: ordenados.map(d => {
-                const o = {};
-                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
-                return o;
-            }),
-            startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
@@ -2040,15 +2171,75 @@
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
-            // Realça o número do processo dos prioritários
-            didParseCell: (data) => {
-                if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
-                    data.cell.styles.textColor = COR_PRIORITARIO;
-                    data.cell.styles.fontStyle = 'bold';
-                }
-            },
-            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+        };
+        const corpoDe = (itens) => itens.map(d => {
+            const o = {};
+            colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
+            return o;
         });
+
+        if (!p.agruparPor) {
+            // Comportamento padrão (idêntico ao de antes de existir p.agruparPor):
+            // uma única tabela com todos os registros ordenados.
+            doc.autoTable({
+                ...opcoesComuns,
+                body: corpoDe(ordenados),
+                startY: tabInicioY,
+                // Realça o número do processo dos prioritários
+                didParseCell: (data) => {
+                    if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                        data.cell.styles.textColor = COR_PRIORITARIO;
+                        data.cell.styles.fontStyle = 'bold';
+                    }
+                },
+                didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            });
+        } else {
+            // Tabela dividida em subtabelas por grupo (ex.: Apreensões por Tipo) — cada
+            // grupo ganha um título de seção seguido de sua própria autoTable, na ordem
+            // de p.ordemGrupos (fallback alfabético pt-BR pro que não estiver na lista).
+            const grupos = new Map();
+            ordenados.forEach(d => {
+                const chave = String(d[p.agruparPor] || '').trim() || '(sem informação)';
+                if (!grupos.has(chave)) grupos.set(chave, []);
+                grupos.get(chave).push(d);
+            });
+            const ordem = p.ordemGrupos || [];
+            const chaves = Array.from(grupos.keys()).sort((a, b) => {
+                const ia = ordem.indexOf(a), ib = ordem.indexOf(b);
+                if (ia !== -1 && ib !== -1) return ia - ib;
+                if (ia !== -1) return -1;
+                if (ib !== -1) return 1;
+                return a.localeCompare(b, 'pt-BR');
+            });
+
+            let y = tabInicioY;
+            chaves.forEach(chave => {
+                const itens = grupos.get(chave);
+                // Se o título da próxima seção não couber com folga pra ao menos uma
+                // linha de tabela, começa página nova antes de desenhar o título.
+                if (y > ph - m - 28) {
+                    doc.addPage();
+                    y = m + 8;
+                }
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+                doc.text(`${chave} (${itens.length})`, m, y);
+
+                doc.autoTable({
+                    ...opcoesComuns,
+                    body: corpoDe(itens),
+                    startY: y + 4,
+                    didParseCell: (data) => {
+                        if (data.section === 'body' && data.column.index === idxProcesso && itens[data.row.index] && itens[data.row.index].prioritario) {
+                            data.cell.styles.textColor = COR_PRIORITARIO;
+                            data.cell.styles.fontStyle = 'bold';
+                        }
+                    },
+                    didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+                });
+                y = doc.lastAutoTable.finalY + 8;
+            });
+        }
 
         return paginaInicial;
     }
@@ -2580,6 +2771,7 @@
         const secaoTempoMedio = secoes.find(s => s.cfgOriginal === CFG_TEMPOMEDIO);
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
+        const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
 
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
         // não é mais um card à parte no topo da capa.
@@ -2659,6 +2851,21 @@
                 indicador: `${r.totalGeral || 0} realizada(s)`,
                 detalhamento: `${r.canceladas || 0} cancel. · ${r.naoRealizadas || 0} não real. · ${r.redesignadas || 0} redesig.`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS_REALIZADAS,
+            });
+        }
+        // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
+        // relatório da categoria Crime. O indicador é só a contagem total (pedido:
+        // "apenas o número de apreensões" no quadro); o detalhamento compacta a
+        // distribuição por Tipo da apreensão (top 5 + "Outros", mesmo corte usado nos
+        // gráficos — ver contarPorCampo), sem estourar a célula.
+        if (secaoApreensoes) {
+            const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
+            const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
+            linhasCartorio.push({
+                nome: 'Bens Apreendidos',
+                indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
+                detalhamento,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
             });
         }
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
@@ -3872,6 +4079,7 @@
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
+        else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
@@ -4120,6 +4328,7 @@
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
+        if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
         return null;
     }
 
@@ -4345,6 +4554,34 @@
             return;
         }
 
+        // Tela de Apreensões (processo/criminal/apreensao.do) — form + table.resultTable
+        // na MESMA página desde o primeiro carregamento (mesmo padrão de Paralisados/
+        // Audiências). A automação decide pelo ESTADO (preenchendo_apreensoes), não pela
+        // presença de resultados — a página já carrega com os filtros padrão (pendentes)
+        // aplicados, então "já tem tabela" não distingue "ainda não pesquisei nesta
+        // rodada" de "resultado de uma pesquisa anterior".
+        if (formularioApreensoes()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_apreensoes') {
+                console.log('[Projudi Apreensões] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_apreensoes');
+                preencherEPesquisarApreensoes();
+                return;
+            }
+            // Uso manual (fora da automação): a tela já convive com resultados de uma
+            // pesquisa anterior (própria ou de outra sessão), então não há como usar
+            // "sem linha nenhuma" para decidir se o botão deve aparecer.
+            if (estadoAtual !== 'coletando_apreensoes') {
+                const bPendentes = document.createElement('button');
+                bPendentes.type = 'button';
+                bPendentes.className = 'projudi-btn';
+                bPendentes.title = 'Pesquisa com os filtros padrão da tela (Apreensão não encerrada) — não altera nenhum campo';
+                bPendentes.textContent = 'Preencher e Pesquisar (Apreensões Pendentes)';
+                bPendentes.onclick = () => preencherEPesquisarApreensoes();
+                buttonBar.appendChild(bPendentes);
+            }
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -4522,6 +4759,8 @@
         // por usuário (ver iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas).
         // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
         { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Quarto item específico do Crime — apreensões pendentes; internamente roda em
+        { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -4671,6 +4910,9 @@
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
+        // "Apreensões em..." fica no menu "Mesa do Escrivão" (aba #tabItemprefix6) —
+        // basta casar pela URL de destino (o rótulo completo varia com a competência).
+        else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
@@ -4819,7 +5061,7 @@
     }
 
     function limparTudoAutomacao() {
-        REPORTS_AUTOMACAO.forEach(({ cfg: c }) => {
+        REPORTS_AUTOMACAO.map(r => r.cfg).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
             store.removeItem(c.prefixo + 'num_paginas');
