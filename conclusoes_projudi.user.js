@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.4
+// @version      18.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -700,51 +700,113 @@
         return linhas;
     }
 
-    // Expande (clica no ícone "+") UMA linha e lê os números de processo (formato CNJ) do
-    // conteúdo que aparece — em vez de confiar na coluna "Agendadas", que pode não bater
-    // 1:1 com processos distintos (pedido do usuário). Usado tanto para montar a tabela
-    // discriminada completa quanto para contar os processos do último dia/por tipo.
-    async function expandirProcessosDaLinha(linha) {
-        const link = linha.elLinha.querySelector('a[class^="linkProcessos"]');
-        if (!link) return [];
-        link.click();
-        // A expansão é via AJAX — sem um evento pra esperar, um atraso fixo é o que dá pra
-        // fazer aqui; 1,2s cobre uma resposta normal do Projudi.
-        await new Promise(r => setTimeout(r, 1200));
-        const detalhe = linha.elLinha.nextElementSibling;
-        const texto = detalhe ? detalhe.textContent : '';
-        return texto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/g) || [];
+    // Expande um LOTE de linhas de uma vez (clica em todos os ícones "+" do lote antes de
+    // esperar) — bem mais rápido que expandir uma a uma, já que a espera é a mesma AJAX
+    // independente de quantas expansões estão em voo ao mesmo tempo. O tamanho do lote é
+    // um meio-termo: grande o bastante para acelerar de verdade, pequeno o bastante para
+    // não sobrecarregar o Projudi nem estourar o tempo de resposta de uma leva só.
+    const TAMANHO_LOTE_EXPANSAO_AD = 15;
+
+    async function expandirLoteDeLinhas(lote) {
+        lote.forEach(linha => {
+            const link = linha.elLinha.querySelector('a[class^="linkProcessos"]');
+            linha._temLink = !!link;
+            if (link) link.click();
+        });
+        // Espera única para o lote inteiro — a base de 1,2s cobre uma resposta normal do
+        // Projudi; o acréscimo por linha dá uma folga extra quando o lote é grande (mais
+        // requisições AJAX disputando o servidor ao mesmo tempo).
+        const espera = 1200 + lote.length * 80;
+        await new Promise(r => setTimeout(r, espera));
+        lote.forEach(linha => {
+            if (!linha._temLink) { linha.processos = []; return; }
+            const detalhe = linha.elLinha.nextElementSibling;
+            const texto = detalhe ? detalhe.textContent : '';
+            linha.processos = texto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/g) || [];
+        });
     }
 
-    // Expande TODAS as linhas lidas, uma a uma (sequencial — o Projudi não aguenta bem
-    // várias expansões simultâneas), preenchendo linha.processos. Necessário para a tabela
-    // discriminada completa (pedido do usuário: data/hora/processo/tipo por linha), além de
-    // alimentar a contagem do último dia e a última audiência por tipo.
+    // Progresso da expansão, exposto para o painel flutuante mostrar (ver atualizarPainel)
+    // — como a leitura pode demorar bastante em pautas grandes, sem isso o usuário via só
+    // "Coletando Audiências Designadas…" parado por vários segundos, sem saber se travou.
+    const CHAVE_PROGRESSO_AD = 'projudi_audienciasdesignadas_progresso';
+    function atualizarProgressoExpansaoAD(processados, total) {
+        store.setItem(CHAVE_PROGRESSO_AD, JSON.stringify({ processados, total }));
+        atualizarPainel();
+    }
+    function lerProgressoExpansaoAD() {
+        try { return JSON.parse(store.getItem(CHAVE_PROGRESSO_AD) || 'null'); }
+        catch (e) { return null; }
+    }
+
+    // Expande TODAS as linhas lidas, em lotes (ver TAMANHO_LOTE_EXPANSAO_AD), preenchendo
+    // linha.processos. Necessário para a tabela discriminada completa (data/hora/processo/
+    // tipo), além de alimentar a contagem do último dia, a última audiência por tipo e a
+    // concentração por dia da semana — todas baseadas nos processos de verdade, não na
+    // coluna "Agendadas".
     async function expandirTodasAsLinhas(linhas) {
-        for (let i = 0; i < linhas.length; i++) {
-            const linha = linhas[i];
-            linha.processos = await expandirProcessosDaLinha(linha);
-            if (linha.processos.length === 0) {
-                console.warn(`[Projudi Audiências Designadas] linha ${i + 1}/${linhas.length} (${linha.data} ${linha.horario}, ${linha.tipoAudiencia}) sem processo reconhecido ao expandir — "Agendadas"=${linha.agendadas} será usado como estimativa onde necessário.`);
+        const total = linhas.length;
+        store.removeItem(CHAVE_PROGRESSO_AD);
+        atualizarProgressoExpansaoAD(0, total);
+        for (let i = 0; i < total; i += TAMANHO_LOTE_EXPANSAO_AD) {
+            const lote = linhas.slice(i, i + TAMANHO_LOTE_EXPANSAO_AD);
+            await expandirLoteDeLinhas(lote);
+            const processados = Math.min(i + lote.length, total);
+            const semProcesso = lote.filter(l => l.processos.length === 0).length;
+            if (semProcesso) {
+                console.warn(`[Projudi Audiências Designadas] ${semProcesso} linha(s) do lote ${Math.floor(i / TAMANHO_LOTE_EXPANSAO_AD) + 1} sem processo vinculado — serão ignoradas (ver filtro de linhas sem processo).`);
             }
-            if ((i + 1) % 5 === 0 || i === linhas.length - 1) {
-                console.log(`[Projudi Audiências Designadas] expandindo processos: ${i + 1}/${linhas.length} linha(s)`);
-            }
+            console.log(`[Projudi Audiências Designadas] expandindo processos: ${processados}/${total} linha(s)`);
+            atualizarProgressoExpansaoAD(processados, total);
         }
     }
 
-    // Conduz a extração inteira (síncrona + a expansão assíncrona de todas as linhas) e
-    // grava o resumo calculado no mesmo formato de armazenamento usado por lerDadosDe/
-    // criarColetor (uma "página" com um array de 1 item), para participar do Relatório
-    // PDF/automação como qualquer outro relatório.
+    // Dias úteis (segunda a sexta — Date#getDay(): 0=domingo...6=sábado) em que cada
+    // processo (não cada linha — uma linha pode ter vários processos) tem audiência,
+    // agrupados por tipo. Fins de semana são descartados (pedido do usuário: só dias
+    // úteis) — o Projudi não deveria pautar audiência em fim de semana, mas por segurança
+    // essas entradas (se existirem) não entram na análise.
+    const ROTULOS_DIA_UTIL = { 1: 'Segunda', 2: 'Terça', 3: 'Quarta', 4: 'Quinta', 5: 'Sexta' };
+    function concentracaoPorDiaSemana(linhasComProcesso) {
+        const porDia = new Map(); // diaSemana(1-5) -> Map(tipo -> quantidade de processos)
+        linhasComProcesso.forEach(l => {
+            const ts = parseDataBR(l.data);
+            if (ts == null) return;
+            const dow = new Date(ts).getDay();
+            if (dow < 1 || dow > 5) return;
+            const porTipoDia = porDia.get(dow) || new Map();
+            porTipoDia.set(l.tipoAudiencia, (porTipoDia.get(l.tipoAudiencia) || 0) + l.processos.length);
+            porDia.set(dow, porTipoDia);
+        });
+        return [1, 2, 3, 4, 5].map(dow => {
+            const porTipoDia = porDia.get(dow) || new Map();
+            const porTipo = [...porTipoDia.entries()].map(([tipo, quantidade]) => ({ tipo, quantidade })).sort((a, b) => b.quantidade - a.quantidade);
+            return { diaSemana: ROTULOS_DIA_UTIL[dow], total: porTipo.reduce((s, it) => s + it.quantidade, 0), porTipo };
+        });
+    }
+
+    // Conduz a extração inteira (síncrona + a expansão assíncrona de todas as linhas em
+    // lotes) e grava o resumo calculado no mesmo formato de armazenamento usado por
+    // lerDadosDe/criarColetor (uma "página" com um array de 1 item), para participar do
+    // Relatório PDF/automação como qualquer outro relatório.
     async function coletarAudienciasDesignadas() {
         console.log('[Projudi Audiências Designadas] iniciando extração da Pauta de Horários');
-        const linhas = lerLinhasPautaAudiencias();
-        console.log(`[Projudi Audiências Designadas] ${linhas.length} linha(s) lida(s) — iniciando expansão dos processos (pode demorar, ~1,2s por linha)`);
+        const todasAsLinhas = lerLinhasPautaAudiencias();
+        console.log(`[Projudi Audiências Designadas] ${todasAsLinhas.length} linha(s) lida(s) — iniciando expansão dos processos em lotes de ${TAMANHO_LOTE_EXPANSAO_AD}`);
 
-        await expandirTodasAsLinhas(linhas);
+        await expandirTodasAsLinhas(todasAsLinhas);
 
-        const totalDesignadas = linhas.reduce((s, l) => s + l.agendadas, 0);
+        // Só entram na análise as linhas com pelo menos um processo vinculado (pedido do
+        // usuário) — uma linha da pauta sem processo reconhecido ao expandir é ignorada em
+        // TODOS os cálculos abaixo, não só na tabela.
+        const linhas = todasAsLinhas.filter(l => l.processos.length > 0);
+        const ignoradas = todasAsLinhas.length - linhas.length;
+        if (ignoradas > 0) console.log(`[Projudi Audiências Designadas] ${ignoradas} linha(s) sem processo vinculado foram ignoradas`);
+
+        // Total de audiências designadas = total de processos com audiência marcada (uma
+        // linha pode ter mais de um processo no mesmo horário) — não mais a soma da coluna
+        // "Agendadas", já que agora só contam linhas com processo de verdade vinculado.
+        const totalDesignadas = linhas.reduce((s, l) => s + l.processos.length, 0);
 
         let ultimaData = null, ultimaDataTs = -Infinity;
         linhas.forEach(l => {
@@ -753,20 +815,14 @@
         });
 
         // Processos distintos no último dia — contados um a um a partir da expansão, não
-        // pela soma da coluna "Agendadas" (pedido do usuário). Se nenhuma linha do dia
-        // trouxe processo reconhecível, cai de volta na soma de "Agendadas" só como número
-        // (sem lista de processos), para nunca reportar zero por engano.
+        // pela soma da coluna "Agendadas" (pedido do usuário).
         let processosUltimoDia = [];
         if (ultimaData) {
-            const linhasDoUltimoDia = linhas.filter(l => l.data === ultimaData);
             const set = new Set();
-            linhasDoUltimoDia.forEach(l => l.processos.forEach(p => set.add(p)));
+            linhas.filter(l => l.data === ultimaData).forEach(l => l.processos.forEach(p => set.add(p)));
             processosUltimoDia = [...set];
-            if (processosUltimoDia.length === 0) {
-                console.warn('[Projudi Audiências Designadas] nenhum processo reconhecido no último dia — usando a soma de "Agendadas" como estimativa do total.');
-            }
         }
-        const totalProcessosUltimoDia = processosUltimoDia.length || linhas.filter(l => l.data === ultimaData).reduce((s, l) => s + l.agendadas, 0);
+        const totalProcessosUltimoDia = processosUltimoDia.length;
 
         // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento" somada
         // em "Audiência de Instrução" — ver normalizarTipoAudiencia), com o(s) número(s) de
@@ -786,20 +842,16 @@
 
         // Tabela discriminada completa: data/hora/processo/tipo, uma linha por processo
         // (uma linha da pauta pode ter mais de um processo agendado no mesmo horário).
-        // Quando a expansão não trouxe processo nenhum, mantém uma linha só com o processo
-        // em branco, para não perder o horário/tipo da pauta.
         const tabela = [];
         linhas.forEach(l => {
-            if (l.processos.length > 0) {
-                l.processos.forEach(p => tabela.push({ data: l.data, horario: l.horario, processo: p, tipoAudiencia: l.tipoAudiencia }));
-            } else {
-                tabela.push({ data: l.data, horario: l.horario, processo: '', tipoAudiencia: l.tipoAudiencia });
-            }
+            l.processos.forEach(p => tabela.push({ data: l.data, horario: l.horario, processo: p, tipoAudiencia: l.tipoAudiencia }));
         });
         tabela.sort((a, b) => {
             const ta = parseDataBR(a.data) || 0, tb = parseDataBR(b.data) || 0;
             return ta - tb || a.horario.localeCompare(b.horario);
         });
+
+        const concentracaoDiaSemana = concentracaoPorDiaSemana(linhas);
 
         const resumo = {
             geradoEm: new Date().toISOString(),
@@ -809,14 +861,16 @@
             totalProcessosUltimoDia,
             porTipo,
             tabela,
+            concentracaoDiaSemana,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Designadas] resumo calculado: totalDesignadas=${totalDesignadas} ultimaData=${ultimaData} totalProcessosUltimoDia=${totalProcessosUltimoDia} tipos=${porTipo.length} linhasTabela=${tabela.length}`);
+        console.log(`[Projudi Audiências Designadas] resumo calculado: totalDesignadas=${totalDesignadas} ultimaData=${ultimaData} totalProcessosUltimoDia=${totalProcessosUltimoDia} tipos=${porTipo.length} linhasTabela=${tabela.length} ignoradas(sem processo)=${ignoradas}`);
 
         const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
+        store.removeItem(CHAVE_PROGRESSO_AD);
 
         avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
     }
@@ -2725,7 +2779,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], competencia: '' };
+        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [], competencia: '' };
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
@@ -2758,7 +2812,7 @@
         desenharCard(doc, m, k2Y, uw, 32, `Situação da Agenda — ${infoStatus.rotulo}`, String(totalUltimoDia) + (totalUltimoDia === 1 ? ' processo no último dia' : ' processos no último dia'),
             [
                 diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular',
-                r.ultimaData ? `Dia ${r.ultimaData}: ${fraseProcessos(r.processosUltimoDia, 8) || 'contagem por "Agendadas" (processos não identificados)'}` : 'Nenhuma audiência designada',
+                r.ultimaData ? `Dia ${r.ultimaData}: ${fraseProcessos(r.processosUltimoDia, 8)}` : 'Nenhuma audiência designada',
             ],
             false, infoStatus.cor);
 
@@ -2783,6 +2837,42 @@
             });
         } else {
             desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+
+        // Concentração por dia da semana (só dias úteis — ver concentracaoPorDiaSemana):
+        // gráfico com o total de processos por dia + detalhamento por tipo, numa página
+        // própria dentro do resumo (a mesma seção do relatório, só que numa página a mais).
+        const concentracao = r.concentracaoDiaSemana || [];
+        if (concentracao.some(d => d.total > 0)) {
+            doc.addPage();
+            tituloSecao(doc, m, m + 4, uw, 'Concentração de Audiências por Dia da Semana (dias úteis)');
+            const itensBarras = concentracao.map(d => ({ label: d.diaSemana, valor: d.total }));
+            desenharBarras(doc, m, m + 8, uw, 44, 'Total de processos por dia da semana', itensBarras, undefined, COR.aqua);
+
+            const linhasDetalhe = [];
+            concentracao.forEach(d => d.porTipo.forEach(it => linhasDetalhe.push({ dia: d.diaSemana, tipo: it.tipo, quantidade: it.quantidade })));
+            const yTabela = m + 8 + 44 + 6;
+            if (linhasDetalhe.length) {
+                tituloSecao(doc, m, yTabela, uw, 'Detalhamento por dia da semana e tipo de audiência');
+                doc.autoTable({
+                    columns: [
+                        { header: 'Dia da Semana', dataKey: 'dia' },
+                        { header: 'Tipo da Audiência', dataKey: 'tipo' },
+                        { header: 'Quantidade', dataKey: 'quantidade' },
+                    ],
+                    body: linhasDetalhe,
+                    startY: yTabela + 6,
+                    margin: { left: m, right: m, bottom: 14 },
+                    theme: 'grid',
+                    styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                    headStyles: { fillColor: COR.aqua, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                    alternateRowStyles: { fillColor: COR.cartao },
+                    columnStyles: { dia: { cellWidth: uw * 0.25 }, tipo: { cellWidth: uw * 0.5 }, quantidade: { cellWidth: uw * 0.25, halign: 'right' } },
+                    didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+                });
+            } else {
+                desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            }
         }
     }
 
@@ -4094,7 +4184,19 @@
             if (estado === 'concluido') return 'Coleta concluída';
             if (estado === 'ir_fim') return 'Finalizando…';
             if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `Preenchendo filtros de <strong>${rel ? rel.rotulo : estado}</strong>…`; }
-            if (estado.startsWith('coletando_')) { const rel = relatorioPorChave(estado.slice(10)); return `Coletando <strong>${rel ? rel.rotulo : estado}</strong>…`; }
+            if (estado.startsWith('coletando_')) {
+                const chave = estado.slice(10);
+                const rel = relatorioPorChave(chave);
+                let txt = `Coletando <strong>${rel ? rel.rotulo : estado}</strong>…`;
+                // Audiências Designadas expande processo a processo (em lotes) e pode
+                // demorar bastante em pautas grandes — mostra o progresso em vez de deixar
+                // o texto parado sem indicação de que algo está acontecendo.
+                if (chave === 'audienciasdesignadas') {
+                    const prog = lerProgressoExpansaoAD();
+                    if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} linha(s) da pauta)`;
+                }
+                return txt;
+            }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
             if (travado) {
                 const rel = relatorioPorChave(estado.slice(8));
