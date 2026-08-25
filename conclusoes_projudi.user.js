@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.3
+// @version      19.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -972,9 +972,10 @@
     // serve tanto pra pesquisa geral quanto pra cada pesquisa por usuário.
     function lerTotalRealizadasAR() { return lerValorLinhaAR(/^total\s+realizadas$/i); }
 
-    // Canceladas/Não Realizadas/Redesignadas — só existem (fazem sentido) na pesquisa
-    // GERAL (sem usuário selecionado); pedido do usuário: extrair da consulta geral.
-    function lerExtrasGeralAR() {
+    // Canceladas/Não Realizadas/Redesignadas — lidas tanto na pesquisa geral (total do
+    // período) quanto em cada pesquisa por usuário (pedido do usuário: também por
+    // magistrado), sempre da mesma tabela de resultado.
+    function lerExtrasAR() {
         return {
             canceladas: lerValorLinhaAR(/^canceladas$/i),
             naoRealizadas: lerValorLinhaAR(/^n[ãa]o\s+realizadas$/i),
@@ -1049,7 +1050,7 @@
 
         if (!aguardando || aguardando.tipo === 'geral') {
             store.setItem(CHAVE_TOTAL_GERAL_AR, String(total));
-            const extras = lerExtrasGeralAR();
+            const extras = lerExtrasAR();
             store.setItem(CHAVE_EXTRAS_GERAL_AR, JSON.stringify(extras));
             const usuarios = lerOpcoesUsuarioAR(form);
             console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas}) — ${usuarios.length} usuário(s) a percorrer`);
@@ -1061,9 +1062,13 @@
             return;
         }
 
-        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} audiência(s) realizada(s)`);
+        const extrasUsuario = lerExtrasAR();
+        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s)`);
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
-        acumulado.push({ usuario: aguardando.value, nome: aguardando.label, quantidade: total });
+        acumulado.push({
+            usuario: aguardando.value, nome: aguardando.label, quantidade: total,
+            canceladas: extrasUsuario.canceladas, naoRealizadas: extrasUsuario.naoRealizadas, redesignadas: extrasUsuario.redesignadas,
+        });
         store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify(acumulado));
         avancarUsuarioAR(form);
     }
@@ -3274,16 +3279,28 @@
             doc.autoTable({
                 columns: [
                     { header: 'Usuário', dataKey: 'nome' },
-                    { header: 'Audiências Realizadas', dataKey: 'quantidade' },
+                    { header: 'Realizadas', dataKey: 'quantidade' },
+                    { header: 'Canceladas', dataKey: 'canceladas' },
+                    { header: 'Não Realizadas', dataKey: 'naoRealizadas' },
+                    { header: 'Redesignadas', dataKey: 'redesignadas' },
                 ],
-                body: r.porUsuario.map(u => ({ nome: u.nome, quantidade: String(u.quantidade) })),
+                body: r.porUsuario.map(u => ({
+                    nome: u.nome, quantidade: String(u.quantidade),
+                    canceladas: String(u.canceladas || 0), naoRealizadas: String(u.naoRealizadas || 0), redesignadas: String(u.redesignadas || 0),
+                })),
                 startY: tY + 6,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
                 styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: { nome: { cellWidth: uw * 0.7 }, quantidade: { cellWidth: uw * 0.3, halign: 'right' } },
+                columnStyles: {
+                    nome: { cellWidth: uw * 0.4 },
+                    quantidade: { cellWidth: uw * 0.15, halign: 'right' },
+                    canceladas: { cellWidth: uw * 0.15, halign: 'right' },
+                    naoRealizadas: { cellWidth: uw * 0.15, halign: 'right' },
+                    redesignadas: { cellWidth: uw * 0.15, halign: 'right' },
+                },
                 didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
         } else {
