@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.1
+// @version      18.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4020,36 +4020,6 @@
         }
     }
 
-    // Lê o texto ao lado de "Atribuição:" no bloco #userinfo da página (ex.: o span com
-    // title="Magistrado (05218334936.cor)" do print enviado pelo usuário).
-    // O bloco #userinfo (com a Atribuição) e o #main-menu (usado para decidir onde
-    // injetar o painel) ficam em FRAMES DIFERENTES do frameset do Projudi — por isso
-    // procura em todos os frames acessíveis (mesma origem), não só no documento atual;
-    // sem isso, o painel nunca aparecia (a busca só olhava o próprio frame, que não tem
-    // #userinfo quando é o frame do #main-menu).
-    function lerAtribuicao() {
-        for (const doc of todosDocumentosAcessiveis()) {
-            const labels = doc.querySelectorAll('#userinfo .userinfo_label');
-            for (const label of labels) {
-                if (!/atribui[cç][aã]o\s*:/i.test(label.textContent)) continue;
-                const span = label.nextElementSibling;
-                if (span) return (span.textContent || '').trim();
-            }
-        }
-        return '';
-    }
-
-    // O painel só aparece para quem está logado com uma atribuição cujo código (entre
-    // parênteses, ex.: "Magistrado (05218334936.cor)") termina em ".cor" — perfil de
-    // Corregedor. Sem essa atribuição (ou se #userinfo não existir neste frame),
-    // NÃO mostra o painel — falha fechado, não aberto.
-    function atribuicaoPermiteAutomacao() {
-        const atrib = lerAtribuicao();
-        const m = /\(([^)]+)\)\s*$/.exec(atrib);
-        const codigo = m ? m[1].trim() : '';
-        return /\.cor$/i.test(codigo);
-    }
-
     // Categorias do painel: Cível-Geral é a base (todos os relatórios já existentes);
     // as demais herdam os mesmos itens e ganham uma seção própria para relatórios
     // específicos — ainda vazia (placeholder) até serem definidos. Só Cível-Geral e
@@ -4069,8 +4039,6 @@
         if (!document.querySelector('#main-menu')) return;
         // Não injeta sobre a tela de resultados de um relatório
         if (detectarConfig()) return;
-        // Só para quem está logado com atribuição de Corregedor (ver atribuicaoPermiteAutomacao)
-        if (!atribuicaoPermiteAutomacao()) return;
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
