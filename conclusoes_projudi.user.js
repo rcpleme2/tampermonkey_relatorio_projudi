@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.3
+// @version      18.4
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -589,7 +589,8 @@
 
     // ── Audiências Designadas (Crime) — audiencia/pautaAudiencia.do, "Ver Pauta de
     // Horários" ───────────────────────────────────────────────────────────────────
-    // Relatório de RESUMO (sem tabela discriminada — ver semTabela): total de audiências
+    // Relatório de resumo + tabela discriminada (guardada dentro do resumo — ver
+    // secaoTemTabela): total de audiências
     // designadas, o último dia com audiência e quantos processos distintos têm audiência
     // nesse dia (contados um a um, não pela coluna "Agendadas" — ver expandirLinhasDoDia),
     // a data da audiência mais distante por tipo, e uma situação (verde/amarelo/vermelho)
@@ -605,7 +606,9 @@
     const CFG_AUDIENCIAS_DESIGNADAS = {
         prefixo: 'projudi_audienciasdesignadas_',
         mostrarSeVazio: true,
-        semTabela: true, // só resumo — ver gerarPDFConjunto
+        // Tem tabela discriminada (data/hora/processo/tipo), mas guardada dentro do
+        // resumo (resumo.tabela) em vez de uma lista de registros como os demais
+        // relatórios — ver secaoTemTabela em gerarPDFConjunto e montarTabelaAudienciasDesignadas.
         detecta: () => false, // nunca detectado por cabeçalho de tabela — só entra via automação (ver navegarMenu/injetarBotoes)
         usaAtuacao: false,
         nomeArquivo: 'audiencias_designadas_projudi',
@@ -697,39 +700,49 @@
         return linhas;
     }
 
-    // Expande (clica no ícone "+") cada linha do dia informado e lê os números de
-    // processo (formato CNJ) do conteúdo que aparece — em vez de confiar na coluna
-    // "Agendadas", que pode não bater 1:1 com processos distintos (pedido do usuário).
-    // Melhor esforço: se a expansão não trouxer nenhum processo reconhecível (ex.: a
-    // marcação da página mudou), cai de volta na soma de "Agendadas" daquele dia, para
-    // nunca reportar zero por engano.
-    async function contarProcessosDoDia(linhasDoDia) {
-        const processos = new Set();
-        for (const linha of linhasDoDia) {
-            const link = linha.elLinha.querySelector('a[class^="linkProcessos"]');
-            if (!link) continue;
-            link.click();
-            // A expansão é via AJAX — sem um evento pra esperar, um atraso fixo é o que dá
-            // pra fazer aqui; 1,2s cobre uma resposta normal do Projudi.
-            await new Promise(r => setTimeout(r, 1200));
-            const detalhe = linha.elLinha.nextElementSibling;
-            const texto = detalhe ? detalhe.textContent : '';
-            const achados = texto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/g) || [];
-            achados.forEach(p => processos.add(p));
-        }
-        if (processos.size > 0) return processos.size;
-        console.warn('[Projudi Audiências Designadas] não foi possível ler os números de processo ao expandir — usando a soma de "Agendadas" como estimativa.');
-        return linhasDoDia.reduce((s, l) => s + l.agendadas, 0);
+    // Expande (clica no ícone "+") UMA linha e lê os números de processo (formato CNJ) do
+    // conteúdo que aparece — em vez de confiar na coluna "Agendadas", que pode não bater
+    // 1:1 com processos distintos (pedido do usuário). Usado tanto para montar a tabela
+    // discriminada completa quanto para contar os processos do último dia/por tipo.
+    async function expandirProcessosDaLinha(linha) {
+        const link = linha.elLinha.querySelector('a[class^="linkProcessos"]');
+        if (!link) return [];
+        link.click();
+        // A expansão é via AJAX — sem um evento pra esperar, um atraso fixo é o que dá pra
+        // fazer aqui; 1,2s cobre uma resposta normal do Projudi.
+        await new Promise(r => setTimeout(r, 1200));
+        const detalhe = linha.elLinha.nextElementSibling;
+        const texto = detalhe ? detalhe.textContent : '';
+        return texto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/g) || [];
     }
 
-    // Conduz a extração inteira (síncrona + a expansão assíncrona do último dia) e grava
-    // o resumo calculado no mesmo formato de armazenamento usado por lerDadosDe/
+    // Expande TODAS as linhas lidas, uma a uma (sequencial — o Projudi não aguenta bem
+    // várias expansões simultâneas), preenchendo linha.processos. Necessário para a tabela
+    // discriminada completa (pedido do usuário: data/hora/processo/tipo por linha), além de
+    // alimentar a contagem do último dia e a última audiência por tipo.
+    async function expandirTodasAsLinhas(linhas) {
+        for (let i = 0; i < linhas.length; i++) {
+            const linha = linhas[i];
+            linha.processos = await expandirProcessosDaLinha(linha);
+            if (linha.processos.length === 0) {
+                console.warn(`[Projudi Audiências Designadas] linha ${i + 1}/${linhas.length} (${linha.data} ${linha.horario}, ${linha.tipoAudiencia}) sem processo reconhecido ao expandir — "Agendadas"=${linha.agendadas} será usado como estimativa onde necessário.`);
+            }
+            if ((i + 1) % 5 === 0 || i === linhas.length - 1) {
+                console.log(`[Projudi Audiências Designadas] expandindo processos: ${i + 1}/${linhas.length} linha(s)`);
+            }
+        }
+    }
+
+    // Conduz a extração inteira (síncrona + a expansão assíncrona de todas as linhas) e
+    // grava o resumo calculado no mesmo formato de armazenamento usado por lerDadosDe/
     // criarColetor (uma "página" com um array de 1 item), para participar do Relatório
     // PDF/automação como qualquer outro relatório.
     async function coletarAudienciasDesignadas() {
         console.log('[Projudi Audiências Designadas] iniciando extração da Pauta de Horários');
         const linhas = lerLinhasPautaAudiencias();
-        console.log(`[Projudi Audiências Designadas] ${linhas.length} linha(s) lida(s)`);
+        console.log(`[Projudi Audiências Designadas] ${linhas.length} linha(s) lida(s) — iniciando expansão dos processos (pode demorar, ~1,2s por linha)`);
+
+        await expandirTodasAsLinhas(linhas);
 
         const totalDesignadas = linhas.reduce((s, l) => s + l.agendadas, 0);
 
@@ -739,34 +752,66 @@
             if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = l.data; }
         });
 
-        let processosUltimoDia = 0;
+        // Processos distintos no último dia — contados um a um a partir da expansão, não
+        // pela soma da coluna "Agendadas" (pedido do usuário). Se nenhuma linha do dia
+        // trouxe processo reconhecível, cai de volta na soma de "Agendadas" só como número
+        // (sem lista de processos), para nunca reportar zero por engano.
+        let processosUltimoDia = [];
         if (ultimaData) {
             const linhasDoUltimoDia = linhas.filter(l => l.data === ultimaData);
-            processosUltimoDia = await contarProcessosDoDia(linhasDoUltimoDia);
+            const set = new Set();
+            linhasDoUltimoDia.forEach(l => l.processos.forEach(p => set.add(p)));
+            processosUltimoDia = [...set];
+            if (processosUltimoDia.length === 0) {
+                console.warn('[Projudi Audiências Designadas] nenhum processo reconhecido no último dia — usando a soma de "Agendadas" como estimativa do total.');
+            }
         }
+        const totalProcessosUltimoDia = processosUltimoDia.length || linhas.filter(l => l.data === ultimaData).reduce((s, l) => s + l.agendadas, 0);
 
-        // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento"
-        // somada em "Audiência de Instrução" — ver normalizarTipoAudiencia).
-        const ultimaPorTipo = new Map();
+        // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento" somada
+        // em "Audiência de Instrução" — ver normalizarTipoAudiencia), com o(s) número(s) de
+        // processo daquela audiência mais distante.
+        const maxTsPorTipo = new Map();
         linhas.forEach(l => {
             const ts = parseDataBR(l.data);
             if (ts == null) return;
-            const atual = ultimaPorTipo.get(l.tipoAudiencia);
-            if (!atual || ts > atual.ts) ultimaPorTipo.set(l.tipoAudiencia, { ts, data: l.data });
+            const atual = maxTsPorTipo.get(l.tipoAudiencia);
+            if (atual == null || ts > atual) maxTsPorTipo.set(l.tipoAudiencia, ts);
         });
-        const porTipo = [...ultimaPorTipo.entries()]
-            .map(([tipo, info]) => ({ tipo, data: info.data }))
-            .sort((a, b) => b.data.localeCompare(a.data));
+        const porTipo = [...maxTsPorTipo.entries()].map(([tipo, ts]) => {
+            const linhasDoTipoNaData = linhas.filter(l => l.tipoAudiencia === tipo && parseDataBR(l.data) === ts);
+            const processos = [...new Set(linhasDoTipoNaData.flatMap(l => l.processos))];
+            return { tipo, data: linhasDoTipoNaData[0].data, processos };
+        }).sort((a, b) => b.data.localeCompare(a.data));
+
+        // Tabela discriminada completa: data/hora/processo/tipo, uma linha por processo
+        // (uma linha da pauta pode ter mais de um processo agendado no mesmo horário).
+        // Quando a expansão não trouxe processo nenhum, mantém uma linha só com o processo
+        // em branco, para não perder o horário/tipo da pauta.
+        const tabela = [];
+        linhas.forEach(l => {
+            if (l.processos.length > 0) {
+                l.processos.forEach(p => tabela.push({ data: l.data, horario: l.horario, processo: p, tipoAudiencia: l.tipoAudiencia }));
+            } else {
+                tabela.push({ data: l.data, horario: l.horario, processo: '', tipoAudiencia: l.tipoAudiencia });
+            }
+        });
+        tabela.sort((a, b) => {
+            const ta = parseDataBR(a.data) || 0, tb = parseDataBR(b.data) || 0;
+            return ta - tb || a.horario.localeCompare(b.horario);
+        });
 
         const resumo = {
             geradoEm: new Date().toISOString(),
             totalDesignadas,
             ultimaData,
             processosUltimoDia,
+            totalProcessosUltimoDia,
             porTipo,
+            tabela,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log('[Projudi Audiências Designadas] resumo calculado:', JSON.stringify(resumo));
+        console.log(`[Projudi Audiências Designadas] resumo calculado: totalDesignadas=${totalDesignadas} ultimaData=${ultimaData} totalProcessosUltimoDia=${totalProcessosUltimoDia} tipos=${porTipo.length} linhasTabela=${tabela.length}`);
 
         const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -1874,7 +1919,7 @@
             return {
                 rotulo: TITULO_AUDIENCIAS_DESIGNADAS,
                 montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice),
-                montarTabela: null, // semTabela — nunca chamado (ver gerarPDFConjunto)
+                montarTabela: (doc, dados, comIndice) => montarTabelaAudienciasDesignadas(doc, (dados && dados[0] && dados[0].tabela) || [], comIndice),
             };
         }
         return {
@@ -2044,6 +2089,17 @@
     // frente), seguida das seções do Cartório e depois do Gabinete, cada uma com
     // marcadores (bookmarks) no leitor de PDF. somenteResumo omite as tabelas
     // discriminadas, mantendo só os resumos (KPIs e gráficos) de cada seção.
+    // Se a seção "s" (já passada por descreverSecaoPDF) tem algo a discriminar em tabela.
+    // A maioria guarda os registros direto em s.dados; Audiências Designadas guarda um
+    // resumo único (s.dados = [resumo]) com a lista de linhas dentro de resumo.tabela.
+    function secaoTemTabela(s) {
+        if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
+            const resumo = s.dados && s.dados[0];
+            return !!(resumo && resumo.tabela && resumo.tabela.length);
+        }
+        return s.dados.length > 0;
+    }
+
     function gerarPDFConjunto(secoesEntrada, somenteResumo) {
         const doc = novoDocPDF();
         const agora = new Date();
@@ -2190,7 +2246,7 @@
             });
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
             // mostrar (ex.: Audiências Pendentes zerado).
-            outrasSecoes.filter(s => s.dados.length > 0 && !s.cfgOriginal.semTabela).forEach(s => {
+            outrasSecoes.filter(secaoTemTabela).forEach(s => {
                 s.pgTabela = s.montarTabela(doc, s.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
                 doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: s.pgTabela });
             });
@@ -2205,7 +2261,7 @@
                 doc.setPage(info.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', info.pgTabela, pw, ph);
             });
-            outrasSecoes.filter(s => s.dados.length > 0 && !s.cfgOriginal.semTabela).forEach(s => {
+            outrasSecoes.filter(secaoTemTabela).forEach(s => {
                 doc.setPage(s.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
             });
@@ -2632,8 +2688,8 @@
     }
 
     // ── PDF do relatório de Audiências Designadas (Crime — Pauta de Horários) ───
-    // Só resumo (cfg.semTabela) — os dados coletados já são um resumo pronto, não uma
-    // lista de linhas a discriminar (ver coletarAudienciasDesignadas).
+    // Os dados coletados já vêm como um resumo pronto (não uma lista de linhas — ver
+    // coletarAudienciasDesignadas), com a tabela discriminada guardada em resumo.tabela.
 
     const TITULO_AUDIENCIAS_DESIGNADAS = 'Audiências Designadas';
 
@@ -2642,7 +2698,21 @@
         const resumo = dados && dados[0] ? dados[0] : null;
         montarResumoAudienciasDesignadas(doc, resumo, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (resumo && resumo.tabela && resumo.tabela.length) {
+            const pgTabela = doc.internal.getNumberOfPages() + 1;
+            montarTabelaAudienciasDesignadas(doc, resumo.tabela, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
         baixarBlob(doc.output('blob'), `audiencias_designadas_projudi_${dataArquivo()}.pdf`);
+    }
+
+    // Lista de processos formatada para caber numa sub-linha do card (trunca com "+N" se
+    // não couber tudo) — usada tanto no card combinado do último dia quanto no card por tipo.
+    function fraseProcessos(processos, maxItens) {
+        if (!processos || !processos.length) return '';
+        const visiveis = processos.slice(0, maxItens);
+        const resto = processos.length - visiveis.length;
+        return visiveis.join(', ') + (resto > 0 ? ` (+${resto})` : '');
     }
 
     function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice) {
@@ -2655,7 +2725,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: 0, porTipo: [], competencia: '' };
+        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], competencia: '' };
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
@@ -2673,42 +2743,82 @@
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.aqua);
 
-        const k2Y = kY + 28 + gap;
-        desenharCard(doc, m, k2Y, uw, 26, 'Processos com audiência no último dia', String(r.processosUltimoDia),
-            [r.ultimaData ? `Dia ${r.ultimaData} — contagem manual de processos distintos, não a coluna "Agendadas"` : 'Nenhuma audiência designada'],
-            true, COR.ambar);
-
         // Situação da agenda: verde até 180 dias até a última audiência, amarelo de 180 a
-        // 360, vermelho acima de 360 — mesma régua Regular/Atenção/Crítico usada nos
-        // demais relatórios (ver classificarSituacaoPorDias/SITUACAO_INFO), só que aqui o
-        // "atraso" é a agenda já estar preenchida muito longe no futuro, não uma pendência.
-        const k3Y = k2Y + 26 + gap;
+        // 360, vermelho acima de 360 — mesma régua Regular/Atenção/Crítico usada nos demais
+        // relatórios (ver classificarSituacaoPorDias/SITUACAO_INFO), só que aqui o "atraso"
+        // é a agenda já estar preenchida muito longe no futuro, não uma pendência. O card
+        // junta a situação com os processos do último dia (pedido do usuário) e usa a cor
+        // da situação como acento — assim a sinalização gráfica salta aos olhos.
+        const k2Y = kY + 28 + gap;
         const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
         const diasAteUltima = tsUltima != null ? Math.round((tsUltima - agora.getTime()) / DIA_MS) : null;
         const status = classificarSituacaoPorDias(diasAteUltima, 180, 360);
         const infoStatus = SITUACAO_INFO[status] || SITUACAO_INFO.regular;
-        desenharCard(doc, m, k3Y, uw, 26, 'Situação da Agenda', infoStatus.rotulo,
-            [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
-            true, infoStatus.cor);
+        const totalUltimoDia = r.totalProcessosUltimoDia != null ? r.totalProcessosUltimoDia : (r.processosUltimoDia || []).length;
+        desenharCard(doc, m, k2Y, uw, 32, `Situação da Agenda — ${infoStatus.rotulo}`, String(totalUltimoDia) + (totalUltimoDia === 1 ? ' processo no último dia' : ' processos no último dia'),
+            [
+                diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular',
+                r.ultimaData ? `Dia ${r.ultimaData}: ${fraseProcessos(r.processosUltimoDia, 8) || 'contagem por "Agendadas" (processos não identificados)'}` : 'Nenhuma audiência designada',
+            ],
+            false, infoStatus.cor);
 
-        const tY = k3Y + 26 + gap + 4;
+        const tY = k2Y + 32 + gap + 4;
         if (r.porTipo.length) {
             tituloSecao(doc, m, tY, uw, 'Última audiência designada por tipo');
             doc.autoTable({
-                columns: [{ header: 'Tipo da Audiência', dataKey: 'tipo' }, { header: 'Data mais distante', dataKey: 'data' }],
-                body: r.porTipo.map(it => ({ tipo: it.tipo, data: it.data })),
+                columns: [
+                    { header: 'Tipo da Audiência', dataKey: 'tipo' },
+                    { header: 'Data mais distante', dataKey: 'data' },
+                    { header: 'Processo(s)', dataKey: 'processos' },
+                ],
+                body: r.porTipo.map(it => ({ tipo: it.tipo, data: it.data, processos: fraseProcessos(it.processos, 4) || '—' })),
                 startY: tY + 6,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
                 styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: { tipo: { cellWidth: uw * 0.7 }, data: { cellWidth: uw * 0.3, halign: 'right' } },
+                columnStyles: { tipo: { cellWidth: uw * 0.28 }, data: { cellWidth: uw * 0.17, halign: 'right' }, processos: { cellWidth: uw * 0.55 } },
                 didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
         } else {
             desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
+    }
+
+    // Tabela discriminada com TODAS as audiências designadas (data/hora/processo/tipo) —
+    // uma linha por processo (ver coletarAudienciasDesignadas). Segue o mesmo padrão das
+    // demais "montarTabelaX": página nova, cabeçalho + rodapé, devolve o nº da página.
+    function montarTabelaAudienciasDesignadas(doc, tabela, comIndice) {
+        doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const pagina = doc.internal.getNumberOfPages();
+
+        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_AUDIENCIAS_DESIGNADAS} (${tabela.length} registro(s))`);
+        doc.autoTable({
+            columns: [
+                { header: 'Data', dataKey: 'data' },
+                { header: 'Hora', dataKey: 'horario' },
+                { header: 'Processo', dataKey: 'processo' },
+                { header: 'Tipo da Audiência', dataKey: 'tipoAudiencia' },
+            ],
+            body: tabela.map(t => ({ data: t.data, horario: t.horario, processo: t.processo || '—', tipoAudiencia: t.tipoAudiencia })),
+            startY: m + 10,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: { data: { cellWidth: uw * 0.14 }, horario: { cellWidth: uw * 0.1 }, processo: { cellWidth: uw * 0.36 }, tipoAudiencia: { cellWidth: uw * 0.4 } },
+            didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+        return pagina;
     }
 
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
@@ -3653,9 +3763,9 @@
         // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
         // do Cível-Geral, só aparece na seção própria da aba Crime.
         { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Audiências', categoriaEspecifica: 'crime', precisaPreencher: true },
-        // Segundo item específico do Crime — resumo da Pauta de Horários (ver
-        // coletarAudienciasDesignadas). Como é só resumo (cfg.semTabela), "Extrair mais"
-        // não faz sentido — cada extração recalcula o resumo do zero.
+        // Segundo item específico do Crime — resumo + tabela da Pauta de Horários (ver
+        // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
+        // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
         { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
@@ -4099,8 +4209,8 @@
                     <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
-            <div class="pa-tabs">${linhasAbas}</div>
             <div class="pa-body" style="display:none;">
+                <div class="pa-tabs">${linhasAbas}</div>
                 <div class="pa-state-row">
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
@@ -4215,6 +4325,10 @@
 
         #painel-automacao .pa-tabs {
             display: flex; gap: 2px; padding: 8px 11px 0; background: #F4F4F1; border-bottom: 1px solid #DEDDD6;
+            /* .pa-tabs mora dentro de .pa-body (para sumir junto ao colapsar — ver
+               pa-btn-colapsar) mas mantém a aparência de faixa colada nas bordas do painel,
+               cancelando o padding do .pa-body com margem negativa. */
+            margin: -11px -11px 8px;
         }
         #painel-automacao .pa-tab {
             flex: 1; border: none; background: none; padding: 7px 4px 8px; font-size: .68em; font-weight: 600;
