@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.4
+// @version      20.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1370,12 +1370,25 @@
             const pendentes = campos.reduce((s, campo) => s + (mapa[campo] || 0), 0);
             if (pendentes <= 0) return; // regra do usuário: linha zerada não entra
 
-            registros.push({
+            const registro = {
                 tipo,
                 pendentes,
                 urgentes: mapa[campoUrgencia] || 0,
                 origem,
-            });
+            };
+            // Além do agregado "pendentes" (usado na capa unificada e no resumo), guarda
+            // também as colunas originais de cada tabela — a tabela discriminada mostra
+            // essas colunas separadas, fiéis à tela do Projudi, em vez de só um total.
+            if (origem === 'principal') {
+                registro.paraConferir = mapa.PreAnalise || 0;
+                registro.paraExpedir = mapa.ParaExpedir || 0;
+                registro.paraAssinar = mapa.ParaAssinar || 0;
+                registro.devolvidoJuiz = mapa.DevolvidoAjuste || 0;
+                registro.decursoPrazo = mapa.DecursoDePrazo || 0;
+            } else {
+                registro.paraExpedir = mapa.ParaExpedirBnmp || 0;
+            }
+            registros.push(registro);
         });
         return registros;
     }
@@ -3957,6 +3970,9 @@
 
     // Tabela discriminada — uma linha por tipo de cumprimento, ordenada por pendentes
     // decrescente (mais volumoso primeiro; em empate, mais urgente primeiro).
+    // Tabela discriminada em DUAS seções fiéis às duas tabelas originais da tela (BNMP e
+    // principal) — cada uma com suas próprias colunas, em vez de um único total agregado
+    // "Pendentes" que escondia de qual tabela vinha cada campo.
     function montarTabelaOutrosCumprimentos(doc, dados, comIndice) {
         doc.addPage();
         const agora = new Date();
@@ -3967,37 +3983,90 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const pagina = doc.internal.getNumberOfPages();
+        const carimbo = `${hoje} ${hora}`;
 
-        const ordenado = [...dados].sort((a, b) => (b.pendentes - a.pendentes) || (b.urgentes - a.urgentes));
+        const bnmp = dados.filter(d => d.origem === 'bnmp').sort((a, b) => (b.paraExpedir - a.paraExpedir) || (b.urgentes - a.urgentes));
+        const principal = dados.filter(d => d.origem !== 'bnmp').sort((a, b) => (b.pendentes - a.pendentes) || (b.urgentes - a.urgentes));
 
-        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_OUTROS_CUMPRIMENTOS} (${ordenado.length} tipo(s))`);
-        doc.autoTable({
-            columns: [
-                { header: 'Tipo de Cumprimento', dataKey: 'tipo' },
-                { header: 'Origem', dataKey: 'origem' },
-                { header: 'Pendentes', dataKey: 'pendentes' },
-                { header: 'Com Urgência', dataKey: 'urgentes' },
-            ],
-            body: ordenado.map(d => ({
-                tipo: d.tipo,
-                origem: d.origem === 'bnmp' ? 'BNMP' : 'Cumprimento',
-                pendentes: String(d.pendentes),
-                urgentes: String(d.urgentes || 0),
-            })),
-            startY: m + 10,
+        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_OUTROS_CUMPRIMENTOS} (${dados.length} tipo(s))`);
+        let y = m + 10;
+
+        const opcoesComuns = {
             margin: { left: m, right: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                tipo: { cellWidth: uw * 0.52 },
-                origem: { cellWidth: uw * 0.16 },
-                pendentes: { cellWidth: uw * 0.16, halign: 'right' },
-                urgentes: { cellWidth: uw * 0.16, halign: 'right' },
-            },
-            didDrawPage: () => desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
-        });
+            didDrawPage: () => desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, carimbo, pw, ph, m, comIndice),
+        };
+
+        // Espaço mínimo para caber um título de seção + ao menos uma linha de tabela;
+        // senão pula para a próxima página antes de desenhar o título (evita título órfão
+        // no fim da página, com a tabela toda na página seguinte).
+        function garantirEspaco(minimo) {
+            if (y > ph - m - minimo) { doc.addPage(); y = m + 8; }
+        }
+
+        if (bnmp.length) {
+            garantirEspaco(30);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+            doc.text(`BNMP (${bnmp.length})`, m, y);
+            doc.autoTable({
+                ...opcoesComuns,
+                columns: [
+                    { header: 'Tipo da Peça', dataKey: 'tipo' },
+                    { header: 'Para Expedir', dataKey: 'paraExpedir' },
+                    { header: 'Com Urgência', dataKey: 'urgentes' },
+                ],
+                body: bnmp.map(d => ({ tipo: d.tipo, paraExpedir: String(d.paraExpedir || 0), urgentes: String(d.urgentes || 0) })),
+                startY: y + 3,
+                columnStyles: {
+                    tipo: { cellWidth: uw * 0.6 },
+                    paraExpedir: { cellWidth: uw * 0.2, halign: 'right' },
+                    urgentes: { cellWidth: uw * 0.2, halign: 'right' },
+                },
+            });
+            y = doc.lastAutoTable.finalY + 8;
+        }
+
+        if (principal.length) {
+            garantirEspaco(30);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+            doc.text(`Cumprimento (${principal.length})`, m, y);
+            doc.autoTable({
+                ...opcoesComuns,
+                columns: [
+                    { header: 'Cumprimento', dataKey: 'tipo' },
+                    { header: 'Para Conferir', dataKey: 'paraConferir' },
+                    { header: 'Para Expedir', dataKey: 'paraExpedir' },
+                    { header: 'Para Assinar', dataKey: 'paraAssinar' },
+                    { header: 'Devolvido pelo Juiz', dataKey: 'devolvidoJuiz' },
+                    { header: 'Decurso de Prazo', dataKey: 'decursoPrazo' },
+                    { header: 'Com Urgência', dataKey: 'urgentes' },
+                ],
+                body: principal.map(d => ({
+                    tipo: d.tipo,
+                    paraConferir: String(d.paraConferir || 0),
+                    paraExpedir: String(d.paraExpedir || 0),
+                    paraAssinar: String(d.paraAssinar || 0),
+                    devolvidoJuiz: String(d.devolvidoJuiz || 0),
+                    decursoPrazo: String(d.decursoPrazo || 0),
+                    urgentes: String(d.urgentes || 0),
+                })),
+                startY: y + 3,
+                styles: { ...opcoesComuns.styles, fontSize: 7.5 },
+                columnStyles: {
+                    tipo: { cellWidth: uw * 0.28 },
+                    paraConferir: { cellWidth: uw * 0.12, halign: 'right' },
+                    paraExpedir: { cellWidth: uw * 0.12, halign: 'right' },
+                    paraAssinar: { cellWidth: uw * 0.12, halign: 'right' },
+                    devolvidoJuiz: { cellWidth: uw * 0.14, halign: 'right' },
+                    decursoPrazo: { cellWidth: uw * 0.12, halign: 'right' },
+                    urgentes: { cellWidth: uw * 0.1, halign: 'right' },
+                },
+            });
+        }
+
         return pagina;
     }
 
