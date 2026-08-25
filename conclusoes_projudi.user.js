@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.0
+// @version      19.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -926,6 +926,14 @@
             campo.dispatchEvent(new Event('input', { bubbles: true }));
             campo.dispatchEvent(new Event('change', { bubbles: true }));
         });
+        // "Dt. Agendamento" (tipoBuscaDataAudiencia=1) — o Projudi às vezes já marca isso
+        // por padrão, mas não sempre; marcar explicitamente evita depender desse padrão.
+        const radioAgendamento = form.querySelector('input[name="tipoBuscaDataAudiencia"][value="1"]');
+        if (radioAgendamento) {
+            radioAgendamento.checked = true;
+            radioAgendamento.dispatchEvent(new Event('click', { bubbles: true }));
+            radioAgendamento.dispatchEvent(new Event('change', { bubbles: true }));
+        }
     }
 
     function setUsuarioAR(form, valor) {
