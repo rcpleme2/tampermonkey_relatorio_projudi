@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.6
+// @version      20.7
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3984,7 +3984,6 @@
         const r = dados || [];
         const totalPendentes = r.reduce((s, d) => s + (d.pendentes || 0), 0);
         const totalUrgentes = r.reduce((s, d) => s + (d.urgentes || 0), 0);
-        const totalBnmp = r.filter(d => d.origem === 'bnmp').reduce((s, d) => s + (d.pendentes || 0), 0);
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_OUTROS_CUMPRIMENTOS, m, m + 2);
@@ -4003,10 +4002,20 @@
 
         const gap = 6;
         const kY = yLinha + 5;
-        const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m,                   kY, kW3, 28, 'Tipos com pendência', String(r.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,       kY, kW3, 28, 'Total pendente', String(totalPendentes), [`incl. ${totalBnmp} BNMP`], true, COR.ambar);
-        desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Com urgência', String(totalUrgentes), [], true, COR.vermelho);
+        const kW2 = (uw - gap) / 2;
+
+        // "urgentes" é um marcador sobre os demais campos (não uma fila própria — ver
+        // observação acima), ou seja já está incluído em "pendentes"; "normais" é o que
+        // sobra depois de tirar os urgentes.
+        const totalNormais = Math.max(0, totalPendentes - totalUrgentes);
+        desenharCard(doc, m, kY, kW2, 28, 'Total de Cumprimentos Pendentes', String(totalPendentes),
+            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.ambar);
+
+        const maisPendencias = r.length ? [...r].sort((a, b) => b.pendentes - a.pendentes)[0] : null;
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Tipo com Mais Pendências',
+            maisPendencias ? maisPendencias.tipo : '—',
+            maisPendencias ? [`${maisPendencias.pendentes} pendente(s)${maisPendencias.urgentes ? `  •  ${maisPendencias.urgentes} urgente(s)` : ''}`] : [],
+            true, COR.azul);
 
         const tY = kY + 28 + gap + 4;
         if (r.length) {
