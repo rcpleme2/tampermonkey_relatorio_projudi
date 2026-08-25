@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      17.1
+// @version      17.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -558,8 +558,8 @@
         usaAtuacao: false,
         nomeArquivo: 'audiencias_pendentes_projudi',
         rotulos: { coletar: 'Extrair Audiências', coletarMais: 'Extrair mais (Audiências)', baixar: '⬇ Baixar Audiências' },
-        cabecalhos: ['Processo', 'Tipo da Audiência', 'Data da Audiência', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 34 }, { wch: 18 }, { wch: 11 }],
+        cabecalhos: ['Processo', 'Tipo da Audiência', 'Data da Audiência', 'Dias até a Audiência', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 34 }, { wch: 18 }, { wch: 18 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
@@ -572,9 +572,20 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.tipoAudiencia, d.dataAudiencia, d.prioritario ? 'Sim' : 'Não'],
+        // "Dias até a Audiência" é sempre recalculado na hora de exportar (Excel ou PDF),
+        // nunca gravado na coleta — a diferença é entre a data da audiência e o momento em
+        // que o relatório é gerado, não o momento em que os dados foram coletados.
+        linha: (d) => [d.processo, d.tipoAudiencia, d.dataAudiencia, fmtDiferencaDias(diasAteAudiencia(d.dataAudiencia, Date.now())), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFAudiencias(dados, somenteResumo),
     };
+
+    // Diferença de dias entre a data da audiência e "now" (positivo = audiência no
+    // futuro, negativo = já deveria ter ocorrido). null quando a data não pôde ser lida.
+    function diasAteAudiencia(dataAudiencia, now) {
+        const t = parseDataBR(dataAudiencia);
+        return t == null ? null : Math.round((t - now) / DIA_MS);
+    }
+    function fmtDiferencaDias(dias) { return dias == null ? '' : String(dias); }
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
@@ -2389,9 +2400,10 @@
         tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Audiências Pendentes');
 
         const colunas = [
-            { header: 'Processo', width: 50, get: (d) => d.processo },
-            { header: 'Tipo da Audiência', width: 70, get: (d) => d.tipoAudiencia },
-            { header: 'Data da Audiência', width: 40, get: (d) => d.dataAudiencia },
+            { header: 'Processo', width: 44, get: (d) => d.processo },
+            { header: 'Tipo da Audiência', width: 62, get: (d) => d.tipoAudiencia },
+            { header: 'Data da Audiência', width: 36, get: (d) => d.dataAudiencia },
+            { header: 'Dias até a Audiência', width: 24, get: (d) => fmtDiferencaDias(diasAteAudiencia(d.dataAudiencia, agora.getTime())) },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
