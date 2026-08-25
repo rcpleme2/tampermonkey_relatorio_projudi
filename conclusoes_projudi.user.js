@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.5
+// @version      20.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -336,7 +336,6 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
-            mediaLabel: 'juntadas / dia',
             distribuicoes: [
                 { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
                 // Os três gráficos abaixo vão para a 2ª página do resumo (pagina2), com
@@ -1656,6 +1655,37 @@
         }
     }
 
+    // Mede a altura que desenharCardLista precisaria para "valor" — chamar ANTES de
+    // desenhar o card (a altura da caixa depende do texto, então precisa ser conhecida de
+    // antemão), com a mesma fonte usada no desenho.
+    function medirAlturaCardLista(doc, w, valor, temSub) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11);
+        const linhas = doc.splitTextToSize(String(valor || '—'), w - 10);
+        return 6.5 + linhas.length * 4.6 + (temSub ? 8 : 0) + 4;
+    }
+
+    // Variante de desenharCard para um "valor" que pode ser longo (ex.: vários números de
+    // processo) — QUEBRA em várias linhas em vez de truncar com reticências, então nunca
+    // corta informação (pedido do usuário). Altura fixa "h" — sempre calcular com
+    // medirAlturaCardLista antes de chamar.
+    function desenharCardLista(doc, x, y, w, h, titulo, valor, subLinha, acento) {
+        acento = acento || COR.azul;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const px = x + 5;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text(String(titulo).toUpperCase(), px, y + 6.5);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11); doc.setTextColor(...COR.tinta);
+        const linhas = doc.splitTextToSize(String(valor || '—'), w - 10);
+        doc.text(linhas, px, y + 12);
+        if (subLinha) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text(subLinha, px, y + 12 + linhas.length * 4.6 + 3);
+        }
+    }
+
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
     // cor: cor padrão das barras (acento semântico do gráfico); item.cor sobrepõe se definida.
     function desenharBarras(doc, x, y, w, h, titulo, itens, fmt, cor) {
@@ -2286,20 +2316,6 @@
             yy += linhasObs.length * 3.4 + 5;
         }
 
-        // Grade de KPIs que QUEBRA em várias linhas quando não cabem lado a lado (o
-        // Cartório pode ter até 7 — pendências totais, prioritários, acima de 30 dias,
-        // mais antiga, Juntadas, Retorno, Termos de Audiência) — cartão largo demais estreita
-        // e corta o título; largura mínima evita isso, sacrificando uma linha a mais.
-        const gap = 5;
-        const larguraMinimaKpi = 44;
-        const porLinha = Math.max(1, Math.min(cfg.kpis.length, Math.floor((w + gap) / (larguraMinimaKpi + gap))));
-        for (let i = 0; i < cfg.kpis.length; i += porLinha) {
-            const linha = cfg.kpis.slice(i, i + porLinha);
-            const kW = (w - (linha.length - 1) * gap) / linha.length;
-            linha.forEach((k, j) => desenharCard(doc, x + j * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
-            yy += 22 + (i + porLinha < cfg.kpis.length ? 4 : 7);
-        }
-
         if (!cfg.itens.length) return yy;
         // colunaExtra (opcional): coluna adicional entre Prioritários e Mais antiga,
         // calculada a partir dos dados brutos do item (ex.: pré-analisados no Gabinete).
@@ -2312,6 +2328,17 @@
             };
             if (temExtra) linha.extra = String(cfg.colunaExtra.get(it.dados || []));
             return linha;
+        });
+        // Linha de total — substitui os KPIs de agregado que existiam acima da tabela (o
+        // resumo inicial agora fica só em tabela, sem cards).
+        const totalPendentes = cfg.itens.reduce((s, it) => s + it.pendentes, 0);
+        const totalPrioritarios = cfg.itens.reduce((s, it) => s + it.prioritarios, 0);
+        const totalExtra = temExtra ? cfg.itens.reduce((s, it) => s + (cfg.colunaExtra.get(it.dados || []) || 0), 0) : 0;
+        const maisAntigaGeral = cfg.itens.reduce((m, it) => (it.maisAntiga != null && (m == null || it.maisAntiga > m) ? it.maisAntiga : m), null);
+        corpo.push({
+            rotulo: 'Total', pendentes: String(totalPendentes), prioritarios: String(totalPrioritarios),
+            extra: temExtra ? String(totalExtra) : undefined,
+            antiga: maisAntigaGeral != null ? `${maisAntigaGeral} dias` : '—', situacao: '', _cor: null, _total: true,
         });
         const colunas = [
             { header: cfg.colunaRotulo, dataKey: 'rotulo' },
@@ -2332,14 +2359,18 @@
             columns: colunas,
             body: corpo,
             startY: yy,
-            margin: { left: x, right: pw - x - w },
+            margin: { left: x, right: pw - x - w, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             didParseCell: (data) => {
-                if (data.section === 'body' && data.column.dataKey === 'situacao') {
+                if (data.section === 'body' && corpo[data.row.index]._total) {
+                    data.cell.styles.fontStyle = 'bold';
+                    data.cell.styles.fillColor = COR.cartao;
+                }
+                if (data.section === 'body' && data.column.dataKey === 'situacao' && !corpo[data.row.index]._total) {
                     data.cell.styles.textColor = corpo[data.row.index]._cor;
                     data.cell.styles.fontStyle = 'bold';
                 }
@@ -2372,18 +2403,6 @@
             yy += linhasObs.length * 3.4 + 5;
         }
 
-        // Grade de KPIs que quebra em várias linhas quando não cabem lado a lado (ver
-        // mesma lógica em desenharBlocoDominio).
-        const gap = 5;
-        const larguraMinimaKpi = 44;
-        const porLinha = Math.max(1, Math.min(cfg.kpis.length, Math.floor((w + gap) / (larguraMinimaKpi + gap))));
-        for (let i = 0; i < cfg.kpis.length; i += porLinha) {
-            const linha = cfg.kpis.slice(i, i + porLinha);
-            const kW = (w - (linha.length - 1) * gap) / linha.length;
-            linha.forEach((k, j) => desenharCard(doc, x + j * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
-            yy += 22 + (i + porLinha < cfg.kpis.length ? 4 : 7);
-        }
-
         if (!cfg.linhas.length) return yy;
 
         doc.autoTable({
@@ -2395,7 +2414,7 @@
             ],
             body: cfg.linhas.map(l => ({ nome: l.nome, indicador: l.indicador, detalhamento: l.detalhamento, situacao: l.semSituacao ? '—' : l.situacaoLabel })),
             startY: yy,
-            margin: { left: x, right: pw - x - w },
+            margin: { left: x, right: pw - x - w, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
@@ -2411,6 +2430,15 @@
                     const l = cfg.linhas[data.row.index];
                     if (!l.semSituacao) { data.cell.styles.textColor = l.corTexto; data.cell.styles.fontStyle = 'bold'; }
                     else data.cell.styles.textColor = COR.muted;
+                }
+            },
+            // Guarda a posição/página da célula "Tarefa" de cada linha para poder virar um
+            // link clicável até a seção detalhada do relatório (ver PASSO 4 em
+            // gerarPDFConjunto) — só depois que a página de destino é conhecida.
+            didDrawCell: (data) => {
+                if (data.section === 'body' && data.column.dataKey === 'nome') {
+                    const l = cfg.linhas[data.row.index];
+                    if (l) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
                 }
             },
         });
@@ -2436,47 +2464,14 @@
 
         let y = 44;
 
-        // ═══ PROCESSOS ATIVOS — condensado, uma linha, sem tabela ═══
-        const atuacoes = Object.keys(mapaAtivos);
-        if (atuacoes.length) {
-            const total = atuacoes.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            const detalheAtivos = atuacoes.length > 1
-                ? atuacoes.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
-                : atuacoes[0];
-            doc.setFillColor(...COR.cartao); doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
-            doc.roundedRect(m, y, uw, 18, 1.5, 1.5, 'FD');
-            doc.setFillColor(...COR.azul); doc.roundedRect(m, y, 1.8, 18, 0.9, 0.9, 'F');
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
-            doc.text('PROCESSOS ATIVOS', m + 6, y + 7);
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
-            doc.text(String(total), m + 6, y + 14.5);
-            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
-            const linhasDetalhe = doc.splitTextToSize(detalheAtivos, uw - 55);
-            doc.text(linhasDetalhe[0], m + 45, y + 11);
-            y += 18 + 10;
-        }
-
-        // A observação sobre o critério de situação (Regular/Atenção/Crítico) fica dentro
-        // de cada bloco (ver cfg.observacao em desenharBlocoDominio), não mais aqui em cima.
+        // Processos Ativos agora é uma LINHA da tabela do Cartório (ver linhasCartorio em
+        // gerarPDFConjunto), não mais um card à parte — resumo inicial ficou só em tabela.
         y = desenharBlocoCartorioUnificado(doc, m, y, uw, {
             titulo: 'Cartório',
             observacao: 'Pendências clássicas: situação pela pendência mais antiga (Regular até 30 dias, Atenção '
                 + '31–90, Crítico acima de 90). Tempo Médio e Audiências Pendentes/Realizadas são informativos, sem '
                 + 'situação. Audiências Designadas segue a régua de 180/360 dias até a audiência mais distante.',
             linhas: cartorio.linhas,
-            kpis: [
-                { titulo: 'Pendências totais', valor: String(cartorio.totalPendentes) },
-                { titulo: 'Prioritários', valor: String(cartorio.totalPrioritarios),
-                  sub: cartorio.totalPendentes ? `${Math.round(cartorio.totalPrioritarios / cartorio.totalPendentes * 100)}% do total` : '' },
-                { titulo: 'Acima de 30 dias', valor: String(cartorio.acima30),
-                  sub: cartorio.totalPendentes ? `${Math.round(cartorio.acima30 / cartorio.totalPendentes * 100)}% do total` : '' },
-                { titulo: 'Pendência mais antiga', valor: cartorio.maisAntiga != null ? `${cartorio.maisAntiga} dias` : '—' },
-                // Juntadas e Retorno de Conclusos separados dos demais (pedido do usuário) —
-                // só aparecem quando a respectiva seção foi de fato coletada.
-                ...(cartorio.juntadasPendentes != null ? [{ titulo: 'Juntadas Pendentes', valor: String(cartorio.juntadasPendentes) }] : []),
-                ...(cartorio.retornoPendentes != null ? [{ titulo: 'Retornos de Conclusão Pendentes', valor: String(cartorio.retornoPendentes) }] : []),
-                ...(cartorio.audienciasPendentes != null ? [{ titulo: 'Termos de Audiência Pendentes', valor: String(cartorio.audienciasPendentes) }] : []),
-            ],
         });
 
         y += 8;
@@ -2489,11 +2484,6 @@
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
             colunaExtra: { header: 'Pré-analisados', get: (dados) => dados.filter(d => !!d.preAnalise).length },
-            kpis: [
-                { titulo: 'Conclusões pendentes', valor: String(gabinete.totalPendentes) },
-                { titulo: 'Prioritários', valor: String(gabinete.totalPrioritarios),
-                  sub: gabinete.totalPendentes ? `${Math.round(gabinete.totalPrioritarios / gabinete.totalPendentes * 100)}% do total` : '' },
-            ],
         });
     }
 
@@ -2591,7 +2581,23 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
 
-        const linhasCartorio = itensCartorio.map(t => ({
+        // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
+        // não é mais um card à parte no topo da capa.
+        const mapaAtivos = lerMapaAtivos();
+        const atuacoesAtivas = Object.keys(mapaAtivos);
+        const linhasCartorio = [];
+        if (atuacoesAtivas.length) {
+            const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
+            linhasCartorio.push({
+                nome: 'Processos Ativos',
+                indicador: `${totalAtivos} ativo(s)`,
+                detalhamento: atuacoesAtivas.length > 1
+                    ? atuacoesAtivas.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
+                    : atuacoesAtivas[0],
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
+            });
+        }
+        linhasCartorio.push(...itensCartorio.map(t => ({
             nome: t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo,
             indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}`,
             detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
@@ -2599,7 +2605,7 @@
             corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
             semSituacao: false,
             cfgOriginal: t.secao.cfgOriginal,
-        }));
+        })));
 
         if (secaoTempoMedio) {
             const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
@@ -2659,7 +2665,7 @@
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
         // fingir que terminou normalmente.
         linhasCartorio.forEach(l => {
-            if (foiInterrompidoPorErro(l.cfgOriginal)) {
+            if (l.cfgOriginal && foiInterrompidoPorErro(l.cfgOriginal)) {
                 l.detalhamento = 'Extração interrompida por erro — dados parciais';
                 l.situacaoLabel = 'Interrompido'; l.corTexto = COR.vermelho; l.semSituacao = false;
             }
@@ -2693,8 +2699,7 @@
             };
         }
 
-        const mapaAtivos = lerMapaAtivos();
-        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || Object.keys(mapaAtivos).length > 0;
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
         // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
@@ -2714,8 +2719,11 @@
         // As tabelas discriminadas só vêm depois de TODOS os resumos — por isso o link
         // "Ver tabela detalhada →" de cada resumo só pode ser desenhado no passo 3,
         // quando a página real da tabela já é conhecida.
+        // Zerado (0 pendências) não gera página de resumo própria — o número já consta na
+        // tabela unificada da capa, e um resumo detalhado (gráficos vazios etc.) não
+        // acrescenta nada (pedido do usuário).
         let bmCartorio = null;
-        itensCartorio.forEach(t => {
+        itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
             const primeira = !usouPagina1;
             const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
             usouPagina1 = true;
@@ -2738,7 +2746,14 @@
             info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
         });
 
-        outrasSecoes.forEach(s => {
+        // Mesma dispensa do Cartório para os relatórios "fora do esquema": zerado só
+        // aparece na tabela unificada, sem resumo próprio.
+        function secaoVazia(s) {
+            if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) return !(s.dados[0] && s.dados[0].totalDesignadas > 0);
+            if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return !(s.dados[0] && s.dados[0].totalGeral > 0);
+            return s.dados.length === 0;
+        }
+        outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
             const primeira = !usouPagina1;
             const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
             usouPagina1 = true;
@@ -2784,6 +2799,21 @@
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
             });
         }
+
+        // ═══ PASSO 4: transforma cada linha da tabela unificada do Cartório (na capa) num
+        // link clicável até a página de resumo daquele relatório — agora que todas as
+        // páginas de resumo já são conhecidas (ver _rect capturado em
+        // desenharBlocoCartorioUnificado). Linhas sem seção própria (ex.: "Processos
+        // Ativos") ou cuja seção foi zerada/pulada e não gerou página ficam sem link.
+        cartorio.linhas.forEach(l => {
+            if (!l._rect || !l.cfgOriginal) return;
+            const t = itensCartorio.find(it => it.secao.cfgOriginal === l.cfgOriginal);
+            const s = outrasSecoes.find(o => o.cfgOriginal === l.cfgOriginal);
+            const pgAlvo = (t && t.pgResumoInicio) || (s && s.pgResumoInicio);
+            if (!pgAlvo) return;
+            doc.setPage(l._rect.page);
+            doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
+        });
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
@@ -3269,16 +3299,17 @@
         const status = classificarSituacaoPorDias(diasAteUltima, 180, 360);
         const infoStatus = SITUACAO_INFO[status] || SITUACAO_INFO.regular;
         const totalUltimoDia = r.totalProcessosUltimoDia != null ? r.totalProcessosUltimoDia : (r.processosUltimoDia || []).length;
-        desenharCard(doc, m, k2Y, kW2, 28, 'Situação da Vara', infoStatus.rotulo,
+        // Lista COMPLETA de processos, sem cortar (pedido do usuário) — o card quebra em
+        // várias linhas em vez de truncar, então a altura é calculada antes de desenhar.
+        const processosTexto = (r.processosUltimoDia || []).join(', ') || '—';
+        const subLinhaProcessos = r.ultimaData && diasAteUltima != null ? `${diasAteUltima} dia(s) até ${r.ultimaData}` : 'Nenhuma audiência designada';
+        const alturaCard2 = Math.max(28, medirAlturaCardLista(doc, kW2, processosTexto, true));
+        desenharCard(doc, m, k2Y, kW2, alturaCard2, 'Situação da Vara', infoStatus.rotulo,
             [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
             true, infoStatus.cor);
-        desenharCard(doc, m + kW2 + gap, k2Y, kW2, 28, `Processos no Dia Mais Distante (${totalUltimoDia})`, fraseProcessos(r.processosUltimoDia, 3) || '—',
-            [
-                r.ultimaData && diasAteUltima != null ? `${diasAteUltima} dia(s) até ${r.ultimaData}` : 'Nenhuma audiência designada',
-            ],
-            false, COR.ambar);
+        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.ambar);
 
-        const tY = k2Y + 28 + gap + 4;
+        const tY = k2Y + alturaCard2 + gap + 4;
         if (r.porTipo.length) {
             tituloSecao(doc, m, tY, uw, 'Última audiência designada por tipo');
             doc.autoTable({
@@ -3287,7 +3318,7 @@
                     { header: 'Data mais distante', dataKey: 'data' },
                     { header: 'Processo(s)', dataKey: 'processos' },
                 ],
-                body: r.porTipo.map(it => ({ tipo: it.tipo, data: it.data, processos: fraseProcessos(it.processos, 4) || '—' })),
+                body: r.porTipo.map(it => ({ tipo: it.tipo, data: it.data, processos: (it.processos || []).join(', ') || '—' })),
                 startY: tY + 6,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
@@ -3422,8 +3453,7 @@
         const kY = yLinha + 5;
         const kW2 = (uw - gap) / 2;
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length),
-            [r.totalUsuarios ? `de ${r.totalUsuarios} usuário(s) pesquisado(s)` : ''], true, COR.aqua);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length), [], true, COR.aqua);
 
         // Canceladas/Não Realizadas/Redesignadas — extraídas só da pesquisa geral (pedido
         // do usuário), lado a lado numa segunda linha de KPIs menores.
@@ -3433,13 +3463,13 @@
         desenharCard(doc, m + kW3 + gap,      k2Y, kW3, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
         desenharCard(doc, m + 2 * (kW3 + gap), k2Y, kW3, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
 
-        const chartY = k2Y + 24 + gap + 2;
+        // Sem gráfico aqui — a mesma informação já está na tabela abaixo (pedido do
+        // usuário), com o percentual de cada categoria sobre o total do magistrado(a)
+        // (realizadas + canceladas + não realizadas + redesignadas).
+        const tY = k2Y + 24 + gap + 4;
         if (r.porUsuario.length) {
-            const itensBarras = r.porUsuario.map(u => ({ label: u.nome, valor: u.quantidade }));
-            const alturaChart = Math.min(90, Math.max(30, itensBarras.length * 7 + 10));
-            desenharBarras(doc, m, chartY, uw, alturaChart, `Audiências Realizadas por Usuário (mín. ${MIN_AUDIENCIAS_POR_USUARIO_AR})`, itensBarras, undefined, COR.aqua);
-            const tY = chartY + alturaChart + 6;
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
+            const fmtPct = (n, total) => total > 0 ? `${Math.round(n / total * 100)}%` : '—';
             doc.autoTable({
                 columns: [
                     { header: 'Usuário', dataKey: 'nome' },
@@ -3448,10 +3478,17 @@
                     { header: 'Não Realizadas', dataKey: 'naoRealizadas' },
                     { header: 'Redesignadas', dataKey: 'redesignadas' },
                 ],
-                body: r.porUsuario.map(u => ({
-                    nome: u.nome, quantidade: String(u.quantidade),
-                    canceladas: String(u.canceladas || 0), naoRealizadas: String(u.naoRealizadas || 0), redesignadas: String(u.redesignadas || 0),
-                })),
+                body: r.porUsuario.map(u => {
+                    const canceladas = u.canceladas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
+                    const totalUsuario = u.quantidade + canceladas + naoRealizadas + redesignadas;
+                    return {
+                        nome: u.nome,
+                        quantidade: `${u.quantidade} (${fmtPct(u.quantidade, totalUsuario)})`,
+                        canceladas: `${canceladas} (${fmtPct(canceladas, totalUsuario)})`,
+                        naoRealizadas: `${naoRealizadas} (${fmtPct(naoRealizadas, totalUsuario)})`,
+                        redesignadas: `${redesignadas} (${fmtPct(redesignadas, totalUsuario)})`,
+                    };
+                }),
                 startY: tY + 6,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
@@ -3459,11 +3496,11 @@
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: {
-                    nome: { cellWidth: uw * 0.4 },
-                    quantidade: { cellWidth: uw * 0.15, halign: 'right' },
-                    canceladas: { cellWidth: uw * 0.15, halign: 'right' },
-                    naoRealizadas: { cellWidth: uw * 0.15, halign: 'right' },
-                    redesignadas: { cellWidth: uw * 0.15, halign: 'right' },
+                    nome: { cellWidth: uw * 0.32 },
+                    quantidade: { cellWidth: uw * 0.17, halign: 'right' },
+                    canceladas: { cellWidth: uw * 0.17, halign: 'right' },
+                    naoRealizadas: { cellWidth: uw * 0.17, halign: 'right' },
+                    redesignadas: { cellWidth: uw * 0.17, halign: 'right' },
                 },
                 didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
