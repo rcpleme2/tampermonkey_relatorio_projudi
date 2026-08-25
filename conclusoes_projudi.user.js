@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.0
+// @version      18.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4022,12 +4022,19 @@
 
     // Lê o texto ao lado de "Atribuição:" no bloco #userinfo da página (ex.: o span com
     // title="Magistrado (05218334936.cor)" do print enviado pelo usuário).
+    // O bloco #userinfo (com a Atribuição) e o #main-menu (usado para decidir onde
+    // injetar o painel) ficam em FRAMES DIFERENTES do frameset do Projudi — por isso
+    // procura em todos os frames acessíveis (mesma origem), não só no documento atual;
+    // sem isso, o painel nunca aparecia (a busca só olhava o próprio frame, que não tem
+    // #userinfo quando é o frame do #main-menu).
     function lerAtribuicao() {
-        const labels = document.querySelectorAll('#userinfo .userinfo_label');
-        for (const label of labels) {
-            if (!/atribui[cç][aã]o\s*:/i.test(label.textContent)) continue;
-            const span = label.nextElementSibling;
-            return span ? (span.textContent || '').trim() : '';
+        for (const doc of todosDocumentosAcessiveis()) {
+            const labels = doc.querySelectorAll('#userinfo .userinfo_label');
+            for (const label of labels) {
+                if (!/atribui[cç][aã]o\s*:/i.test(label.textContent)) continue;
+                const span = label.nextElementSibling;
+                if (span) return (span.textContent || '').trim();
+            }
         }
         return '';
     }
