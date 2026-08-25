@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.1
+// @version      19.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1009,7 +1009,10 @@
 
     // Avança para o próximo usuário da fila (ou finaliza, se a fila acabou).
     function avancarUsuarioAR(form) {
-        const fila = JSON.parse(store.getItem(CHAVE_FILA_USUARIOS_AR) || '[]');
+        // desembrulharArray, não JSON.parse cru — o valor às vezes volta JSON-codificado em
+        // camadas (visto em outros relatórios, ver CHAVE_FILA_MESES_TM/lerDadosDe); sem
+        // isso, um JSON.parse único podia deixar "fila" como STRING, e fila.shift() quebrava.
+        const fila = desembrulharArray(store.getItem(CHAVE_FILA_USUARIOS_AR)) || [];
         if (!fila.length) { finalizarAudienciasRealizadas(); return; }
         const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
         const prox = fila.shift();
@@ -1043,7 +1046,7 @@
         }
 
         console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} audiência(s) realizada(s)`);
-        const acumulado = JSON.parse(store.getItem(CHAVE_ACUMULADO_AR) || '[]');
+        const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         acumulado.push({ usuario: aguardando.value, nome: aguardando.label, quantidade: total });
         store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify(acumulado));
         avancarUsuarioAR(form);
@@ -1060,7 +1063,7 @@
     // usado por lerDadosDe/criarColetor (uma "página" com um array de 1 item).
     function finalizarAudienciasRealizadas() {
         const totalGeral = parseInt(store.getItem(CHAVE_TOTAL_GERAL_AR) || '0', 10);
-        const acumulado = JSON.parse(store.getItem(CHAVE_ACUMULADO_AR) || '[]');
+        const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         let periodo = { dataInicio: '', dataFim: '' };
         try { periodo = JSON.parse(store.getItem('projudi_audienciasrealizadas_periodo') || 'null') || periodo; } catch (e) { /* ignore */ }
 
