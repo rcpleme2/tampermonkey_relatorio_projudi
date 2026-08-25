@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.2
+// @version      20.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1135,15 +1135,6 @@
     // encerrada)" e "Status = ATIVO" marcados por padrão — que é exatamente o filtro de
     // "pendente" pedido pelo usuário — então não mexemos em nenhum desses selects, só
     // clicamos em Pesquisar.
-    //
-    // Depois de coletar essa lista, a MESMA automação marca adicionalmente o checkbox
-    // "flagSemCadastroSNBA" (bens sem cadastro no SNGB) e pesquisa de novo, coletando uma
-    // SEGUNDA lista (sempre um subconjunto da primeira). Modelado como duas fases de um
-    // único item da fila de automação ('apreensoes'), não como dois relatórios
-    // independentes: as duas listas nascem da mesma pesquisa-base (pendentes) e o usuário
-    // pediu explicitamente que só apareça UMA linha ("Bens Apreendidos") no resumo
-    // unificado — dois itens de fila deixariam isso mais difícil de manter coeso (ver
-    // CHAVE_APREENSOES_FASE / preencherEPesquisarApreensoes / continuar() no coletor).
     function colunasApreensoes(sufixoRotulo) {
         return {
             cabecalhos: ['Data do Registro', 'Número', 'Tipo da Apreensão', 'Processo', 'Classe Processual', 'Data de Encerramento', 'Motivo do Encerramento', 'Localização Interna', 'Descrição', 'Prioritário'],
@@ -1151,12 +1142,14 @@
             extrai: (tds, atuacao) => {
                 const emProc = tds[3].querySelector('em');
                 const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[3]);
+                const classeCompleta = textoAteBr(tds[4]) || textoCelula(tds[4]);
+                const classe = classeCompleta.split(' (')[0].trim();
                 return {
                     dataRegistro: textoCelula(tds[0]),
                     numero: textoCelula(tds[1]),
                     tipo: textoCelula(tds[2]),
                     processo,
-                    classe: textoCelula(tds[4]),
+                    classe,
                     dataEncerramento: textoCelula(tds[5]),
                     motivoEncerramento: textoCelula(tds[6]),
                     localizacao: textoCelula(tds[7]),
@@ -1172,25 +1165,24 @@
 
     const COLS_APREENSOES = colunasApreensoes();
 
-    // Fase atual da automação de Apreensões ('pendentes' | 'semSngb') — permanece no
-    // localStorage entre o clique em Pesquisar e o reload da página de resultados (ver
-    // preencherEPesquisarApreensoes/injetarBotoes).
-    const CHAVE_APREENSOES_FASE = 'projudi_apreensoes_fase';
-
-    // Lê o estado do checkbox "Apreensão sem cadastro no SNBA/SNGB" na tela de
-    // resultados — usado tanto para diferenciar CFG_APREENSOES de CFG_APREENSOES_SNGB
-    // (mesmo cabeçalho de tabela) quanto para decidir se a fase 2 já foi marcada.
-    function flagSemCadastroSNGBMarcado() {
-        const chk = document.querySelector('input[name="flagSemCadastroSNBA"]');
-        return !!(chk && chk.checked);
-    }
+    const LISTA_TIPOS_APREENSAO = [
+        'Armas de fogo', 'Munições', 'Explosivos', 'Objetos', 'Entorpecentes', 'Valores', 'Plantas', 'Animais',
+        'Armas brancas', 'Aeronaves', 'Alimentos, bebidas, medicamentos e outros produtos perecíveis',
+        'Ativos Financeiros, cheques e outros títulos de crédito',
+        'Computadores, acessórios, insumos e outros produtos de informática', 'Documentos',
+        'Eletroeletrônicos diversos', 'Embarcações', 'Equipamentos de Caça e Pesca (exceto armas)',
+        'Material Biológico', 'Outros Bens Móveis', 'Outros Meios de Transporte',
+        'Objetos Pessoais ou Domésticos', 'Produtos Florestais', 'Veículos Automotores', 'Bens Imóveis',
+        'Pedras, Metais Preciosos, jóias, quadros, objetos de arte, objeto de coleção e antiguidade',
+        'Acessórios de Armas de Fogo e Produtos Controlados pelo EB',
+    ];
 
     const CFG_APREENSOES = {
         prefixo: 'projudi_apreensoes_',
         // Mostra a linha "Bens Apreendidos" mesmo com zero pendências, desde que já
         // coletado — "zero apreensões pendentes" é uma informação, não um vazio a esconder.
         mostrarSeVazio: true,
-        detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab) && !flagSemCadastroSNGBMarcado(),
+        detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab),
         minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'apreensoes_pendentes_projudi',
@@ -1208,52 +1200,18 @@
             dataTitulo: 'Registro de apreensão mais antigo',
             processoCampo: 'processo',
             tipoCampo: 'tipo',
+            // Apreensões não distingue prioritário/normal (não faz sentido pra esse
+            // relatório) — some com o KPI "Prioritários pendentes" e com a separação por
+            // prioridade no gráfico de aging (vira barra única por faixa).
+            semPrioridade: true,
+            // Tabela discriminada dividida em subtabelas por Tipo da Apreensão, na mesma
+            // ordem do <select name="idTipoApreensaoBusca"> do Projudi.
+            agruparPor: 'tipo',
+            ordemGrupos: LISTA_TIPOS_APREENSAO,
             distribuicoes: [
                 { titulo: 'Apreensões por Tipo', campo: 'tipo', topN: 12 },
                 { titulo: 'Apreensões por Localização Interna', campo: 'localizacao', topN: 10 },
-            ],
-            colunas: [
-                { header: 'Número', width: 18, get: (d) => d.numero },
-                { header: 'Tipo', width: 28, get: (d) => d.tipo },
-                { header: 'Processo', width: 30, get: (d) => d.processo },
-                { header: 'Classe', width: 24, get: (d) => d.classe },
-                { header: 'Dt. Registro', width: 20, get: (d) => d.dataRegistro },
-                { header: 'Localização', width: 24, get: (d) => d.localizacao },
-                { header: 'Descrição', width: 28, get: (d) => d.descricao },
-            ],
-        },
-    };
-
-    // Fase 2 da mesma automação: apreensões pendentes SEM cadastro no SNGB (mesma
-    // pesquisa-base, com o checkbox flagSemCadastroSNBA marcado). Não é um item próprio
-    // da fila de automação (ver REPORTS_AUTOMACAO) — entra no PDF conjunto só como
-    // seção extra referenciada pela linha "Bens Apreendidos" (ver baixarPDFConjunto/
-    // gerarPDFConjunto), mas tem PDF individual dedicado igual a qualquer outro
-    // relatório (via cfg.pdf/gerarPDF, mesmo botão "Baixar PDF" da tela de resultados).
-    const CFG_APREENSOES_SNGB = {
-        prefixo: 'projudi_apreensoessngb_',
-        mostrarSeVazio: true,
-        detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab) && flagSemCadastroSNGBMarcado(),
-        minTds: 9,
-        usaAtuacao: false,
-        nomeArquivo: 'apreensoes_sem_sngb_projudi',
-        rotulos: { coletar: 'Extrair Apreensões (sem SNGB)', coletarMais: 'Extrair mais (sem SNGB)', baixar: '⬇ Baixar sem SNGB' },
-        cabecalhos: COLS_APREENSOES.cabecalhos,
-        larguras: COLS_APREENSOES.larguras,
-        extrai: COLS_APREENSOES.extrai,
-        linha: COLS_APREENSOES.linha,
-        pdf: {
-            titulo: 'Bens Apreendidos sem Cadastro no SNGB',
-            atosTitulo: 'Apreensões sem cadastro no SNGB',
-            agingTitulo: 'Apreensões por tempo de registro',
-            tabelaTitulo: 'Tabela discriminada das apreensões sem cadastro no SNGB',
-            dataCampo: 'dataRegistro',
-            dataTitulo: 'Registro de apreensão mais antigo',
-            processoCampo: 'processo',
-            tipoCampo: 'tipo',
-            distribuicoes: [
-                { titulo: 'Apreensões sem SNGB por Tipo', campo: 'tipo', topN: 12 },
-                { titulo: 'Apreensões sem SNGB por Localização Interna', campo: 'localizacao', topN: 10 },
+                { titulo: 'Apreensões por Classe Processual', campo: 'classe', topN: 12 },
             ],
             colunas: [
                 { header: 'Número', width: 18, get: (d) => d.numero },
@@ -1272,9 +1230,9 @@
         return form && form.querySelector('#idMotivoEncerramentoApreensaoBusca') ? form : null;
     }
 
-    // fase: 'pendentes' (busca-base, sem mexer nos filtros padrão) ou 'semSngb' (marca
-    // adicionalmente o checkbox flagSemCadastroSNBA antes de pesquisar).
-    function preencherEPesquisarApreensoes(fase) {
+    // Força o motivo de encerramento para "(Apreensão não encerrada)" e clica em
+    // Pesquisar — os demais filtros ficam no padrão da tela.
+    function preencherEPesquisarApreensoes() {
         const form = formularioApreensoes();
         if (!form) return;
 
@@ -1284,18 +1242,6 @@
             selMotivo.dispatchEvent(new Event('change', { bubbles: true }));
         }
         console.log(`[Projudi Apreensões] motivo de encerramento definido como "(Apreensão não encerrada)" (value=${selMotivo ? selMotivo.value : 'n/d'})`);
-
-        if (fase === 'semSngb') {
-            const chk = form.querySelector('input[name="flagSemCadastroSNBA"]');
-            console.log(`[Projudi Apreensões] fase=semSngb — checkbox flagSemCadastroSNBA encontrado=${!!chk}`);
-            if (chk && !chk.checked) {
-                chk.checked = true;
-                chk.dispatchEvent(new Event('click', { bubbles: true }));
-                chk.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-        } else {
-            console.log('[Projudi Apreensões] fase=pendentes — status mantido no padrão da tela');
-        }
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
         console.log(`[Projudi Apreensões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
@@ -1469,14 +1415,6 @@
                     console.log('[Projudi TM] mês concluído — ainda restam meses na fila, buscando o próximo');
                     store.setItem(AUTO_ESTADO, 'ir_tempomedio');
                     setTimeout(passoAutomacao, 900);
-                } else if (cfg === CFG_APREENSOES && store.getItem(AUTO_ESTADO) === 'coletando_apreensoes') {
-                    // Fase 1 (pendentes) concluída dentro da automação — em vez de avançar
-                    // para o próximo item da fila, dispara a fase 2 (sem SNGB) na MESMA
-                    // tela (ver preencherEPesquisarApreensoes/CFG_APREENSOES_SNGB).
-                    console.log('[Projudi Apreensões] fase "pendentes" concluída — iniciando fase "sem SNGB"');
-                    store.setItem(CHAVE_APREENSOES_FASE, 'semSngb');
-                    store.setItem(AUTO_ESTADO, 'preenchendo_apreensoes');
-                    setTimeout(() => preencherEPesquisarApreensoes('semSngb'), 900);
                 } else {
                     avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
                 }
@@ -1997,16 +1935,6 @@
         doc.textWithLink(label, pw / 2 - w / 2, ph - 6, { pageNumber });
     }
 
-    // Mesmo link de rodapé, uma linha ACIMA do padrão — usado quando um resumo precisa
-    // de um segundo link no rodapé além do "Ver tabela detalhada →" (hoje só o resumo de
-    // "Bens Apreendidos", que também linka para o relatório dedicado de bens sem SNGB —
-    // ver gerarPDFConjunto).
-    function desenharLinkRodapeSecundario(doc, label, pageNumber, pw, ph) {
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.azul);
-        const w = doc.getTextWidth(label);
-        doc.textWithLink(label, pw / 2 - w / 2, ph - 11, { pageNumber });
-    }
-
     // Distribui uma lista de gráficos numa grade de 2 colunas (span:2 ocupa a largura
     // toda) dentro da área (x, y, w, hDisponivel) informada — reutilizado tanto para os
     // gráficos da 1ª página do resumo quanto para os que foram para a 2ª página.
@@ -2092,8 +2020,10 @@
             const prio = contarPrioritarios(sub);
             const kpis = [
                 { titulo: p.atosTitulo, valor: String(sub.length), subs: [], acento: COR.azul },
-                { titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
             ];
+            if (!p.semPrioridade) {
+                kpis.push({ titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
+            }
             if (p.mediaLabel) {
                 // Quando há mais de uma competência, a média diária do "Resumo geral" é a
                 // SOMA da média de cada competência (contexto.mediaSoma), não a média
@@ -2126,7 +2056,9 @@
             // ganhando a página inteira (útil para rankings maiores, ex.: 15 itens em vez
             // de 10, sem espremer os gráficos que ficam na página 1).
             const chartsTodos = [
-                { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
+                p.semPrioridade
+                    ? { tipo: 'barras', span: 1, titulo: p.agingTitulo, itens: faixasPorPrioridade(sub, p.dataCampo, now).map(f => ({ label: f.label, valor: f.prioritarios + f.normais })), pagina2: false }
+                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
@@ -2227,14 +2159,11 @@
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
         const idxProcesso = colunas.findIndex(c => /processo/i.test(c.header));
 
-        doc.autoTable({
+        // Opções comuns ao autoTable, reaproveitadas tanto no caminho de tabela única
+        // quanto no caminho agrupado (p.agruparPor) — mantém aparência/alinhamento
+        // idênticos nos dois casos.
+        const opcoesComuns = {
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-            body: ordenados.map(d => {
-                const o = {};
-                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
-                return o;
-            }),
-            startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
@@ -2242,15 +2171,75 @@
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
-            // Realça o número do processo dos prioritários
-            didParseCell: (data) => {
-                if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
-                    data.cell.styles.textColor = COR_PRIORITARIO;
-                    data.cell.styles.fontStyle = 'bold';
-                }
-            },
-            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+        };
+        const corpoDe = (itens) => itens.map(d => {
+            const o = {};
+            colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, { now }) ?? ''); });
+            return o;
         });
+
+        if (!p.agruparPor) {
+            // Comportamento padrão (idêntico ao de antes de existir p.agruparPor):
+            // uma única tabela com todos os registros ordenados.
+            doc.autoTable({
+                ...opcoesComuns,
+                body: corpoDe(ordenados),
+                startY: tabInicioY,
+                // Realça o número do processo dos prioritários
+                didParseCell: (data) => {
+                    if (data.section === 'body' && data.column.index === idxProcesso && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                        data.cell.styles.textColor = COR_PRIORITARIO;
+                        data.cell.styles.fontStyle = 'bold';
+                    }
+                },
+                didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            });
+        } else {
+            // Tabela dividida em subtabelas por grupo (ex.: Apreensões por Tipo) — cada
+            // grupo ganha um título de seção seguido de sua própria autoTable, na ordem
+            // de p.ordemGrupos (fallback alfabético pt-BR pro que não estiver na lista).
+            const grupos = new Map();
+            ordenados.forEach(d => {
+                const chave = String(d[p.agruparPor] || '').trim() || '(sem informação)';
+                if (!grupos.has(chave)) grupos.set(chave, []);
+                grupos.get(chave).push(d);
+            });
+            const ordem = p.ordemGrupos || [];
+            const chaves = Array.from(grupos.keys()).sort((a, b) => {
+                const ia = ordem.indexOf(a), ib = ordem.indexOf(b);
+                if (ia !== -1 && ib !== -1) return ia - ib;
+                if (ia !== -1) return -1;
+                if (ib !== -1) return 1;
+                return a.localeCompare(b, 'pt-BR');
+            });
+
+            let y = tabInicioY;
+            chaves.forEach(chave => {
+                const itens = grupos.get(chave);
+                // Se o título da próxima seção não couber com folga pra ao menos uma
+                // linha de tabela, começa página nova antes de desenhar o título.
+                if (y > ph - m - 28) {
+                    doc.addPage();
+                    y = m + 8;
+                }
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+                doc.text(`${chave} (${itens.length})`, m, y);
+
+                doc.autoTable({
+                    ...opcoesComuns,
+                    body: corpoDe(itens),
+                    startY: y + 4,
+                    didParseCell: (data) => {
+                        if (data.section === 'body' && data.column.index === idxProcesso && itens[data.row.index] && itens[data.row.index].prioritario) {
+                            data.cell.styles.textColor = COR_PRIORITARIO;
+                            data.cell.styles.fontStyle = 'bold';
+                        }
+                    },
+                    didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+                });
+                y = doc.lastAutoTable.finalY + 8;
+            });
+        }
 
         return paginaInicial;
     }
@@ -2783,7 +2772,6 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
-        const secaoApreensoesSngb = secoes.find(s => s.cfgOriginal === CFG_APREENSOES_SNGB);
 
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
         // não é mais um card à parte no topo da capa.
@@ -2869,13 +2857,10 @@
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
         // "apenas o número de apreensões" no quadro); o detalhamento compacta a
         // distribuição por Tipo da apreensão (top 5 + "Outros", mesmo corte usado nos
-        // gráficos — ver contarPorCampo) e a contagem de bens sem cadastro no SNGB, sem
-        // estourar a célula.
+        // gráficos — ver contarPorCampo), sem estourar a célula.
         if (secaoApreensoes) {
             const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
-            const detalheTipo = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ');
-            const semSngb = secaoApreensoesSngb ? secaoApreensoesSngb.dados.length : 0;
-            const detalhamento = [detalheTipo, `${semSngb} sem SNGB`].filter(Boolean).join(' · ') || '—';
+            const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
             linhasCartorio.push({
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
@@ -3020,18 +3005,6 @@
                 doc.setPage(s.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
             });
-
-            // Segundo link no rodapé do resumo de "Bens Apreendidos": o relatório dedicado
-            // de bens sem cadastro no SNGB (CFG_APREENSOES_SNGB), coletado como fase 2 da
-            // mesma automação — ver preencherEPesquisarApreensoes/CHAVE_APREENSOES_FASE.
-            {
-                const secAp = outrasSecoes.find(s => s.cfgOriginal === CFG_APREENSOES);
-                const secApSngb = outrasSecoes.find(s => s.cfgOriginal === CFG_APREENSOES_SNGB);
-                if (secAp && secAp.pgResumoFim && secApSngb && secApSngb.pgResumoInicio) {
-                    doc.setPage(secAp.pgResumoFim);
-                    desenharLinkRodapeSecundario(doc, 'Ver bens sem cadastro no SNGB →', secApSngb.pgResumoInicio, pw, ph);
-                }
-            }
         }
 
         // ═══ PASSO 4: transforma cada linha da tabela unificada do Cartório (na capa) num
@@ -4107,7 +4080,6 @@
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
-        else if (CFG_APREENSOES_SNGB.detecta(cab)) cfg = CFG_APREENSOES_SNGB;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
@@ -4587,35 +4559,26 @@
         // Audiências). A automação decide pelo ESTADO (preenchendo_apreensoes), não pela
         // presença de resultados — a página já carrega com os filtros padrão (pendentes)
         // aplicados, então "já tem tabela" não distingue "ainda não pesquisei nesta
-        // rodada" de "resultado da fase anterior".
+        // rodada" de "resultado de uma pesquisa anterior".
         if (formularioApreensoes()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_apreensoes') {
-                const fase = store.getItem(CHAVE_APREENSOES_FASE) || 'pendentes';
-                console.log(`[Projudi Apreensões] automação: preenchendo e pesquisando (fase=${fase})`);
+                console.log('[Projudi Apreensões] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_apreensoes');
-                preencherEPesquisarApreensoes(fase);
+                preencherEPesquisarApreensoes();
                 return;
             }
-            // Uso manual (fora da automação): dois botões, um por fase — a tela já
-            // convive com resultados de uma pesquisa anterior (própria ou de outra
-            // sessão), então não há como usar "sem linha nenhuma" para decidir.
+            // Uso manual (fora da automação): a tela já convive com resultados de uma
+            // pesquisa anterior (própria ou de outra sessão), então não há como usar
+            // "sem linha nenhuma" para decidir se o botão deve aparecer.
             if (estadoAtual !== 'coletando_apreensoes') {
                 const bPendentes = document.createElement('button');
                 bPendentes.type = 'button';
                 bPendentes.className = 'projudi-btn';
                 bPendentes.title = 'Pesquisa com os filtros padrão da tela (Apreensão não encerrada) — não altera nenhum campo';
                 bPendentes.textContent = 'Preencher e Pesquisar (Apreensões Pendentes)';
-                bPendentes.onclick = () => preencherEPesquisarApreensoes('pendentes');
+                bPendentes.onclick = () => preencherEPesquisarApreensoes();
                 buttonBar.appendChild(bPendentes);
-
-                const bSemSngb = document.createElement('button');
-                bSemSngb.type = 'button';
-                bSemSngb.className = 'projudi-btn';
-                bSemSngb.title = 'Marca "Apreensão sem cadastro no SNBA/SNGB" além dos filtros padrão e pesquisa';
-                bSemSngb.textContent = 'Preencher e Pesquisar (sem SNGB)';
-                bSemSngb.onclick = () => preencherEPesquisarApreensoes('semSngb');
-                buttonBar.appendChild(bSemSngb);
             }
         }
 
@@ -4797,18 +4760,14 @@
         // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
         { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Quarto item específico do Crime — apreensões pendentes; internamente roda em
-        // duas fases sequenciais na MESMA tela (pendentes, depois sem cadastro no SNGB —
-        // ver CHAVE_APREENSOES_FASE/preencherEPesquisarApreensoes). "cfgs" lista os dois
-        // CFGs que podem aparecer nessa tela, para relatorioPorCfg reconhecer a fase 2
-        // (CFG_APREENSOES_SNGB) como o mesmo item da fila.
-        { key: 'apreensoes', cfg: CFG_APREENSOES, cfgs: [CFG_APREENSOES, CFG_APREENSOES_SNGB], navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
-    function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => (r.cfgs || [r.cfg]).includes(cfg)); }
+    function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
 
     function lerFilaAutomacao() {
         try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
@@ -5006,7 +4965,6 @@
         if (rel.key === 'tempomedio') store.removeItem(CHAVE_FILA_MESES_TM);
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
-        if (rel.key === 'apreensoes') store.removeItem(CHAVE_APREENSOES_FASE);
 
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(key);
@@ -5093,9 +5051,6 @@
         // do loop mês a mês (ver criarColetor/continuar), senão ela voltaria sempre ao
         // tamanho cheio a cada mês coletado.
         if (fila.includes('tempomedio')) prepararFilaMesesTempoMedio(periodoTM || '1m');
-        // Idem para Apreensões: sempre começa pela fase "pendentes" (ver
-        // CHAVE_APREENSOES_FASE/preencherEPesquisarApreensoes/continuar() no coletor).
-        if (fila.includes('apreensoes')) store.setItem(CHAVE_APREENSOES_FASE, 'pendentes');
         const primeiro = relatorioPorChave(fila[0]);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
@@ -5106,9 +5061,7 @@
     }
 
     function limparTudoAutomacao() {
-        // Alguns itens da fila (ver "cfgs" em REPORTS_AUTOMACAO) usam mais de um CFG na
-        // mesma tela (ex.: Apreensões — fase 1 e fase 2) — limpa todos, não só r.cfg.
-        REPORTS_AUTOMACAO.flatMap(r => r.cfgs || [r.cfg]).forEach(c => {
+        REPORTS_AUTOMACAO.map(r => r.cfg).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
             store.removeItem(c.prefixo + 'num_paginas');
@@ -5125,7 +5078,6 @@
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem(CHAVE_FILA_MESES_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
-        store.removeItem(CHAVE_APREENSOES_FASE);
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
         limparEstadoTransitorioAR();
@@ -5144,14 +5096,6 @@
         const secoes = REPORTS_AUTOMACAO
             .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
-        // Apreensões sem SNGB (fase 2 do mesmo item "apreensoes" — ver CFG_APREENSOES_SNGB)
-        // não é um item próprio da fila (REPORTS_AUTOMACAO só lista "apreensoes" uma vez),
-        // mas ainda entra no PDF conjunto como seção extra, referenciada pela linha "Bens
-        // Apreendidos" (ver gerarPDFConjunto).
-        const dadosSemSngb = lerDadosDe(CFG_APREENSOES_SNGB.prefixo);
-        if (dadosSemSngb.length || (CFG_APREENSOES_SNGB.mostrarSeVazio && foiColetado(CFG_APREENSOES_SNGB))) {
-            secoes.push({ dados: dadosSemSngb, cfg: CFG_APREENSOES_SNGB });
-        }
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             gerarPDFConjunto(secoes, somenteResumo);
