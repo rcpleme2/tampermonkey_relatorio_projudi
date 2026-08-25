@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      17.2
+// @version      18.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -586,6 +586,195 @@
         return t == null ? null : Math.round((t - now) / DIA_MS);
     }
     function fmtDiferencaDias(dias) { return dias == null ? '' : String(dias); }
+
+    // ── Audiências Designadas (Crime) — audiencia/pautaAudiencia.do, "Ver Pauta de
+    // Horários" ───────────────────────────────────────────────────────────────────
+    // Relatório de RESUMO (sem tabela discriminada — ver semTabela): total de audiências
+    // designadas, o último dia com audiência e quantos processos distintos têm audiência
+    // nesse dia (contados um a um, não pela coluna "Agendadas" — ver expandirLinhasDoDia),
+    // a data da audiência mais distante por tipo, e uma situação (verde/amarelo/vermelho)
+    // conforme o quão longe no futuro a agenda já está lotada.
+    //
+    // "Audiência de Instrução" e "Audiência de Instrução e Julgamento" contam como um
+    // tipo só ("Audiência de Instrução") — pedido do usuário.
+    function normalizarTipoAudiencia(tipo) {
+        const t = (tipo || '').trim();
+        return /^audi[êe]ncia\s+de\s+instru[çc][ãa]o(\s+e\s+julgamento)?$/i.test(t) ? 'Audiência de Instrução' : t;
+    }
+
+    const CFG_AUDIENCIAS_DESIGNADAS = {
+        prefixo: 'projudi_audienciasdesignadas_',
+        mostrarSeVazio: true,
+        semTabela: true, // só resumo — ver gerarPDFConjunto
+        detecta: () => false, // nunca detectado por cabeçalho de tabela — só entra via automação (ver navegarMenu/injetarBotoes)
+        usaAtuacao: false,
+        nomeArquivo: 'audiencias_designadas_projudi',
+        pdfCustom: (dados) => gerarPDFAudienciasDesignadas(dados),
+    };
+
+    // Tela de "Ver Pauta de Horários" (audiencia/pautaAudiencia.do) — form de filtros +
+    // resultado paginado por dia/local, tudo numa única página (o Projudi não pagina esse
+    // relatório: mesmo pedindo 10 anos, só volta as datas que realmente têm audiência).
+    function formularioPautaAudiencias() {
+        const form = document.getElementById('pautaAudienciaForm');
+        return form && form.querySelector('#divTiposAudiencia') ? form : null;
+    }
+
+    // Marca todos os tipos de audiência, define a Data Fim para 10 anos à frente de hoje e
+    // pesquisa. Não depende do "Todas" cascatear os checkboxes individuais via JS da
+    // página — marca cada input[name="idsTiposAudiencia"] diretamente, garantindo o mesmo
+    // resultado independente desse comportamento.
+    function preencherEPesquisarPautaAudiencias() {
+        const form = formularioPautaAudiencias();
+        if (!form) return;
+
+        const todos = form.querySelectorAll('input[name="idsTiposAudiencia"]');
+        todos.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
+        const checkTodos = form.querySelector('input[name="checkMarcaTodos"]');
+        if (checkTodos) { checkTodos.checked = true; checkTodos.dispatchEvent(new Event('change', { bubbles: true })); }
+        console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s)`);
+
+        const campoFim = form.querySelector('#dataFinal');
+        if (campoFim) {
+            const daqui10anos = new Date();
+            daqui10anos.setFullYear(daqui10anos.getFullYear() + 10);
+            campoFim.value = formatarDataBR(daqui10anos);
+            campoFim.dispatchEvent(new Event('input', { bubbles: true }));
+            campoFim.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        console.log(`[Projudi Audiências Designadas] Data Fim="${campoFim ? campoFim.value : '?'}"`);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="button"][name="button"]');
+        console.log(`[Projudi Audiências Designadas] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+        }, 1500);
+    }
+
+    // Detecta se a página já tem os resultados da pauta (pelo menos uma tabela interna
+    // com o cabeçalho Horário/Tipo da Audiência) — a tela mostra form + resultado juntos
+    // desde o primeiro carregamento, então "existe table.resultTable" sozinho não basta.
+    function pautaAudienciasTemResultados() {
+        return [...document.querySelectorAll('table.resultTable')].some(t => {
+            const thead = t.querySelector(':scope > thead');
+            const cab = thead ? thead.textContent : '';
+            return /hor[áa]rio/i.test(cab) && /tipo\s+da\s+audi[êe]ncia/i.test(cab);
+        });
+    }
+
+    // Lê todas as linhas (uma por horário/tipo) das tabelas internas de cada dia — a
+    // "Pauta de Horários" agrupa por Local + Data (tabela externa) e, dentro de cada
+    // grupo, uma tabela interna própria com colunas Horário/Modalidade/Criadas/Agendadas/
+    // Pauta Auto./Via Grade/Tipo da Audiência. A linha oculta de detalhe (id="rowN", com o
+    // <div class="extendedinfo"> onde os processos aparecem ao expandir) é ignorada aqui.
+    function lerLinhasPautaAudiencias() {
+        const linhas = [];
+        document.querySelectorAll('table.resultTable').forEach(tabela => {
+            const thead = tabela.querySelector(':scope > thead');
+            if (!thead) return;
+            const cab = thead.textContent;
+            if (!/hor[áa]rio/i.test(cab) || !/tipo\s+da\s+audi[êe]ncia/i.test(cab)) return; // só as tabelas internas (por dia)
+
+            const trExterna = tabela.closest('tr');
+            const linkData = trExterna ? trExterna.querySelector('td a.link') : null;
+            const data = linkData ? linkData.textContent.trim() : '';
+            if (!data) return;
+
+            tabela.querySelectorAll(':scope > tbody > tr').forEach(tr => {
+                if (/^row\d+$/.test(tr.id)) return; // linha oculta de detalhe (extendedinfo)
+                const tds = tr.querySelectorAll(':scope > td');
+                if (tds.length < 8) return;
+                linhas.push({
+                    data,
+                    horario: textoCelula(tds[1]),
+                    criadas: parseInt(textoCelula(tds[3]), 10) || 0,
+                    agendadas: parseInt(textoCelula(tds[4]), 10) || 0,
+                    tipoAudiencia: normalizarTipoAudiencia(textoCelula(tds[7])),
+                    elLinha: tr,
+                });
+            });
+        });
+        return linhas;
+    }
+
+    // Expande (clica no ícone "+") cada linha do dia informado e lê os números de
+    // processo (formato CNJ) do conteúdo que aparece — em vez de confiar na coluna
+    // "Agendadas", que pode não bater 1:1 com processos distintos (pedido do usuário).
+    // Melhor esforço: se a expansão não trouxer nenhum processo reconhecível (ex.: a
+    // marcação da página mudou), cai de volta na soma de "Agendadas" daquele dia, para
+    // nunca reportar zero por engano.
+    async function contarProcessosDoDia(linhasDoDia) {
+        const processos = new Set();
+        for (const linha of linhasDoDia) {
+            const link = linha.elLinha.querySelector('a[class^="linkProcessos"]');
+            if (!link) continue;
+            link.click();
+            // A expansão é via AJAX — sem um evento pra esperar, um atraso fixo é o que dá
+            // pra fazer aqui; 1,2s cobre uma resposta normal do Projudi.
+            await new Promise(r => setTimeout(r, 1200));
+            const detalhe = linha.elLinha.nextElementSibling;
+            const texto = detalhe ? detalhe.textContent : '';
+            const achados = texto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/g) || [];
+            achados.forEach(p => processos.add(p));
+        }
+        if (processos.size > 0) return processos.size;
+        console.warn('[Projudi Audiências Designadas] não foi possível ler os números de processo ao expandir — usando a soma de "Agendadas" como estimativa.');
+        return linhasDoDia.reduce((s, l) => s + l.agendadas, 0);
+    }
+
+    // Conduz a extração inteira (síncrona + a expansão assíncrona do último dia) e grava
+    // o resumo calculado no mesmo formato de armazenamento usado por lerDadosDe/
+    // criarColetor (uma "página" com um array de 1 item), para participar do Relatório
+    // PDF/automação como qualquer outro relatório.
+    async function coletarAudienciasDesignadas() {
+        console.log('[Projudi Audiências Designadas] iniciando extração da Pauta de Horários');
+        const linhas = lerLinhasPautaAudiencias();
+        console.log(`[Projudi Audiências Designadas] ${linhas.length} linha(s) lida(s)`);
+
+        const totalDesignadas = linhas.reduce((s, l) => s + l.agendadas, 0);
+
+        let ultimaData = null, ultimaDataTs = -Infinity;
+        linhas.forEach(l => {
+            const ts = parseDataBR(l.data);
+            if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = l.data; }
+        });
+
+        let processosUltimoDia = 0;
+        if (ultimaData) {
+            const linhasDoUltimoDia = linhas.filter(l => l.data === ultimaData);
+            processosUltimoDia = await contarProcessosDoDia(linhasDoUltimoDia);
+        }
+
+        // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento"
+        // somada em "Audiência de Instrução" — ver normalizarTipoAudiencia).
+        const ultimaPorTipo = new Map();
+        linhas.forEach(l => {
+            const ts = parseDataBR(l.data);
+            if (ts == null) return;
+            const atual = ultimaPorTipo.get(l.tipoAudiencia);
+            if (!atual || ts > atual.ts) ultimaPorTipo.set(l.tipoAudiencia, { ts, data: l.data });
+        });
+        const porTipo = [...ultimaPorTipo.entries()]
+            .map(([tipo, info]) => ({ tipo, data: info.data }))
+            .sort((a, b) => b.data.localeCompare(a.data));
+
+        const resumo = {
+            geradoEm: new Date().toISOString(),
+            totalDesignadas,
+            ultimaData,
+            processosUltimoDia,
+            porTipo,
+            competencia: competenciaDe(lerAtuacao()),
+        };
+        console.log('[Projudi Audiências Designadas] resumo calculado:', JSON.stringify(resumo));
+
+        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+
+        avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
@@ -1681,6 +1870,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaAudiencias(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_AUDIENCIAS_DESIGNADAS) {
+            return {
+                rotulo: TITULO_AUDIENCIAS_DESIGNADAS,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice),
+                montarTabela: null, // semTabela — nunca chamado (ver gerarPDFConjunto)
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -1994,7 +2190,7 @@
             });
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
             // mostrar (ex.: Audiências Pendentes zerado).
-            outrasSecoes.filter(s => s.dados.length > 0).forEach(s => {
+            outrasSecoes.filter(s => s.dados.length > 0 && !s.cfgOriginal.semTabela).forEach(s => {
                 s.pgTabela = s.montarTabela(doc, s.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
                 doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: s.pgTabela });
             });
@@ -2009,7 +2205,7 @@
                 doc.setPage(info.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', info.pgTabela, pw, ph);
             });
-            outrasSecoes.filter(s => s.dados.length > 0).forEach(s => {
+            outrasSecoes.filter(s => s.dados.length > 0 && !s.cfgOriginal.semTabela).forEach(s => {
                 doc.setPage(s.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
             });
@@ -2433,6 +2629,86 @@
         });
 
         return paginaInicial;
+    }
+
+    // ── PDF do relatório de Audiências Designadas (Crime — Pauta de Horários) ───
+    // Só resumo (cfg.semTabela) — os dados coletados já são um resumo pronto, não uma
+    // lista de linhas a discriminar (ver coletarAudienciasDesignadas).
+
+    const TITULO_AUDIENCIAS_DESIGNADAS = 'Audiências Designadas';
+
+    function gerarPDFAudienciasDesignadas(dados) {
+        const doc = novoDocPDF();
+        const resumo = dados && dados[0] ? dados[0] : null;
+        montarResumoAudienciasDesignadas(doc, resumo, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `audiencias_designadas_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: 0, porTipo: [], competencia: '' };
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  Pauta de Horários (todos os tipos, 10 anos à frente)`;
+        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+        doc.text(linhasSubtitulo, m, m + 8);
+        const yLinha = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.aqua);
+
+        const k2Y = kY + 28 + gap;
+        desenharCard(doc, m, k2Y, uw, 26, 'Processos com audiência no último dia', String(r.processosUltimoDia),
+            [r.ultimaData ? `Dia ${r.ultimaData} — contagem manual de processos distintos, não a coluna "Agendadas"` : 'Nenhuma audiência designada'],
+            true, COR.ambar);
+
+        // Situação da agenda: verde até 180 dias até a última audiência, amarelo de 180 a
+        // 360, vermelho acima de 360 — mesma régua Regular/Atenção/Crítico usada nos
+        // demais relatórios (ver classificarSituacaoPorDias/SITUACAO_INFO), só que aqui o
+        // "atraso" é a agenda já estar preenchida muito longe no futuro, não uma pendência.
+        const k3Y = k2Y + 26 + gap;
+        const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
+        const diasAteUltima = tsUltima != null ? Math.round((tsUltima - agora.getTime()) / DIA_MS) : null;
+        const status = classificarSituacaoPorDias(diasAteUltima, 180, 360);
+        const infoStatus = SITUACAO_INFO[status] || SITUACAO_INFO.regular;
+        desenharCard(doc, m, k3Y, uw, 26, 'Situação da Agenda', infoStatus.rotulo,
+            [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
+            true, infoStatus.cor);
+
+        const tY = k3Y + 26 + gap + 4;
+        if (r.porTipo.length) {
+            tituloSecao(doc, m, tY, uw, 'Última audiência designada por tipo');
+            doc.autoTable({
+                columns: [{ header: 'Tipo da Audiência', dataKey: 'tipo' }, { header: 'Data mais distante', dataKey: 'data' }],
+                body: r.porTipo.map(it => ({ tipo: it.tipo, data: it.data })),
+                startY: tY + 6,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: { tipo: { cellWidth: uw * 0.7 }, data: { cellWidth: uw * 0.3, halign: 'right' } },
+                didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+        } else {
+            desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
     }
 
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
@@ -3043,6 +3319,7 @@
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
         if (navAlvo === 'suspensos') return /processoBuscaSuspenso\.do/i;
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
+        if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         return null;
     }
 
@@ -3191,6 +3468,44 @@
             }
         }
 
+        // Tela "Ver Pauta de Horários" — não passa pelo coletor genérico (a tabela é
+        // aninhada por dia/local, não uma table.resultTable simples de linhas soltas — ver
+        // coletarAudienciasDesignadas), e não tem paginação (o Projudi devolve tudo numa
+        // página só, mesmo pedindo 10 anos).
+        if (formularioPautaAudiencias()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_audienciasdesignadas') {
+                console.log('[Projudi Audiências Designadas] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_audienciasdesignadas');
+                preencherEPesquisarPautaAudiencias();
+                return;
+            }
+            if (estadoAtual === 'coletando_audienciasdesignadas' && pautaAudienciasTemResultados()) {
+                // O clique em Pesquisar recarregou esta mesma tela já com os resultados —
+                // dispara a extração (assíncrona: expande as linhas do último dia).
+                coletarAudienciasDesignadas();
+                return;
+            }
+            if (!pautaAudienciasTemResultados()) {
+                const bPreencher = document.createElement('button');
+                bPreencher.type = 'button';
+                bPreencher.className = 'projudi-btn';
+                bPreencher.title = 'Marca todos os tipos, define Data Fim em 10 anos e pesquisa (o site pode demorar a responder)';
+                bPreencher.textContent = 'Preencher e Pesquisar (Audiências Designadas)';
+                bPreencher.onclick = () => preencherEPesquisarPautaAudiencias();
+                buttonBar.appendChild(bPreencher);
+                return;
+            }
+            const bExtrair = document.createElement('button');
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê a pauta exibida e gera o resumo (total, último dia, processos daquele dia, última data por tipo)';
+            bExtrair.textContent = 'Extrair Audiências Designadas';
+            bExtrair.onclick = () => coletarAudienciasDesignadas();
+            buttonBar.appendChild(bExtrair);
+            return;
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -3336,6 +3651,10 @@
         // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
         // do Cível-Geral, só aparece na seção própria da aba Crime.
         { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Audiências', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Segundo item específico do Crime — resumo da Pauta de Horários (ver
+        // coletarAudienciasDesignadas). Como é só resumo (cfg.semTabela), "Extrair mais"
+        // não faz sentido — cada extração recalcula o resumo do zero.
+        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -3483,6 +3802,7 @@
         else if (alvo === 'remessas') link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /em\s+remessa.*exceto\s+processos\s+conclusos/i);
         else if (alvo === 'suspensos') link = acharLinkAoLadoDoLabel(/suspensos\s+por\s+tempo\s+indeterminado/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
+        else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         link.click();
