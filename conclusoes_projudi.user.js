@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.5
+// @version      20.6
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1403,11 +1403,11 @@
     ];
 
     // Lê as duas tabelas da página e monta a lista final de registros (já filtrados por
-    // pendentes > 0), sem paginação — é sempre uma passada só. Salva no mesmo formato de
-    // armazenamento usado pelos demais relatórios (uma "página" só, ver lerDadosDe) para o
-    // resto do pipeline (PDF individual, capa unificada, foiColetado etc.) continuar
-    // funcionando igual, e avança a automação normalmente ao terminar.
-    function coletarOutrosCumprimentos() {
+    // pendentes > 0), sem paginação. Salva no mesmo formato de armazenamento usado pelos
+    // demais relatórios (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF
+    // individual, capa unificada, foiColetado etc.) continuar funcionando igual, e avança
+    // a automação normalmente ao terminar.
+    function coletarOutrosCumprimentosAgora() {
         const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
         console.log(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
 
@@ -1423,6 +1423,57 @@
         store.setItem(prefixo + 'coletado', '1');
 
         avancarAutomacao(CFG_OUTROS_CUMPRIMENTOS);
+    }
+
+    // "Assinatura" do estado atual das duas tabelas: quantidade de linhas de cada uma +
+    // quantidade e soma de todos os contadores (span[id^="status"]) exibidos. A tabela
+    // principal (a maior, ~34 tipos) é preenchida pelo Projudi de forma assíncrona DEPOIS
+    // do HTML inicial da página — extrair na hora pegava a tela ainda com a tabela vazia
+    // ou parcial. Comparar essa assinatura entre duas leituras seguidas permite detectar
+    // quando a tela parou de mudar, sem depender de nenhum indicador específico de
+    // carregamento (que pode nem existir/ser visível no DOM).
+    function assinaturaTabelasOutrosCumprimentos() {
+        const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
+        const linhasBnmp = tabelaBnmp ? tabelaBnmp.querySelectorAll(':scope > tbody > tr').length : 0;
+        const linhasPrincipal = tabelaPrincipal ? tabelaPrincipal.querySelectorAll(':scope > tbody > tr').length : 0;
+        let qtdSpans = 0, somaSpans = 0;
+        document.querySelectorAll('table.resultTable span[id^="status"]').forEach(s => {
+            qtdSpans++;
+            somaSpans += parseInt((s.textContent || '').trim(), 10) || 0;
+        });
+        return `${linhasBnmp}|${linhasPrincipal}|${qtdSpans}|${somaSpans}`;
+    }
+
+    let ultimaAssinaturaOutrosCump = null;
+
+    // Espera a tela "estabilizar" (duas leituras seguidas com a mesma assinatura, num
+    // intervalo de 500ms) antes de extrair de verdade — até um teto de ~10s, depois do
+    // qual extrai mesmo assim (com aviso no console) para não travar a automação para
+    // sempre numa tela que por algum motivo nunca estabiliza.
+    function aguardarOutrosCumprimentosProntoEExtrair(tentativa, callback) {
+        const assinaturaAtual = assinaturaTabelasOutrosCumprimentos();
+        if (tentativa > 0 && assinaturaAtual === ultimaAssinaturaOutrosCump) {
+            console.log(`[Projudi Outros Cumprimentos] tela estável na tentativa ${tentativa} — extraindo`);
+            coletarOutrosCumprimentosAgora();
+            if (callback) callback();
+            return;
+        }
+        if (tentativa >= 20) {
+            console.warn('[Projudi Outros Cumprimentos] tela não estabilizou em ~10s — extraindo mesmo assim (dados podem estar incompletos)');
+            coletarOutrosCumprimentosAgora();
+            if (callback) callback();
+            return;
+        }
+        ultimaAssinaturaOutrosCump = assinaturaAtual;
+        setTimeout(() => aguardarOutrosCumprimentosProntoEExtrair(tentativa + 1, callback), 500);
+    }
+
+    // Ponto de entrada da coleta — chamado tanto pela automação quanto pelos botões
+    // manuais. "callback" é opcional (usado pelo botão "Baixar PDF", que precisa esperar a
+    // extração terminar antes de ler os dados salvos).
+    function coletarOutrosCumprimentos(callback) {
+        ultimaAssinaturaOutrosCump = null;
+        aguardarOutrosCumprimentosProntoEExtrair(0, callback);
     }
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -4731,9 +4782,10 @@
                 bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
                 bBaixar.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.baixar;
                 bBaixar.onclick = () => {
-                    coletarOutrosCumprimentos();
-                    const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
-                    gerarPDFOutrosCumprimentos(dados);
+                    coletarOutrosCumprimentos(() => {
+                        const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
+                        gerarPDFOutrosCumprimentos(dados);
+                    });
                 };
                 ancora.appendChild(bBaixar);
             }
