@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.4
+// @version      19.5
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -637,11 +637,23 @@
         const form = formularioPautaAudiencias();
         if (!form) return;
 
-        const todos = form.querySelectorAll('input[name="idsTiposAudiencia"]');
-        todos.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
+        // O Projudi cascateia os tipos individuais a partir de um CLIQUE de verdade no
+        // checkbox "Todas" (onclick da própria página) — só marcar checked=true e disparar
+        // "change" não é suficiente (regressão: parou de funcionar depois de um merge, que
+        // silenciosamente perdeu o .click() real). Clica de verdade e, como rede de
+        // segurança, ainda confere se sobrou algum tipo desmarcado.
         const checkTodos = form.querySelector('input[name="checkMarcaTodos"]');
-        if (checkTodos) { checkTodos.checked = true; checkTodos.dispatchEvent(new Event('change', { bubbles: true })); }
-        console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s)`);
+        if (checkTodos && !checkTodos.checked) {
+            console.log('[Projudi Audiências Designadas] clicando no checkbox "Todas"');
+            checkTodos.click();
+        }
+        const todos = form.querySelectorAll('input[name="idsTiposAudiencia"]');
+        const semMarcar = [...todos].filter(chk => !chk.checked);
+        if (semMarcar.length) {
+            console.warn(`[Projudi Audiências Designadas] "Todas" não marcou ${semMarcar.length} tipo(s) — marcando manualmente`);
+            semMarcar.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
+        }
+        console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s) (Todas=${checkTodos ? checkTodos.checked : 'n/d'})`);
 
         const campoFim = form.querySelector('#dataFinal');
         if (campoFim) {
@@ -2336,6 +2348,75 @@
         return doc.lastAutoTable.finalY;
     }
 
+    // Bloco do Cartório na "Situação da Unidade": mesmo cabeçalho/KPIs de
+    // desenharBlocoDominio, mas com uma tabela de colunas GENÉRICAS (Tarefa/Indicador/
+    // Detalhamento/Situação) em vez de Pendentes/Prioritários/Mais antiga — precisa disso
+    // porque agora TODOS os relatórios entram como uma linha do Cartório (pedido do
+    // usuário), inclusive Tempo Médio e as três Audiências, que não têm o mesmo formato de
+    // "pendentes" das tarefas clássicas (Juntadas, Retorno, Paralisados, Remessas,
+    // Suspensos). Gabinete continua usando desenharBlocoDominio, sem mudança.
+    function desenharBlocoCartorioUnificado(doc, x, y, w, cfg) {
+        const pw = doc.internal.pageSize.getWidth();
+
+        const headH = 15;
+        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3); doc.setFillColor(...COR.cartao);
+        doc.rect(x, y, w, headH, 'FD');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+        doc.text(cfg.titulo, x + 6, y + 9.5);
+
+        let yy = y + headH + 5;
+        if (cfg.observacao) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+            const linhasObs = doc.splitTextToSize(cfg.observacao, w - 12);
+            doc.text(linhasObs, x + 6, yy);
+            yy += linhasObs.length * 3.4 + 5;
+        }
+
+        // Grade de KPIs que quebra em várias linhas quando não cabem lado a lado (ver
+        // mesma lógica em desenharBlocoDominio).
+        const gap = 5;
+        const larguraMinimaKpi = 44;
+        const porLinha = Math.max(1, Math.min(cfg.kpis.length, Math.floor((w + gap) / (larguraMinimaKpi + gap))));
+        for (let i = 0; i < cfg.kpis.length; i += porLinha) {
+            const linha = cfg.kpis.slice(i, i + porLinha);
+            const kW = (w - (linha.length - 1) * gap) / linha.length;
+            linha.forEach((k, j) => desenharCard(doc, x + j * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
+            yy += 22 + (i + porLinha < cfg.kpis.length ? 4 : 7);
+        }
+
+        if (!cfg.linhas.length) return yy;
+
+        doc.autoTable({
+            columns: [
+                { header: 'Tarefa', dataKey: 'nome' },
+                { header: 'Indicador', dataKey: 'indicador' },
+                { header: 'Detalhamento', dataKey: 'detalhamento' },
+                { header: 'Situação', dataKey: 'situacao' },
+            ],
+            body: cfg.linhas.map(l => ({ nome: l.nome, indicador: l.indicador, detalhamento: l.detalhamento, situacao: l.semSituacao ? '—' : l.situacaoLabel })),
+            startY: yy,
+            margin: { left: x, right: pw - x - w },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                nome: { cellWidth: w * 0.26, fontStyle: 'bold', textColor: COR.tinta },
+                indicador: { cellWidth: w * 0.19 },
+                detalhamento: { cellWidth: w * 0.38 },
+                situacao: { cellWidth: w * 0.17, halign: 'right' },
+            },
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.dataKey === 'situacao') {
+                    const l = cfg.linhas[data.row.index];
+                    if (!l.semSituacao) { data.cell.styles.textColor = l.corTexto; data.cell.styles.fontStyle = 'bold'; }
+                    else data.cell.styles.textColor = COR.muted;
+                }
+            },
+        });
+        return doc.lastAutoTable.finalY;
+    }
+
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
     // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
     // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
@@ -2377,13 +2458,12 @@
 
         // A observação sobre o critério de situação (Regular/Atenção/Crítico) fica dentro
         // de cada bloco (ver cfg.observacao em desenharBlocoDominio), não mais aqui em cima.
-        y = desenharBlocoDominio(doc, m, y, uw, {
+        y = desenharBlocoCartorioUnificado(doc, m, y, uw, {
             titulo: 'Cartório',
-            observacao: 'Situação calculada pela pendência mais antiga de cada tarefa. Regular até 30 dias, '
-                + 'Atenção de 31 a 90 dias, Crítico acima de 90 dias.',
-            situacao: cartorio.situacao,
-            colunaRotulo: 'Tarefa',
-            itens: cartorio.itens,
+            observacao: 'Pendências clássicas: situação pela pendência mais antiga (Regular até 30 dias, Atenção '
+                + '31–90, Crítico acima de 90). Tempo Médio e Audiências Pendentes/Realizadas são informativos, sem '
+                + 'situação. Audiências Designadas segue a régua de 180/360 dias até a audiência mais distante.',
+            linhas: cartorio.linhas,
             kpis: [
                 { titulo: 'Pendências totais', valor: String(cartorio.totalPendentes) },
                 { titulo: 'Prioritários', valor: String(cartorio.totalPrioritarios),
@@ -2501,6 +2581,90 @@
             retornoPendentes: itemRetorno ? itemRetorno.pendentes : null,
             audienciasPendentes: secaoAudiencias ? secaoAudiencias.dados.length : null,
         };
+
+        // Tabela única do Cartório (pedido do usuário): TODOS os relatórios — inclusive
+        // Tempo Médio e as três Audiências — como uma linha só, cada um com seu indicador
+        // e detalhamento próprios (não têm o mesmo formato de "pendentes/prioritários" das
+        // tarefas clássicas). Isso é só o RESUMO na capa — cada um continua tendo sua
+        // própria seção com gráfico/tabela discriminada mais adiante (ver outrasSecoes).
+        const secaoTempoMedio = secoes.find(s => s.cfgOriginal === CFG_TEMPOMEDIO);
+        const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
+        const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
+
+        const linhasCartorio = itensCartorio.map(t => ({
+            nome: t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo,
+            indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}`,
+            detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
+            situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
+            corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
+            semSituacao: false,
+            cfgOriginal: t.secao.cfgOriginal,
+        }));
+
+        if (secaoTempoMedio) {
+            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
+            const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
+            let periodoTxt = '';
+            {
+                const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
+                if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
+            }
+            linhasCartorio.push({
+                nome: 'Tempo Médio de Cumprimento',
+                indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
+                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
+            });
+        }
+        if (secaoAudiencias) {
+            let detalhamento = '—';
+            let mais = null;
+            secaoAudiencias.dados.forEach(d => {
+                const ts = parseDataBR(d.dataAudiencia);
+                if (ts != null && (!mais || ts < mais.ts)) mais = { ts, data: d.dataAudiencia };
+            });
+            if (mais) {
+                const dias = Math.round((now - mais.ts) / DIA_MS);
+                detalhamento = `Mais antiga sem termo: ${mais.data} (${dias} dia(s))`;
+            }
+            linhasCartorio.push({
+                nome: 'Audiências Pendentes',
+                indicador: `${secaoAudiencias.dados.length} audiência(s)`,
+                detalhamento, situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS,
+            });
+        }
+        if (secaoAudienciasDesignadas) {
+            const r = secaoAudienciasDesignadas.dados[0] || {};
+            const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
+            const diasAteUltima = tsUltima != null ? Math.round((tsUltima - now) / DIA_MS) : null;
+            const statusAD = classificarSituacaoPorDias(diasAteUltima, 180, 360);
+            const infoAD = SITUACAO_INFO[statusAD] || SITUACAO_INFO.regular;
+            linhasCartorio.push({
+                nome: 'Audiências Designadas',
+                indicador: `${r.totalDesignadas || 0} designada(s)`,
+                detalhamento: r.ultimaData ? `Última: ${r.ultimaData} (${diasAteUltima} dia(s))` : '—',
+                situacaoLabel: infoAD.rotulo, corTexto: infoAD.cor, semSituacao: false, cfgOriginal: CFG_AUDIENCIAS_DESIGNADAS,
+            });
+        }
+        if (secaoAudienciasRealizadas) {
+            const r = secaoAudienciasRealizadas.dados[0] || {};
+            linhasCartorio.push({
+                nome: 'Audiências Realizadas',
+                indicador: `${r.totalGeral || 0} realizada(s)`,
+                detalhamento: `${r.canceladas || 0} cancel. · ${r.naoRealizadas || 0} não real. · ${r.redesignadas || 0} redesig.`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS_REALIZADAS,
+            });
+        }
+        // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
+        // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
+        // fingir que terminou normalmente.
+        linhasCartorio.forEach(l => {
+            if (foiInterrompidoPorErro(l.cfgOriginal)) {
+                l.detalhamento = 'Extração interrompida por erro — dados parciais';
+                l.situacaoLabel = 'Interrompido'; l.corTexto = COR.vermelho; l.semSituacao = false;
+            }
+        });
+        cartorio.linhas = linhasCartorio;
 
         let gabinete = { itens: [], totalPendentes: 0, totalPrioritarios: 0, situacao: 'regular' };
         if (secaoGabinete) {
@@ -4234,6 +4398,21 @@
     //        -> início -> habilita "PDF conjunto". O estado persiste no localStorage,
     //        então dá para rodar de novo em outra Atuação e ACUMULAR várias competências.
     const AUTO_ESTADO = 'projudi_auto_estado';
+    // Marca o início/fim de uma rodada de automação (ver iniciarAutomacao/passoAutomacao)
+    // — usados só para mostrar o tempo decorrido no painel (ver atualizarPainel).
+    const CHAVE_AUTO_INICIO = 'projudi_auto_inicio';
+    const CHAVE_AUTO_FIM = 'projudi_auto_fim';
+
+    // "Xh Ym Zs" / "Ym Zs" / "Zs", sempre com o menor número de unidades necessário.
+    function formatarDuracao(ms) {
+        const totalSeg = Math.max(0, Math.round(ms / 1000));
+        const h = Math.floor(totalSeg / 3600);
+        const m = Math.floor((totalSeg % 3600) / 60);
+        const s = totalSeg % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+    }
 
     // Botões de extração individual (Extrair/Baixar/PDF/Limpar) em cada tela de relatório
     // ficam OCULTOS por padrão — a extração normal é pelo painel de automação da página
@@ -4245,6 +4424,15 @@
         let v = valor, t = 0;
         while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { break; } t++; }
         return Array.isArray(v) ? v : null;
+    }
+
+    // Mesma proteção que desembrulharArray, mas para um objeto plano (não array) — usado
+    // para valores como o período do Tempo Médio, que também podem voltar do localStorage
+    // JSON-codificados em camadas.
+    function desembrulharObjeto(valor) {
+        let v = valor, t = 0;
+        while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { return null; } t++; }
+        return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
     }
 
     // Lê os dados acumulados de um relatório a partir do prefixo de armazenamento.
@@ -4471,6 +4659,43 @@
         setTimeout(passoAutomacao, 900);
     }
 
+    // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
+    // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo. Marca o
+    // relatório em andamento como interrompido por erro (ver foiInterrompidoPorErro — o
+    // Relatório PDF avisa disso, ao invés de fingir que os dados estão completos) e avança
+    // a fila normalmente, como se o relatório tivesse terminado.
+    function pularRelatorioAtual() {
+        const estado = store.getItem(AUTO_ESTADO);
+        if (!estado) return;
+        let key = null;
+        if (estado.startsWith('coletando_')) key = estado.slice('coletando_'.length);
+        else if (estado.startsWith('preenchendo_')) key = estado.slice('preenchendo_'.length);
+        else if (estado.startsWith('travado_')) key = estado.slice('travado_'.length);
+        if (!key) return;
+        const rel = relatorioPorChave(key);
+        if (!rel) return;
+        if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
+
+        console.warn(`[Auto Projudi] usuário pulou a extração de "${rel.rotulo}" (estado="${estado}")`);
+        store.setItem(rel.cfg.prefixo + 'erro', '1');
+        store.setItem(rel.cfg.prefixo + 'coletado', '1');
+        store.removeItem(rel.cfg.prefixo + 'rodando');
+        // Limpa o estado transitório de relatórios com fila própria — senão a próxima
+        // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
+        // recomeçar do zero.
+        if (rel.key === 'tempomedio') store.removeItem(CHAVE_FILA_MESES_TM);
+        if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
+        if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
+
+        const fila = lerFilaAutomacao();
+        const idx = fila.indexOf(key);
+        const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
+        store.setItem('projudi_auto_lock', String(Date.now()));
+        atualizarPainel();
+        setTimeout(passoAutomacao, 300);
+    }
+
     // Executa o passo de navegação do estado atual. Pode ser chamado por qualquer frame;
     // uma trava de tempo evita cliques duplicados quando mais de um frame o executa.
     function passoAutomacao() {
@@ -4490,6 +4715,7 @@
         if (estado === 'ir_fim') {
             store.setItem('projudi_auto_lock', String(agora));
             store.setItem(AUTO_ESTADO, 'concluido');
+            store.setItem(CHAVE_AUTO_FIM, String(agora));
             navegarMenu('inicio');
             return;
         }
@@ -4549,6 +4775,8 @@
         const primeiro = relatorioPorChave(fila[0]);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
+        store.setItem(CHAVE_AUTO_INICIO, String(Date.now()));
+        store.removeItem(CHAVE_AUTO_FIM);
         atualizarPainel();
         setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
     }
@@ -4561,8 +4789,11 @@
             store.removeItem(c.prefixo + 'rodando');
             store.removeItem(c.prefixo + 'ts');
             store.removeItem(c.prefixo + 'coletado');
+            store.removeItem(c.prefixo + 'erro');
         });
         store.removeItem(AUTO_ESTADO);
+        store.removeItem(CHAVE_AUTO_INICIO);
+        store.removeItem(CHAVE_AUTO_FIM);
         store.removeItem('projudi_auto_fila');
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
@@ -4578,6 +4809,9 @@
     // zero registros, desde que a coleta tenha rodado até o fim — "zero pendências" é uma
     // informação relevante para o card, diferente de "nunca foi coletado".
     function foiColetado(cfg) { return store.getItem(cfg.prefixo + 'coletado') === '1'; }
+    // Marcado por "Pular a extração atual" no painel (ver pularRelatorioAtual) — o
+    // relatório foi interrompido antes de terminar; os dados que existem são parciais.
+    function foiInterrompidoPorErro(cfg) { return store.getItem(cfg.prefixo + 'erro') === '1'; }
 
     function baixarPDFConjunto(somenteResumo) {
         const secoes = REPORTS_AUTOMACAO
@@ -4665,6 +4899,28 @@
         });
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
+        // "Pular extração atual" só aparece com a automação em curso — é a válvula de
+        // escape para quando a coleta trava (ver pularRelatorioAtual).
+        const btnPular = painel.querySelector('#pa-pular');
+        if (btnPular) btnPular.style.display = emCurso ? '' : 'none';
+
+        // Tempo decorrido: enquanto em curso, atualiza a cada 2s (mesmo intervalo que
+        // chama atualizarPainel); depois de concluído, mostra o tempo total fixo da
+        // última rodada.
+        const elTempo = painel.querySelector('.pa-tempo');
+        if (elTempo) {
+            const inicio = parseInt(store.getItem(CHAVE_AUTO_INICIO) || '0', 10);
+            const fim = parseInt(store.getItem(CHAVE_AUTO_FIM) || '0', 10);
+            if (inicio && emCurso) {
+                elTempo.style.display = '';
+                elTempo.textContent = `Tempo decorrido: ${formatarDuracao(Date.now() - inicio)}`;
+            } else if (inicio && fim && estado === 'concluido') {
+                elTempo.style.display = '';
+                elTempo.textContent = `Extração concluída em ${formatarDuracao(fim - inicio)}`;
+            } else {
+                elTempo.style.display = 'none';
+            }
+        }
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
         painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
@@ -4765,6 +5021,7 @@
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
                 </div>
+                <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
                     <div class="pa-progress-lbl">—</div>
@@ -4791,6 +5048,7 @@
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
+                    <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF.</div>
             </div>`;
@@ -4812,6 +5070,7 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
+        painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
         painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
             store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
         };
@@ -4907,6 +5166,7 @@
         }
         #painel-automacao .pa-progress-bar.pa-progress-completo { background: #527467; }
         #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
+        #painel-automacao .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
         #painel-automacao .pa-counts {
             display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
@@ -4952,6 +5212,7 @@
         #painel-automacao .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
         #painel-automacao .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
         #painel-automacao .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
+        #painel-automacao .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
         #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
 
         #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
