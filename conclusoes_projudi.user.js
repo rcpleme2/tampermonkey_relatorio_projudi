@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.5
+// @version      18.6
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -596,12 +596,18 @@
     // a data da audiência mais distante por tipo, e uma situação (verde/amarelo/vermelho)
     // conforme o quão longe no futuro a agenda já está lotada.
     //
-    // "Audiência de Instrução" e "Audiência de Instrução e Julgamento" contam como um
-    // tipo só ("Audiência de Instrução") — pedido do usuário.
+    // "Audiência de Instrução", "Audiência de Instrução e Julgamento" e "Audiência de
+    // Interrogatório" contam como um tipo só ("Audiência de Instrução") — pedido do
+    // usuário. A observação sobre essa junção aparece no relatório (ver OBSERVACAO_TIPOS_AD
+    // em montarResumoAudienciasDesignadas).
     function normalizarTipoAudiencia(tipo) {
         const t = (tipo || '').trim();
-        return /^audi[êe]ncia\s+de\s+instru[çc][ãa]o(\s+e\s+julgamento)?$/i.test(t) ? 'Audiência de Instrução' : t;
+        if (/^audi[êe]ncia\s+de\s+instru[çc][ãa]o(\s+e\s+julgamento)?$/i.test(t)) return 'Audiência de Instrução';
+        if (/^audi[êe]ncia\s+de\s+interrogat[óo]rio$/i.test(t)) return 'Audiência de Instrução';
+        return t;
     }
+    const OBSERVACAO_TIPOS_AD = 'Observação: "Audiência de Instrução", "Audiência de Instrução e Julgamento" e '
+        + '"Audiência de Interrogatório" foram tratadas como um único tipo ("Audiência de Instrução").';
 
     const CFG_AUDIENCIAS_DESIGNADAS = {
         prefixo: 'projudi_audienciasdesignadas_',
@@ -1940,7 +1946,7 @@
 
     // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
     // relatório (genérico via cfg.pdf, ou o caso especial do Tempo Médio).
-    function descreverSecaoPDF(cfg) {
+    function descreverSecaoPDF(cfg, somenteResumo) {
         if (cfg === CFG_TEMPOMEDIO) {
             return {
                 rotulo: 'Tempo Médio de Cumprimento',
@@ -1965,8 +1971,11 @@
         if (cfg === CFG_AUDIENCIAS) {
             return {
                 rotulo: TITULO_AUDIENCIAS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudiencias(doc, dados, primeira, comIndice),
-                montarTabela: (doc, dados, comIndice) => montarTabelaAudiencias(doc, dados, comIndice),
+                // Resumo e tabela sempre juntos (pedido do usuário) — a tabela é desenhada
+                // dentro do próprio montarResumoAudiencias, então não há passo de tabela
+                // separado aqui (ver secaoTemTabela em gerarPDFConjunto).
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo),
+                montarTabela: null,
             };
         }
         if (cfg === CFG_AUDIENCIAS_DESIGNADAS) {
@@ -2007,10 +2016,19 @@
             yy += linhasObs.length * 3.4 + 5;
         }
 
+        // Grade de KPIs que QUEBRA em várias linhas quando não cabem lado a lado (o
+        // Cartório pode ter até 7 — pendências totais, prioritários, acima de 30 dias,
+        // mais antiga, Juntadas, Retorno, Termos de Audiência) — cartão largo demais estreita
+        // e corta o título; largura mínima evita isso, sacrificando uma linha a mais.
         const gap = 5;
-        const kW = (w - (cfg.kpis.length - 1) * gap) / cfg.kpis.length;
-        cfg.kpis.forEach((k, i) => desenharCard(doc, x + i * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
-        yy += 22 + 7;
+        const larguraMinimaKpi = 44;
+        const porLinha = Math.max(1, Math.min(cfg.kpis.length, Math.floor((w + gap) / (larguraMinimaKpi + gap))));
+        for (let i = 0; i < cfg.kpis.length; i += porLinha) {
+            const linha = cfg.kpis.slice(i, i + porLinha);
+            const kW = (w - (linha.length - 1) * gap) / linha.length;
+            linha.forEach((k, j) => desenharCard(doc, x + j * (kW + gap), yy, kW, 22, k.titulo, k.valor, k.sub ? [k.sub] : [], true, COR.azul));
+            yy += 22 + (i + porLinha < cfg.kpis.length ? 4 : 7);
+        }
 
         if (!cfg.itens.length) return yy;
         // colunaExtra (opcional): coluna adicional entre Prioritários e Mais antiga,
@@ -2115,6 +2133,11 @@
                 { titulo: 'Acima de 30 dias', valor: String(cartorio.acima30),
                   sub: cartorio.totalPendentes ? `${Math.round(cartorio.acima30 / cartorio.totalPendentes * 100)}% do total` : '' },
                 { titulo: 'Pendência mais antiga', valor: cartorio.maisAntiga != null ? `${cartorio.maisAntiga} dias` : '—' },
+                // Juntadas e Retorno de Conclusos separados dos demais (pedido do usuário) —
+                // só aparecem quando a respectiva seção foi de fato coletada.
+                ...(cartorio.juntadasPendentes != null ? [{ titulo: 'Juntadas Pendentes', valor: String(cartorio.juntadasPendentes) }] : []),
+                ...(cartorio.retornoPendentes != null ? [{ titulo: 'Retornos de Conclusão Pendentes', valor: String(cartorio.retornoPendentes) }] : []),
+                ...(cartorio.audienciasPendentes != null ? [{ titulo: 'Termos de Audiência Pendentes', valor: String(cartorio.audienciasPendentes) }] : []),
             ],
         });
 
@@ -2147,6 +2170,9 @@
     // A maioria guarda os registros direto em s.dados; Audiências Designadas guarda um
     // resumo único (s.dados = [resumo]) com a lista de linhas dentro de resumo.tabela.
     function secaoTemTabela(s) {
+        // Audiências Pendentes desenha a tabela dentro do próprio resumo (pedido do
+        // usuário: sempre juntos) — nunca entra no passo de tabela separado.
+        if (s.cfgOriginal === CFG_AUDIENCIAS) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -2158,7 +2184,7 @@
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
-        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg)));
+        const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg, somenteResumo)));
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
@@ -2193,6 +2219,16 @@
                 status: classificarSituacaoPorDias(maisAntiga, LIMITES_CARTORIO.atencao, LIMITES_CARTORIO.critico),
             };
         });
+        // Juntadas/Retorno de Conclusos entram como KPIs próprios no card do Cartório (além
+        // da mini-tabela por tarefa, que já os separa) — pedido do usuário. null quando a
+        // seção nem chegou a ser coletada (não confundir com "coletado, zero pendências").
+        const itemCartorioDe = (cfg) => itensCartorio.find(t => t.secao.cfgOriginal === cfg);
+        const itemJuntadas = itemCartorioDe(CFG_JUNTADAS);
+        const itemRetorno = itemCartorioDe(CFG_RETORNO);
+        // Audiências Pendentes não é uma tarefa do Cartório no esquema (fica em
+        // "outrasSecoes"), mas o usuário quer o total também aqui, como KPI — ver
+        // "Termos de Audiência Pendentes" abaixo.
+        const secaoAudiencias = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS);
         const cartorio = {
             itens: itensCartorio,
             totalPendentes: itensCartorio.reduce((s, t) => s + t.pendentes, 0),
@@ -2200,6 +2236,9 @@
             acima30: itensCartorio.reduce((s, t) => s + t._itens.filter(it => it.dias != null && it.dias > 30).length, 0),
             maisAntiga: maiorDias(itensCartorio.flatMap(t => t._itens)),
             situacao: piorSituacao(itensCartorio.map(t => t.status)),
+            juntadasPendentes: itemJuntadas ? itemJuntadas.pendentes : null,
+            retornoPendentes: itemRetorno ? itemRetorno.pendentes : null,
+            audienciasPendentes: secaoAudiencias ? secaoAudiencias.dados.length : null,
         };
 
         let gabinete = { itens: [], totalPendentes: 0, totalPrioritarios: 0, situacao: 'regular' };
@@ -2631,20 +2670,19 @@
 
     function gerarPDFAudiencias(dados, somenteResumo) {
         const doc = novoDocPDF();
-        montarResumoAudiencias(doc, dados, true, false);
+        montarResumoAudiencias(doc, dados, true, false, somenteResumo);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        if (!somenteResumo) {
-            const pgTabela = montarTabelaAudiencias(doc, dados, false);
-            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `audiencias_pendentes_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
-    // Página de RESUMO: só o essencial — quantas audiências pendentes (mesmo zero) e a
-    // distribuição por tipo. Sem o gráfico de "tempo em aberto" dos demais relatórios de
-    // pendência: a data da audiência é no FUTURO, não faz sentido tratar como atraso.
-    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice) {
+    // Resumo (KPIs + gráfico) seguido, sem quebra de seção, pela tabela discriminada —
+    // sempre juntos, nunca com a tabela numa seção separada atrás de um link "Ver tabela
+    // detalhada →" (pedido do usuário). Continua na mesma página quando cabe; senão, o
+    // autoTable segue para quantas páginas forem precisas, normalmente. somenteResumo
+    // omite a tabela (usado tanto no relatório individual quanto no Relatório PDF conjunto,
+    // pela opção "Só resumo").
+    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -2674,25 +2712,21 @@
         desenharCard(doc, m,             kY, kW2, 28, 'Audiências Pendentes', String(dados.length), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
+        // Altura FIXA para o gráfico (não consome o resto da página) — deixa espaço para a
+        // tabela discriminada logo abaixo, na mesma página quando couber.
         const chartY = kY + 28 + gap + 2;
-        const disponivel = ph - m - chartY - 14;
+        const alturaChart = 46;
         const porTipo = contarPorCampo(dados, 'tipoAudiencia', 12);
+        let proximoY = chartY;
         if (porTipo.length) {
-            desenharBarras(doc, m, chartY, uw, disponivel, 'Audiências por Tipo', porTipo, undefined, COR.aqua);
+            desenharBarras(doc, m, chartY, uw, alturaChart, 'Audiências por Tipo', porTipo, undefined, COR.aqua);
+            proximoY = chartY + alturaChart + 6;
         }
 
-        desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
-    }
-
-    // Tabela discriminada do relatório de Audiências Pendentes (sempre inicia em página
-    // nova). Retorna o número da página inicial (para o índice/bookmarks do Relatório PDF).
-    function montarTabelaAudiencias(doc, dados, comIndice) {
-        const agora = new Date();
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 12;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        if (somenteResumo || !dados.length) {
+            desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
+        }
 
         // Da audiência mais próxima para a mais distante (sem data válida vai ao final) —
         // mais útil que a ordem de coleta para saber o que vem primeiro.
@@ -2701,9 +2735,7 @@
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
 
-        doc.addPage();
-        const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Audiências Pendentes');
+        tituloSecao(doc, m, proximoY, uw, 'Detalhamento — Audiências Pendentes');
 
         const colunas = [
             { header: 'Processo', width: 44, get: (d) => d.processo },
@@ -2721,7 +2753,7 @@
                 colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
                 return o;
             }),
-            startY: m + 8,
+            startY: proximoY + 6,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec,
@@ -2737,8 +2769,6 @@
             },
             didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
-
-        return paginaInicial;
     }
 
     // ── PDF do relatório de Audiências Designadas (Crime — Pauta de Horários) ───
@@ -2788,7 +2818,13 @@
         if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
-        const yLinha = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        // Observação sobre a junção de tipos (pedido do usuário) — sempre presente, já que
+        // a normalização (ver normalizarTipoAudiencia) vale para toda a pauta.
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const linhasObs = doc.splitTextToSize(OBSERVACAO_TIPOS_AD, uw);
+        doc.text(linhasObs, m, yObs);
+        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -2797,26 +2833,27 @@
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.aqua);
 
-        // Situação da agenda: verde até 180 dias até a última audiência, amarelo de 180 a
-        // 360, vermelho acima de 360 — mesma régua Regular/Atenção/Crítico usada nos demais
-        // relatórios (ver classificarSituacaoPorDias/SITUACAO_INFO), só que aqui o "atraso"
-        // é a agenda já estar preenchida muito longe no futuro, não uma pendência. O card
-        // junta a situação com os processos do último dia (pedido do usuário) e usa a cor
-        // da situação como acento — assim a sinalização gráfica salta aos olhos.
+        // Dois KPIs (pedido do usuário): 1) só a situação da vara (verde até 180 dias até a
+        // audiência mais distante, amarelo de 180 a 360, vermelho acima de 360 — mesma
+        // régua Regular/Atenção/Crítico usada nos demais relatórios, só que aqui o "atraso"
+        // é a agenda já estar preenchida muito longe no futuro); 2) só os processos do dia
+        // mais distante, com os dias até essa data.
         const k2Y = kY + 28 + gap;
         const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
         const diasAteUltima = tsUltima != null ? Math.round((tsUltima - agora.getTime()) / DIA_MS) : null;
         const status = classificarSituacaoPorDias(diasAteUltima, 180, 360);
         const infoStatus = SITUACAO_INFO[status] || SITUACAO_INFO.regular;
         const totalUltimoDia = r.totalProcessosUltimoDia != null ? r.totalProcessosUltimoDia : (r.processosUltimoDia || []).length;
-        desenharCard(doc, m, k2Y, uw, 32, `Situação da Agenda — ${infoStatus.rotulo}`, String(totalUltimoDia) + (totalUltimoDia === 1 ? ' processo no último dia' : ' processos no último dia'),
+        desenharCard(doc, m, k2Y, kW2, 28, 'Situação da Vara', infoStatus.rotulo,
+            [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
+            true, infoStatus.cor);
+        desenharCard(doc, m + kW2 + gap, k2Y, kW2, 28, `Processos no Dia Mais Distante (${totalUltimoDia})`, fraseProcessos(r.processosUltimoDia, 3) || '—',
             [
-                diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular',
-                r.ultimaData ? `Dia ${r.ultimaData}: ${fraseProcessos(r.processosUltimoDia, 8)}` : 'Nenhuma audiência designada',
+                r.ultimaData && diasAteUltima != null ? `${diasAteUltima} dia(s) até ${r.ultimaData}` : 'Nenhuma audiência designada',
             ],
-            false, infoStatus.cor);
+            false, COR.ambar);
 
-        const tY = k2Y + 32 + gap + 4;
+        const tY = k2Y + 28 + gap + 4;
         if (r.porTipo.length) {
             tituloSecao(doc, m, tY, uw, 'Última audiência designada por tipo');
             doc.autoTable({
