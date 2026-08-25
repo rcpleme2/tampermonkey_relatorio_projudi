@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.6
+// @version      18.7
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1360,6 +1360,18 @@
     // papel semântico do dado (azul=principal, vermelho=prioritário, âmbar=atenção,
     // aqua=secundário). subs: array de linhas secundárias. Se central=true, o conteúdo
     // é centralizado horizontal e verticalmente dentro do card.
+    // Encurta "texto" (com reticências) até caber em "larguraMax" com a fonte já ativa no
+    // doc (setFont/setFontSize precisam ter sido chamados antes) — usado para o valor
+    // principal do card nunca vazar pra fora da borda (bug relatado: um valor longo, como
+    // vários números de processo, desenhado sem quebra ultrapassava o card).
+    function textoTruncadoParaLargura(doc, texto, larguraMax) {
+        const s = String(texto);
+        if (doc.getTextWidth(s) <= larguraMax) return s;
+        let t = s;
+        while (t.length > 1 && doc.getTextWidth(t + '…') > larguraMax) t = t.slice(0, -1);
+        return t + '…';
+    }
+
     function desenharCard(doc, x, y, w, h, titulo, valor, subs, central, acento) {
         acento = acento || COR.azul;
         doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
@@ -1376,7 +1388,7 @@
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
             doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(valor.length <= 26 ? 15 : 11); doc.setTextColor(...COR.tinta);
-            doc.text(valor, cx, yy, { align: 'center' }); yy += 5.5;
+            doc.text(textoTruncadoParaLargura(doc, valor, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
             return;
@@ -1387,7 +1399,7 @@
         doc.text(String(titulo).toUpperCase(), px, y + 6.5);
         const grande = valor.length <= 13;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(grande ? 20 : 14); doc.setTextColor(...COR.tinta);
-        doc.text(valor, px, y + (grande ? 16.5 : 15));
+        doc.text(textoTruncadoParaLargura(doc, valor, w - 8), px, y + (grande ? 16.5 : 15));
         if (subs.length) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             let yy = y + (grande ? 22 : 20);
