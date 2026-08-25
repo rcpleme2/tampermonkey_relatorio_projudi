@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      19.2
+// @version      19.3
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -954,19 +954,32 @@
             .map(o => ({ value: o.value, label: o.textContent.trim() }));
     }
 
-    // Lê o total de audiências realizadas na tabela de resultado — linha "Total Realizadas"
-    // (em negrito), coluna Quantidade. Mesma tabela serve tanto pra pesquisa geral quanto
-    // pra cada pesquisa por usuário.
-    function lerTotalRealizadasAR() {
-        let total = 0;
+    // Lê o valor (coluna Quantidade) da linha da tabela de resultado cujo rótulo bate com
+    // "rotuloRegex" (ex.: "Total Realizadas", "Canceladas") — 0 se a linha não aparecer.
+    function lerValorLinhaAR(rotuloRegex) {
+        let valor = 0;
         document.querySelectorAll('table.resultTable tbody tr').forEach(tr => {
             const tds = tr.querySelectorAll(':scope > td');
             if (tds.length < 2) return;
-            if (/^total\s+realizadas$/i.test(textoCelula(tds[0]))) {
-                total = parseInt(textoCelula(tds[1]).replace(/\D/g, ''), 10) || 0;
+            if (rotuloRegex.test(textoCelula(tds[0]))) {
+                valor = parseInt(textoCelula(tds[1]).replace(/\D/g, ''), 10) || 0;
             }
         });
-        return total;
+        return valor;
+    }
+
+    // Total de audiências realizadas — linha "Total Realizadas" (em negrito). Mesma tabela
+    // serve tanto pra pesquisa geral quanto pra cada pesquisa por usuário.
+    function lerTotalRealizadasAR() { return lerValorLinhaAR(/^total\s+realizadas$/i); }
+
+    // Canceladas/Não Realizadas/Redesignadas — só existem (fazem sentido) na pesquisa
+    // GERAL (sem usuário selecionado); pedido do usuário: extrair da consulta geral.
+    function lerExtrasGeralAR() {
+        return {
+            canceladas: lerValorLinhaAR(/^canceladas$/i),
+            naoRealizadas: lerValorLinhaAR(/^n[ãa]o\s+realizadas$/i),
+            redesignadas: lerValorLinhaAR(/^redesignadas$/i),
+        };
     }
 
     function submitAR(form) {
@@ -976,6 +989,7 @@
 
     const CHAVE_AGUARDANDO_AR = 'projudi_audienciasrealizadas_aguardando';
     const CHAVE_TOTAL_GERAL_AR = 'projudi_audienciasrealizadas_totalgeral';
+    const CHAVE_EXTRAS_GERAL_AR = 'projudi_audienciasrealizadas_extrasgeral';
     const CHAVE_FILA_USUARIOS_AR = 'projudi_audienciasrealizadas_fila_usuarios';
     const CHAVE_ACUMULADO_AR = 'projudi_audienciasrealizadas_acumulado';
     const CHAVE_PROGRESSO_AR = 'projudi_audienciasrealizadas_progresso';
@@ -1035,8 +1049,10 @@
 
         if (!aguardando || aguardando.tipo === 'geral') {
             store.setItem(CHAVE_TOTAL_GERAL_AR, String(total));
+            const extras = lerExtrasGeralAR();
+            store.setItem(CHAVE_EXTRAS_GERAL_AR, JSON.stringify(extras));
             const usuarios = lerOpcoesUsuarioAR(form);
-            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} — ${usuarios.length} usuário(s) a percorrer`);
+            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas}) — ${usuarios.length} usuário(s) a percorrer`);
             store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
             store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
             store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
@@ -1053,8 +1069,8 @@
     }
 
     function limparEstadoTransitorioAR() {
-        [CHAVE_AGUARDANDO_AR, CHAVE_TOTAL_GERAL_AR, CHAVE_FILA_USUARIOS_AR, CHAVE_ACUMULADO_AR,
-         CHAVE_PROGRESSO_AR, CHAVE_TOTAL_USUARIOS_AR, 'projudi_audienciasrealizadas_periodo']
+        [CHAVE_AGUARDANDO_AR, CHAVE_TOTAL_GERAL_AR, CHAVE_EXTRAS_GERAL_AR, CHAVE_FILA_USUARIOS_AR,
+         CHAVE_ACUMULADO_AR, CHAVE_PROGRESSO_AR, CHAVE_TOTAL_USUARIOS_AR, 'projudi_audienciasrealizadas_periodo']
             .forEach(k => store.removeItem(k));
     }
 
@@ -1066,6 +1082,8 @@
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         let periodo = { dataInicio: '', dataFim: '' };
         try { periodo = JSON.parse(store.getItem('projudi_audienciasrealizadas_periodo') || 'null') || periodo; } catch (e) { /* ignore */ }
+        let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0 };
+        try { extrasGeral = JSON.parse(store.getItem(CHAVE_EXTRAS_GERAL_AR) || 'null') || extrasGeral; } catch (e) { /* ignore */ }
 
         const porUsuario = acumulado
             .filter(u => u.quantidade >= MIN_AUDIENCIAS_POR_USUARIO_AR)
@@ -1075,13 +1093,16 @@
         const resumo = {
             geradoEm: new Date().toISOString(),
             totalGeral,
+            canceladas: extrasGeral.canceladas,
+            naoRealizadas: extrasGeral.naoRealizadas,
+            redesignadas: extrasGeral.redesignadas,
             periodo,
             porUsuario,
             usuariosIgnorados,
             totalUsuarios: acumulado.length,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} usuarios=${acumulado.length} exibidos(>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -3209,7 +3230,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, totalUsuarios: 0, competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, totalUsuarios: 0, competencia: '' };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -3235,7 +3256,15 @@
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length),
             [r.totalUsuarios ? `de ${r.totalUsuarios} usuário(s) pesquisado(s)` : ''], true, COR.aqua);
 
-        const chartY = kY + 28 + gap + 2;
+        // Canceladas/Não Realizadas/Redesignadas — extraídas só da pesquisa geral (pedido
+        // do usuário), lado a lado numa segunda linha de KPIs menores.
+        const k2Y = kY + 28 + gap;
+        const kW3 = (uw - 2 * gap) / 3;
+        desenharCard(doc, m,                  k2Y, kW3, 24, 'Canceladas', String(r.canceladas), [], true, COR.ambar);
+        desenharCard(doc, m + kW3 + gap,      k2Y, kW3, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
+        desenharCard(doc, m + 2 * (kW3 + gap), k2Y, kW3, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
+
+        const chartY = k2Y + 24 + gap + 2;
         if (r.porUsuario.length) {
             const itensBarras = r.porUsuario.map(u => ({ label: u.nome, valor: u.quantidade }));
             const alturaChart = Math.min(90, Math.max(30, itensBarras.length * 7 + 10));
