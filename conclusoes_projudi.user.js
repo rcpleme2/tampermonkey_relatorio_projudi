@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      18.7
+// @version      19.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -879,6 +879,206 @@
         store.removeItem(CHAVE_PROGRESSO_AD);
 
         avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
+
+    // ── Audiências Realizadas (Crime) — audiencia/estatistica.do, "Audiências na
+    // Vara" ──────────────────────────────────────────────────────────────────────
+    // Diferente dos demais relatórios de Crime: uma única tela de filtros/resultado
+    // (estatisticaAudienciaForm) que devolve só TOTAIS (não uma lista de processos), e o
+    // detalhamento por usuário exige uma pesquisa PARA CADA usuário do combo — não dá pra
+    // ler tudo de uma vez. Por isso a coleta é uma fila (mesmo padrão do Tempo Médio "mês a
+    // mês"): primeiro uma pesquisa "geral" (usuário em branco) pro total do período, depois
+    // uma pesquisa por usuário, na sequência, acumulando os totais.
+    const CFG_AUDIENCIAS_REALIZADAS = {
+        prefixo: 'projudi_audienciasrealizadas_',
+        mostrarSeVazio: true,
+        detecta: () => false, // nunca detectado por cabeçalho — só entra via automação (ver navegarMenu/injetarBotoes)
+        usaAtuacao: false,
+        nomeArquivo: 'audiencias_realizadas_projudi',
+        pdfCustom: (dados) => gerarPDFAudienciasRealizadas(dados),
+    };
+
+    // Quantidade mínima de audiências realizadas para um usuário aparecer no detalhamento
+    // (pedido do usuário) — os demais ainda contam para o total geral, só não entram na
+    // lista por usuário.
+    const MIN_AUDIENCIAS_POR_USUARIO_AR = 10;
+
+    function formularioAudienciasRealizadas() {
+        const form = document.getElementById('estatisticaAudienciaForm');
+        return form && form.querySelector('#usuario') ? form : null;
+    }
+
+    // Data final = último dia do mês anterior ao vigente; data inicial = 3 anos antes dessa
+    // data (pedido do usuário) — sempre um período de 3 anos "fechado" (nunca inclui o mês
+    // corrente, ainda em andamento).
+    function periodoAudienciasRealizadas(agora) {
+        const fim = new Date(agora.getFullYear(), agora.getMonth(), 0);
+        const inicio = new Date(fim.getFullYear() - 3, fim.getMonth(), fim.getDate());
+        return { dataInicio: formatarDataBR(inicio), dataFim: formatarDataBR(fim) };
+    }
+
+    function preencherPeriodoAR(form, periodo) {
+        const campoIni = form.querySelector('#dataInicio');
+        const campoFim = form.querySelector('#dataFim');
+        [[campoIni, periodo.dataInicio], [campoFim, periodo.dataFim]].forEach(([campo, valor]) => {
+            if (!campo) return;
+            campo.value = valor;
+            campo.dispatchEvent(new Event('input', { bubbles: true }));
+            campo.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    }
+
+    function setUsuarioAR(form, valor) {
+        const sel = form.querySelector('#usuario');
+        if (!sel) return;
+        sel.value = valor;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // Lê as opções reais do combo de usuários (ignora o placeholder "-- CLIQUE AQUI PARA
+    // SELECIONAR --", que tem value vazio) — feito UMA vez, na primeira pesquisa (geral),
+    // já que o combo é o mesmo em toda pesquisa desta tela.
+    function lerOpcoesUsuarioAR(form) {
+        const sel = form.querySelector('#usuario');
+        if (!sel) return [];
+        return [...sel.querySelectorAll('option')]
+            .filter(o => o.value)
+            .map(o => ({ value: o.value, label: o.textContent.trim() }));
+    }
+
+    // Lê o total de audiências realizadas na tabela de resultado — linha "Total Realizadas"
+    // (em negrito), coluna Quantidade. Mesma tabela serve tanto pra pesquisa geral quanto
+    // pra cada pesquisa por usuário.
+    function lerTotalRealizadasAR() {
+        let total = 0;
+        document.querySelectorAll('table.resultTable tbody tr').forEach(tr => {
+            const tds = tr.querySelectorAll(':scope > td');
+            if (tds.length < 2) return;
+            if (/^total\s+realizadas$/i.test(textoCelula(tds[0]))) {
+                total = parseInt(textoCelula(tds[1]).replace(/\D/g, ''), 10) || 0;
+            }
+        });
+        return total;
+    }
+
+    function submitAR(form) {
+        const btn = form.querySelector('#searchButton');
+        setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1200);
+    }
+
+    const CHAVE_AGUARDANDO_AR = 'projudi_audienciasrealizadas_aguardando';
+    const CHAVE_TOTAL_GERAL_AR = 'projudi_audienciasrealizadas_totalgeral';
+    const CHAVE_FILA_USUARIOS_AR = 'projudi_audienciasrealizadas_fila_usuarios';
+    const CHAVE_ACUMULADO_AR = 'projudi_audienciasrealizadas_acumulado';
+    const CHAVE_PROGRESSO_AR = 'projudi_audienciasrealizadas_progresso';
+    const CHAVE_TOTAL_USUARIOS_AR = 'projudi_audienciasrealizadas_total_usuarios';
+
+    function atualizarProgressoAR(processados, total) {
+        store.setItem(CHAVE_PROGRESSO_AR, JSON.stringify({ processados, total }));
+        atualizarPainel();
+    }
+
+    function lerProgressoAR() {
+        try { return JSON.parse(store.getItem(CHAVE_PROGRESSO_AR) || 'null'); }
+        catch (e) { return null; }
+    }
+
+    // Primeira entrada nesta automação: preenche o período e pesquisa com usuário em branco
+    // (todos) — o total dessa pesquisa é o total geral do período; o combo lido nessa mesma
+    // tela vira a fila de usuários a percorrer depois.
+    function iniciarBuscaAudienciasRealizadas() {
+        const form = formularioAudienciasRealizadas();
+        if (!form) return;
+        const periodo = periodoAudienciasRealizadas(new Date());
+        console.log(`[Projudi Audiências Realizadas] iniciando — período ${periodo.dataInicio} a ${periodo.dataFim}, pesquisa geral (todos os usuários)`);
+        preencherPeriodoAR(form, periodo);
+        setUsuarioAR(form, '');
+        store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'geral' }));
+        store.setItem('projudi_audienciasrealizadas_periodo', JSON.stringify(periodo));
+        store.setItem(AUTO_ESTADO, 'coletando_audienciasrealizadas');
+        submitAR(form);
+    }
+
+    // Avança para o próximo usuário da fila (ou finaliza, se a fila acabou).
+    function avancarUsuarioAR(form) {
+        const fila = JSON.parse(store.getItem(CHAVE_FILA_USUARIOS_AR) || '[]');
+        if (!fila.length) { finalizarAudienciasRealizadas(); return; }
+        const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
+        const prox = fila.shift();
+        store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(fila));
+        console.log(`[Projudi Audiências Realizadas] pesquisando usuário "${prox.label}" (${totalUsuarios - fila.length}/${totalUsuarios})`);
+        atualizarProgressoAR(totalUsuarios - fila.length - 1, totalUsuarios);
+        setUsuarioAR(form, prox.value);
+        store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'usuario', value: prox.value, label: prox.label }));
+        submitAR(form);
+    }
+
+    // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
+    // significa (geral ou de qual usuário, ver CHAVE_AGUARDANDO_AR) e segue a fila.
+    function processarResultadoAudienciasRealizadas() {
+        const form = formularioAudienciasRealizadas();
+        if (!form) return;
+        let aguardando = null;
+        try { aguardando = JSON.parse(store.getItem(CHAVE_AGUARDANDO_AR) || 'null'); } catch (e) { /* ignore */ }
+        const total = lerTotalRealizadasAR();
+
+        if (!aguardando || aguardando.tipo === 'geral') {
+            store.setItem(CHAVE_TOTAL_GERAL_AR, String(total));
+            const usuarios = lerOpcoesUsuarioAR(form);
+            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} — ${usuarios.length} usuário(s) a percorrer`);
+            store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
+            store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
+            store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
+            atualizarProgressoAR(0, usuarios.length);
+            avancarUsuarioAR(form);
+            return;
+        }
+
+        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} audiência(s) realizada(s)`);
+        const acumulado = JSON.parse(store.getItem(CHAVE_ACUMULADO_AR) || '[]');
+        acumulado.push({ usuario: aguardando.value, nome: aguardando.label, quantidade: total });
+        store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify(acumulado));
+        avancarUsuarioAR(form);
+    }
+
+    function limparEstadoTransitorioAR() {
+        [CHAVE_AGUARDANDO_AR, CHAVE_TOTAL_GERAL_AR, CHAVE_FILA_USUARIOS_AR, CHAVE_ACUMULADO_AR,
+         CHAVE_PROGRESSO_AR, CHAVE_TOTAL_USUARIOS_AR, 'projudi_audienciasrealizadas_periodo']
+            .forEach(k => store.removeItem(k));
+    }
+
+    // Fila de usuários vazia: monta o resumo final (total geral + detalhamento por usuário,
+    // já filtrado pelo mínimo — ver MIN_AUDIENCIAS_POR_USUARIO_AR) e grava no mesmo formato
+    // usado por lerDadosDe/criarColetor (uma "página" com um array de 1 item).
+    function finalizarAudienciasRealizadas() {
+        const totalGeral = parseInt(store.getItem(CHAVE_TOTAL_GERAL_AR) || '0', 10);
+        const acumulado = JSON.parse(store.getItem(CHAVE_ACUMULADO_AR) || '[]');
+        let periodo = { dataInicio: '', dataFim: '' };
+        try { periodo = JSON.parse(store.getItem('projudi_audienciasrealizadas_periodo') || 'null') || periodo; } catch (e) { /* ignore */ }
+
+        const porUsuario = acumulado
+            .filter(u => u.quantidade >= MIN_AUDIENCIAS_POR_USUARIO_AR)
+            .sort((a, b) => b.quantidade - a.quantidade);
+        const usuariosIgnorados = acumulado.length - porUsuario.length;
+
+        const resumo = {
+            geradoEm: new Date().toISOString(),
+            totalGeral,
+            periodo,
+            porUsuario,
+            usuariosIgnorados,
+            totalUsuarios: acumulado.length,
+            competencia: competenciaDe(lerAtuacao()),
+        };
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} usuarios=${acumulado.length} exibidos(>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+
+        const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
+        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+        limparEstadoTransitorioAR();
+
+        avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
     }
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -1997,6 +2197,15 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaAudienciasDesignadas(doc, (dados && dados[0] && dados[0].tabela) || [], comIndice),
             };
         }
+        if (cfg === CFG_AUDIENCIAS_REALIZADAS) {
+            return {
+                rotulo: TITULO_AUDIENCIAS_REALIZADAS,
+                // Só resumo — não há lista de processos a discriminar, apenas totais (geral
+                // e por usuário) — ver secaoTemTabela em gerarPDFConjunto.
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasRealizadas(doc, dados && dados[0], primeira, comIndice),
+                montarTabela: null,
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -2185,6 +2394,9 @@
         // Audiências Pendentes desenha a tabela dentro do próprio resumo (pedido do
         // usuário: sempre juntos) — nunca entra no passo de tabela separado.
         if (s.cfgOriginal === CFG_AUDIENCIAS) return false;
+        // Audiências Realizadas é só totais (geral + por usuário) — nunca tem tabela
+        // discriminada de processos.
+        if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -2960,6 +3172,85 @@
         return pagina;
     }
 
+    // ── PDF do relatório de Audiências Realizadas (Crime — Estatísticas de
+    // Audiência) ─────────────────────────────────────────────────────────────────
+    // Os dados coletados já vêm como um resumo pronto (total geral + detalhamento por
+    // usuário, já filtrado pelo mínimo — ver finalizarAudienciasRealizadas), sem lista de
+    // processos: é um relatório de totais, não de discriminação.
+
+    const TITULO_AUDIENCIAS_REALIZADAS = 'Audiências Realizadas';
+
+    function gerarPDFAudienciasRealizadas(dados) {
+        const doc = novoDocPDF();
+        const resumo = dados && dados[0] ? dados[0] : null;
+        montarResumoAudienciasRealizadas(doc, resumo, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `audiencias_realizadas_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = resumo || { totalGeral: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, totalUsuarios: 0, competencia: '' };
+        const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_AUDIENCIAS_REALIZADAS, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  Período: ${periodoTxt}`;
+        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+        doc.text(linhasSubtitulo, m, m + 8);
+        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const obs = `Observação: o detalhamento por usuário mostra apenas quem realizou ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
+            + `(${r.usuariosIgnorados} usuário(s) abaixo desse mínimo não aparecem na lista, mas contam no total geral).`;
+        const linhasObs = doc.splitTextToSize(obs, uw);
+        doc.text(linhasObs, m, yObs);
+        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length),
+            [r.totalUsuarios ? `de ${r.totalUsuarios} usuário(s) pesquisado(s)` : ''], true, COR.aqua);
+
+        const chartY = kY + 28 + gap + 2;
+        if (r.porUsuario.length) {
+            const itensBarras = r.porUsuario.map(u => ({ label: u.nome, valor: u.quantidade }));
+            const alturaChart = Math.min(90, Math.max(30, itensBarras.length * 7 + 10));
+            desenharBarras(doc, m, chartY, uw, alturaChart, `Audiências Realizadas por Usuário (mín. ${MIN_AUDIENCIAS_POR_USUARIO_AR})`, itensBarras, undefined, COR.aqua);
+            const tY = chartY + alturaChart + 6;
+            tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
+            doc.autoTable({
+                columns: [
+                    { header: 'Usuário', dataKey: 'nome' },
+                    { header: 'Audiências Realizadas', dataKey: 'quantidade' },
+                ],
+                body: r.porUsuario.map(u => ({ nome: u.nome, quantidade: String(u.quantidade) })),
+                startY: tY + 6,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: { nome: { cellWidth: uw * 0.7 }, quantidade: { cellWidth: uw * 0.3, halign: 'right' } },
+                didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+        } else {
+            desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+    }
+
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
     // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
     // calcular a partir de duas datas): KPIs + top 10 mais tempo paralisados + média por classe.
@@ -3570,6 +3861,7 @@
         if (navAlvo === 'suspensos') return /processoBuscaSuspenso\.do/i;
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
+        if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         return null;
     }
 
@@ -3757,6 +4049,44 @@
             return;
         }
 
+        // Tela "Estatísticas de Audiência" (audiencia/estatistica.do) — form + resultado
+        // (só totais, sem tabela discriminada) na mesma página. A automação preenche o
+        // período e dispara uma pesquisa "geral", depois uma pesquisa por usuário (fila) —
+        // ver iniciarBuscaAudienciasRealizadas/processarResultadoAudienciasRealizadas.
+        if (formularioAudienciasRealizadas()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            const temResultado = !!document.querySelector('table.resultTable');
+            if (estadoAtual === 'preenchendo_audienciasrealizadas' || estadoAtual === 'coletando_audienciasrealizadas') {
+                if (temResultado) processarResultadoAudienciasRealizadas();
+                else iniciarBuscaAudienciasRealizadas();
+                return;
+            }
+            if (!temResultado) {
+                const bPreencher = document.createElement('button');
+                bPreencher.type = 'button';
+                bPreencher.className = 'projudi-btn';
+                bPreencher.title = 'Preenche o período (últimos 3 anos até o mês anterior) e pesquisa o total geral (o site pode demorar a responder)';
+                bPreencher.textContent = 'Preencher e Pesquisar (Audiências Realizadas)';
+                bPreencher.onclick = () => {
+                    store.setItem(AUTO_ESTADO, 'preenchendo_audienciasrealizadas');
+                    iniciarBuscaAudienciasRealizadas();
+                };
+                buttonBar.appendChild(bPreencher);
+                return;
+            }
+            const bExtrair = document.createElement('button');
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê o total exibido e, em seguida, pesquisa usuário por usuário até completar o detalhamento (pode demorar bastante)';
+            bExtrair.textContent = 'Extrair Audiências Realizadas';
+            bExtrair.onclick = () => {
+                store.setItem(AUTO_ESTADO, 'coletando_audienciasrealizadas');
+                processarResultadoAudienciasRealizadas();
+            };
+            buttonBar.appendChild(bExtrair);
+            return;
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -3906,6 +4236,10 @@
         // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
         // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
         { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Terceiro item específico do Crime — totais de Estatísticas de Audiência, geral e
+        // por usuário (ver iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas).
+        // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
+        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -4054,6 +4388,7 @@
         else if (alvo === 'suspensos') link = acharLinkAoLadoDoLabel(/suspensos\s+por\s+tempo\s+indeterminado/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
+        else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
@@ -4178,6 +4513,7 @@
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
+        limparEstadoTransitorioAR();
         atualizarPainel();
     }
 
@@ -4243,6 +4579,12 @@
                 if (chave === 'audienciasdesignadas') {
                     const prog = lerProgressoExpansaoAD();
                     if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} linha(s) da pauta)`;
+                }
+                // Audiências Realizadas pesquisa usuário por usuário (uma pesquisa =
+                // um reload da página) — mesma ideia, mostra o progresso da fila.
+                if (chave === 'audienciasrealizadas') {
+                    const prog = lerProgressoAR();
+                    if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} usuário(s))`;
                 }
                 return txt;
             }
