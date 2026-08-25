@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      16.7
+// @version      17.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3357,7 +3357,7 @@
             // coleta antiga fique acumulada/misturada com a próxima automação.
             limparTudoAutomacao();
         }
-        catch (err) { alert('Erro ao gerar PDF conjunto: ' + err.message); console.error(err); }
+        catch (err) { alert('Erro ao gerar Relatório PDF: ' + err.message); console.error(err); }
     }
 
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
@@ -3436,6 +3436,39 @@
         }
     }
 
+    // Lê o texto ao lado de "Atribuição:" no bloco #userinfo da página (ex.: o span com
+    // title="Magistrado (05218334936.cor)" do print enviado pelo usuário).
+    function lerAtribuicao() {
+        const labels = document.querySelectorAll('#userinfo .userinfo_label');
+        for (const label of labels) {
+            if (!/atribui[cç][aã]o\s*:/i.test(label.textContent)) continue;
+            const span = label.nextElementSibling;
+            return span ? (span.textContent || '').trim() : '';
+        }
+        return '';
+    }
+
+    // O painel só aparece para quem está logado com uma atribuição cujo código (entre
+    // parênteses, ex.: "Magistrado (05218334936.cor)") termina em ".cor" — perfil de
+    // Corregedor. Sem essa atribuição (ou se #userinfo não existir neste frame),
+    // NÃO mostra o painel — falha fechado, não aberto.
+    function atribuicaoPermiteAutomacao() {
+        const atrib = lerAtribuicao();
+        const m = /\(([^)]+)\)\s*$/.exec(atrib);
+        const codigo = m ? m[1].trim() : '';
+        return /\.cor$/i.test(codigo);
+    }
+
+    // Categorias do painel: Cível-Geral é a base (todos os relatórios já existentes);
+    // as demais herdam os mesmos itens e ganham uma seção própria para relatórios
+    // específicos — ainda vazia (placeholder) até serem definidos. Só Cível-Geral e
+    // Crime por enquanto; Família/Infância entra depois, no mesmo padrão.
+    const CATEGORIAS_PAINEL = [
+        { id: 'civel', rotulo: 'Cível-Geral' },
+        { id: 'crime', rotulo: 'Crime' },
+    ];
+    const CHAVE_CATEGORIA_PAINEL = 'projudi_painel_categoria';
+
     function injetarPainel() {
         if (document.getElementById('painel-automacao')) return;
         // Só na página que hospeda o menu principal (evita duplicar em outros frames).
@@ -3445,13 +3478,16 @@
         if (!document.querySelector('#main-menu')) return;
         // Não injeta sobre a tela de resultados de um relatório
         if (detectarConfig()) return;
+        // Só para quem está logado com atribuição de Corregedor (ver atribuicaoPermiteAutomacao)
+        if (!atribuicaoPermiteAutomacao()) return;
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
         // Todos os relatórios de REPORTS_AUTOMACAO vêm marcados por padrão, exceto Tempo
         // Médio (precisa ser habilitado explicitamente — ver seletor de período ao lado).
         // Os checkboxes são agrupados por domínio (Cartório/Gabinete), espelhando a
-        // divisão do PDF conjunto.
+        // divisão do Relatório PDF — os mesmos itens valem para qualquer categoria (ver
+        // CATEGORIAS_PAINEL); só a seção de "específicos" muda com a aba escolhida.
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
             const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave).map(r => {
                 const seletorPeriodo = r.key === 'tempomedio'
@@ -3472,6 +3508,10 @@
         }).join('');
         const linhasContagem = REPORTS_AUTOMACAO.map(r => `
                     <div class="pa-count" data-key="${r.key}"><span class="l">${r.curto}</span><span class="n">0</span></div>`).join('');
+        const categoriaSalva = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
+        const categoriaInicial = CATEGORIAS_PAINEL.some(c => c.id === categoriaSalva) ? categoriaSalva : 'civel';
+        const linhasAbas = CATEGORIAS_PAINEL.map(c => `
+                    <button class="pa-tab${c.id === categoriaInicial ? ' active' : ''}" type="button" data-categoria="${c.id}">${c.rotulo}</button>`).join('');
         painel.innerHTML = `
             <div class="pa-head">
                 <span class="pa-titulo">Automação de relatórios</span>
@@ -3480,6 +3520,7 @@
                     <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
+            <div class="pa-tabs">${linhasAbas}</div>
             <div class="pa-body" style="display:none;">
                 <div class="pa-state-row">
                     <span class="pa-dot"></span>
@@ -3491,11 +3532,15 @@
                 </div>
                 <div class="pa-counts">${linhasContagem}</div>
                 ${linhasGrupos}
+                <div class="pa-group pa-group-especifico" style="display:none;">
+                    <p class="pa-group-lbl especifico"></p>
+                    <div class="pa-placeholder">Itens específicos desta categoria — a definir</div>
+                </div>
                 <div class="pa-links">
                     <button id="pa-marcar-tudo" class="pa-link" type="button">Marcar tudo</button>
                     <button id="pa-desmarcar-tudo" class="pa-link" type="button">Desmarcar tudo</button>
                 </div>
-                <label class="pa-resumo" title="Gera o PDF conjunto só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
+                <label class="pa-resumo" title="Gera o Relatório PDF só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
                     <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
                 </label>
                 <label class="pa-resumo" title="Reexibe os botões de Extrair/Baixar/PDF/Limpar em cada tela de relatório (fora do painel de automação)">
@@ -3504,11 +3549,11 @@
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
-                        <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ PDF conjunto</button>
+                        <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                 </div>
-                <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o PDF conjunto.</div>
+                <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF.</div>
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = () => {
@@ -3537,6 +3582,26 @@
             btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
+
+        // Troca de categoria: só decide o que MOSTRAR (seção de itens específicos). Os
+        // relatórios do Cível-Geral valem para qualquer categoria — nada nos checkboxes
+        // muda, já que a Crime ainda não tem relatórios próprios definidos.
+        function aplicarCategoria(id) {
+            const cat = CATEGORIAS_PAINEL.find(c => c.id === id) || CATEGORIAS_PAINEL[0];
+            painel.querySelectorAll('.pa-tab').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.categoria === cat.id);
+            });
+            const grupoEspecifico = painel.querySelector('.pa-group-especifico');
+            const ehCivel = cat.id === 'civel';
+            grupoEspecifico.style.display = ehCivel ? 'none' : '';
+            grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
+            store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
+        }
+        painel.querySelectorAll('.pa-tab').forEach(btn => {
+            btn.onclick = () => aplicarCategoria(btn.dataset.categoria);
+        });
+        aplicarCategoria(categoriaInicial);
+
         atualizarPainel();
     }
 
@@ -3560,6 +3625,18 @@
             line-height: 1; padding: 0;
         }
         #painel-automacao .pa-icon-btn:hover { background: #F4F4F1; }
+
+        #painel-automacao .pa-tabs {
+            display: flex; gap: 2px; padding: 8px 11px 0; background: #F4F4F1; border-bottom: 1px solid #DEDDD6;
+        }
+        #painel-automacao .pa-tab {
+            flex: 1; border: none; background: none; padding: 7px 4px 8px; font-size: .68em; font-weight: 600;
+            color: #82807A; cursor: pointer; border-bottom: 2px solid transparent; text-align: center;
+            font-family: inherit;
+        }
+        #painel-automacao .pa-tab:hover { color: #52514E; }
+        #painel-automacao .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
+
         #painel-automacao .pa-body { padding: 11px; }
 
         #painel-automacao .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
@@ -3594,9 +3671,14 @@
             letter-spacing: .05em; text-transform: uppercase; color: #82807A; margin: 0 0 5px;
         }
         #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
+        #painel-automacao .pa-group-lbl.especifico { color: #3A5A7D; }
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
+        #painel-automacao .pa-placeholder {
+            display: flex; align-items: center; gap: 6px; padding: 8px 9px; background: #FAFAF8;
+            border: 1px dashed #C3C2B7; border-radius: 6px; font-size: .7em; color: #82807A; font-style: italic;
+        }
 
         #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
         #painel-automacao .pa-link {
