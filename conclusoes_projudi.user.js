@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.1
+// @version      20.2
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1278,6 +1278,13 @@
         const form = formularioApreensoes();
         if (!form) return;
 
+        const selMotivo = form.querySelector('#idMotivoEncerramentoApreensaoBusca');
+        if (selMotivo && selMotivo.value !== '0') {
+            selMotivo.value = '0';
+            selMotivo.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        console.log(`[Projudi Apreensões] motivo de encerramento definido como "(Apreensão não encerrada)" (value=${selMotivo ? selMotivo.value : 'n/d'})`);
+
         if (fase === 'semSngb') {
             const chk = form.querySelector('input[name="flagSemCadastroSNBA"]');
             console.log(`[Projudi Apreensões] fase=semSngb — checkbox flagSemCadastroSNBA encontrado=${!!chk}`);
@@ -1287,7 +1294,7 @@
                 chk.dispatchEvent(new Event('change', { bubbles: true }));
             }
         } else {
-            console.log('[Projudi Apreensões] fase=pendentes — mantendo os filtros padrão da tela (motivo/status já vêm corretos)');
+            console.log('[Projudi Apreensões] fase=pendentes — status mantido no padrão da tela');
         }
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
