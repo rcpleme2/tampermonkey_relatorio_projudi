@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.3
+// @version      20.11
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1259,6 +1259,252 @@
         }, 1500);
     }
 
+    // ── Outros Cumprimentos (Mesa do Magistrado) — mesaAnalista.do?actionType=
+    // listaOutrosCumprimentos ───────────────────────────────────────────────────
+    // Diferente de TODOS os demais relatórios: não é uma lista paginada de processos, é
+    // um PAINEL DE CONTADORES de página única (a tabela "Cumprimento", e opcionalmente
+    // "BNMP" — só em unidades com competência criminal —, carregadas via AJAX depois do
+    // HTML inicial, sem formulário/pesquisa nenhuma). Por isso
+    // NÃO usa criarColetor/montarResumoGenerico/montarTabelaGenerico (todos pressupõem um
+    // registro por PROCESSO, com dataCampo/processoCampo) — tem coleta, resumo e tabela
+    // dedicados, mais simples, escritos abaixo.
+
+    const TITULO_OUTROS_CUMPRIMENTOS = 'Outros Cumprimentos';
+
+    const CFG_OUTROS_CUMPRIMENTOS = {
+        prefixo: 'projudi_outroscump_',
+        // "Zero cumprimentos pendentes" é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_SUSPENSOS) — mostra a linha mesmo vazia, desde que já coletada.
+        mostrarSeVazio: true,
+        // Nunca detectado pelo cabeçalho genérico de table.resultTable (há DUAS tabelas
+        // na página, com cabeçalhos diferentes) — a detecção própria fica em
+        // paginaOutrosCumprimentos()/detectarConfig (ver abaixo).
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'outros_cumprimentos_projudi',
+        rotulos: { coletar: 'Extrair Outros Cumprimentos', baixar: '⬇ Baixar Outros Cumprimentos' },
+        pdfCustom: (dados) => gerarPDFOutrosCumprimentos(dados),
+    };
+
+    // Reconhece a página de "Outros Cumprimentos" (mesaAnalista.do?actionType=
+    // listaOutrosCumprimentos) pelo CONTEÚDO, não pela URL exata (pode variar) — precisa
+    // de uma table.resultTable cujo cabeçalho comece com "Cumprimento".
+    // O BNMP é OPCIONAL — só aparece em unidades com competência criminal; unidades sem
+    // Vara Criminal mostram só a tabela "Cumprimento" (confirmado pelo usuário: "algumas
+    // unidades têm BNMP e Cumprimentos, outras só Cumprimentos"). Por isso a detecção da
+    // página exige só a tabela "Cumprimento" (a que SEMPRE existe) — exigir o BNMP também
+    // fazia paginaOutrosCumprimentos() nunca retornar true nas unidades sem BNMP, e
+    // tratarPaginaOutrosCumprimentos() acabava desistindo depois de ~15s e descartando os
+    // dados REAIS da tabela "Cumprimento" como se fossem "0 registros".
+    function paginaOutrosCumprimentos() {
+        return [...document.querySelectorAll('table.resultTable')].some(t => {
+            const thead = t.querySelector(':scope > thead');
+            const primeiroTh = thead ? thead.querySelector('th') : null;
+            return primeiroTh && /^cumprimento$/i.test((primeiroTh.textContent || '').trim());
+        });
+    }
+
+    // Indício rápido de que estamos na tela "Outros Cumprimentos" (Mesa do Magistrado) —
+    // usado só pra decidir SE vale a pena começar a esperar (ver injetarBotoes); a
+    // extração de verdade continua condicionada a paginaOutrosCumprimentos() === true.
+    // Reconhece tanto o <h4>BNMP</h4> (quando existe) quanto a própria tabela
+    // "Cumprimento" já carregada — nenhum dos dois é garantido no momento do bootstrap
+    // (podem não ter carregado ainda, ou o BNMP pode nem existir nesta unidade), por isso
+    // injetarBotoes() também usa outros sinais (URL/estado da automação) além deste.
+    function temMarcadorOutrosCumprimentos() {
+        if ([...document.querySelectorAll('h4')].some(h => /^bnmp$/i.test((h.textContent || '').trim()))) return true;
+        return paginaOutrosCumprimentos();
+    }
+
+    // Acha a tabela BNMP (a que vem logo depois do <h4>BNMP</h4>) e a tabela principal (a
+    // que tem "Cumprimento" como primeiro cabeçalho) — nessa ordem, sem depender de índice
+    // fixo entre as table.resultTable da página.
+    function tabelasOutrosCumprimentos() {
+        let tabelaBnmp = null, tabelaPrincipal = null;
+        document.querySelectorAll('h4').forEach(h => {
+            if (tabelaBnmp) return;
+            if (!/^bnmp$/i.test((h.textContent || '').trim())) return;
+            // A tabela fica dentro do mesmo <td>/container do <h4>, logo depois dele.
+            let el = h.nextElementSibling;
+            while (el && !(el.matches && el.matches('table.resultTable'))) el = el.nextElementSibling;
+            if (el) tabelaBnmp = el;
+            else { // fallback: procura a próxima table.resultTable no documento, em ordem
+                const todas = [...document.querySelectorAll('table.resultTable')];
+                const depoisDoH4 = todas.find(t => (h.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING));
+                if (depoisDoH4) tabelaBnmp = depoisDoH4;
+            }
+        });
+        document.querySelectorAll('table.resultTable').forEach(t => {
+            if (tabelaPrincipal) return;
+            const thead = t.querySelector(':scope > thead');
+            const primeiroTh = thead ? thead.querySelector('th') : null;
+            if (primeiroTh && /^cumprimento$/i.test((primeiroTh.textContent || '').trim())) tabelaPrincipal = t;
+        });
+        return { tabelaBnmp, tabelaPrincipal };
+    }
+
+    // Lê um <tr> da tabela, procurando por span[id^="statusXxx_N"] em QUALQUER lugar da
+    // linha (a quantidade e a posição dos <td> varia de linha para linha — nem toda linha
+    // tem todas as colunas preenchidas), e devolve um mapa {sufixoDoId: valorNumerico}.
+    // sufixoBnmp diferencia "statusParaExpedirBnmp"/"statusComUrgenciaBnmp" (tabela BNMP)
+    // dos campos da tabela principal (statusPreAnalise, statusParaExpedir, etc.) — os
+    // nomes de campo da BNMP têm o sufixo "Bnmp" embutido no próprio id.
+    function lerContadoresLinha(tr) {
+        const mapa = {};
+        tr.querySelectorAll('span[id]').forEach(span => {
+            const m = /^status([A-Za-z]+)_-?\d+$/.exec(span.id);
+            if (!m) return;
+            mapa[m[1]] = parseInt((span.textContent || '').trim(), 10) || 0;
+        });
+        return mapa;
+    }
+
+    // Nome do tipo de cumprimento de uma linha — primeiro <td> da linha, sem os espaços/
+    // quebras de linha internos do HTML original (indentação do Projudi).
+    function tipoDaLinha(tr) {
+        const primeiroTd = tr.querySelector(':scope > td');
+        return primeiroTd ? textoCelula(primeiroTd) : '';
+    }
+
+    // Extrai as linhas de UMA tabela (BNMP ou principal) já convertidas em registros
+    // {tipo, pendentes, urgentes, origem, ...camposBrutos}. Pula a linha de TOTAL (não é
+    // um tipo de cumprimento) e qualquer linha sem nome de tipo reconhecível. "campos" é a
+    // lista ordenada dos sufixos de id que compõem "pendentes" (ex.: ['ParaExpedirBnmp']
+    // para a BNMP, ou a lista completa da tabela principal); "campoUrgencia" é o sufixo
+    // reportado à parte (não somado no total — ver regra de negócio no cabeçalho do arquivo).
+    function extrairLinhasTabela(tabela, origem, campos, campoUrgencia) {
+        if (!tabela) return [];
+        const registros = [];
+        tabela.querySelectorAll(':scope > tbody > tr').forEach(tr => {
+            // Linha de TOTAL: primeiro <td> tem só um <strong>Total</strong> (sem nome de
+            // tipo) — mais robusto que checar a classe "total" nos spans, que também
+            // funcionaria mas depende de marcação que pode variar.
+            const tipo = tipoDaLinha(tr);
+            if (!tipo || /^total$/i.test(tipo)) return;
+
+            const mapa = lerContadoresLinha(tr);
+            const pendentes = campos.reduce((s, campo) => s + (mapa[campo] || 0), 0);
+            if (pendentes <= 0) return; // regra do usuário: linha zerada não entra
+
+            const registro = {
+                tipo,
+                pendentes,
+                urgentes: mapa[campoUrgencia] || 0,
+                origem,
+            };
+            // Além do agregado "pendentes" (usado na capa unificada e no resumo), guarda
+            // também as colunas originais de cada tabela — a tabela discriminada mostra
+            // essas colunas separadas, fiéis à tela do Projudi, em vez de só um total.
+            if (origem === 'principal') {
+                registro.paraConferir = mapa.PreAnalise || 0;
+                registro.paraExpedir = mapa.ParaExpedir || 0;
+                registro.paraAssinar = mapa.ParaAssinar || 0;
+                registro.devolvidoJuiz = mapa.DevolvidoAjuste || 0;
+                registro.decursoPrazo = mapa.DecursoDePrazo || 0;
+            } else {
+                registro.paraExpedir = mapa.ParaExpedirBnmp || 0;
+            }
+            registros.push(registro);
+        });
+        return registros;
+    }
+
+    // Campos da tabela principal somados em "pendentes" — EXCLUI ComUrgencia (marcador de
+    // urgência sobre os demais campos, não uma fila própria) e ParaAssinarUsuarioLogado
+    // (subconjunto de ParaAssinar — só "os meus", já contado no total "todos"). Ver
+    // explicação completa da regra de negócio no comentário de CFG_OUTROS_CUMPRIMENTOS.
+    const CAMPOS_PENDENTES_PRINCIPAL = [
+        'PreAnalise', 'ParaExpedir', 'ParaAssinar', 'DevolvidoAjuste',
+        'DecursoDePrazo', 'AguardandoDeposito', 'InformarRetornoARDigital', 'AnaliseErroARDigital',
+    ];
+
+    // Lê as duas tabelas da página e monta a lista final de registros (já filtrados por
+    // pendentes > 0), sem paginação. Salva no mesmo formato de armazenamento usado pelos
+    // demais relatórios (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF
+    // individual, capa unificada, foiColetado etc.) continuar funcionando igual, e avança
+    // a automação normalmente ao terminar.
+    function coletarOutrosCumprimentosAgora() {
+        const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
+        console.log(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
+
+        const bnmp = extrairLinhasTabela(tabelaBnmp, 'bnmp', ['ParaExpedirBnmp'], 'ComUrgenciaBnmp');
+        const principal = extrairLinhasTabela(tabelaPrincipal, 'principal', CAMPOS_PENDENTES_PRINCIPAL, 'ComUrgencia');
+        const registros = [...bnmp, ...principal];
+
+        console.log(`[Projudi Outros Cumprimentos] ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registros.length} no total)`);
+
+        const prefixo = CFG_OUTROS_CUMPRIMENTOS.prefixo;
+        store.setItem(prefixo + 'pagina_0', JSON.stringify(registros));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+
+        avancarAutomacao(CFG_OUTROS_CUMPRIMENTOS);
+    }
+
+    // "Assinatura" do estado atual das duas tabelas: quantidade de linhas de cada uma +
+    // quantidade e soma de todos os contadores (span[id^="status"]) exibidos. A tabela
+    // principal (a maior, ~34 tipos) é preenchida pelo Projudi de forma assíncrona DEPOIS
+    // do HTML inicial da página — extrair na hora pegava a tela ainda com a tabela vazia
+    // ou parcial. Comparar essa assinatura entre duas leituras seguidas permite detectar
+    // quando a tela parou de mudar, sem depender de nenhum indicador específico de
+    // carregamento (que pode nem existir/ser visível no DOM).
+    function assinaturaTabelasOutrosCumprimentos() {
+        const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
+        const linhasBnmp = tabelaBnmp ? tabelaBnmp.querySelectorAll(':scope > tbody > tr').length : 0;
+        const linhasPrincipal = tabelaPrincipal ? tabelaPrincipal.querySelectorAll(':scope > tbody > tr').length : 0;
+        let qtdSpans = 0, somaSpans = 0;
+        document.querySelectorAll('table.resultTable span[id^="status"]').forEach(s => {
+            qtdSpans++;
+            somaSpans += parseInt((s.textContent || '').trim(), 10) || 0;
+        });
+        return `${linhasBnmp}|${linhasPrincipal}|${qtdSpans}|${somaSpans}`;
+    }
+
+    let ultimaAssinaturaOutrosCump = null;
+
+    // Espera a tela "estabilizar" (duas leituras seguidas com a mesma assinatura, num
+    // intervalo de 500ms) antes de extrair de verdade — até um teto de ~10s, depois do
+    // qual extrai mesmo assim (com aviso no console) para não travar a automação para
+    // sempre numa tela que por algum motivo nunca estabiliza.
+    function aguardarOutrosCumprimentosProntoEExtrair(tentativa, callback) {
+        const assinaturaAtual = assinaturaTabelasOutrosCumprimentos();
+        if (tentativa > 0 && assinaturaAtual === ultimaAssinaturaOutrosCump) {
+            console.log(`[Projudi Outros Cumprimentos] tela estável na tentativa ${tentativa} — extraindo`);
+            coletarOutrosCumprimentosAgora();
+            if (callback) callback();
+            return;
+        }
+        if (tentativa >= 20) {
+            console.warn('[Projudi Outros Cumprimentos] tela não estabilizou em ~10s — extraindo mesmo assim (dados podem estar incompletos)');
+            coletarOutrosCumprimentosAgora();
+            if (callback) callback();
+            return;
+        }
+        ultimaAssinaturaOutrosCump = assinaturaAtual;
+        setTimeout(() => aguardarOutrosCumprimentosProntoEExtrair(tentativa + 1, callback), 500);
+    }
+
+    let coletaOutrosCumprimentosEmAndamento = false;
+
+    // Ponto de entrada da coleta — chamado tanto pela automação quanto pelos botões
+    // manuais. "callback" é opcional (usado pelo botão "Baixar PDF", que precisa esperar a
+    // extração terminar antes de ler os dados salvos). Trava contra chamadas concorrentes
+    // (ex.: usuário clica em "Extrair" enquanto a automação já está esperando a tabela
+    // estabilizar) — sem isso, duas cadeias de setTimeout rodando em paralelo podiam
+    // sobrescrever uma a outra e avançar a automação duas vezes.
+    function coletarOutrosCumprimentos(callback) {
+        if (coletaOutrosCumprimentosEmAndamento) {
+            console.log('[Projudi Outros Cumprimentos] coleta já em andamento — ignorando novo disparo');
+            return;
+        }
+        coletaOutrosCumprimentosEmAndamento = true;
+        ultimaAssinaturaOutrosCump = null;
+        aguardarOutrosCumprimentosProntoEExtrair(0, () => {
+            coletaOutrosCumprimentosEmAndamento = false;
+            if (callback) callback();
+        });
+    }
+
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
     function criarColetor(cfg) {
@@ -2476,6 +2722,13 @@
                 montarTabela: null,
             };
         }
+        if (cfg === CFG_OUTROS_CUMPRIMENTOS) {
+            return {
+                rotulo: TITULO_OUTROS_CUMPRIMENTOS,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -2772,6 +3025,7 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
+        const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
 
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
         // não é mais um card à parte no topo da capa.
@@ -2866,6 +3120,20 @@
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
+            });
+        }
+        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado (pedido do
+        // usuário: linha própria no Cartório, mesmo padrão de "Bens Apreendidos"). O
+        // indicador é o total pendente somado de todos os tipos com pendência > 0; o
+        // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
+        if (secaoOutrosCumprimentos) {
+            const totalPendentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.pendentes || 0), 0);
+            const totalUrgentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.urgentes || 0), 0);
+            linhasCartorio.push({
+                nome: 'Outros Cumprimentos',
+                indicador: `${totalPendentes} pendente(s)`,
+                detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
             });
         }
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
@@ -3716,6 +3984,181 @@
         }
     }
 
+    // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
+    // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
+    // montarResumoGenerico/montarTabelaGenerico (dependem de p.dataCampo/p.processoCampo
+    // por registro). Resumo (KPIs) + tabela discriminada por tipo, dedicados.
+
+    function gerarPDFOutrosCumprimentos(dados) {
+        const doc = novoDocPDF();
+        montarResumoOutrosCumprimentos(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (dados && dados.length) {
+            const pgTabela = montarTabelaOutrosCumprimentos(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        baixarBlob(doc.output('blob'), `outros_cumprimentos_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoOutrosCumprimentos(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = dados || [];
+        const totalPendentes = r.reduce((s, d) => s + (d.pendentes || 0), 0);
+        const totalUrgentes = r.reduce((s, d) => s + (d.urgentes || 0), 0);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_OUTROS_CUMPRIMENTOS, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        const subtitulo = `Extraído em ${hoje} às ${hora}  •  Mesa do Magistrado — painel de contadores por tipo de cumprimento`;
+        doc.text(subtitulo, m, m + 8);
+        let yObs = m + 8 + 4.2;
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const obs = 'Observação: tipos com numeração zerada não constam desta tabela. "Com Urgência" é um marcador '
+            + 'sobre os demais campos (não somado no total pendente) e "pessoais" (Para Assinar) não é somado '
+            + 'separadamente — já está incluído no total "todos".';
+        const linhasObs = doc.splitTextToSize(obs, uw);
+        doc.text(linhasObs, m, yObs);
+        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+
+        // "urgentes" é um marcador sobre os demais campos (não uma fila própria — ver
+        // observação acima), ou seja já está incluído em "pendentes"; "normais" é o que
+        // sobra depois de tirar os urgentes.
+        const totalNormais = Math.max(0, totalPendentes - totalUrgentes);
+        desenharCard(doc, m, kY, kW2, 28, 'Total de Cumprimentos Pendentes', String(totalPendentes),
+            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.ambar);
+
+        const maisPendencias = r.length ? [...r].sort((a, b) => b.pendentes - a.pendentes)[0] : null;
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Tipo com Mais Pendências',
+            maisPendencias ? maisPendencias.tipo : '—',
+            maisPendencias ? [`${maisPendencias.pendentes} pendente(s)${maisPendencias.urgentes ? `  •  ${maisPendencias.urgentes} urgente(s)` : ''}`] : [],
+            true, COR.azul);
+
+        const tY = kY + 28 + gap + 4;
+        if (r.length) {
+            const top = [...r].sort((a, b) => b.pendentes - a.pendentes).slice(0, 15);
+            const itensBarras = top.map(it => ({ label: it.tipo, valor: it.pendentes }));
+            desenharBarras(doc, m, tY, uw, 54, `Maiores pendências por tipo (top ${top.length} de ${r.length})`, itensBarras, undefined, COR.azul);
+            desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        } else {
+            desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+    }
+
+    // Tabela discriminada — uma linha por tipo de cumprimento, ordenada por pendentes
+    // decrescente (mais volumoso primeiro; em empate, mais urgente primeiro).
+    // Tabela discriminada em DUAS seções fiéis às duas tabelas originais da tela (BNMP e
+    // principal) — cada uma com suas próprias colunas, em vez de um único total agregado
+    // "Pendentes" que escondia de qual tabela vinha cada campo.
+    function montarTabelaOutrosCumprimentos(doc, dados, comIndice) {
+        doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const pagina = doc.internal.getNumberOfPages();
+        const carimbo = `${hoje} ${hora}`;
+
+        const bnmp = dados.filter(d => d.origem === 'bnmp').sort((a, b) => (b.paraExpedir - a.paraExpedir) || (b.urgentes - a.urgentes));
+        const principal = dados.filter(d => d.origem !== 'bnmp').sort((a, b) => (b.pendentes - a.pendentes) || (b.urgentes - a.urgentes));
+
+        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_OUTROS_CUMPRIMENTOS} (${dados.length} tipo(s))`);
+        let y = m + 10;
+
+        const opcoesComuns = {
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            didDrawPage: () => desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, carimbo, pw, ph, m, comIndice),
+        };
+
+        // Espaço mínimo para caber um título de seção + ao menos uma linha de tabela;
+        // senão pula para a próxima página antes de desenhar o título (evita título órfão
+        // no fim da página, com a tabela toda na página seguinte).
+        function garantirEspaco(minimo) {
+            if (y > ph - m - minimo) { doc.addPage(); y = m + 8; }
+        }
+
+        if (bnmp.length) {
+            garantirEspaco(30);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+            doc.text(`BNMP (${bnmp.length})`, m, y);
+            doc.autoTable({
+                ...opcoesComuns,
+                columns: [
+                    { header: 'Tipo da Peça', dataKey: 'tipo' },
+                    { header: 'Para Expedir', dataKey: 'paraExpedir' },
+                    { header: 'Com Urgência', dataKey: 'urgentes' },
+                ],
+                body: bnmp.map(d => ({ tipo: d.tipo, paraExpedir: String(d.paraExpedir || 0), urgentes: String(d.urgentes || 0) })),
+                startY: y + 3,
+                columnStyles: {
+                    tipo: { cellWidth: uw * 0.6 },
+                    paraExpedir: { cellWidth: uw * 0.2, halign: 'right' },
+                    urgentes: { cellWidth: uw * 0.2, halign: 'right' },
+                },
+            });
+            y = doc.lastAutoTable.finalY + 8;
+        }
+
+        if (principal.length) {
+            garantirEspaco(30);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.5); doc.setTextColor(...COR.azul);
+            doc.text(`Cumprimento (${principal.length})`, m, y);
+            doc.autoTable({
+                ...opcoesComuns,
+                columns: [
+                    { header: 'Cumprimento', dataKey: 'tipo' },
+                    { header: 'Para Conferir', dataKey: 'paraConferir' },
+                    { header: 'Para Expedir', dataKey: 'paraExpedir' },
+                    { header: 'Para Assinar', dataKey: 'paraAssinar' },
+                    { header: 'Devolvido pelo Juiz', dataKey: 'devolvidoJuiz' },
+                    { header: 'Decurso de Prazo', dataKey: 'decursoPrazo' },
+                    { header: 'Com Urgência', dataKey: 'urgentes' },
+                ],
+                body: principal.map(d => ({
+                    tipo: d.tipo,
+                    paraConferir: String(d.paraConferir || 0),
+                    paraExpedir: String(d.paraExpedir || 0),
+                    paraAssinar: String(d.paraAssinar || 0),
+                    devolvidoJuiz: String(d.devolvidoJuiz || 0),
+                    decursoPrazo: String(d.decursoPrazo || 0),
+                    urgentes: String(d.urgentes || 0),
+                })),
+                startY: y + 3,
+                styles: { ...opcoesComuns.styles, fontSize: 7.5 },
+                columnStyles: {
+                    tipo: { cellWidth: uw * 0.28 },
+                    paraConferir: { cellWidth: uw * 0.12, halign: 'right' },
+                    paraExpedir: { cellWidth: uw * 0.12, halign: 'right' },
+                    paraAssinar: { cellWidth: uw * 0.12, halign: 'right' },
+                    devolvidoJuiz: { cellWidth: uw * 0.14, halign: 'right' },
+                    decursoPrazo: { cellWidth: uw * 0.12, halign: 'right' },
+                    urgentes: { cellWidth: uw * 0.1, halign: 'right' },
+                },
+            });
+        }
+
+        return pagina;
+    }
+
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
     // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
     // calcular a partir de duas datas): KPIs + top 10 mais tempo paralisados + média por classe.
@@ -4080,6 +4523,10 @@
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
+        // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
+        // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
+        // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
+        else if (paginaOutrosCumprimentos()) cfg = CFG_OUTROS_CUMPRIMENTOS;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
@@ -4329,11 +4776,111 @@
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
+        // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
+        // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
+        // que renderizam só um aviso de "nenhum resultado" em vez de tabela) disparar em
+        // QUALQUER página enquanto a automação esperava esse relatório, inclusive na
+        // página ainda carregando logo após o clique na aba — batendo "0 registros" antes
+        // mesmo da tabela existir. Esse relatório nunca usa esse fallback: ele sempre
+        // renderiza as duas tabelas (mesmo com tudo zerado), então quem decide "não achou
+        // nada"/"desistiu de esperar" é só tratarPaginaOutrosCumprimentos() (ver
+        // injetarBotoes), com sua própria espera ativa e timeout.
         return null;
     }
 
+    // Espera a tabela "Cumprimento" (a maior, injetada via AJAX depois do HTML inicial —
+    // ver comentário em injetarBotoes) aparecer no DOM antes de seguir. Poll a cada 500ms,
+    // teto de ~15s (30 tentativas) como salvaguarda. Se a automação está esperando
+    // exatamente este relatório, desistir aqui não pode deixá-la travada pra sempre (era
+    // o motivo do antigo fallback genérico de "0 registros" em injetarBotoes — removido
+    // pra este relatório porque disparava cedo demais, veja urlEsperadaRelatorio) — então
+    // trata como "0 registros" e avança, exatamente como os demais relatórios fazem
+    // quando a tela realmente não tem resultado. Fora da automação (uso manual), só
+    // avisa — não há fila pra travar, e o usuário pode tentar de novo manualmente.
+    function tratarPaginaOutrosCumprimentos(tentativa) {
+        tentativa = tentativa || 0;
+        if (!paginaOutrosCumprimentos()) {
+            if (tentativa >= 30) {
+                console.warn('[Projudi Outros Cumprimentos] a tabela "Cumprimento" não apareceu em ~15s — desistindo (tela pode ter mudado ou carregamento travou).');
+                const estadoDesistencia = store.getItem(AUTO_ESTADO);
+                if (estadoDesistencia === 'coletando_outroscumprimentos' || estadoDesistencia === 'preenchendo_outroscumprimentos') {
+                    console.warn('[Projudi Outros Cumprimentos] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    store.setItem(CFG_OUTROS_CUMPRIMENTOS.prefixo + 'coletado', '1');
+                    avancarAutomacao(CFG_OUTROS_CUMPRIMENTOS);
+                }
+                return;
+            }
+            setTimeout(() => tratarPaginaOutrosCumprimentos(tentativa + 1), 500);
+            return;
+        }
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        if (estadoAtual === 'coletando_outroscumprimentos' || estadoAtual === 'preenchendo_outroscumprimentos') {
+            console.log('[Projudi Outros Cumprimentos] automação: extraindo o painel de contadores (sem preencher/pesquisar — a página já chega pronta)');
+            coletarOutrosCumprimentos();
+            return;
+        }
+        // Uso manual — injeta os botões (Extrair + Baixar PDF) logo após a segunda
+        // tabela (ou no fim do body, como último recurso), já que não há
+        // table.buttonBar nesta tela.
+        if (!document.getElementById('btn-outroscumprimentos-extrair')) {
+            const { tabelaPrincipal } = tabelasOutrosCumprimentos();
+            const ancora = (tabelaPrincipal && tabelaPrincipal.parentNode) || document.body;
+
+            const bExtrair = document.createElement('button');
+            bExtrair.id = 'btn-outroscumprimentos-extrair';
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê as duas tabelas de contadores exibidas e gera o resumo (sem paginação, sem pesquisa)';
+            bExtrair.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.coletar;
+            bExtrair.onclick = () => coletarOutrosCumprimentos();
+            ancora.appendChild(bExtrair);
+
+            const bBaixar = document.createElement('button');
+            bBaixar.id = 'btn-outroscumprimentos-baixar';
+            bBaixar.type = 'button';
+            bBaixar.className = 'projudi-btn';
+            bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
+            bBaixar.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.baixar;
+            bBaixar.onclick = () => {
+                coletarOutrosCumprimentos(() => {
+                    const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
+                    gerarPDFOutrosCumprimentos(dados);
+                });
+            };
+            ancora.appendChild(bBaixar);
+        }
+    }
+
     function injetarBotoes() {
-        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${store.getItem(AUTO_ESTADO)}`);
+        const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
+        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
+
+        // Página de Outros Cumprimentos (painel de contadores, sem form/pesquisa e SEM
+        // table.buttonBar — diferente de todas as outras telas de relatório) — tratada
+        // ANTES do "if (!buttonBar)" abaixo, que senão trataria essa tela como "0
+        // registros" e nunca chamaria coletarOutrosCumprimentos().
+        //
+        // injetarBotoes() só roda UMA VEZ, no bootstrap da página (ver o fim do arquivo)
+        // — e o conteúdo INTEIRO da tela (as duas tabelas, incluindo o <h4>BNMP</h4>) é
+        // carregado via AJAX depois do HTML inicial, não só a tabela "Cumprimento" como
+        // se pensava antes (confirmado por log real: bootstrap()/injetarBotoes() rodaram
+        // sem nenhum log de "Outros Cumprimentos" depois — temMarcadorOutrosCumprimentos()
+        // deu falso na hora do bootstrap porque nem o BNMP tinha aparecido ainda). Por
+        // isso o gate de entrada NÃO pode depender de nada que só existe depois de
+        // carregado — usa a URL (que já está certa assim que a navegação termina) e/ou o
+        // estado da automação como sinal de "estamos na tela certa, vale esperar o
+        // conteúdo aparecer", delegando a espera de verdade pra
+        // tratarPaginaOutrosCumprimentos().
+        const pareceTelaOutrosCumprimentos = temMarcadorOutrosCumprimentos()
+            || /mesaAnalista\.do/i.test(location.pathname)
+            || estadoAutoNoInicio === 'coletando_outroscumprimentos'
+            || estadoAutoNoInicio === 'preenchendo_outroscumprimentos';
+        if (pareceTelaOutrosCumprimentos) {
+            tratarPaginaOutrosCumprimentos();
+            return;
+        }
+
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
         if (!buttonBar) {
             // Quando uma busca não encontra NENHUM registro, algumas telas do Projudi
@@ -4761,6 +5308,14 @@
         { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Quarto item específico do Crime — apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
+        // formulário/pesquisa (a página já chega pronta ao clicar na aba), por isso
+        // precisaPreencher: false, mesmo não sendo um dos 5 clássicos "direto nos
+        // resultados" acima (Suspensos/Juntadas/Retorno). Sem categoriaEspecifica (não é
+        // exclusivo do Crime) — entra no grupo Cartório do painel, e como uma linha própria
+        // na tabela unificada do Cartório do PDF conjunto (ver linhasCartorio em
+        // gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
+        { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -4914,8 +5469,45 @@
         // basta casar pela URL de destino (o rótulo completo varia com a competência).
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
+        else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
+        link.click();
+        return true;
+    }
+
+    // Aba "Outros Cumprimentos" (#tabItemprefix3) da barra horizontal da home "Mesa do
+    // Magistrado" (#tabHorz) — só existe ali, não em toda página. O <a> dentro do <li> NÃO
+    // tem atributo href (navegação disparada só por JS no clique real da página) — por
+    // isso não dá pra casar por URL como os demais navegarMenu, precisa achar o link pelo
+    // TEXTO dentro de #tabHorz/.tabCenter e disparar um clique de verdade (mesmo problema
+    // já resolvido no checkbox "Todas" de Audiências Designadas — checked=true +
+    // dispatchEvent não substitui um .click() real nesses elementos do Projudi).
+    function acharAbaOutrosCumprimentos() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const porId = d.querySelector('#tabItemprefix3 a');
+            if (porId) return porId;
+        }
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            for (const a of candidatos) {
+                if (/^outros\s+cumprimentos$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    function navegarAbaOutrosCumprimentos() {
+        const link = acharAbaOutrosCumprimentos();
+        if (!link) {
+            // Essa aba só existe na home "Mesa do Magistrado" — perfis sem essa mesa não a
+            // têm; mesmo tratamento silencioso (warning) dos demais navegarMenu quando não
+            // acham o link.
+            console.warn('[Auto Projudi] link de menu não encontrado: outroscumprimentos (aba "Outros Cumprimentos" ausente — perfil sem Mesa do Magistrado?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
         link.click();
         return true;
     }
