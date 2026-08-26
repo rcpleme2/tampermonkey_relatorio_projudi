@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.14
+// @version      20.15
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -240,7 +240,10 @@
 
     const CFG_RETORNO = {
         prefixo: 'projudi_retorno_',
-        detecta: (cab) => /retorno/i.test(cab),
+        // "retorno" sozinho também casa com a tabela de Mandados (coluna "Data retorno") —
+        // exige também "agrupador" (coluna real e exclusiva desta tabela, ver tds[9] em
+        // "extrai" abaixo) pra não colidir.
+        detecta: (cab) => /retorno/i.test(cab) && /agrupador/i.test(cab),
         minTds: 9,                              // linhas têm 10 tds (0 = semáforo)
         usaAtuacao: false,
         nomeArquivo: 'retorno_conclusos_projudi',
@@ -1281,10 +1284,25 @@
         return sel ? sel.value : null;
     }
 
+    // A tela de resultados de Mandados pode ter OUTRA table.resultTable na página além da
+    // própria (ex.: algum widget relacionado a Conclusões/Retorno visível ali — visto em
+    // produção: com 0 mandados na fase, detectarConfig() pegou por engano o cabeçalho de
+    // uma tabela alheia). document.querySelector('table.resultTable thead') (usado pelo
+    // detectarConfig genérico) pega só a PRIMEIRA table.resultTable do documento — não dá
+    // pra confiar que essa é a de Mandados. Por isso a detecção de Mandados busca a tabela
+    // certa em TODAS as table.resultTable da página (pelo cabeçalho real dela), em vez de
+    // depender do "cab" já computado uma vez lá em cima em detectarConfig().
+    function tabelaMandados() {
+        return [...document.querySelectorAll('table.resultTable')].find(t => {
+            const thead = t.querySelector(':scope > thead');
+            return cabecalhoCumprimentoMandado(thead ? thead.textContent : '');
+        }) || null;
+    }
+
     const CFG_MANDADOS_RETORNO = {
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
-        detecta: (cab) => cabecalhoCumprimentoMandado(cab) && statusCumprimentoCartorioSelecionado() === '13',
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '13',
         minTds: 16,
         usaAtuacao: false,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
@@ -1318,7 +1336,7 @@
     const CFG_MANDADOS_CUMPRIMENTO = {
         prefixo: 'projudi_mandadoscumprimento_',
         mostrarSeVazio: true,
-        detecta: (cab) => cabecalhoCumprimentoMandado(cab) && statusCumprimentoCartorioSelecionado() === '6',
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '6',
         minTds: 16,
         usaAtuacao: false,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
@@ -1353,7 +1371,7 @@
     const CFG_MANDADOS_NAOLIDOS = {
         prefixo: 'projudi_mandadosnaolidos_',
         mostrarSeVazio: true,
-        detecta: (cab) => cabecalhoCumprimentoMandado(cab) && statusCumprimentoCartorioSelecionado() === '4',
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
         minTds: 16,
         usaAtuacao: false,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
@@ -1497,7 +1515,14 @@
             return true;
         }
         const cfg = cfgMandadosPorFase(fase);
-        if (!document.querySelector('table.buttonBar td.buttons') && !document.querySelector('table.resultTable tbody tr')) {
+        // Usa tabelaMandados() (busca pela tabela CERTA, pelo cabeçalho dela) em vez de
+        // "table.resultTable tbody tr" genérico — a página pode ter outra table.resultTable
+        // alheia (visto em produção: um widget não relacionado ficou visível junto com a
+        // tela de Mandados quando a fase tinha 0 resultados), e o genérico contaria linhas
+        // dessa tabela alheia como se fossem de Mandados, concluindo "não está vazio" por
+        // engano.
+        const tabela = tabelaMandados();
+        if (!document.querySelector('table.buttonBar td.buttons') && !(tabela && tabela.querySelector('tbody tr'))) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
             console.log(`[Auto Projudi Mandados] fase "${fase}" sem resultados — avançando`);
             avancarOuConcluirFaseMandados(fase);
@@ -4821,14 +4846,20 @@
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
-        else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
-        else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
-        else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
-        // As 3 telas de Mandados compartilham o mesmo cabeçalho — distinguem-se pelo
-        // valor do select de status (ver detecta() de cada CFG_MANDADOS_*).
+        // As 3 telas de Mandados vêm ANTES de CFG_RETORNO de propósito: a coluna "Data
+        // retorno" da tabela de Mandados também casa com o regex (largo, só "/retorno/i")
+        // de CFG_RETORNO, então checar Mandados primeiro evita depender só da checagem
+        // extra que CFG_RETORNO.detecta ganhou por causa dessa colisão (defesa em
+        // profundidade — cada detecta() aqui deveria ser específico o bastante pra não
+        // precisar de ordem, mas ordem importa quando um deles é largo demais). As 3 telas
+        // de Mandados compartilham o mesmo cabeçalho entre si — distinguem-se pelo valor
+        // do select de status (ver detecta() de cada CFG_MANDADOS_*).
         else if (CFG_MANDADOS_RETORNO.detecta(cab)) cfg = CFG_MANDADOS_RETORNO;
         else if (CFG_MANDADOS_CUMPRIMENTO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO;
         else if (CFG_MANDADOS_NAOLIDOS.detecta(cab)) cfg = CFG_MANDADOS_NAOLIDOS;
+        else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
+        else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
+        else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
