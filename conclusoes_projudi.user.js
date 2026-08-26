@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.9
+// @version      20.10
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4847,7 +4847,8 @@
     }
 
     function injetarBotoes() {
-        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${store.getItem(AUTO_ESTADO)}`);
+        const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
+        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
 
         // Página de Outros Cumprimentos (painel de contadores, sem form/pesquisa e SEM
         // table.buttonBar — diferente de todas as outras telas de relatório) — tratada
@@ -4855,14 +4856,21 @@
         // registros" e nunca chamaria coletarOutrosCumprimentos().
         //
         // injetarBotoes() só roda UMA VEZ, no bootstrap da página (ver o fim do arquivo)
-        // — mas a tabela "Cumprimento" (a maior, ~34 tipos) só existe no DOM depois de um
-        // tempo (é injetada via AJAX, não só preenchida — ver tabelasOutrosCumprimentos).
-        // Se essa checagem exigisse paginaOutrosCumprimentos() (as DUAS tabelas) na hora
-        // do bootstrap, a tabela nunca teria chance de aparecer: essa função não roda de
-        // novo depois. Por isso usa o indício mais fraco (só o <h4>BNMP</h4>, que já vem
-        // pronto) pra decidir SE vale a pena começar a esperar, e delega a espera de
-        // verdade pra tratarPaginaOutrosCumprimentos().
-        if (temMarcadorOutrosCumprimentos()) {
+        // — e o conteúdo INTEIRO da tela (as duas tabelas, incluindo o <h4>BNMP</h4>) é
+        // carregado via AJAX depois do HTML inicial, não só a tabela "Cumprimento" como
+        // se pensava antes (confirmado por log real: bootstrap()/injetarBotoes() rodaram
+        // sem nenhum log de "Outros Cumprimentos" depois — temMarcadorOutrosCumprimentos()
+        // deu falso na hora do bootstrap porque nem o BNMP tinha aparecido ainda). Por
+        // isso o gate de entrada NÃO pode depender de nada que só existe depois de
+        // carregado — usa a URL (que já está certa assim que a navegação termina) e/ou o
+        // estado da automação como sinal de "estamos na tela certa, vale esperar o
+        // conteúdo aparecer", delegando a espera de verdade pra
+        // tratarPaginaOutrosCumprimentos().
+        const pareceTelaOutrosCumprimentos = temMarcadorOutrosCumprimentos()
+            || /mesaAnalista\.do/i.test(location.pathname)
+            || estadoAutoNoInicio === 'coletando_outroscumprimentos'
+            || estadoAutoNoInicio === 'preenchendo_outroscumprimentos';
+        if (pareceTelaOutrosCumprimentos) {
             tratarPaginaOutrosCumprimentos();
             return;
         }
