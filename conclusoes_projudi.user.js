@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.13
+// @version      20.14
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5182,8 +5182,14 @@
         // estado da automação como sinal de "estamos na tela certa, vale esperar o
         // conteúdo aparecer", delegando a espera de verdade pra
         // tratarPaginaOutrosCumprimentos().
+        // "mesaAnalista.do" sozinho (sem olhar o actionType, que fica na query string, não
+        // no pathname) casa com QUALQUER aba dessa tela — inclusive a de Mandados
+        // (actionType=listaAnaliseJuntadas), que usa a MESMA base de URL. Sem checar
+        // actionType=listaOutrosCumprimentos explicitamente, essa checagem interceptava a
+        // tela de Mandados por engano (a automação ficava ~15s esperando uma tabela
+        // "Cumprimento" que nunca ia aparecer ali, e a fase 0 de Mandados nunca rodava).
         const pareceTelaOutrosCumprimentos = temMarcadorOutrosCumprimentos()
-            || /mesaAnalista\.do/i.test(location.pathname)
+            || /actionType=listaOutrosCumprimentos/i.test(location.href)
             || estadoAutoNoInicio === 'coletando_outroscumprimentos'
             || estadoAutoNoInicio === 'preenchendo_outroscumprimentos';
         if (pareceTelaOutrosCumprimentos) {
