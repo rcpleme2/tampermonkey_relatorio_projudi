@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.33
+// @version      20.34
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2126,7 +2126,10 @@
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
                 if (tds.length < cfg.minTds) return;
-                dados.push(cfg.extrai(tds, atuacao, contexto));
+                // cfg.extrai pode devolver null para descartar a linha (ex.: Suspensos com
+                // Prazo ignora linhas "Sem Prazo" — não são suspensão por prazo determinado).
+                const d = cfg.extrai(tds, atuacao, contexto);
+                if (d) dados.push(d);
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             return dados;
@@ -6709,11 +6712,6 @@
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
-        painel.querySelectorAll('.pa-count').forEach(el => {
-            const c = contagens.find(c => c.r.key === el.dataset.key);
-            const n = el.querySelector('.n');
-            if (c && n) n.textContent = String(c.n);
-        });
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
@@ -6788,7 +6786,6 @@
         // (ver aplicarCategoria) — hoje só "Audiências Pendentes" em Crime.
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
-        const itensVisiveis = (catId) => itensCivel.concat(itensEspecificos(catId));
 
         // "Processos Ativos" não é um item de REPORTS_AUTOMACAO de verdade (não navega/
         // coleta paginado, é lido passivamente na página inicial — ver
@@ -6851,8 +6848,6 @@
                     ${itens}
                 </div>`;
         }).join('');
-        const montarContagem = (catId) => itensVisiveis(catId).map(r => `
-                    <div class="pa-count" data-key="${r.key}"><span class="l">${r.curto}</span><span class="n">0</span></div>`).join('');
         // Enquanto a categoria não tiver nenhum item próprio ainda definido, mostra um
         // espaço reservado em vez de uma seção vazia.
         const montarGrupoEspecifico = (cat) => {
@@ -6883,7 +6878,6 @@
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
                     <div class="pa-progress-lbl">—</div>
                 </div>
-                <div class="pa-counts">${montarContagem(categoriaInicial)}</div>
                 ${linhasGrupos}
                 <div class="pa-group pa-group-especifico" style="display:none;">
                     <p class="pa-group-lbl especifico"></p>
@@ -6971,9 +6965,8 @@
             grupoEspecifico.style.display = ehCivel ? 'none' : '';
             grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
             grupoEspecifico.querySelector('.pa-group-conteudo').innerHTML = montarGrupoEspecifico(cat);
-            painel.querySelector('.pa-counts').innerHTML = montarContagem(cat.id);
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
-            atualizarPainel(); // repopula os números da grade de contagem recém-trocada
+            atualizarPainel();
         }
         painel.querySelectorAll('.pa-tab').forEach(btn => {
             btn.onclick = () => aplicarCategoria(btn.dataset.categoria);
@@ -7127,17 +7120,6 @@
         #painel-automacao .pa-progress-bar.pa-progress-completo { background: #527467; }
         #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
-
-        #painel-automacao .pa-counts {
-            display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
-            margin-bottom: 12px; padding: 8px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px;
-        }
-        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; min-width: 0; }
-        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; flex-shrink: 0; }
-        /* min-width:0 (no pai) + overflow/nowrap aqui — sem isso, um rótulo comprido
-           (ex.: "Aud. Termo Pendentes") quebrava linha dentro da célula do grid, jogando
-           o número pra fora da primeira linha em vez de truncar com "…" */
-        #painel-automacao .pa-count .l { color: #52514E; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         #painel-automacao .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl {
