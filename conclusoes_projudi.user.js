@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.36
+// @version      20.37
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -598,6 +598,53 @@
         // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
         // existe noção de média por classe) — ver gerarPDFSuspensosPrazo.
         pdfCustom: (dados, somenteResumo) => gerarPDFSuspensosPrazo(dados, somenteResumo),
+    };
+
+    // ── Em Instância Recursal (processoBuscaInstanciaSuperior.do) ──────────────────────
+    // No Projudi o relatório se chama "Processos Remetidos para Instância Superior"; o
+    // usuário se refere a ele como "Em Instância Recursal" — mantemos o rótulo amigável
+    // na interface/PDF e o nome técnico só nas variáveis internas. Alcançado pelo menu
+    // "Em Instância Superior" > "Remetidos" (ver navegarMenu) — ATENÇÃO: existe outro
+    // link de menu com o MESMO texto "Remetidos" mas href diferente
+    // (processosRemetidos.do, sem "Busca"/"Instancia"/"Superior" — é outro relatório do
+    // Projudi); a regex de URL usada em acharLinkMenu já é específica o bastante para não
+    // confundir os dois. A tela cai direto no form (situação "Em Instância Superior" já
+    // vem marcada por padrão) convivendo com a table.resultTable, mesmo padrão de
+    // Apreensões/Paralisados/Suspensos com Prazo — ver formularioInstanciaRecursal/
+    // preencherEPesquisarInstanciaRecursal. Colunas da tabela: [0]Processo
+    // [1]Classe Processual [2]Partes (tabela aninhada — ignorada) [3]Enviado [4]Recebido
+    // (vazio nesta situação — ignorado).
+    const CFG_INSTANCIA_RECURSAL = {
+        prefixo: 'projudi_instanciarecursal_',
+        // "Zero processos em instância recursal" é informação válida (mesmo racional dos
+        // demais relatórios de Estatísticas Gerais) — mostra a linha mesmo vazia.
+        mostrarSeVazio: true,
+        // "Enviado"/"Recebido" sozinhos são genéricos demais (poderiam colidir com outras
+        // telas de remessa/mandado) — exige as duas colunas MAIS "Classe Processual" no
+        // mesmo cabeçalho, o que é específico desta tela.
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /\benviado\b/i.test(cab) && /\brecebido\b/i.test(cab),
+        minTds: 5,
+        usaAtuacao: false,
+        nomeArquivo: 'instancia_recursal_projudi',
+        rotulos: { coletar: 'Extrair Instância Recursal', coletarMais: 'Extrair mais (Instância Recursal)', baixar: '⬇ Baixar Instância Recursal' },
+        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                dataEnvio: textoCelula(tds[3]),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.dataEnvio],
+        // Sem cfg.pdf genérico: o resumo pedido (detalhamento dos enviados há mais de 2
+        // anos, distribuição por faixa de tempo desde o envio) não cabe no mecanismo
+        // genérico — ver gerarPDFInstanciaRecursal.
+        pdfCustom: (dados, somenteResumo) => gerarPDFInstanciaRecursal(dados, somenteResumo),
     };
 
     // Verifica qual "Situação" está marcada no formulário de Audiências (audienciaForm) —
@@ -1881,6 +1928,39 @@
                 console.log(`[Projudi Suspensos c/ Prazo] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de "Em Instância Recursal" (processoBuscaInstanciaSuperior.do) —
+    // form + table.resultTable juntos desde o primeiro carregamento, mesmo padrão de
+    // Suspensos com Prazo acima. O rádio "Em Instância Superior" (value="P") já vem
+    // marcado por padrão — é exatamente o filtro que o relatório quer, não precisa
+    // alterar nenhum campo.
+    function formularioInstanciaRecursal() {
+        const form = document.getElementById('processoBuscaInstanciaSuperiorForm');
+        return form && form.querySelector('input[name="situacao"]') ? form : null;
+    }
+
+    // ATENÇÃO: este formulário usa o botão #searchButton ("Filtrar"), NÃO #pesquisar como
+    // os demais relatórios de tela de filtros (Apreensões/Paralisados/Suspensos com
+    // Prazo) — id diferente confirmado no HTML real da tela.
+    function preencherEPesquisarInstanciaRecursal() {
+        const form = formularioInstanciaRecursal();
+        if (!form) return;
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Instância Recursal] botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Instância Recursal] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Instância Recursal] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Instância Recursal] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -3514,6 +3594,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_INSTANCIA_RECURSAL) {
+            return {
+                rotulo: TITULO_INSTANCIA_RECURSAL,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -3837,6 +3924,7 @@
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
+        const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
         // não é mais um card à parte no topo da capa.
@@ -4023,6 +4111,20 @@
                     ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
                     : 'Nenhum processo suspenso por prazo determinado',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
+            });
+        }
+        // "Em Instância Recursal" — linha do Cartório (mesmo padrão de "Suspensos com
+        // Prazo" acima). Indicador: total em instância recursal. Detalhamento (pedido do
+        // usuário, item a): quantos foram enviados há mais de 2 anos.
+        if (secaoInstanciaRecursal) {
+            const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
+            linhasCartorio.push({
+                nome: 'Em Instância Recursal',
+                indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
+                detalhamento: maisDe2Anos.length
+                    ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
+                    : 'Nenhum processo enviado há mais de 2 anos',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
             });
         }
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
@@ -5553,6 +5655,172 @@
         return paginaInicial;
     }
 
+    const TITULO_INSTANCIA_RECURSAL = 'Em Instância Recursal';
+
+    // Processos cuja data de envio (dataEnvio) já passou de "anos" anos atrás, ordenados
+    // por data de envio CRESCENTE (mais antigo primeiro — mesmo critério pedido para a
+    // tabela discriminada, ver montarTabelaInstanciaRecursal). Usa a mesma aproximação de
+    // "anos * 365 dias" já empregada em outros cálculos de dias decorridos do script (ver
+    // DIA_MS) — não precisa ser calendário-preciso. Registros sem data parseável nunca
+    // entram aqui (não há como saber há quanto tempo foram enviados).
+    function processosEnviadosHaMaisDeXAnos(dados, anos) {
+        const limite = Date.now() - anos * 365 * DIA_MS;
+        return dados
+            .map(d => ({ registro: d, ts: parseDataBR(d.dataEnvio) }))
+            .filter(x => x.ts != null && x.ts <= limite)
+            .sort((a, b) => a.ts - b.ts);
+    }
+
+    // Faixas de tempo desde o envio (pedido do usuário, item b: "distribuição por faixa
+    // de tempo"). Mesma aproximação de dias de DIA_MS/365 usada acima.
+    function faixasTempoInstanciaRecursal(dados) {
+        const now = Date.now();
+        const faixas = [
+            { label: 'Até 6 meses', min: 0, max: 182, valor: 0 },
+            { label: '6 meses a 1 ano', min: 182, max: 365, valor: 0 },
+            { label: '1 a 2 anos', min: 365, max: 730, valor: 0 },
+            { label: 'Mais de 2 anos', min: 730, max: Infinity, valor: 0 },
+        ];
+        dados.forEach(d => {
+            const ts = parseDataBR(d.dataEnvio);
+            if (ts == null) return;
+            const dias = (now - ts) / DIA_MS;
+            const faixa = faixas.find(f => dias >= f.min && dias < f.max) || faixas[faixas.length - 1];
+            faixa.valor++;
+        });
+        return faixas;
+    }
+
+    function gerarPDFInstanciaRecursal(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoInstanciaRecursal(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo && dados.length) {
+            const pgTabela = montarTabelaInstanciaRecursal(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `instancia_recursal_projudi${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO: KPIs (total em instância recursal, total enviado há mais de 2
+    // anos), lista dos processos enviados há mais de 2 anos (processo + data de envio,
+    // via mini-tabela — pode ser longa demais para um card sem apertar o layout, mesmo
+    // racional de outras listas potencialmente grandes do script) e o gráfico de barras
+    // "remetidos por faixa de tempo desde o envio" (item b do pedido do usuário).
+    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const maisDe2Anos = processosEnviadosHaMaisDeXAnos(dados, 2);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, m + 8);
+        const yLinha = m + 8 + 4.2;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
+
+        // Gráfico "remetidos por faixa de tempo desde o envio" (item b).
+        const graficoY = kY + 24 + gap;
+        const graficoH = 46;
+        desenharBarras(doc, m, graficoY, uw, graficoH, 'Processos por Faixa de Tempo desde o Envio', faixasTempoInstanciaRecursal(dados), (v) => String(v), COR.aqua);
+
+        // Lista dos processos enviados há mais de 2 anos — mini-tabela (não card: a
+        // quantidade de processos pode ser grande, e desenharCardLista/medirAlturaCardLista
+        // não paginam sozinhos; doc.autoTable já pagina e nunca corta o número do processo).
+        const listaY = graficoY + graficoH + gap;
+        tituloSecao(doc, m, listaY, uw, 'Processos enviados há mais de 2 anos');
+        if (maisDe2Anos.length) {
+            doc.autoTable({
+                columns: [
+                    { header: 'Processo', dataKey: 'processo' },
+                    { header: 'Data de Envio', dataKey: 'dataEnvio' },
+                ],
+                body: maisDe2Anos.map(x => ({ processo: x.registro.processo, dataEnvio: x.registro.dataEnvio })),
+                startY: listaY + 4,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: {
+                    processo: { cellWidth: uw * 0.65 },
+                    dataEnvio: { cellWidth: uw * 0.35, halign: 'right' },
+                },
+                didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+        } else {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Nenhum processo enviado há mais de 2 anos.', m, listaY + 6);
+            desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+    }
+
+    // Tabela discriminada — Processo, Classe, Data de Envio — ORDENADA por data de envio
+    // CRESCENTE (mais antigo primeiro, pedido do usuário: "a partir daquele enviado há
+    // mais tempo"). Registros sem data parseável vão ao final.
+    function montarTabelaInstanciaRecursal(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataEnvio);
+            const tb = parseDataBR(b.dataEnvio);
+            const va = ta == null ? Infinity : ta;
+            const vb = tb == null ? Infinity : tb;
+            return va - vb;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
+
+        const colunas = [
+            { header: 'Processo', width: 40, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 70, get: (d) => d.classe },
+            { header: 'Data de Envio', width: 30, get: (d) => d.dataEnvio },
+        ];
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
@@ -5604,6 +5872,7 @@
         // casaria com ela por engano), mas só ela tem "Fim Suspensão" — regex mais
         // específico primeiro.
         if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
+        else if (CFG_INSTANCIA_RECURSAL.detecta(cab)) cfg = CFG_INSTANCIA_RECURSAL;
         // CFG_SUSPENSOS vem antes de CFG_PARALISADOS: a tabela de Suspensos por Prazo
         // Indeterminado também tem a coluna "Dias Paralisado" (o regex de Paralisados
         // sozinho a reconheceria por engano), mas só ela tem "Início Suspensão".
@@ -5634,6 +5903,7 @@
         else if (paginaOutrosCumprimentos()) cfg = CFG_OUTROS_CUMPRIMENTOS;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
+        else if (/processoBuscaInstanciaSuperior\.do/i.test(location.pathname + location.search)) cfg = CFG_INSTANCIA_RECURSAL;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
@@ -5881,6 +6151,7 @@
         if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
         if (navAlvo === 'suspensos' || navAlvo === 'suspensosprazo') return /processoBuscaSuspenso\.do/i;
+        if (navAlvo === 'instanciarecursal') return /processoBuscaInstanciaSuperior\.do/i;
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
@@ -6308,6 +6579,31 @@
             }
         }
 
+        // Tela de filtros de "Em Instância Recursal" (processoBuscaInstanciaSuperior.do,
+        // alcançada pelo menu "Em Instância Superior" > "Remetidos") — mesmo padrão de
+        // Suspensos com Prazo acima: decide pelo ESTADO da automação, não pela presença de
+        // resultados; botão de pesquisa é "Filtrar" (#searchButton), não "Pesquisar".
+        if (formularioInstanciaRecursal()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_instanciarecursal') {
+                console.log('[Projudi Instância Recursal] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_instanciarecursal');
+                preencherEPesquisarInstanciaRecursal();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso para filtrar com os padrões da
+            // tela (situação "Em Instância Superior" já vem marcada).
+            if (estadoAtual !== 'coletando_instanciarecursal' && mostrarBotoesIndividuais()) {
+                const bInstanciaRecursal = document.createElement('button');
+                bInstanciaRecursal.type = 'button';
+                bInstanciaRecursal.className = 'projudi-btn';
+                bInstanciaRecursal.title = 'Filtra com os padrões da tela (Em Instância Superior) — não altera nenhum campo';
+                bInstanciaRecursal.textContent = 'Preencher e Pesquisar (Instância Recursal)';
+                bInstanciaRecursal.onclick = () => preencherEPesquisarInstanciaRecursal();
+                buttonBar.appendChild(bInstanciaRecursal);
+            }
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -6480,6 +6776,10 @@
         // isso precisaPreencher: true, mesmo padrão de Apreensões/Paralisados) antes de
         // chegar nos resultados — ver formularioSuspensoPrazo/preencherEPesquisarSuspensoPrazo.
         { key: 'suspensosprazo', cfg: CFG_SUSPENSOS_PRAZO, navAlvo: 'suspensosprazo', rotulo: 'Suspensos com Prazo', curto: 'Susp. c/ Prazo', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
+        // "Em Instância Recursal": também passa por tela de filtros própria (situação "Em
+        // Instância Superior" já vem marcada, só precisa clicar em Filtrar) — ver
+        // formularioInstanciaRecursal/preencherEPesquisarInstanciaRecursal.
+        { key: 'instanciarecursal', cfg: CFG_INSTANCIA_RECURSAL, navAlvo: 'instanciarecursal', rotulo: 'Em Instância Recursal', curto: 'Inst. Recursal', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         // ── Pendências ───────────────────────────────────────────────────────────────
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
@@ -6705,6 +7005,12 @@
         // (sozinho) num submenu, que leva à TELA DE FILTROS (processoBuscaSuspensoForm),
         // não direto aos resultados como o link acima.
         else if (alvo === 'suspensosprazo') link = acharLinkMenu(/processoBuscaSuspenso\.do/i, /^suspensos$/i);
+        // "Em Instância Recursal" (nome amigável) = "Processos Remetidos para Instância
+        // Superior" no Projudi — menu "Em Instância Superior" > "Remetidos". ATENÇÃO: há
+        // OUTRO link de menu também com texto "Remetidos" mas href processosRemetidos.do
+        // (SEM "Busca"/"Instancia"/"Superior") — relatório diferente; a regex de URL abaixo
+        // já é específica o bastante pra não confundir os dois.
+        else if (alvo === 'instanciarecursal') link = acharLinkMenu(/processoBuscaInstanciaSuperior\.do/i, /^remetidos$/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
