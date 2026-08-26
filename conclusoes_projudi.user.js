@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.15
+// @version      20.16
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1244,25 +1244,64 @@
     // listas por processo com data, como Juntadas/Retorno. "urgente" (extraído da coluna
     // "Urgente" da tabela) é mapeado para "prioritario", o campo que o pipeline genérico já
     // entende — ativa de graça o KPI "Prioritários pendentes"/destaque na tabela.
-    function extrairLinhaMandado(tds) {
-        const emProc = tds[5].querySelector('em');
-        const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[5]);
-        const urgenteTexto = textoCelula(tds[14]).trim().toLowerCase();
+    // O número de colunas e a posição delas MUDA entre as 3 telas de Mandados (confirmado
+    // com telas reais de cada status): "Aguardando Análise de Retorno" tem uma coluna
+    // "Data retorno" que as outras não têm; "Expedido e Não Lido" tem duas colunas a mais
+    // ("Distribuição"/"Visualização (Oficial)") que empurram tudo pra frente. Extrair por
+    // índice fixo de td (como os demais relatórios fazem, com uma única tela por trás)
+    // não funciona aqui — precisa mapear cada campo pelo TEXTO do cabeçalho, calculado uma
+    // vez por página (ver contextoExtra em coletarPaginaAtual), não por índice fixo.
+    function mapaColunasMandado() {
+        const tabela = tabelaMandados();
+        const thead = tabela ? tabela.querySelector(':scope > thead') : null;
+        const ths = thead ? [...thead.querySelectorAll('th')] : [];
+        const mapa = {};
+        ths.forEach((th, i) => {
+            const texto = (th.textContent || '').trim();
+            if (/^ordena[çc][ãa]o$/i.test(texto)) mapa.dataOrdenacao = i;
+            else if (/^expedi[çc][ãa]o$/i.test(texto)) mapa.dataExpedicao = i;
+            else if (/^data\s+retorno$/i.test(texto)) mapa.dataRetorno = i;
+            else if (/^processo$/i.test(texto)) mapa.processo = i;
+            else if (/^sequencial$/i.test(texto)) mapa.sequencial = i;
+            else if (/^classe$/i.test(texto)) mapa.classe = i;
+            else if (/^natureza\s+do\s+mandado$/i.test(texto)) mapa.natureza = i;
+            else if (/^custas\s+do\s+mandado/i.test(texto)) mapa.custas = i;
+            else if (/^referente\s+a/i.test(texto)) mapa.partes = i;
+            else if (/^oficial\s+de\s+justi[çc]a$/i.test(texto)) mapa.oficial = i;
+            else if (/^prazo/i.test(texto)) mapa.prazo = i;
+            else if (/^status$/i.test(texto)) mapa.status = i;
+            else if (/^urgente$/i.test(texto)) mapa.urgente = i;
+            else if (/^tipo\s+de\s+urg[êe]ncia$/i.test(texto)) mapa.tipoUrgencia = i;
+        });
+        return mapa;
+    }
+
+    // "mapa" vem de mapaColunasMandado(), calculado uma vez por página (ver contextoExtra
+    // em coletarPaginaAtual) — nunca por índice fixo de td. Campo ausente no cabeçalho
+    // desta tela em particular (ex.: "Data retorno" fora da tela de Retorno) vira string
+    // vazia, não erro.
+    function extrairLinhaMandado(tds, atuacao, mapa) {
+        mapa = mapa || mapaColunasMandado();
+        const tdCampo = (campo) => (mapa[campo] != null ? tds[mapa[campo]] : null);
+        const tdProcesso = tdCampo('processo');
+        const emProc = tdProcesso && tdProcesso.querySelector('em');
+        const processo = emProc ? emProc.textContent.trim() : textoCelula(tdProcesso);
+        const urgenteTexto = textoCelula(tdCampo('urgente')).trim().toLowerCase();
         return {
             processo,
-            classe: textoCelula(tds[7]),
-            dataOrdenacao: textoCelula(tds[1]),
-            dataExpedicao: textoCelula(tds[2]),
-            dataRetorno: textoCelula(tds[3]),
-            sequencial: textoCelula(tds[6]),
-            natureza: textoCelula(tds[8]),
-            custas: textoCelula(tds[9]),
-            partes: textoCelula(tds[10]),
-            oficial: textoCelula(tds[11]),
-            prazo: textoCelula(tds[12]),
-            status: textoCelula(tds[13]),
+            classe: textoCelula(tdCampo('classe')),
+            dataOrdenacao: textoCelula(tdCampo('dataOrdenacao')),
+            dataExpedicao: textoCelula(tdCampo('dataExpedicao')),
+            dataRetorno: textoCelula(tdCampo('dataRetorno')),
+            sequencial: textoCelula(tdCampo('sequencial')),
+            natureza: textoCelula(tdCampo('natureza')),
+            custas: textoCelula(tdCampo('custas')),
+            partes: textoCelula(tdCampo('partes')),
+            oficial: textoCelula(tdCampo('oficial')),
+            prazo: textoCelula(tdCampo('prazo')),
+            status: textoCelula(tdCampo('status')),
             urgente: urgenteTexto === 'sim',
-            tipoUrgencia: textoCelula(tds[15]),
+            tipoUrgencia: textoCelula(tdCampo('tipoUrgencia')),
             prioritario: urgenteTexto === 'sim',
         };
     }
@@ -1303,8 +1342,9 @@
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '13',
-        minTds: 16,
+        minTds: 16, // só esta tela tem a coluna "Data retorno" (ver mapaColunasMandado)
         usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
         nomeArquivo: 'mandados_retorno_projudi',
         rotulos: { coletar: 'Extrair Mandados (Retorno)', coletarMais: 'Extrair mais (Mandados Retorno)', baixar: '⬇ Baixar Mandados (Retorno)' },
@@ -1314,6 +1354,10 @@
         linha: LINHA_MANDADO_XLSX,
         pdf: {
             titulo: 'Mandados Aguardando Análise de Retorno',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
             atosTitulo: 'Mandados aguardando análise de retorno',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de retorno',
@@ -1337,8 +1381,9 @@
         prefixo: 'projudi_mandadoscumprimento_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '6',
-        minTds: 16,
+        minTds: 15, // sem a coluna "Data retorno" — ver mapaColunasMandado
         usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
         nomeArquivo: 'mandados_pendentes_cumprimento_projudi',
         rotulos: { coletar: 'Extrair Mandados (Cumprimento)', coletarMais: 'Extrair mais (Mandados Cumprimento)', baixar: '⬇ Baixar Mandados (Cumprimento)' },
@@ -1348,6 +1393,10 @@
         linha: LINHA_MANDADO_XLSX,
         pdf: {
             titulo: 'Mandados Pendentes de Cumprimento',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
             atosTitulo: 'Mandados pendentes de cumprimento',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados pendentes de cumprimento',
@@ -1372,8 +1421,9 @@
         prefixo: 'projudi_mandadosnaolidos_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
-        minTds: 16,
+        minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
         usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
         nomeArquivo: 'mandados_naolidos_projudi',
         rotulos: { coletar: 'Extrair Mandados (Não Lidos)', coletarMais: 'Extrair mais (Mandados Não Lidos)', baixar: '⬇ Baixar Mandados (Não Lidos)' },
@@ -1386,6 +1436,10 @@
             // linha da capa unificada usa um rótulo diferente ("Mandados Pendentes de
             // Leitura"), pedido explícito do usuário (ver linhasCartorio em gerarPDFConjunto).
             titulo: 'Mandados Expedidos e Não Lidos',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
             atosTitulo: 'Mandados expedidos e não lidos',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados expedidos e não lidos',
@@ -1394,7 +1448,7 @@
             processoCampo: 'processo',
             tipoCampo: 'oficial',
             distribuicoes: [
-                { titulo: 'Mandados Pendentes de Cumprimento por Oficial', campo: 'oficial', topN: 12 },
+                { titulo: 'Mandados Expedidos e Não Lidos por Oficial', campo: 'oficial', topN: 12 },
             ],
             colunas: [
                 { header: 'Processo', width: 32, get: (d) => d.processo },
@@ -1882,6 +1936,12 @@
         function coletarPaginaAtual() {
             const atuacao = lerAtuacao();
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
+            // cfg.contextoExtra() (opcional) roda UMA VEZ por página, não por linha — usado
+            // por relatórios cuja ordem/presença de colunas muda entre telas (ex.: Mandados,
+            // ver mapaColunasMandado) e que por isso não podem extrair por índice fixo de
+            // td. cfg.extrai recebe o resultado como 3º argumento; relatórios que não
+            // definem contextoExtra simplesmente ignoram esse argumento extra.
+            const contexto = cfg.contextoExtra ? cfg.contextoExtra() : undefined;
             const dados = [];
             linhas.forEach(tr => {
                 // ":scope > td" (só filhos diretos) — não "td" puro, que também pega tds de
@@ -1890,7 +1950,7 @@
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
                 if (tds.length < cfg.minTds) return;
-                dados.push(cfg.extrai(tds, atuacao));
+                dados.push(cfg.extrai(tds, atuacao, contexto));
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             return dados;
@@ -2424,16 +2484,22 @@
     const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
 
     // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha —
-    // o vermelho é sempre prioritário, nunca a faixa.
-    function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
+    // o vermelho é sempre prioritário, nunca a faixa. rotuloPrioritario/rotuloNormal
+    // (opcionais) trocam o texto da legenda — usado por relatórios cujo campo
+    // "prioritario" representa outra coisa (ex.: Mandados usa "Urgentes"/"Não urgentes"
+    // em vez de "Prioritários"/"Normais" — ver p.rotuloPrioritarioLegenda/
+    // rotuloNormalLegenda em montarResumoGenerico).
+    function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas, rotuloPrioritario, rotuloNormal) {
+        rotuloPrioritario = rotuloPrioritario || 'Prioritários';
+        rotuloNormal = rotuloNormal || 'Normais';
         tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
         const legY = y + 10;
         doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
-        doc.text('Prioritários', x + 4, legY);
+        doc.text(rotuloPrioritario, x + 4, legY);
         const q2 = x + 28;
         doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
-        doc.text('Normais', q2 + 4, legY);
+        doc.text(rotuloNormal, q2 + 4, legY);
 
         const topo = y + 15;
         const areaH = Math.max(6, h - 15);
@@ -2527,7 +2593,7 @@
             const cx = x + c.pos.col * (colW + gap);
             const cy = y + c.pos.row * (chartH + 10);
             const cw = c.pos.span === 2 ? w : colW;
-            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
+            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
             else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
         });
     }
@@ -2588,7 +2654,7 @@
                 { titulo: p.atosTitulo, valor: String(sub.length), subs: [], acento: COR.azul },
             ];
             if (!p.semPrioridade) {
-                kpis.push({ titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
+                kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
             }
             if (p.mediaLabel) {
                 // Quando há mais de uma competência, a média diária do "Resumo geral" é a
@@ -2612,7 +2678,7 @@
                 const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
                 valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
                 subsAntigo = [
-                    `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                    `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? `  — ${p.sufixoPrioridade || 'PRIORITÁRIO'}` : ''}`,
                     reg[p.tipoCampo] || '',
                 ];
             }
@@ -2624,7 +2690,7 @@
             const chartsTodos = [
                 p.semPrioridade
                     ? { tipo: 'barras', span: 1, titulo: p.agingTitulo, itens: faixasPorPrioridade(sub, p.dataCampo, now).map(f => ({ label: f.label, valor: f.prioritarios + f.normais })), pagina2: false }
-                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
+                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false, rotuloPrioritario: p.rotuloPrioritarioLegenda, rotuloNormal: p.rotuloNormalLegenda },
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
