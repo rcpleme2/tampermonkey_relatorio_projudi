@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.37
+// @version      20.38
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2538,6 +2538,7 @@
         aqua:     [82, 116, 103],   // secundário / positivo (verde-acinzentado)
         ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
         vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
+        azulTint: [238, 242, 246],  // fundo da faixa de SUBGRUPO na capa unificada (mais claro que "cartao")
     };
 
     const DIA_MS = 86400000;
@@ -3732,12 +3733,19 @@
             // espaços) — a forma mais robusta no jspdf-autotable para uma indentação por
             // LINHA (não por coluna inteira), já que columnStyles/didParseCell não têm um
             // "padding-left por célula" nativo confiável entre versões.
-            body: cfg.linhas.map(l => ({
-                nome: (l.grupoPai ? '     ' : '') + l.nome,
-                indicador: l.indicador,
-                detalhamento: l.detalhamento,
-                situacao: l.semSituacao ? '—' : l.situacaoLabel,
-            })),
+            // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
+            // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
+            // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
+            // reaproveitada só como 4ª coluna alinhada à direita, sem estilo de situação
+            // de verdade (ver didParseCell abaixo).
+            body: cfg.linhas.map(l => l.subgrupoCabecalho
+                ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
+                : {
+                    nome: (l.grupoPai ? '     ' : '') + l.nome,
+                    indicador: l.indicador,
+                    detalhamento: l.detalhamento,
+                    situacao: l.semSituacao ? '—' : l.situacaoLabel,
+                }),
             startY: yy,
             margin: { left: x, right: pw - x - w, bottom: 14 },
             theme: 'grid',
@@ -3754,6 +3762,17 @@
                 if (data.section !== 'body') return;
                 const l = cfg.linhas[data.row.index];
                 if (!l) return;
+                // Faixa de SUBGRUPO (nível acima de grupoCabecalho) — fundo azul bem claro
+                // (COR.azulTint, distinto do "cartao" neutro do cabeçalho de grupo),
+                // versalete em negrito na cor azul (mesmo acento usado em tituloSecao).
+                if (l.subgrupoCabecalho) {
+                    data.cell.styles.fillColor = COR.azulTint;
+                    data.cell.styles.fontStyle = 'bold';
+                    data.cell.styles.fontSize = 8.2;
+                    data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.azul : COR.tintaSec;
+                    if (data.column.dataKey === 'situacao') data.cell.styles.halign = 'right';
+                    return;
+                }
                 // Cabeçalho de grupo (pai, ex. "Mandados"/"Audiências"): fundo sutil +
                 // negrito em toda a linha, sem cor de situação (não tem situação própria).
                 if (l.grupoCabecalho) {
@@ -3774,7 +3793,7 @@
             didDrawCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'nome') {
                     const l = cfg.linhas[data.row.index];
-                    if (l && !l.grupoCabecalho) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
+                    if (l && !l.grupoCabecalho && !l.subgrupoCabecalho) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
                 }
             },
         });
@@ -3926,22 +3945,9 @@
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
-        // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
-        // não é mais um card à parte no topo da capa.
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
-        if (atuacoesAtivas.length) {
-            const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            linhasCartorio.push({
-                nome: 'Processos Ativos',
-                indicador: `${totalAtivos} ativo(s)`,
-                detalhamento: atuacoesAtivas.length > 1
-                    ? atuacoesAtivas.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
-                    : atuacoesAtivas[0],
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
-            });
-        }
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
         // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo).
         function linhaTarefa(t, nome) {
@@ -3955,16 +3961,82 @@
                 cfgOriginal: t.secao.cfgOriginal,
             };
         }
-        // Linha de CABEÇALHO DE GRUPO (pai) — bold, sem indicador/detalhamento/situação
-        // próprios de um relatório (cfgOriginal: null, então nunca vira link — ver PASSO 4
-        // em gerarPDFConjunto, e secaoTemTabela/o passo de página de resumo não a alcançam
-        // porque ela não corresponde a nenhuma seção). "indicador" aqui é o agregado do
-        // grupo, calculado por quem chama (ver grupos "Mandados"/"Audiências" abaixo).
+        // Linha de CABEÇALHO DE GRUPO (pai, ex. "Mandados") — bold, sem indicador/
+        // detalhamento/situação próprios de um relatório (cfgOriginal: null, então nunca
+        // vira link — ver PASSO 4 em gerarPDFConjunto, e secaoTemTabela/o passo de página
+        // de resumo não a alcançam porque ela não corresponde a nenhuma seção).
+        // "indicador" aqui é o agregado do grupo, calculado por quem chama.
         function linhaGrupo(nome, indicador) {
             return { nome, indicador, detalhamento: '', situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null, grupoCabecalho: true };
         }
+        // Faixa de SUBGRUPO — nível ACIMA de linhaGrupo, espelhando os mesmos subgrupos do
+        // popup do painel de automação (REPORTS_AUTOMACAO[].subgrupo — pedido do usuário:
+        // a capa unificada deve refletir a mesma organização "Estatísticas Gerais" /
+        // "Pendências" / "Audiências" / "Outros" que o painel já usa). Ver
+        // desenharBlocoCartorioUnificado para o desenho (faixa cheia, colSpan).
+        function linhaSubgrupo(nome, contagem) {
+            return { nome, contagem, subgrupoCabecalho: true, cfgOriginal: null };
+        }
+        // Empilha a faixa de subgrupo seguida dos itens informados — só se houver ao
+        // menos um item (subgrupo vazio não aparece). A contagem exibida na faixa conta
+        // só itens de PRIMEIRO nível (sem grupoPai) — um grupo como "Mandados" (pai + 3
+        // filhas indentadas) conta como 1 item, não 4, mesmo padrão do popup do painel.
+        function empilharSubgrupo(nome, itens, unidade) {
+            if (!itens.length) return;
+            const contagem = itens.filter(l => !l.grupoPai).length;
+            linhasCartorio.push(linhaSubgrupo(nome, `${contagem} ${unidade || 'item(ns)'}`));
+            linhasCartorio.push(...itens);
+        }
 
-        // Estrutura de 2 níveis (pedido do usuário): "Mandados" e "Audiências" viram um
+        // ── Estatísticas Gerais (Ativos, Suspensos indeterminado/com prazo, Instância
+        // Recursal) ──────────────────────────────────────────────────────────────────
+        const itensEstatisticasGerais = [];
+        // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
+        // não é mais um card à parte no topo da capa.
+        if (atuacoesAtivas.length) {
+            const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
+            itensEstatisticasGerais.push({
+                nome: 'Processos Ativos',
+                indicador: `${totalAtivos} ativo(s)`,
+                detalhamento: atuacoesAtivas.length > 1
+                    ? atuacoesAtivas.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
+                    : atuacoesAtivas[0],
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
+            });
+        }
+        const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
+        if (itemSuspensos) itensEstatisticasGerais.push(linhaTarefa(itemSuspensos, itemSuspensos.rotulo));
+        // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
+        // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de
+        // fim de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
+        if (secaoSuspensosPrazo) {
+            const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
+            itensEstatisticasGerais.push({
+                nome: 'Suspensos com Prazo',
+                indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
+                detalhamento: fimMaisLongo
+                    ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
+                    : 'Nenhum processo suspenso por prazo determinado',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
+            });
+        }
+        // "Em Instância Recursal" — indicador: total em instância recursal.
+        // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
+        if (secaoInstanciaRecursal) {
+            const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
+            itensEstatisticasGerais.push({
+                nome: 'Em Instância Recursal',
+                indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
+                detalhamento: maisDe2Anos.length
+                    ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
+                    : 'Nenhum processo enviado há mais de 2 anos',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
+            });
+        }
+        empilharSubgrupo('Estatísticas Gerais', itensEstatisticasGerais);
+
+        // ── Pendências (Juntadas, Retorno, Paralisados, Remessas, Mandados) ─────────
+        // Estrutura de 2 níveis (pedido do usuário, já existente): "Mandados" vira um
         // item PAI com subitens indentados, em vez de linhas soltas — ver
         // desenharBlocoCartorioUnificado (indentação visual + estilo do cabeçalho de
         // grupo) e PASSO 4 em gerarPDFConjunto (link só nas filhas).
@@ -3973,13 +4045,9 @@
             [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
         ]);
         const itensMandados = CFGS_GRUPO_MANDADOS.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
-
-        // Itens soltos de sempre (Juntadas/Retorno de Conclusão/Paralisados/Remessas/
-        // Suspensos) — tudo que não faz parte do grupo Mandados.
-        linhasCartorio.push(...itensCartorio
-            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal))
-            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo)));
-
+        const itensPendencias = itensCartorio
+            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
+            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo));
         if (itensMandados.length) {
             // Indicador do grupo "Mandados" (pedido do usuário): em vez de um total único
             // somando tudo, separa por ONDE a pendência está — "aguarda cumprimento"
@@ -3995,37 +4063,24 @@
             const totalMandados = pendCumprimento + pendCartorioMandados;
             const totalUrgentesMandados = itensMandados.reduce((s, t) => s + t.prioritarios, 0);
             const totalNormaisMandados = totalMandados - totalUrgentesMandados;
-            linhasCartorio.push(linhaGrupo('Mandados',
+            itensPendencias.push(linhaGrupo('Mandados',
                 `${pendCumprimento} aguarda cumprimento · ${pendCartorioMandados} pendente(s) no cartório · `
                 + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)`));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
-                linhasCartorio.push(l);
+                itensPendencias.push(l);
             });
         }
+        empilharSubgrupo('Pendências', itensPendencias);
 
-        if (secaoTempoMedio) {
-            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
-            const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
-            let periodoTxt = '';
-            {
-                const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
-                if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
-            }
-            linhasCartorio.push({
-                nome: 'Tempo Médio de Cumprimento',
-                indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
-                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
-            });
-        }
-        // Grupo "Audiências": Pendentes/Designadas/Realizadas são naturezas de dado
-        // DIFERENTES (audiências sem termo, designações futuras, estatística de
-        // realizadas) — não faz sentido somar os totais num indicador único do pai, ao
-        // contrário de "Mandados" acima. O indicador do pai vira só a contagem de
-        // sub-relatórios presentes.
-        const filhasAudiencias = [];
+        // ── Audiências (Pendentes, Designadas, Realizadas) ──────────────────────────
+        // Pendentes/Designadas/Realizadas são naturezas de dado DIFERENTES (audiências
+        // sem termo, designações futuras, estatística de realizadas) — não faz sentido
+        // somar os totais num indicador único; a própria faixa de subgrupo já mostra a
+        // contagem de sub-relatórios presentes (não precisa mais de um linhaGrupo próprio
+        // "Audiências" como antes — a faixa de subgrupo assumiu esse papel).
+        const itensAudiencias = [];
         if (secaoAudiencias) {
             let detalhamento = '—';
             let mais = null;
@@ -4037,7 +4092,7 @@
                 const dias = Math.round((now - mais.ts) / DIA_MS);
                 detalhamento = `Mais antiga sem termo: ${mais.data} (${dias} dia(s))`;
             }
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Pendentes',
                 indicador: `${secaoAudiencias.dados.length} audiência(s)`,
                 detalhamento, situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS,
@@ -4049,7 +4104,7 @@
             const diasAteUltima = tsUltima != null ? Math.round((tsUltima - now) / DIA_MS) : null;
             const statusAD = classificarSituacaoPorDias(diasAteUltima, 180, 360);
             const infoAD = SITUACAO_INFO[statusAD] || SITUACAO_INFO.regular;
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Designadas',
                 indicador: `${r.totalDesignadas || 0} designada(s)`,
                 detalhamento: r.ultimaData ? `Última: ${r.ultimaData} (${diasAteUltima} dia(s))` : '—',
@@ -4058,16 +4113,32 @@
         }
         if (secaoAudienciasRealizadas) {
             const r = secaoAudienciasRealizadas.dados[0] || {};
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Realizadas',
                 indicador: `${r.totalGeral || 0} realizada(s)`,
                 detalhamento: `${r.canceladas || 0} cancel. · ${r.naoRealizadas || 0} não real. · ${r.redesignadas || 0} redesig.`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS_REALIZADAS,
             });
         }
-        if (filhasAudiencias.length) {
-            linhasCartorio.push(linhaGrupo('Audiências', `${filhasAudiencias.length} sub-relatório(s)`));
-            filhasAudiencias.forEach(l => { l.grupoPai = 'Audiências'; linhasCartorio.push(l); });
+        empilharSubgrupo('Audiências', itensAudiencias, 'sub-relatório(s)');
+
+        // ── Outros (itens do Cartório sem subgrupo no popup do painel: Tempo Médio,
+        // Bens Apreendidos, Outros Cumprimentos) ────────────────────────────────────
+        const itensOutros = [];
+        if (secaoTempoMedio) {
+            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
+            const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
+            let periodoTxt = '';
+            {
+                const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
+                if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
+            }
+            itensOutros.push({
+                nome: 'Tempo Médio de Cumprimento',
+                indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
+                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
+            });
         }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
@@ -4077,56 +4148,28 @@
         if (secaoApreensoes) {
             const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
             const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
-            linhasCartorio.push({
+            itensOutros.push({
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
             });
         }
-        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado (pedido do
-        // usuário: linha própria no Cartório, mesmo padrão de "Bens Apreendidos"). O
+        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
         // indicador é o total pendente somado de todos os tipos com pendência > 0; o
         // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
         if (secaoOutrosCumprimentos) {
             const totalPendentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.pendentes || 0), 0);
             const totalUrgentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.urgentes || 0), 0);
-            linhasCartorio.push({
+            itensOutros.push({
                 nome: 'Outros Cumprimentos',
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
             });
         }
-        // "Suspensos com Prazo" — linha do Cartório (mesmo padrão de "Bens Apreendidos"/
-        // "Outros Cumprimentos" acima). Indicador: total de processos suspensos por prazo
-        // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de fim
-        // de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
-        if (secaoSuspensosPrazo) {
-            const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
-            linhasCartorio.push({
-                nome: 'Suspensos com Prazo',
-                indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
-                detalhamento: fimMaisLongo
-                    ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
-                    : 'Nenhum processo suspenso por prazo determinado',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
-            });
-        }
-        // "Em Instância Recursal" — linha do Cartório (mesmo padrão de "Suspensos com
-        // Prazo" acima). Indicador: total em instância recursal. Detalhamento (pedido do
-        // usuário, item a): quantos foram enviados há mais de 2 anos.
-        if (secaoInstanciaRecursal) {
-            const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
-            linhasCartorio.push({
-                nome: 'Em Instância Recursal',
-                indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
-                detalhamento: maisDe2Anos.length
-                    ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
-                    : 'Nenhum processo enviado há mais de 2 anos',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
-            });
-        }
+        empilharSubgrupo('Outros', itensOutros);
+
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
         // fingir que terminou normalmente.
