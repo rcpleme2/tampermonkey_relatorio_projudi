@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.16
+// @version      20.17
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2784,11 +2784,19 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, p.tabelaTitulo || 'Tabela discriminada');
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, p.tabelaTitulo || 'Tabela discriminada');
         const tabInicioY = m + 8;
         const colunas = p.colunas;
         const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        // p.colunas[].width é só um PESO relativo, não milímetros — sem escalar pra soma
+        // = uw, tabelas com poucas colunas (ex.: Mandados, 4-5 colunas) sobravam com
+        // bastante espaço vazio à direita em vez de preencher a página (largura fixa em mm
+        // somando bem menos que a largura útil). Escala todas as colunas proporcionalmente
+        // pra a soma bater exatamente com a largura útil da página.
+        const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
+        const fatorLargura = somaLarguras > 0 ? uw / somaLarguras : 1;
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
         const idxProcesso = colunas.findIndex(c => /processo/i.test(c.header));
 
         // Opções comuns ao autoTable, reaproveitadas tanto no caminho de tabela única
