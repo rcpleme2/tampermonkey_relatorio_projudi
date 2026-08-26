@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.30
+// @version      20.31
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3296,6 +3296,25 @@
         });
         desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
     }
+
+    // PDF individual (botão "Baixar PDF" na tela/painel, fora do Relatório PDF conjunto) —
+    // sem isso, cfg.pdfCustom ficava indefinido e o gerarPDF() genérico (ver
+    // injetarBotoes/"if (cfg.pdfCustom) ... else gerarPDF(...)") caía direto em
+    // montarResumoGenerico, PERDENDO a tabela Oficial/Total/Lidos/Não Lidos (só apareceria
+    // no PDF conjunto, via descreverSecaoPDF, não no PDF individual). Mesmo padrão de
+    // gerarPDFTempoMedio/gerarPDFParalisados.
+    function gerarPDFMandadosCumprimento(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoMandadosCumprimento(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_MANDADOS_CUMPRIMENTO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+    CFG_MANDADOS_CUMPRIMENTO.pdfCustom = (dados, somenteResumo) => gerarPDFMandadosCumprimento(dados, somenteResumo);
 
     function descreverSecaoPDF(cfg, somenteResumo) {
         if (cfg === CFG_MANDADOS_CUMPRIMENTO) {
