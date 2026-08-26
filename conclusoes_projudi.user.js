@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.32
+// @version      20.33
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -6121,66 +6121,78 @@
     // "dominio" agrupa os checkboxes do painel de automação (ver injetarPainel), espelhando
     // a mesma divisão Cartório/Gabinete usada no PDF conjunto; "curto" é o rótulo compacto
     // usado na grade de contagens.
+    // Reorganizado em subgrupos dentro do Cartório (pedido do usuário): "Estatísticas
+    // Gerais" (Processos Ativos + Suspensos), "Pendências" (os 5 clássicos de sempre +
+    // Mandados) e "Audiências" (movida do Crime pro Cível-Geral — ver abaixo). A ORDEM no
+    // array importa: linhasComSubgrupos() (ver injetarPainel) agrupa por adjacência, não
+    // por nome — itens do mesmo "subgrupo" precisam ficar em sequência no array, senão o
+    // cabeçalho do subgrupo repete. "Processos Ativos" não é um item de REPORTS_AUTOMACAO
+    // de verdade (não navega/coleta nada — ver gravarProcessosAtivosSeDisponivel); entra
+    // na posição certa via um objeto avulso construído em injetarPainel (ver ITEM_ATIVOS).
     const REPORTS_AUTOMACAO = [
-        // O link de Suspensos por Prazo Indeterminado abre a tabela de resultados
-        // direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
-        { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false },
-        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false },
-        { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false },
+        // ── Estatísticas Gerais (Processos Ativos entra aqui via ITEM_ATIVOS, ver
+        // injetarPainel) — o link de Suspensos por Prazo Indeterminado abre a tabela de
+        // resultados direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
+        { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Estatísticas Gerais' },
+        // ── Pendências ───────────────────────────────────────────────────────────────
+        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
+        { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
         // situação), não direto nos resultados — por isso também precisam do passo de
         // preencher+pesquisar antes de coletar.
-        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true },
-        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true },
-        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
+        { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
+        { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
+        // Mandados — UM item de fila, TRÊS relatórios internos (fases status 13 -> 6 -> 4
+        // -> 8, ver avancarOuConcluirFaseMandados). "cfg" aponta para a primeira fase
+        // (Retorno) — usado como cfg "representante" do item pelo código que assume um cfg
+        // só por item (ex. querColetarAuto em injetarBotoes); "cfgs" lista TODOS os
+        // prefixos envolvidos — inclusive as CFGs internas de coleta (LIDO/NAOLIDO, ver
+        // definição das CFGs de Mandados) — usado onde o item precisa expandir para seus
+        // prefixos de armazenamento (relatorioPorCfg, limparTudoAutomacao,
+        // pularRelatorioAtual). baixarPDFConjunto lê de TODAS elas também, mas as internas
+        // normalmente já estão vazias/sem 'coletado' nesse ponto (a mesclagem já rodou e
+        // limpou os prefixos — ver mesclarMandadosCumprimento), então não aparecem como
+        // seções duplicadas. precisaPreencher: true porque a fase 0 (leitura do contador
+        // na tela "Análise de Juntadas") precisa rodar antes de qualquer coleta, mesmo
+        // landing direto nos resultados depois.
+        { key: 'mandados', cfg: CFG_MANDADOS_RETORNO, cfgs: [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO], navAlvo: 'mandados', rotulo: 'Mandados', curto: 'Mandados', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
+        // ── Audiências (movida do Crime pro Cartório/Cível-Geral — pedido do usuário:
+        // fica visível em qualquer categoria/aba, não só Crime, igual aos demais itens
+        // acima) ─────────────────────────────────────────────────────────────────────
+        // rotuloChecklist (opcional): texto mostrado SÓ no checklist do painel, ao lado do
+        // checkbox — quando o item está dentro de um subgrupo, o subtítulo do subgrupo já
+        // deixa o contexto claro ("AUDIÊNCIAS" acima de "Pendentes"/"Designadas"/
+        // "Realizadas"), então repetir "Audiências" em cada linha é redundante. Sem
+        // rotuloChecklist, o checklist cai em "rotulo" (usado em todo o resto — capa,
+        // mensagens de status, diálogo de pular etc. — que continuam com o nome completo).
+        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   rotuloChecklist: 'Pendentes', curto: 'Aud. Termo', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Audiências' },
+        // Resumo + tabela da Pauta de Horários (ver coletarAudienciasDesignadas). Como
+        // cada extração recalcula tudo do zero (a "página" gravada é sempre um único
+        // resumo), "Extrair mais" não faz sentido aqui.
+        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', rotuloChecklist: 'Designadas', curto: 'Aud. Designadas', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Audiências' },
+        // Totais de Estatísticas de Audiência, geral e por usuário (ver
+        // iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas). Assim como
+        // Audiências Designadas, cada extração recalcula tudo do zero.
+        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', rotuloChecklist: 'Realizadas', curto: 'Aud. Realizadas', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Audiências' },
+        // ── Itens do Cartório sem subgrupo (soltos, como sempre foram) ─────────────────
         // Reabilitado (branch tempo-medio-teste) — busca em meses completos separados em
         // vez de um período único (ver mesesCompletos/prepararFilaMesesTempoMedio), para
         // evitar pesquisas grandes e lentas no Projudi. Vem DESMARCADO por padrão no
         // painel (ver injetarPainel): o usuário precisa marcar explicitamente para incluí-lo.
         { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'cartorio', precisaPreencher: true },
-        // Primeiro item específico da categoria Crime (ver CATEGORIAS_PAINEL/
-        // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
-        // do Cível-Geral, só aparece na seção própria da aba Crime.
-        // rotuloChecklist (opcional): texto mostrado SÓ no checklist do painel, ao lado do
-        // checkbox — quando o item está dentro de um subgrupo (ver "subgrupo" abaixo), o
-        // subtítulo do subgrupo já deixa o contexto claro ("AUDIÊNCIAS" acima de
-        // "Pendentes"/"Designadas"/"Realizadas"), então repetir "Audiências" em cada linha
-        // é redundante. Sem rotuloChecklist, o checklist cai em "rotulo" (usado em todo o
-        // resto — capa, mensagens de status, diálogo de pular etc. — que continuam com o
-        // nome completo, sem ambiguidade fora do contexto visual do subgrupo).
-        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   rotuloChecklist: 'Pendentes', curto: 'Aud. Termo', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
-        // Segundo item específico do Crime — resumo + tabela da Pauta de Horários (ver
-        // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
-        // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
-        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', rotuloChecklist: 'Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
-        // Terceiro item específico do Crime — totais de Estatísticas de Audiência, geral e
-        // por usuário (ver iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas).
-        // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
-        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', rotuloChecklist: 'Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
-        // Quarto item específico do Crime — apreensões pendentes; internamente roda em
-        { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
         // formulário/pesquisa (a página já chega pronta ao clicar na aba), por isso
         // precisaPreencher: false, mesmo não sendo um dos 5 clássicos "direto nos
-        // resultados" acima (Suspensos/Juntadas/Retorno). Sem categoriaEspecifica (não é
-        // exclusivo do Crime) — entra no grupo Cartório do painel, e como uma linha própria
-        // na tabela unificada do Cartório do PDF conjunto (ver linhasCartorio em
-        // gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
+        // resultados" acima (Suspensos/Juntadas/Retorno). Entra no grupo Cartório do
+        // painel, e como uma linha própria na tabela unificada do Cartório do PDF conjunto
+        // (ver linhasCartorio em gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
-        // Mandados — UM item de fila, TRÊS relatórios internos (fases status 13 -> 6 -> 4,
-        // ver avancarOuConcluirFaseMandados). "cfg" aponta para a primeira fase (Retorno) —
-        // usado como cfg "representante" do item pelo código que assume um cfg só por
-        // item (ex. querColetarAuto em injetarBotoes); "cfgs" lista TODOS os prefixos
-        // envolvidos — inclusive as duas CFGs internas de coleta (LIDO/NAOLIDO, ver
-        // definição das CFGs de Mandados) — usado onde o item precisa expandir para seus
-        // prefixos de armazenamento (relatorioPorCfg, limparTudoAutomacao,
-        // pularRelatorioAtual). baixarPDFConjunto lê de TODAS elas também, mas as duas
-        // internas normalmente já estão vazias/sem 'coletado' nesse ponto (a mesclagem já
-        // rodou e limpou os prefixos — ver mesclarMandadosCumprimento), então não aparecem
-        // como seções duplicadas. precisaPreencher: true porque a fase 0 (leitura do
-        // contador na tela "Análise de Juntadas") precisa rodar antes de qualquer coleta,
-        // mesmo landing direto nos resultados depois.
-        { key: 'mandados', cfg: CFG_MANDADOS_RETORNO, cfgs: [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO], navAlvo: 'mandados', rotulo: 'Mandados', curto: 'Mandados', dominio: 'cartorio', precisaPreencher: true },
+        // ── Gabinete ────────────────────────────────────────────────────────────────
+        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
+        // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
+        // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
+        // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
+        { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -6778,9 +6790,25 @@
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
         const itensVisiveis = (catId) => itensCivel.concat(itensEspecificos(catId));
 
+        // "Processos Ativos" não é um item de REPORTS_AUTOMACAO de verdade (não navega/
+        // coleta paginado, é lido passivamente na página inicial — ver
+        // gravarProcessosAtivosSeDisponivel) — é um objeto avulso, só pra entrar na
+        // posição certa (subgrupo "Estatísticas Gerais", antes de Suspensos) junto dos
+        // itens de verdade em linhasComSubgrupos. "extra: true" faz linhaChecklistItem()
+        // renderizar .pa-check-extra em vez de .pa-check (não entra na fila de automação
+        // de #pa-iniciar, que filtra só .pa-check:checked), com id/data-key fixos que o
+        // resto do código já espera (ver #pa-incluir-ativos/CHAVE_INCLUIR_ATIVOS abaixo).
+        const ITEM_ATIVOS = { key: 'processosativos', rotuloChecklist: 'Ativos', subgrupo: 'Estatísticas Gerais', extra: true };
+
         // Todos os relatórios vêm marcados por padrão, exceto Tempo Médio (precisa ser
         // habilitado explicitamente — ver seletor de período ao lado).
         function linhaChecklistItem(r) {
+            if (r.extra) {
+                return `
+                    <label class="pa-item pa-item-sub" title="Inclui a contagem de Processos Ativos (lida na página inicial do Projudi) como uma linha do Cartório na capa do PDF conjunto">
+                        <input type="checkbox" class="pa-check-extra" id="pa-incluir-ativos" data-key="processosativos" ${incluirProcessosAtivos() ? 'checked' : ''}> ${r.rotuloChecklist}
+                    </label>`;
+            }
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
@@ -6812,23 +6840,15 @@
         }
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
             const itensGrupo = itensCivel.filter(r => r.dominio === g.chave);
+            // ITEM_ATIVOS entra no início do Cartório, mesmo subgrupo "Estatísticas
+            // Gerais" de Suspensos (que já vem logo em seguida) — linhasComSubgrupos()
+            // trata os dois como um bloco só, sem duplicar o cabeçalho do subgrupo.
+            if (g.chave === 'cartorio') itensGrupo.unshift(ITEM_ATIVOS);
             const itens = linhasComSubgrupos(itensGrupo);
-            // Checkbox extra "Processos Ativos" — não é um item de REPORTS_AUTOMACAO (não
-            // navega/coleta paginado, é lido passivamente na página inicial — ver
-            // gravarProcessosAtivosSeDisponivel), por isso NÃO usa a classe .pa-check (que
-            // alimenta a fila de automação em #pa-iniciar) — usa .pa-check-extra, própria,
-            // e persiste em CHAVE_INCLUIR_ATIVOS, default marcado (preserva o
-            // comportamento histórico de sempre incluir a linha na capa).
-            const itemAtivos = g.chave === 'cartorio'
-                ? `
-                    <label class="pa-item pa-item-extra" title="Inclui a contagem de Processos Ativos (lida na página inicial do Projudi) como uma linha do Cartório na capa do PDF conjunto">
-                        <input type="checkbox" class="pa-check-extra" id="pa-incluir-ativos" data-key="processosativos" ${incluirProcessosAtivos() ? 'checked' : ''}> Processos Ativos
-                    </label>`
-                : '';
             return `
                 <div class="pa-group">
                     <p class="pa-group-lbl">${g.rotulo}</p>
-                    ${itemAtivos}${itens}
+                    ${itens}
                 </div>`;
         }).join('');
         const montarContagem = (catId) => itensVisiveis(catId).map(r => `
@@ -7135,7 +7155,6 @@
         }
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
-        #painel-automacao .pa-item-extra { border-top: 1px dashed #DEDDD6; margin-top: 4px; padding-top: 6px; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
         #painel-automacao .pa-placeholder {
