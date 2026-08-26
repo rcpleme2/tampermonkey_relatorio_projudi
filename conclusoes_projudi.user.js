@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.10
+// @version      20.11
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1262,8 +1262,9 @@
     // ── Outros Cumprimentos (Mesa do Magistrado) — mesaAnalista.do?actionType=
     // listaOutrosCumprimentos ───────────────────────────────────────────────────
     // Diferente de TODOS os demais relatórios: não é uma lista paginada de processos, é
-    // um PAINEL DE CONTADORES de página única (duas tabelas — "BNMP" e a principal —
-    // já prontas assim que a página carrega, sem formulário/pesquisa nenhuma). Por isso
+    // um PAINEL DE CONTADORES de página única (a tabela "Cumprimento", e opcionalmente
+    // "BNMP" — só em unidades com competência criminal —, carregadas via AJAX depois do
+    // HTML inicial, sem formulário/pesquisa nenhuma). Por isso
     // NÃO usa criarColetor/montarResumoGenerico/montarTabelaGenerico (todos pressupõem um
     // registro por PROCESSO, com dataCampo/processoCampo) — tem coleta, resumo e tabela
     // dedicados, mais simples, escritos abaixo.
@@ -1287,12 +1288,15 @@
 
     // Reconhece a página de "Outros Cumprimentos" (mesaAnalista.do?actionType=
     // listaOutrosCumprimentos) pelo CONTEÚDO, não pela URL exata (pode variar) — precisa
-    // do <h4>BNMP</h4> seguido de table.resultTable, MAIS uma segunda table.resultTable
-    // cujo cabeçalho comece com "Cumprimento".
+    // de uma table.resultTable cujo cabeçalho comece com "Cumprimento".
+    // O BNMP é OPCIONAL — só aparece em unidades com competência criminal; unidades sem
+    // Vara Criminal mostram só a tabela "Cumprimento" (confirmado pelo usuário: "algumas
+    // unidades têm BNMP e Cumprimentos, outras só Cumprimentos"). Por isso a detecção da
+    // página exige só a tabela "Cumprimento" (a que SEMPRE existe) — exigir o BNMP também
+    // fazia paginaOutrosCumprimentos() nunca retornar true nas unidades sem BNMP, e
+    // tratarPaginaOutrosCumprimentos() acabava desistindo depois de ~15s e descartando os
+    // dados REAIS da tabela "Cumprimento" como se fossem "0 registros".
     function paginaOutrosCumprimentos() {
-        const h4s = [...document.querySelectorAll('h4')];
-        const temBnmp = h4s.some(h => /^bnmp$/i.test((h.textContent || '').trim()));
-        if (!temBnmp) return false;
         return [...document.querySelectorAll('table.resultTable')].some(t => {
             const thead = t.querySelector(':scope > thead');
             const primeiroTh = thead ? thead.querySelector('th') : null;
@@ -1301,13 +1305,15 @@
     }
 
     // Indício rápido de que estamos na tela "Outros Cumprimentos" (Mesa do Magistrado) —
-    // só o <h4>BNMP</h4>, que já vem no HTML inicial da página. Ao contrário de
-    // paginaOutrosCumprimentos() (que exige as DUAS tabelas), este NÃO espera a tabela
-    // "Cumprimento" — ela é a que demora a aparecer (ver tratarPaginaOutrosCumprimentos).
-    // Usado só pra decidir SE vale a pena começar a esperar; a extração de verdade
-    // continua condicionada a paginaOutrosCumprimentos() === true.
+    // usado só pra decidir SE vale a pena começar a esperar (ver injetarBotoes); a
+    // extração de verdade continua condicionada a paginaOutrosCumprimentos() === true.
+    // Reconhece tanto o <h4>BNMP</h4> (quando existe) quanto a própria tabela
+    // "Cumprimento" já carregada — nenhum dos dois é garantido no momento do bootstrap
+    // (podem não ter carregado ainda, ou o BNMP pode nem existir nesta unidade), por isso
+    // injetarBotoes() também usa outros sinais (URL/estado da automação) além deste.
     function temMarcadorOutrosCumprimentos() {
-        return [...document.querySelectorAll('h4')].some(h => /^bnmp$/i.test((h.textContent || '').trim()));
+        if ([...document.querySelectorAll('h4')].some(h => /^bnmp$/i.test((h.textContent || '').trim()))) return true;
+        return paginaOutrosCumprimentos();
     }
 
     // Acha a tabela BNMP (a que vem logo depois do <h4>BNMP</h4>) e a tabela principal (a
