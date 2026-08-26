@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.11
+// @version      20.17
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -240,7 +240,10 @@
 
     const CFG_RETORNO = {
         prefixo: 'projudi_retorno_',
-        detecta: (cab) => /retorno/i.test(cab),
+        // "retorno" sozinho também casa com a tabela de Mandados (coluna "Data retorno") —
+        // exige também "agrupador" (coluna real e exclusiva desta tabela, ver tds[9] em
+        // "extrai" abaixo) pra não colidir.
+        detecta: (cab) => /retorno/i.test(cab) && /agrupador/i.test(cab),
         minTds: 9,                              // linhas têm 10 tds (0 = semáforo)
         usaAtuacao: false,
         nomeArquivo: 'retorno_conclusos_projudi',
@@ -367,6 +370,9 @@
     const CFG_TEMPOMEDIO = {
         prefixo: 'projudi_tempomedio_',
         detecta: (cab) => /an[áa]lise\s+cart[óo]rio/i.test(cab),
+        // 500 travava o site do Projudi (tabela com 1000 <tr> — ver comentário original
+        // em criarColetor/iniciar()); com a busca mês a mês, 100 é seguro.
+        pageSizeSelect: { name: 'estatisticaPageSizeOptions', valor: '100' },
         minTds: 7,
         usaAtuacao: false,
         nomeArquivo: 'tempo_medio_projudi',
@@ -1225,6 +1231,363 @@
         },
     };
 
+    // ── Mandados (processo/cumprimentoCartorioMandado.do) — TRÊS relatórios derivados
+    // da MESMA tela de busca, distinguidos só pelo valor selecionado no
+    // <select id="codStatusCumprimentoCartorio"> (13/6/4). A tela é alcançada clicando no
+    // contador "Mandados aguardando análise de retorno" da tela "Análise de Juntadas"
+    // (mesma navegação de CFG_JUNTADAS/CFG_RETORNO — ver navegarMenu('mandados')); o
+    // fluxo de 3 fases dentro do MESMO item da fila de automação fica em
+    // avancarOuConcluirFaseMandados/gateFaseMandados/tratarFaseMandadosPendentes, perto
+    // do restante da automação.
+    //
+    // Todos cabem no pipeline genérico (montarResumoGenerico/montarTabelaGenerico) — são
+    // listas por processo com data, como Juntadas/Retorno. "urgente" (extraído da coluna
+    // "Urgente" da tabela) é mapeado para "prioritario", o campo que o pipeline genérico já
+    // entende — ativa de graça o KPI "Prioritários pendentes"/destaque na tabela.
+    // O número de colunas e a posição delas MUDA entre as 3 telas de Mandados (confirmado
+    // com telas reais de cada status): "Aguardando Análise de Retorno" tem uma coluna
+    // "Data retorno" que as outras não têm; "Expedido e Não Lido" tem duas colunas a mais
+    // ("Distribuição"/"Visualização (Oficial)") que empurram tudo pra frente. Extrair por
+    // índice fixo de td (como os demais relatórios fazem, com uma única tela por trás)
+    // não funciona aqui — precisa mapear cada campo pelo TEXTO do cabeçalho, calculado uma
+    // vez por página (ver contextoExtra em coletarPaginaAtual), não por índice fixo.
+    function mapaColunasMandado() {
+        const tabela = tabelaMandados();
+        const thead = tabela ? tabela.querySelector(':scope > thead') : null;
+        const ths = thead ? [...thead.querySelectorAll('th')] : [];
+        const mapa = {};
+        ths.forEach((th, i) => {
+            const texto = (th.textContent || '').trim();
+            if (/^ordena[çc][ãa]o$/i.test(texto)) mapa.dataOrdenacao = i;
+            else if (/^expedi[çc][ãa]o$/i.test(texto)) mapa.dataExpedicao = i;
+            else if (/^data\s+retorno$/i.test(texto)) mapa.dataRetorno = i;
+            else if (/^processo$/i.test(texto)) mapa.processo = i;
+            else if (/^sequencial$/i.test(texto)) mapa.sequencial = i;
+            else if (/^classe$/i.test(texto)) mapa.classe = i;
+            else if (/^natureza\s+do\s+mandado$/i.test(texto)) mapa.natureza = i;
+            else if (/^custas\s+do\s+mandado/i.test(texto)) mapa.custas = i;
+            else if (/^referente\s+a/i.test(texto)) mapa.partes = i;
+            else if (/^oficial\s+de\s+justi[çc]a$/i.test(texto)) mapa.oficial = i;
+            else if (/^prazo/i.test(texto)) mapa.prazo = i;
+            else if (/^status$/i.test(texto)) mapa.status = i;
+            else if (/^urgente$/i.test(texto)) mapa.urgente = i;
+            else if (/^tipo\s+de\s+urg[êe]ncia$/i.test(texto)) mapa.tipoUrgencia = i;
+        });
+        return mapa;
+    }
+
+    // "mapa" vem de mapaColunasMandado(), calculado uma vez por página (ver contextoExtra
+    // em coletarPaginaAtual) — nunca por índice fixo de td. Campo ausente no cabeçalho
+    // desta tela em particular (ex.: "Data retorno" fora da tela de Retorno) vira string
+    // vazia, não erro.
+    function extrairLinhaMandado(tds, atuacao, mapa) {
+        mapa = mapa || mapaColunasMandado();
+        const tdCampo = (campo) => (mapa[campo] != null ? tds[mapa[campo]] : null);
+        const tdProcesso = tdCampo('processo');
+        const emProc = tdProcesso && tdProcesso.querySelector('em');
+        const processo = emProc ? emProc.textContent.trim() : textoCelula(tdProcesso);
+        const urgenteTexto = textoCelula(tdCampo('urgente')).trim().toLowerCase();
+        return {
+            processo,
+            classe: textoCelula(tdCampo('classe')),
+            dataOrdenacao: textoCelula(tdCampo('dataOrdenacao')),
+            dataExpedicao: textoCelula(tdCampo('dataExpedicao')),
+            dataRetorno: textoCelula(tdCampo('dataRetorno')),
+            sequencial: textoCelula(tdCampo('sequencial')),
+            natureza: textoCelula(tdCampo('natureza')),
+            custas: textoCelula(tdCampo('custas')),
+            partes: textoCelula(tdCampo('partes')),
+            oficial: textoCelula(tdCampo('oficial')),
+            prazo: textoCelula(tdCampo('prazo')),
+            status: textoCelula(tdCampo('status')),
+            urgente: urgenteTexto === 'sim',
+            tipoUrgencia: textoCelula(tdCampo('tipoUrgencia')),
+            prioritario: urgenteTexto === 'sim',
+        };
+    }
+    const LINHA_MANDADO_XLSX = (d) => [d.processo, d.classe, d.natureza, d.oficial, d.dataOrdenacao,
+        d.dataExpedicao, d.dataRetorno, d.status, d.prazo, d.urgente ? 'Sim' : 'Não', d.tipoUrgencia];
+    const CABECALHOS_MANDADO_XLSX = ['Processo', 'Classe', 'Natureza do Mandado', 'Oficial de Justiça',
+        'Ordenação', 'Expedição', 'Dt. Retorno', 'Status', 'Prazo', 'Urgente', 'Tipo de Urgência'];
+    const LARGURAS_MANDADO_XLSX = [{ wch: 26 }, { wch: 30 }, { wch: 26 }, { wch: 24 }, { wch: 16 },
+        { wch: 16 }, { wch: 16 }, { wch: 34 }, { wch: 14 }, { wch: 9 }, { wch: 20 }];
+
+    // Reconhece as três telas de resultado pelo cabeçalho da tabela — não dá pra
+    // distinguir status só pelo cabeçalho (é a MESMA tabela para os três), por isso
+    // combina com o valor atual do select de status (ver detecta() de cada CFG abaixo).
+    function cabecalhoCumprimentoMandado(cab) {
+        return /oficial\s+de\s+justi[çc]a/i.test(cab) && /natureza\s+do\s+mandado/i.test(cab);
+    }
+    function statusCumprimentoCartorioSelecionado() {
+        const sel = document.getElementById('codStatusCumprimentoCartorio');
+        return sel ? sel.value : null;
+    }
+
+    // A tela de resultados de Mandados pode ter OUTRA table.resultTable na página além da
+    // própria (ex.: algum widget relacionado a Conclusões/Retorno visível ali — visto em
+    // produção: com 0 mandados na fase, detectarConfig() pegou por engano o cabeçalho de
+    // uma tabela alheia). document.querySelector('table.resultTable thead') (usado pelo
+    // detectarConfig genérico) pega só a PRIMEIRA table.resultTable do documento — não dá
+    // pra confiar que essa é a de Mandados. Por isso a detecção de Mandados busca a tabela
+    // certa em TODAS as table.resultTable da página (pelo cabeçalho real dela), em vez de
+    // depender do "cab" já computado uma vez lá em cima em detectarConfig().
+    function tabelaMandados() {
+        return [...document.querySelectorAll('table.resultTable')].find(t => {
+            const thead = t.querySelector(':scope > thead');
+            return cabecalhoCumprimentoMandado(thead ? thead.textContent : '');
+        }) || null;
+    }
+
+    const CFG_MANDADOS_RETORNO = {
+        prefixo: 'projudi_mandadosretorno_',
+        mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '13',
+        minTds: 16, // só esta tela tem a coluna "Data retorno" (ver mapaColunasMandado)
+        usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
+        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        nomeArquivo: 'mandados_retorno_projudi',
+        rotulos: { coletar: 'Extrair Mandados (Retorno)', coletarMais: 'Extrair mais (Mandados Retorno)', baixar: '⬇ Baixar Mandados (Retorno)' },
+        cabecalhos: CABECALHOS_MANDADO_XLSX,
+        larguras: LARGURAS_MANDADO_XLSX,
+        extrai: extrairLinhaMandado,
+        linha: LINHA_MANDADO_XLSX,
+        pdf: {
+            titulo: 'Mandados Aguardando Análise de Retorno',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
+            atosTitulo: 'Mandados aguardando análise de retorno',
+            agingTitulo: 'Mandados por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de retorno',
+            dataCampo: 'dataRetorno',
+            dataTitulo: 'Retorno mais antigo',
+            processoCampo: 'processo',
+            tipoCampo: 'natureza',
+            distribuicoes: [
+                { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Processo', width: 34, get: (d) => d.processo },
+                { header: 'Dt. Retorno', width: 20, get: (d) => d.dataRetorno },
+                { header: 'Natureza do Mandado', width: 40, get: (d) => d.natureza },
+                { header: 'Tipo de Urgência', width: 30, get: (d) => d.tipoUrgencia || '—' },
+            ],
+        },
+    };
+
+    const CFG_MANDADOS_CUMPRIMENTO = {
+        prefixo: 'projudi_mandadoscumprimento_',
+        mostrarSeVazio: true,
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '6',
+        minTds: 15, // sem a coluna "Data retorno" — ver mapaColunasMandado
+        usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
+        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        nomeArquivo: 'mandados_pendentes_cumprimento_projudi',
+        rotulos: { coletar: 'Extrair Mandados (Cumprimento)', coletarMais: 'Extrair mais (Mandados Cumprimento)', baixar: '⬇ Baixar Mandados (Cumprimento)' },
+        cabecalhos: CABECALHOS_MANDADO_XLSX,
+        larguras: LARGURAS_MANDADO_XLSX,
+        extrai: extrairLinhaMandado,
+        linha: LINHA_MANDADO_XLSX,
+        pdf: {
+            titulo: 'Mandados Pendentes de Cumprimento',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
+            atosTitulo: 'Mandados pendentes de cumprimento',
+            agingTitulo: 'Mandados por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos mandados pendentes de cumprimento',
+            dataCampo: 'dataExpedicao',
+            dataTitulo: 'Expedição mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'oficial',
+            distribuicoes: [
+                { titulo: 'Mandados Pendentes de Cumprimento por Oficial', campo: 'oficial', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Processo', width: 32, get: (d) => d.processo },
+                { header: 'Oficial de Justiça', width: 32, get: (d) => d.oficial },
+                { header: 'Dt. Expedição', width: 20, get: (d) => d.dataExpedicao },
+                { header: 'Urgente', width: 12, get: (d) => (d.urgente ? 'Sim' : 'Não') },
+                { header: 'Tipo de Urgência', width: 26, get: (d) => d.tipoUrgencia || '—' },
+            ],
+        },
+    };
+
+    const CFG_MANDADOS_NAOLIDOS = {
+        prefixo: 'projudi_mandadosnaolidos_',
+        mostrarSeVazio: true,
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
+        minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
+        usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
+        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        nomeArquivo: 'mandados_naolidos_projudi',
+        rotulos: { coletar: 'Extrair Mandados (Não Lidos)', coletarMais: 'Extrair mais (Mandados Não Lidos)', baixar: '⬇ Baixar Mandados (Não Lidos)' },
+        cabecalhos: CABECALHOS_MANDADO_XLSX,
+        larguras: LARGURAS_MANDADO_XLSX,
+        extrai: extrairLinhaMandado,
+        linha: LINHA_MANDADO_XLSX,
+        pdf: {
+            // Nome interno do relatório continua "Mandados Expedidos e Não Lidos" — a
+            // linha da capa unificada usa um rótulo diferente ("Mandados Pendentes de
+            // Leitura"), pedido explícito do usuário (ver linhasCartorio em gerarPDFConjunto).
+            titulo: 'Mandados Expedidos e Não Lidos',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
+            atosTitulo: 'Mandados expedidos e não lidos',
+            agingTitulo: 'Mandados por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos mandados expedidos e não lidos',
+            dataCampo: 'dataExpedicao',
+            dataTitulo: 'Expedição mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'oficial',
+            distribuicoes: [
+                { titulo: 'Mandados Expedidos e Não Lidos por Oficial', campo: 'oficial', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Processo', width: 32, get: (d) => d.processo },
+                { header: 'Oficial de Justiça', width: 32, get: (d) => d.oficial },
+                { header: 'Dt. Expedição', width: 20, get: (d) => d.dataExpedicao },
+                { header: 'Urgente', width: 12, get: (d) => (d.urgente ? 'Sim' : 'Não') },
+                { header: 'Tipo de Urgência', width: 26, get: (d) => d.tipoUrgencia || '—' },
+            ],
+        },
+    };
+
+    // Ordem das 3 fases dentro do único item de fila "mandados" — status do select
+    // codStatusCumprimentoCartorio em cada uma.
+    const FASES_MANDADOS = ['retorno', 'cumprimento', 'naolidos'];
+    function cfgMandadosPorFase(fase) {
+        if (fase === 'cumprimento') return CFG_MANDADOS_CUMPRIMENTO;
+        if (fase === 'naolidos') return CFG_MANDADOS_NAOLIDOS;
+        return CFG_MANDADOS_RETORNO;
+    }
+    function statusValorPorFase(fase) {
+        if (fase === 'cumprimento') return '6';
+        if (fase === 'naolidos') return '4';
+        return '13';
+    }
+    function proximaFaseMandados(fase) {
+        const idx = FASES_MANDADOS.indexOf(fase);
+        return (idx >= 0 && idx < FASES_MANDADOS.length - 1) ? FASES_MANDADOS[idx + 1] : null;
+    }
+    // Chave que persiste em qual fase (status) a automação de Mandados está, entre
+    // reloads de página — mesmo papel de CHAVE_FILA_MESES_TM para o Tempo Médio.
+    const CHAVE_MANDADOS_FASE = 'projudi_mandados_fase';
+
+    // Marca um dos 3 CFGs de Mandados como "coletado, zero registros" sem passar pelo
+    // coletor genérico — usado quando já se sabe de antemão que não há nada a coletar
+    // (contador zerado na tela de origem, ou tabela/buttonBar ausentes na tela de
+    // resultados) — mesmo padrão de "0 registros" já usado para Juntadas/Retorno/Conclusões
+    // (ver bloco "!buttonBar" em injetarBotoes).
+    function marcarColetaMandadosVazia(cfg) {
+        store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
+        store.setItem(cfg.prefixo + 'num_paginas', '1');
+        store.setItem(cfg.prefixo + 'coletado', '1');
+    }
+
+    // Fase 0 — painel "Para Realizar" (aba "Análise de Juntadas"): lê o contador de
+    // mandados aguardando análise de retorno e clica no link (sempre — mesmo com contador
+    // 0), porque só a partir da tela de resultados é possível trocar o filtro de status e
+    // seguir para as fases 2 e 3 (cumprimento pendente / não lidos), que não dependem
+    // desse contador (podem ter pendências mesmo com "aguardando retorno" zerado).
+    //
+    // O painel é carregado via AJAX depois do HTML inicial (mesma lição de Outros
+    // Cumprimentos) — espera ativa (poll a cada 500ms, teto de ~15s) até o contador
+    // aparecer, em vez de checar só uma vez e concluir "não encontrado" cedo demais.
+    function tratarFaseMandadosPendentes(tentativa) {
+        tentativa = tentativa || 0;
+        const span = document.getElementById('numeroMandadosAguardandoAnaliseRetorno');
+        const link = span && span.closest('a');
+        if (!span || !link) {
+            if (tentativa < 30) {
+                setTimeout(() => tratarFaseMandadosPendentes(tentativa + 1), 500);
+                return;
+            }
+            console.warn('[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando os 3 relatórios de Mandados');
+            store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
+            store.setItem(AUTO_ESTADO, 'coletando_mandados');
+            [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_NAOLIDOS].forEach(marcarColetaMandadosVazia);
+            avancarAutomacao(CFG_MANDADOS_RETORNO);
+            return;
+        }
+        store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
+        store.setItem(AUTO_ESTADO, 'coletando_mandados');
+        const n = parseInt((span.textContent || '0').trim(), 10) || 0;
+        console.log(`[Auto Projudi Mandados] contador de mandados aguardando retorno = ${n} — abrindo tela de resultados`);
+        if (n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
+        link.click();
+    }
+
+    // Chamado ao terminar a coleta de uma fase (via cfg.aoTerminarColeta, ver
+    // criarColetor/continuar) — troca o filtro de status e clica Filtrar para a próxima
+    // fase, ou (se já era a última) avança a fila de automação de verdade.
+    function avancarOuConcluirFaseMandados(faseAtual) {
+        const prox = proximaFaseMandados(faseAtual);
+        if (!prox) {
+            avancarAutomacao(CFG_MANDADOS_RETORNO); // relatorioPorCfg mapeia p/ o item "mandados" da fila
+            return;
+        }
+        store.setItem(CHAVE_MANDADOS_FASE, prox);
+        const sel = document.getElementById('codStatusCumprimentoCartorio');
+        const btn = document.getElementById('searchButton');
+        if (!sel || !btn) {
+            console.warn('[Auto Projudi Mandados] select de status ou botão Filtrar não encontrado ao avançar de fase — automação pode ficar parada nesta tela');
+            return;
+        }
+        sel.value = statusValorPorFase(prox);
+        console.log(`[Auto Projudi Mandados] fase "${faseAtual}" concluída — filtrando para fase "${prox}" (status=${sel.value}) e clicando Filtrar`);
+        setTimeout(() => btn.click(), 500);
+    }
+
+    // Gate chamado bem no início de injetarBotoes() quando a URL é a tela de resultados de
+    // Mandados. Cuida de dois casos que o fluxo genérico não trata sozinho: (a) o select de
+    // status ainda não reflete a fase esperada (correção defensiva — o valor deveria já vir
+    // certo do clique em Filtrar/no link da fase 0, mas trata o caso de sobra); (b) zero
+    // resultados nesta fase (sem tabela/buttonBar) — mesmo padrão "0 registros" das demais
+    // telas, mas sem sair da fila (avança só de fase, não do item). Retorna true quando
+    // tratou (o chamador não deve prosseguir com o fluxo genérico nesta passada), false
+    // quando não havia nada a fazer aqui (uso manual fora da automação, ou coleta normal —
+    // segue para detectarConfig()/criarColetor() como qualquer outro relatório).
+    function gateFaseMandados() {
+        const estadoAuto = store.getItem(AUTO_ESTADO);
+        if (estadoAuto !== 'coletando_mandados') return false;
+        const fase = store.getItem(CHAVE_MANDADOS_FASE) || 'retorno';
+        const statusEsperado = statusValorPorFase(fase);
+        const sel = document.getElementById('codStatusCumprimentoCartorio');
+        if (sel && sel.value !== statusEsperado) {
+            sel.value = statusEsperado;
+            const btn = document.getElementById('searchButton');
+            console.log(`[Auto Projudi Mandados] corrigindo filtro de status para ${statusEsperado} (fase=${fase}) e clicando Filtrar`);
+            setTimeout(() => { if (btn) btn.click(); }, 400);
+            return true;
+        }
+        const cfg = cfgMandadosPorFase(fase);
+        // Usa tabelaMandados() (busca pela tabela CERTA, pelo cabeçalho dela) em vez de
+        // "table.resultTable tbody tr" genérico — a página pode ter outra table.resultTable
+        // alheia (visto em produção: um widget não relacionado ficou visível junto com a
+        // tela de Mandados quando a fase tinha 0 resultados), e o genérico contaria linhas
+        // dessa tabela alheia como se fossem de Mandados, concluindo "não está vazio" por
+        // engano.
+        const tabela = tabelaMandados();
+        if (!document.querySelector('table.buttonBar td.buttons') && !(tabela && tabela.querySelector('tbody tr'))) {
+            if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
+            console.log(`[Auto Projudi Mandados] fase "${fase}" sem resultados — avançando`);
+            avancarOuConcluirFaseMandados(fase);
+            return true;
+        }
+        return false; // deixa o fluxo genérico (detectarConfig/criarColetor) coletar normalmente
+    }
+    CFG_MANDADOS_RETORNO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('retorno');
+    CFG_MANDADOS_CUMPRIMENTO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('cumprimento');
+    CFG_MANDADOS_NAOLIDOS.aoTerminarColeta = () => avancarOuConcluirFaseMandados('naolidos');
+
     function formularioApreensoes() {
         const form = document.getElementById('apreensaoForm');
         return form && form.querySelector('#idMotivoEncerramentoApreensaoBusca') ? form : null;
@@ -1573,6 +1936,12 @@
         function coletarPaginaAtual() {
             const atuacao = lerAtuacao();
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
+            // cfg.contextoExtra() (opcional) roda UMA VEZ por página, não por linha — usado
+            // por relatórios cuja ordem/presença de colunas muda entre telas (ex.: Mandados,
+            // ver mapaColunasMandado) e que por isso não podem extrair por índice fixo de
+            // td. cfg.extrai recebe o resultado como 3º argumento; relatórios que não
+            // definem contextoExtra simplesmente ignoram esse argumento extra.
+            const contexto = cfg.contextoExtra ? cfg.contextoExtra() : undefined;
             const dados = [];
             linhas.forEach(tr => {
                 // ":scope > td" (só filhos diretos) — não "td" puro, que também pega tds de
@@ -1581,28 +1950,32 @@
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
                 if (tds.length < cfg.minTds) return;
-                dados.push(cfg.extrai(tds, atuacao));
+                dados.push(cfg.extrai(tds, atuacao, contexto));
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             return dados;
         }
 
-        // Tamanho de página alvo para o seletor "estatisticaPageSizeOptions" (só existe na
-        // tela de resultados do Tempo Médio). 500 travava o site do Projudi — a tabela com
-        // 1000 <tr> (500 processos + linhas de detalhe) era pesada demais para o próprio
-        // Projudi renderizar/paginar. Com a busca agora feita mês a mês (bem menos
-        // registros por pesquisa — ver preencherEPesquisarTempoMedio), 100 já é seguro.
-        const TAMANHO_PAGINA_ALVO = '100';
-
+        // Tamanho de página alvo para o seletor de paginação da tela de resultados —
+        // configurável por relatório via cfg.pageSizeSelect = { name, valor } (ex.: Tempo
+        // Médio usa 'estatisticaPageSizeOptions'/100 — 500 travava o site do Projudi: a
+        // tabela com 1000 <tr>, 500 processos + linhas de detalhe, era pesada demais para
+        // o próprio Projudi renderizar/paginar; com a busca mês a mês, 100 já é seguro.
+        // Mandados usa 'cumprimentoCartorioMandadoPageSizeOptions'/500 — tela mais simples,
+        // sem linhas de detalhe por processo, aguenta o valor máximo). Relatórios sem
+        // cfg.pageSizeSelect simplesmente não mexem em nenhum seletor (comportamento
+        // anterior, preservado).
         function iniciar() {
-            // Antes de iniciar, ajusta a página para exibir TAMANHO_PAGINA_ALVO registros
-            // por vez (se essa opção existir no seletor). Quando o valor do select muda, o
-            // Projudi recarrega a página; o estado KEY_RODANDO já estará salvo e continuar()
-            // será chamado automaticamente ao reiniciar (bloco rodando && !obsoleta).
-            const sel = document.querySelector('select[name="estatisticaPageSizeOptions"]');
+            // Antes de iniciar, ajusta a página para exibir o tamanho configurado em
+            // cfg.pageSizeSelect (se houver e a opção existir no seletor). Quando o valor
+            // do select muda, o Projudi recarrega a página; o estado KEY_RODANDO já estará
+            // salvo e continuar() será chamado automaticamente ao reiniciar (bloco
+            // rodando && !obsoleta).
+            const pss = cfg.pageSizeSelect;
+            const sel = pss && document.querySelector(`select[name="${pss.name}"]`);
             if (sel) {
                 const opcoesDisponiveis = [...sel.options].map(o => o.value);
-                const alvo = opcoesDisponiveis.includes(TAMANHO_PAGINA_ALVO) ? TAMANHO_PAGINA_ALVO : null;
+                const alvo = opcoesDisponiveis.includes(pss.valor) ? pss.valor : null;
                 if (alvo && sel.value !== alvo) {
                     console.log(`[Projudi] alterando pageSize de ${sel.value} para ${alvo} — aguardando reload`);
                     store.setItem(KEY_RODANDO, '1');
@@ -1611,7 +1984,7 @@
                     sel.dispatchEvent(new Event('change', { bubbles: true }));
                     return;
                 }
-                if (!alvo) console.log(`[Projudi] opção ${TAMANHO_PAGINA_ALVO} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
+                if (!alvo) console.log(`[Projudi] opção ${pss.valor} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
             }
             console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
@@ -1661,6 +2034,13 @@
                     console.log('[Projudi TM] mês concluído — ainda restam meses na fila, buscando o próximo');
                     store.setItem(AUTO_ESTADO, 'ir_tempomedio');
                     setTimeout(passoAutomacao, 900);
+                } else if (typeof cfg.aoTerminarColeta === 'function') {
+                    // Gancho genérico para relatórios com múltiplas fases dentro do MESMO
+                    // item da fila (ex.: Mandados — status 13 -> 6 -> 4, ver
+                    // avancarOuConcluirFaseMandados) — em vez de avançar direto para o
+                    // próximo item da fila de automação, decide o que fazer a seguir
+                    // (trocar filtro e pesquisar de novo, ou só então avançar a fila).
+                    cfg.aoTerminarColeta();
                 } else {
                     avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
                 }
@@ -2104,16 +2484,22 @@
     const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
 
     // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha —
-    // o vermelho é sempre prioritário, nunca a faixa.
-    function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas) {
+    // o vermelho é sempre prioritário, nunca a faixa. rotuloPrioritario/rotuloNormal
+    // (opcionais) trocam o texto da legenda — usado por relatórios cujo campo
+    // "prioritario" representa outra coisa (ex.: Mandados usa "Urgentes"/"Não urgentes"
+    // em vez de "Prioritários"/"Normais" — ver p.rotuloPrioritarioLegenda/
+    // rotuloNormalLegenda em montarResumoGenerico).
+    function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas, rotuloPrioritario, rotuloNormal) {
+        rotuloPrioritario = rotuloPrioritario || 'Prioritários';
+        rotuloNormal = rotuloNormal || 'Normais';
         tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
         const legY = y + 10;
         doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
-        doc.text('Prioritários', x + 4, legY);
+        doc.text(rotuloPrioritario, x + 4, legY);
         const q2 = x + 28;
         doc.setFillColor(...COR.azul); doc.rect(q2, legY - 2.4, 3, 3, 'F');
-        doc.text('Normais', q2 + 4, legY);
+        doc.text(rotuloNormal, q2 + 4, legY);
 
         const topo = y + 15;
         const areaH = Math.max(6, h - 15);
@@ -2207,7 +2593,7 @@
             const cx = x + c.pos.col * (colW + gap);
             const cy = y + c.pos.row * (chartH + 10);
             const cw = c.pos.span === 2 ? w : colW;
-            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas);
+            if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
             else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
         });
     }
@@ -2268,7 +2654,7 @@
                 { titulo: p.atosTitulo, valor: String(sub.length), subs: [], acento: COR.azul },
             ];
             if (!p.semPrioridade) {
-                kpis.push({ titulo: 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
+                kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho });
             }
             if (p.mediaLabel) {
                 // Quando há mais de uma competência, a média diária do "Resumo geral" é a
@@ -2292,7 +2678,7 @@
                 const dias = Math.max(0, Math.floor((now - antigo.ts) / DIA_MS));
                 valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
                 subsAntigo = [
-                    `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                    `Processo ${reg[p.processoCampo] || ''}${reg.prioritario ? `  — ${p.sufixoPrioridade || 'PRIORITÁRIO'}` : ''}`,
                     reg[p.tipoCampo] || '',
                 ];
             }
@@ -2304,7 +2690,7 @@
             const chartsTodos = [
                 p.semPrioridade
                     ? { tipo: 'barras', span: 1, titulo: p.agingTitulo, itens: faixasPorPrioridade(sub, p.dataCampo, now).map(f => ({ label: f.label, valor: f.prioritarios + f.normais })), pagina2: false }
-                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false },
+                    : { tipo: 'faixas', span: 1, titulo: p.agingTitulo, faixas: faixasPorPrioridade(sub, p.dataCampo, now), pagina2: false, rotuloPrioritario: p.rotuloPrioritarioLegenda, rotuloNormal: p.rotuloNormalLegenda },
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
@@ -2398,11 +2784,19 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, p.tabelaTitulo || 'Tabela discriminada');
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, p.tabelaTitulo || 'Tabela discriminada');
         const tabInicioY = m + 8;
         const colunas = p.colunas;
         const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        // p.colunas[].width é só um PESO relativo, não milímetros — sem escalar pra soma
+        // = uw, tabelas com poucas colunas (ex.: Mandados, 4-5 colunas) sobravam com
+        // bastante espaço vazio à direita em vez de preencher a página (largura fixa em mm
+        // somando bem menos que a largura útil). Escala todas as colunas proporcionalmente
+        // pra a soma bater exatamente com a largura útil da página.
+        const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
+        const fatorLargura = somaLarguras > 0 ? uw / somaLarguras : 1;
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
         const idxProcesso = colunas.findIndex(c => /processo/i.test(c.header));
 
         // Opções comuns ao autoTable, reaproveitadas tanto no caminho de tabela única
@@ -2963,7 +3357,8 @@
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
-        const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS];
+        const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS,
+            CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_NAOLIDOS];
         // Seções com cfg.mostrarSeVazio (Suspensos, Audiências Pendentes) aparecem mesmo
         // com dados.length === 0, desde que já tenham sido coletadas (ver KEY_COLETADO/
         // foiColetado) — "zero pendências" é um dado, não um vazio a esconder.
@@ -3044,7 +3439,12 @@
             });
         }
         linhasCartorio.push(...itensCartorio.map(t => ({
-            nome: t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo,
+            nome: t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão'
+                // Pedido explícito do usuário: a linha da capa usa "Mandados Pendentes de
+                // Leitura", nome DIFERENTE do título interno do relatório ("Mandados
+                // Expedidos e Não Lidos", ver CFG_MANDADOS_NAOLIDOS.pdf.titulo).
+                : t.secao.cfgOriginal === CFG_MANDADOS_NAOLIDOS ? 'Mandados Pendentes de Leitura'
+                : t.rotulo,
             indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}`,
             detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
             situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
@@ -4520,6 +4920,17 @@
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
+        // As 3 telas de Mandados vêm ANTES de CFG_RETORNO de propósito: a coluna "Data
+        // retorno" da tabela de Mandados também casa com o regex (largo, só "/retorno/i")
+        // de CFG_RETORNO, então checar Mandados primeiro evita depender só da checagem
+        // extra que CFG_RETORNO.detecta ganhou por causa dessa colisão (defesa em
+        // profundidade — cada detecta() aqui deveria ser específico o bastante pra não
+        // precisar de ordem, mas ordem importa quando um deles é largo demais). As 3 telas
+        // de Mandados compartilham o mesmo cabeçalho entre si — distinguem-se pelo valor
+        // do select de status (ver detecta() de cada CFG_MANDADOS_*).
+        else if (CFG_MANDADOS_RETORNO.detecta(cab)) cfg = CFG_MANDADOS_RETORNO;
+        else if (CFG_MANDADOS_CUMPRIMENTO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO;
+        else if (CFG_MANDADOS_NAOLIDOS.detecta(cab)) cfg = CFG_MANDADOS_NAOLIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
@@ -4768,6 +5179,10 @@
     // estamos mesmo na página certa antes de considerar "0 registros" (ver injetarBotoes).
     function urlEsperadaRelatorio(navAlvo) {
         if (navAlvo === 'juntadas') return /analisarJuntada\.do/i;
+        // 'mandados' não entra aqui de propósito: a fase 0 fica na MESMA URL de Juntadas
+        // (analisarJuntada.do), então usar essa URL aqui faria o fallback "sem buttonBar
+        // = 0 registros" reagir também durante a fase 0 de Mandados — que tem seu próprio
+        // gate (ver tratarFaseMandadosPendentes/gateFaseMandados em injetarBotoes).
         if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
         if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
@@ -4872,12 +5287,40 @@
         // estado da automação como sinal de "estamos na tela certa, vale esperar o
         // conteúdo aparecer", delegando a espera de verdade pra
         // tratarPaginaOutrosCumprimentos().
+        // "mesaAnalista.do" sozinho (sem olhar o actionType, que fica na query string, não
+        // no pathname) casa com QUALQUER aba dessa tela — inclusive a de Mandados
+        // (actionType=listaAnaliseJuntadas), que usa a MESMA base de URL. Sem checar
+        // actionType=listaOutrosCumprimentos explicitamente, essa checagem interceptava a
+        // tela de Mandados por engano (a automação ficava ~15s esperando uma tabela
+        // "Cumprimento" que nunca ia aparecer ali, e a fase 0 de Mandados nunca rodava).
         const pareceTelaOutrosCumprimentos = temMarcadorOutrosCumprimentos()
-            || /mesaAnalista\.do/i.test(location.pathname)
+            || /actionType=listaOutrosCumprimentos/i.test(location.href)
             || estadoAutoNoInicio === 'coletando_outroscumprimentos'
             || estadoAutoNoInicio === 'preenchendo_outroscumprimentos';
         if (pareceTelaOutrosCumprimentos) {
             tratarPaginaOutrosCumprimentos();
+            return;
+        }
+
+        // Fase 0 de Mandados: painel "Para Realizar" da aba "Análise de Juntadas"
+        // (mesaAnalista.do?actionType=listaAnaliseJuntadas — NÃO é a mesma tela de
+        // Juntadas/Retorno, que ficam em analisarJuntada.do/conclusao.do; é o painel com
+        // vários contadores, incluindo "Mandados aguardando análise de retorno"). Só o
+        // estado da automação já é sinal suficiente pra tentar (evita depender de URL, que
+        // pode variar, e de conteúdo que ainda pode não ter carregado — mesma lição de
+        // Outros Cumprimentos); tratarFaseMandadosPendentes() espera ativamente o contador
+        // aparecer antes de decidir.
+        if (estadoAutoNoInicio === 'preenchendo_mandados') {
+            tratarFaseMandadosPendentes();
+            return;
+        }
+
+        // Tela de resultados de Mandados (as 3 fases, status 13/6/4): gateFaseMandados()
+        // cuida dos casos que o fluxo genérico não trata sozinho (correção de filtro fora
+        // de fase, zero resultados numa fase) — quando ela não tratou nada (uso manual, ou
+        // coleta normal em andamento), o fluxo genérico abaixo (detectarConfig/
+        // criarColetor) segue cuidando da paginação normalmente.
+        if (/cumprimentoCartorioMandado\.do/i.test(location.pathname) && gateFaseMandados()) {
             return;
         }
 
@@ -5316,13 +5759,30 @@
         // na tabela unificada do Cartório do PDF conjunto (ver linhasCartorio em
         // gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
+        // Mandados — UM item de fila, TRÊS relatórios internos (fases status 13 -> 6 -> 4,
+        // ver avancarOuConcluirFaseMandados). "cfg" aponta para a primeira fase (Retorno) —
+        // usado como cfg "representante" do item pelo código que assume um cfg só por
+        // item (ex. querColetarAuto em injetarBotoes); "cfgs" lista os três, usado onde o
+        // item precisa expandir para seus três prefixos de armazenamento (relatorioPorCfg,
+        // baixarPDFConjunto, limparTudoAutomacao, pularRelatorioAtual). precisaPreencher:
+        // true porque a fase 0 (leitura do contador na tela "Análise de Juntadas") precisa
+        // rodar antes de qualquer coleta, mesmo landing direto nos resultados depois.
+        { key: 'mandados', cfg: CFG_MANDADOS_RETORNO, cfgs: [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_NAOLIDOS], navAlvo: 'mandados', rotulo: 'Mandados', curto: 'Mandados', dominio: 'cartorio', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
-    function relatorioPorCfg(cfg) { return REPORTS_AUTOMACAO.find(r => r.cfg === cfg); }
+    // Considera tanto r.cfg (cfg "representante" do item) quanto r.cfgs (lista completa,
+    // ver item "mandados" em REPORTS_AUTOMACAO) — necessário porque avancarAutomacao()/
+    // querColetarAuto (em injetarBotoes) recebem qualquer uma das 3 CFGs de Mandados
+    // (Retorno/Cumprimento/NãoLidos) dependendo da fase em que a automação está, e todas
+    // precisam resolver para o mesmo item de fila ("mandados").
+    function relatorioPorCfg(cfg) {
+        return REPORTS_AUTOMACAO.find(r => r.cfg === cfg || (r.cfgs && r.cfgs.includes(cfg)));
+    }
+    function cfgsDoRelatorio(r) { return r.cfgs || [r.cfg]; }
 
     function lerFilaAutomacao() {
         try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
@@ -5454,6 +5914,14 @@
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
+        // A fase 0 de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
+        // conclusao.do, alcançadas por link direto) — é o painel "Para Realizar" da aba
+        // "Análise de Juntadas" (mesaAnalista.do?actionType=listaAnaliseJuntadas), que só
+        // se chega clicando na aba #tabItemprefix2 (mesmo padrão de Outros Cumprimentos:
+        // <a> sem href, precisa de clique de verdade — ver navegarAbaAnaliseJuntadas). O
+        // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
+        // painel (ver tratarFaseMandadosPendentes).
+        else if (alvo === 'mandados') return navegarAbaAnaliseJuntadas();
         else if (alvo === 'conclusoes') link = acharLinkMenuExcluindo(/conclusao\.do/i, /retorno/i);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
@@ -5512,6 +5980,37 @@
         return true;
     }
 
+    // Aba "Análise de Juntadas" (#tabItemprefix2) — mesma barra horizontal (#tabHorz) e
+    // mesmo problema de Outros Cumprimentos (#tabItemprefix3): o <a> não tem href, precisa
+    // de clique de verdade. É onde fica o painel "Para Realizar" com os contadores de
+    // Juntadas/Retorno/Mandados/etc — usado aqui só pela fase 0 de Mandados (Juntadas e
+    // Retorno de Conclusão continuam navegando pelo link direto de sempre, mais rápido).
+    function acharAbaAnaliseJuntadas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const porId = d.querySelector('#tabItemprefix2 a');
+            if (porId) return porId;
+        }
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            for (const a of candidatos) {
+                if (/^an[áa]lise\s+de\s+juntadas$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    function navegarAbaAnaliseJuntadas() {
+        const link = acharAbaAnaliseJuntadas();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: mandados (aba "Análise de Juntadas" ausente)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
     // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
     // (próximo relatório da fila, ou "ir_fim") e tenta avançar (o próprio frame do relatório
     // costuma ter o menu; senão o poll do painel assume).
@@ -5548,15 +6047,23 @@
         if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
 
         console.warn(`[Auto Projudi] usuário pulou a extração de "${rel.rotulo}" (estado="${estado}")`);
-        store.setItem(rel.cfg.prefixo + 'erro', '1');
-        store.setItem(rel.cfg.prefixo + 'coletado', '1');
-        store.removeItem(rel.cfg.prefixo + 'rodando');
+        // Item pode ter mais de um cfg (ver "mandados" — 3 fases internas): marca erro/
+        // coletado em todos, mesmo que só uma fase estivesse em andamento — os dados das
+        // fases não alcançadas ficam ausentes de qualquer forma (mostrarSeVazio faria o
+        // card aparecer com 0 sem o "erro"), então "erro" nos três deixa claro que a
+        // extração foi interrompida, não que essas fases genuinamente deram zero.
+        cfgsDoRelatorio(rel).forEach(cfg => {
+            store.setItem(cfg.prefixo + 'erro', '1');
+            store.setItem(cfg.prefixo + 'coletado', '1');
+            store.removeItem(cfg.prefixo + 'rodando');
+        });
         // Limpa o estado transitório de relatórios com fila própria — senão a próxima
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
         if (rel.key === 'tempomedio') store.removeItem(CHAVE_FILA_MESES_TM);
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
+        if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
 
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(key);
@@ -5653,7 +6160,7 @@
     }
 
     function limparTudoAutomacao() {
-        REPORTS_AUTOMACAO.map(r => r.cfg).forEach(c => {
+        REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
             store.removeItem(c.prefixo + 'num_paginas');
@@ -5673,6 +6180,7 @@
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
         limparEstadoTransitorioAR();
+        store.removeItem(CHAVE_MANDADOS_FASE);
         atualizarPainel();
     }
 
@@ -5686,7 +6194,7 @@
 
     function baixarPDFConjunto(somenteResumo) {
         const secoes = REPORTS_AUTOMACAO
-            .map(r => ({ dados: lerDadosDe(r.cfg.prefixo), cfg: r.cfg }))
+            .flatMap(r => cfgsDoRelatorio(r).map(cfg => ({ dados: lerDadosDe(cfg.prefixo), cfg })))
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
@@ -5722,7 +6230,7 @@
         const painel = document.getElementById('painel-automacao');
         if (!painel) return;
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
-        const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: lerDadosDe(r.cfg.prefixo).length }));
+        const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + lerDadosDe(cfg.prefixo).length, 0) }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
         const emCurso = estado !== 'inativo' && estado !== 'concluido';
         const travado = estado.startsWith('travado_');
