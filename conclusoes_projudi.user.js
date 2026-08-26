@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.7
+// @version      20.8
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1300,6 +1300,16 @@
         });
     }
 
+    // Indício rápido de que estamos na tela "Outros Cumprimentos" (Mesa do Magistrado) —
+    // só o <h4>BNMP</h4>, que já vem no HTML inicial da página. Ao contrário de
+    // paginaOutrosCumprimentos() (que exige as DUAS tabelas), este NÃO espera a tabela
+    // "Cumprimento" — ela é a que demora a aparecer (ver tratarPaginaOutrosCumprimentos).
+    // Usado só pra decidir SE vale a pena começar a esperar; a extração de verdade
+    // continua condicionada a paginaOutrosCumprimentos() === true.
+    function temMarcadorOutrosCumprimentos() {
+        return [...document.querySelectorAll('h4')].some(h => /^bnmp$/i.test((h.textContent || '').trim()));
+    }
+
     // Acha a tabela BNMP (a que vem logo depois do <h4>BNMP</h4>) e a tabela principal (a
     // que tem "Cumprimento" como primeiro cabeçalho) — nessa ordem, sem depender de índice
     // fixo entre as table.resultTable da página.
@@ -1468,12 +1478,25 @@
         setTimeout(() => aguardarOutrosCumprimentosProntoEExtrair(tentativa + 1, callback), 500);
     }
 
+    let coletaOutrosCumprimentosEmAndamento = false;
+
     // Ponto de entrada da coleta — chamado tanto pela automação quanto pelos botões
     // manuais. "callback" é opcional (usado pelo botão "Baixar PDF", que precisa esperar a
-    // extração terminar antes de ler os dados salvos).
+    // extração terminar antes de ler os dados salvos). Trava contra chamadas concorrentes
+    // (ex.: usuário clica em "Extrair" enquanto a automação já está esperando a tabela
+    // estabilizar) — sem isso, duas cadeias de setTimeout rodando em paralelo podiam
+    // sobrescrever uma a outra e avançar a automação duas vezes.
     function coletarOutrosCumprimentos(callback) {
+        if (coletaOutrosCumprimentosEmAndamento) {
+            console.log('[Projudi Outros Cumprimentos] coleta já em andamento — ignorando novo disparo');
+            return;
+        }
+        coletaOutrosCumprimentosEmAndamento = true;
         ultimaAssinaturaOutrosCump = null;
-        aguardarOutrosCumprimentosProntoEExtrair(0, callback);
+        aguardarOutrosCumprimentosProntoEExtrair(0, () => {
+            coletaOutrosCumprimentosEmAndamento = false;
+            if (callback) callback();
+        });
     }
 
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
@@ -4754,6 +4777,60 @@
         return null;
     }
 
+    // Espera a tabela "Cumprimento" (a maior, injetada via AJAX depois do HTML inicial —
+    // ver comentário em injetarBotoes) aparecer no DOM antes de seguir. Poll a cada 500ms,
+    // teto de ~15s (30 tentativas) como salvaguarda — depois disso desiste silenciosamente
+    // (loga um aviso), tratando como "essa tela não é Outros Cumprimentos de verdade" ou
+    // "carregamento travou/demorou demais".
+    function tratarPaginaOutrosCumprimentos(tentativa) {
+        tentativa = tentativa || 0;
+        if (!paginaOutrosCumprimentos()) {
+            if (tentativa >= 30) {
+                console.warn('[Projudi Outros Cumprimentos] a tabela "Cumprimento" não apareceu em ~15s — desistindo (tela pode ter mudado ou carregamento travou).');
+                return;
+            }
+            setTimeout(() => tratarPaginaOutrosCumprimentos(tentativa + 1), 500);
+            return;
+        }
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        if (estadoAtual === 'coletando_outroscumprimentos' || estadoAtual === 'preenchendo_outroscumprimentos') {
+            console.log('[Projudi Outros Cumprimentos] automação: extraindo o painel de contadores (sem preencher/pesquisar — a página já chega pronta)');
+            coletarOutrosCumprimentos();
+            return;
+        }
+        // Uso manual — injeta os botões (Extrair + Baixar PDF) logo após a segunda
+        // tabela (ou no fim do body, como último recurso), já que não há
+        // table.buttonBar nesta tela.
+        if (!document.getElementById('btn-outroscumprimentos-extrair')) {
+            const { tabelaPrincipal } = tabelasOutrosCumprimentos();
+            const ancora = (tabelaPrincipal && tabelaPrincipal.parentNode) || document.body;
+
+            const bExtrair = document.createElement('button');
+            bExtrair.id = 'btn-outroscumprimentos-extrair';
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê as duas tabelas de contadores exibidas e gera o resumo (sem paginação, sem pesquisa)';
+            bExtrair.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.coletar;
+            bExtrair.onclick = () => coletarOutrosCumprimentos();
+            ancora.appendChild(bExtrair);
+
+            const bBaixar = document.createElement('button');
+            bBaixar.id = 'btn-outroscumprimentos-baixar';
+            bBaixar.type = 'button';
+            bBaixar.className = 'projudi-btn';
+            bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
+            bBaixar.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.baixar;
+            bBaixar.onclick = () => {
+                coletarOutrosCumprimentos(() => {
+                    const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
+                    gerarPDFOutrosCumprimentos(dados);
+                });
+            };
+            ancora.appendChild(bBaixar);
+        }
+    }
+
     function injetarBotoes() {
         console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${store.getItem(AUTO_ESTADO)}`);
 
@@ -4761,43 +4838,17 @@
         // table.buttonBar — diferente de todas as outras telas de relatório) — tratada
         // ANTES do "if (!buttonBar)" abaixo, que senão trataria essa tela como "0
         // registros" e nunca chamaria coletarOutrosCumprimentos().
-        if (paginaOutrosCumprimentos()) {
-            const estadoAtual = store.getItem(AUTO_ESTADO);
-            if (estadoAtual === 'coletando_outroscumprimentos' || estadoAtual === 'preenchendo_outroscumprimentos') {
-                console.log('[Projudi Outros Cumprimentos] automação: extraindo o painel de contadores (sem preencher/pesquisar — a página já chega pronta)');
-                coletarOutrosCumprimentos();
-                return;
-            }
-            // Uso manual — injeta os botões (Extrair + Baixar PDF) logo após a segunda
-            // tabela (ou no fim do body, como último recurso), já que não há
-            // table.buttonBar nesta tela.
-            if (!document.getElementById('btn-outroscumprimentos-extrair')) {
-                const { tabelaPrincipal } = tabelasOutrosCumprimentos();
-                const ancora = (tabelaPrincipal && tabelaPrincipal.parentNode) || document.body;
-
-                const bExtrair = document.createElement('button');
-                bExtrair.id = 'btn-outroscumprimentos-extrair';
-                bExtrair.type = 'button';
-                bExtrair.className = 'projudi-btn';
-                bExtrair.title = 'Lê as duas tabelas de contadores exibidas e gera o resumo (sem paginação, sem pesquisa)';
-                bExtrair.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.coletar;
-                bExtrair.onclick = () => coletarOutrosCumprimentos();
-                ancora.appendChild(bExtrair);
-
-                const bBaixar = document.createElement('button');
-                bBaixar.id = 'btn-outroscumprimentos-baixar';
-                bBaixar.type = 'button';
-                bBaixar.className = 'projudi-btn';
-                bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
-                bBaixar.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.baixar;
-                bBaixar.onclick = () => {
-                    coletarOutrosCumprimentos(() => {
-                        const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
-                        gerarPDFOutrosCumprimentos(dados);
-                    });
-                };
-                ancora.appendChild(bBaixar);
-            }
+        //
+        // injetarBotoes() só roda UMA VEZ, no bootstrap da página (ver o fim do arquivo)
+        // — mas a tabela "Cumprimento" (a maior, ~34 tipos) só existe no DOM depois de um
+        // tempo (é injetada via AJAX, não só preenchida — ver tabelasOutrosCumprimentos).
+        // Se essa checagem exigisse paginaOutrosCumprimentos() (as DUAS tabelas) na hora
+        // do bootstrap, a tabela nunca teria chance de aparecer: essa função não roda de
+        // novo depois. Por isso usa o indício mais fraco (só o <h4>BNMP</h4>, que já vem
+        // pronto) pra decidir SE vale a pena começar a esperar, e delega a espera de
+        // verdade pra tratarPaginaOutrosCumprimentos().
+        if (temMarcadorOutrosCumprimentos()) {
+            tratarPaginaOutrosCumprimentos();
             return;
         }
 
