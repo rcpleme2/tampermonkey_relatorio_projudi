@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.12
+// @version      20.13
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1420,22 +1420,33 @@
         store.setItem(cfg.prefixo + 'coletado', '1');
     }
 
-    // Fase 0 — tela "Análise de Juntadas": lê o contador de mandados aguardando análise de
-    // retorno e clica no link (sempre — mesmo com contador 0), porque só a partir da tela
-    // de resultados é possível trocar o filtro de status e seguir para as fases 2 e 3
-    // (cumprimento pendente / não lidos), que não dependem desse contador (podem ter
-    // pendências mesmo com "aguardando retorno" zerado).
-    function tratarFaseMandadosPendentes() {
+    // Fase 0 — painel "Para Realizar" (aba "Análise de Juntadas"): lê o contador de
+    // mandados aguardando análise de retorno e clica no link (sempre — mesmo com contador
+    // 0), porque só a partir da tela de resultados é possível trocar o filtro de status e
+    // seguir para as fases 2 e 3 (cumprimento pendente / não lidos), que não dependem
+    // desse contador (podem ter pendências mesmo com "aguardando retorno" zerado).
+    //
+    // O painel é carregado via AJAX depois do HTML inicial (mesma lição de Outros
+    // Cumprimentos) — espera ativa (poll a cada 500ms, teto de ~15s) até o contador
+    // aparecer, em vez de checar só uma vez e concluir "não encontrado" cedo demais.
+    function tratarFaseMandadosPendentes(tentativa) {
+        tentativa = tentativa || 0;
         const span = document.getElementById('numeroMandadosAguardandoAnaliseRetorno');
         const link = span && span.closest('a');
-        store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
-        store.setItem(AUTO_ESTADO, 'coletando_mandados');
         if (!span || !link) {
-            console.warn('[Auto Projudi Mandados] contador/link de mandados aguardando retorno não encontrado nesta tela — pulando os 3 relatórios de Mandados');
+            if (tentativa < 30) {
+                setTimeout(() => tratarFaseMandadosPendentes(tentativa + 1), 500);
+                return;
+            }
+            console.warn('[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando os 3 relatórios de Mandados');
+            store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
+            store.setItem(AUTO_ESTADO, 'coletando_mandados');
             [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_NAOLIDOS].forEach(marcarColetaMandadosVazia);
             avancarAutomacao(CFG_MANDADOS_RETORNO);
             return;
         }
+        store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
+        store.setItem(AUTO_ESTADO, 'coletando_mandados');
         const n = parseInt((span.textContent || '0').trim(), 10) || 0;
         console.log(`[Auto Projudi Mandados] contador de mandados aguardando retorno = ${n} — abrindo tela de resultados`);
         if (n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
@@ -5180,12 +5191,15 @@
             return;
         }
 
-        // Fase 0 de Mandados: tela "Análise de Juntadas" (mesma de Juntadas/Retorno), mas
-        // com a automação esperando especificamente por Mandados — lê o contador e decide
-        // (ver tratarFaseMandadosPendentes). Precisa vir ANTES do fluxo normal de
-        // Juntadas/Retorno dessa mesma página, senão a automação tentaria coletar
-        // Juntadas por engano.
-        if (/analisarJuntada\.do/i.test(location.pathname) && estadoAutoNoInicio === 'preenchendo_mandados') {
+        // Fase 0 de Mandados: painel "Para Realizar" da aba "Análise de Juntadas"
+        // (mesaAnalista.do?actionType=listaAnaliseJuntadas — NÃO é a mesma tela de
+        // Juntadas/Retorno, que ficam em analisarJuntada.do/conclusao.do; é o painel com
+        // vários contadores, incluindo "Mandados aguardando análise de retorno"). Só o
+        // estado da automação já é sinal suficiente pra tentar (evita depender de URL, que
+        // pode variar, e de conteúdo que ainda pode não ter carregado — mesma lição de
+        // Outros Cumprimentos); tratarFaseMandadosPendentes() espera ativamente o contador
+        // aparecer antes de decidir.
+        if (estadoAutoNoInicio === 'preenchendo_mandados') {
             tratarFaseMandadosPendentes();
             return;
         }
@@ -5789,10 +5803,14 @@
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
-        // Mesma tela "Análise de Juntadas" — a fase 0 de Mandados lê o contador de
-        // "Mandados aguardando análise de retorno" e clica no link específico dali (ver
-        // tratarFaseMandadosPendentes), então a navegação inicial é idêntica à de Juntadas.
-        else if (alvo === 'mandados') link = acharLinkMenu(/analisarJuntada\.do/i, null);
+        // A fase 0 de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
+        // conclusao.do, alcançadas por link direto) — é o painel "Para Realizar" da aba
+        // "Análise de Juntadas" (mesaAnalista.do?actionType=listaAnaliseJuntadas), que só
+        // se chega clicando na aba #tabItemprefix2 (mesmo padrão de Outros Cumprimentos:
+        // <a> sem href, precisa de clique de verdade — ver navegarAbaAnaliseJuntadas). O
+        // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
+        // painel (ver tratarFaseMandadosPendentes).
+        else if (alvo === 'mandados') return navegarAbaAnaliseJuntadas();
         else if (alvo === 'conclusoes') link = acharLinkMenuExcluindo(/conclusao\.do/i, /retorno/i);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
@@ -5847,6 +5865,37 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
+    // Aba "Análise de Juntadas" (#tabItemprefix2) — mesma barra horizontal (#tabHorz) e
+    // mesmo problema de Outros Cumprimentos (#tabItemprefix3): o <a> não tem href, precisa
+    // de clique de verdade. É onde fica o painel "Para Realizar" com os contadores de
+    // Juntadas/Retorno/Mandados/etc — usado aqui só pela fase 0 de Mandados (Juntadas e
+    // Retorno de Conclusão continuam navegando pelo link direto de sempre, mais rápido).
+    function acharAbaAnaliseJuntadas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const porId = d.querySelector('#tabItemprefix2 a');
+            if (porId) return porId;
+        }
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            for (const a of candidatos) {
+                if (/^an[áa]lise\s+de\s+juntadas$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    function navegarAbaAnaliseJuntadas() {
+        const link = acharAbaAnaliseJuntadas();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: mandados (aba "Análise de Juntadas" ausente)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
         link.click();
         return true;
     }
