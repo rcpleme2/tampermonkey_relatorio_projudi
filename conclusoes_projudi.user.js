@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.31
+// @version      20.32
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1533,10 +1533,14 @@
             processoCampo: 'processo',
             tipoCampo: 'oficial',
             // SEM gráfico de distribuição por oficial (pedido do usuário) — o resumo desse
-            // relatório troca o gráfico por uma TABELA Oficial/Total/Lidos/Não Lidos, que
-            // cruza duas dimensões e por isso foge do mecanismo genérico de distribuições
-            // (só conta ocorrências de UM campo). Ver montarResumoMandadosCumprimento.
-            distribuicoes: [],
+            // relatório troca esse gráfico por uma TABELA Oficial/Total/Lidos/Não Lidos,
+            // que cruza duas dimensões e por isso foge do mecanismo genérico de
+            // distribuições (só conta ocorrências de UM campo). Ver
+            // montarResumoMandadosCumprimento. O gráfico por Natureza do Mandado continua
+            // normal (uma dimensão só), mesmo padrão dos demais relatórios de Mandados.
+            distribuicoes: [
+                { titulo: 'Mandados Pendentes de Cumprimento por Natureza', campo: 'natureza', topN: 12 },
+            ],
             colunas: [
                 { header: 'Processo', width: 26, get: (d) => d.processo },
                 { header: 'Oficial de Justiça', width: 26, get: (d) => d.oficial },
@@ -1593,6 +1597,15 @@
     // ao concluir "naolidos" (a segunda), avancarOuConcluirFaseMandados mescla as duas no
     // relatório final antes de seguir para "decurso" (ver mesclarMandadosCumprimento).
     const FASES_MANDADOS = ['retorno', 'cumprimento', 'naolidos', 'decurso'];
+    // Rótulo de cada fase pro status do painel (ver atualizarPainel) — independente de
+    // cfgMandadosPorFase, porque "cumprimento"/"naolidos" resolvem pra configs só de
+    // coleta interna (sem .pdf).
+    const ROTULOS_FASE_MANDADOS = {
+        retorno: 'Aguardando Análise de Retorno',
+        cumprimento: 'Aguardando Cumprimento (lidos)',
+        naolidos: 'Expedido e Não Lido',
+        decurso: 'Aguardando Análise de Decurso de Prazo',
+    };
     function cfgMandadosPorFase(fase) {
         if (fase === 'cumprimento') return CFG_MANDADOS_CUMPRIMENTO_LIDO;
         if (fase === 'naolidos') return CFG_MANDADOS_CUMPRIMENTO_NAOLIDO;
@@ -3247,13 +3260,21 @@
         const agora = new Date();
         const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 
+        const agoraTs = Date.now();
         const porOficial = new Map();
         dados.forEach(d => {
             const nome = (d.oficial || '').trim() || '(sem oficial)';
-            if (!porOficial.has(nome)) porOficial.set(nome, { total: 0, lidos: 0, naoLidos: 0 });
+            if (!porOficial.has(nome)) porOficial.set(nome, { total: 0, lidos: 0, naoLidos: 0, maisAntigoTs: null, maisAntigoStr: '' });
             const o = porOficial.get(nome);
             o.total += 1;
             if (d.lido) o.lidos += 1; else o.naoLidos += 1;
+            // Mandado mais antigo em posse do oficial — pouco importa se lido ou não
+            // (pedido do usuário): olha a expedição de TODOS os mandados dele.
+            const ts = parseDataBR(d.dataExpedicao);
+            if (ts != null && (o.maisAntigoTs == null || ts < o.maisAntigoTs)) {
+                o.maisAntigoTs = ts;
+                o.maisAntigoStr = d.dataExpedicao;
+            }
         });
         const linhas = [...porOficial.entries()]
             .map(([oficial, c]) => ({ oficial, ...c }))
@@ -3281,8 +3302,12 @@
                 { header: 'Total', dataKey: 'total' },
                 { header: 'Lidos', dataKey: 'lidos' },
                 { header: 'Não Lidos', dataKey: 'naoLidos' },
+                { header: 'Mandado Mais Antigo', dataKey: 'maisAntigo' },
             ],
-            body: linhas.map(l => ({ oficial: l.oficial, total: String(l.total), lidos: String(l.lidos), naoLidos: String(l.naoLidos) })),
+            body: linhas.map(l => ({
+                oficial: l.oficial, total: String(l.total), lidos: String(l.lidos), naoLidos: String(l.naoLidos),
+                maisAntigo: l.maisAntigoStr || '—',
+            })),
             startY: hy,
             margin: { left: m, right: m, bottom: 14 },
             theme: 'grid',
@@ -3292,6 +3317,19 @@
             columnStyles: {
                 oficial: { fontStyle: 'bold', textColor: COR.tinta },
                 total: { halign: 'right' }, lidos: { halign: 'right' }, naoLidos: { halign: 'right' },
+                maisAntigo: { halign: 'right' },
+            },
+            // Data do mandado mais antigo em posse do oficial, colorida pela idade — preto
+            // até 60 dias, amarelo de 60 a 90, vermelho a partir de 90 (pedido do usuário;
+            // não importa se lido ou não lido, olha todos os mandados do oficial).
+            didParseCell: (data) => {
+                if (data.section !== 'body' || data.column.dataKey !== 'maisAntigo') return;
+                const linha = linhas[data.row.index];
+                if (!linha || linha.maisAntigoTs == null) return;
+                const dias = Math.floor((agoraTs - linha.maisAntigoTs) / DIA_MS);
+                if (dias > 90) { data.cell.styles.textColor = COR.vermelho; data.cell.styles.fontStyle = 'bold'; }
+                else if (dias > 60) { data.cell.styles.textColor = COR.ambar; data.cell.styles.fontStyle = 'bold'; }
+                else data.cell.styles.textColor = COR.tinta;
             },
         });
         desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
@@ -3756,11 +3794,23 @@
             .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo)));
 
         if (itensMandados.length) {
-            // Indicador do grupo "Mandados": soma dos pendentes das 3 filhas — faz sentido
-            // somar aqui porque todas contam a MESMA unidade (mandados pendentes de alguma
-            // análise/cumprimento), diferente do grupo "Audiências" abaixo.
-            const totalMandados = itensMandados.reduce((s, t) => s + t.pendentes, 0);
-            linhasCartorio.push(linhaGrupo('Mandados', `${totalMandados} pendente(s)`));
+            // Indicador do grupo "Mandados" (pedido do usuário): em vez de um total único
+            // somando tudo, separa por ONDE a pendência está — "aguarda cumprimento"
+            // (Cumprimento, já unificado lido+não lido — está com o oficial de justiça) x
+            // "pendente no cartório" (Retorno + Decurso — ainda depende de análise do
+            // próprio cartório, não do oficial) — e por urgência (normal x urgente; não
+            // usa mais "prioritário", que era o rótulo genérico de outros relatórios,
+            // Mandados usa "urgente" desde o começo — ver rotuloPrioridade* de cada CFG).
+            const itemCumprimento = itensMandados.find(t => t.secao.cfgOriginal === CFG_MANDADOS_CUMPRIMENTO);
+            const itensCartorioMandados = itensMandados.filter(t => t.secao.cfgOriginal !== CFG_MANDADOS_CUMPRIMENTO); // Retorno + Decurso
+            const pendCumprimento = itemCumprimento ? itemCumprimento.pendentes : 0;
+            const pendCartorioMandados = itensCartorioMandados.reduce((s, t) => s + t.pendentes, 0);
+            const totalMandados = pendCumprimento + pendCartorioMandados;
+            const totalUrgentesMandados = itensMandados.reduce((s, t) => s + t.prioritarios, 0);
+            const totalNormaisMandados = totalMandados - totalUrgentesMandados;
+            linhasCartorio.push(linhaGrupo('Mandados',
+                `${pendCumprimento} aguarda cumprimento · ${pendCartorioMandados} pendente(s) no cartório · `
+                + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)`));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
@@ -6619,14 +6669,18 @@
                     const prog = lerProgressoAR();
                     if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} usuário(s))`;
                 }
-                // Mandados são 3 relatórios encadeados num único item de fila (status
-                // 13 -> 6 -> 4, mesma tela) — sem indicar a fase, "Coletando Mandados…"
-                // fica parado no mesmo texto por bastante tempo, sem dar pra saber em
-                // qual dos 3 está.
+                // Mandados são 4 fases encadeadas num único item de fila (status
+                // 13 -> 6 -> 4 -> 8, mesma tela) — sem indicar a fase, "Coletando
+                // Mandados…" fica parado no mesmo texto por bastante tempo, sem dar pra
+                // saber em qual das 4 está. Rótulo próprio por fase (NÃO
+                // cfgMandadosPorFase(fase).pdf.titulo — as fases "cumprimento"/"naolidos"
+                // resolvem pra CFG_MANDADOS_CUMPRIMENTO_LIDO/NAOLIDO, que são configs só
+                // de coleta INTERNA, sem `.pdf` — ler `.pdf.titulo` delas lançava
+                // exceção e derrubava a atualização do painel inteira nessas duas fases).
                 if (chave === 'mandados') {
                     const fase = store.getItem(CHAVE_MANDADOS_FASE);
-                    const cfgFase = fase && cfgMandadosPorFase(fase);
-                    if (cfgFase) txt += ` — fase: <strong>${cfgFase.pdf.titulo}</strong>`;
+                    const rotuloFase = ROTULOS_FASE_MANDADOS[fase];
+                    if (rotuloFase) txt += ` — fase: <strong>${rotuloFase}</strong>`;
                 }
                 return txt;
             }
