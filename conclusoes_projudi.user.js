@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.18
+// @version      20.19
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -733,7 +733,7 @@
     // independente de quantas expansões estão em voo ao mesmo tempo. O tamanho do lote é
     // um meio-termo: grande o bastante para acelerar de verdade, pequeno o bastante para
     // não sobrecarregar o Projudi nem estourar o tempo de resposta de uma leva só.
-    const TAMANHO_LOTE_EXPANSAO_AD = 15;
+    const TAMANHO_LOTE_EXPANSAO_AD = 30;
 
     async function expandirLoteDeLinhas(lote) {
         lote.forEach(linha => {
@@ -1005,7 +1005,15 @@
         };
     }
 
+    const CHAVE_ASSINATURA_ANTERIOR_AR = 'projudi_audienciasrealizadas_assinatura_anterior';
+
     function submitAR(form) {
+        // Guarda o que está na tela ANTES de pesquisar — usado depois por
+        // aguardarResultadoAREEstabilizarEProcessar pra exigir que o resultado MUDE em
+        // relação a isso antes de considerar "estabilizado" (ver comentário lá). Precisa
+        // ir em localStorage, não uma variável do módulo — se a pesquisa navegar pra uma
+        // página nova de verdade, uma variável JS comum se perderia no reload.
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_AR, assinaturaResultadoAR());
         const btn = form.querySelector('#searchButton');
         setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1200);
     }
@@ -1059,6 +1067,59 @@
         setUsuarioAR(form, prox.value);
         store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'usuario', value: prox.value, label: prox.label }));
         submitAR(form);
+    }
+
+    // Assinatura do resultado atualmente exibido — usada só pra detectar quando a tabela
+    // "parou de mudar" (ver aguardarResultadoAREEstabilizarEProcessar), não tem outro uso.
+    function assinaturaResultadoAR() {
+        return `${lerTotalRealizadasAR()}|${JSON.stringify(lerExtrasAR())}`;
+    }
+    let ultimaAssinaturaAR = null;
+
+    // A tabela de totais desta tela é preenchida via AJAX depois do HTML inicial da
+    // página (mesma lição já aprendida em Outros Cumprimentos/Mandados) — processar o
+    // resultado assim que a página "termina" de carregar pegava valores ainda da consulta
+    // ANTERIOR (o usuário via números certos na tela um instante depois, mas o script já
+    // tinha lido e registrado o valor desatualizado — o sintoma relatado: "o script repete
+    // valores, mesmo a tela não mostrando valores idênticos").
+    //
+    // Só comparar duas leituras seguidas não basta: se o valor ANTIGO ficar parado na tela
+    // por duas checagens (poll de 500ms) antes do AJAX realmente atualizar, o algoritmo
+    // "estabiliza" cedo demais com o valor errado (bug encontrado escrevendo o teste desta
+    // correção — teste_ar_estabilizacao.js). Por isso exige TAMBÉM que o valor tenha
+    // MUDADO em relação ao que estava na tela antes desta pesquisa começar (ver
+    // CHAVE_ASSINATURA_ANTERIOR_AR/submitAR) — só depois disso passa a valer a checagem de
+    // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
+    // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
+    // caso raro em que o valor novo coincide por acaso com o antigo).
+    function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
+        tentativa = tentativa || 0;
+        const temTabela = !!document.querySelector('table.resultTable');
+        if (!temTabela) {
+            if (tentativa >= 30) {
+                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+                const form = formularioAudienciasRealizadas();
+                if (form) submitAR(form);
+                return;
+            }
+            setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
+            return;
+        }
+        const assinaturaAtual = assinaturaResultadoAR();
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
+        const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
+        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaAR) {
+            console.log(`[Projudi Audiências Realizadas] resultado estável na tentativa ${tentativa} — processando`);
+            processarResultadoAudienciasRealizadas();
+            return;
+        }
+        if (tentativa >= 30) {
+            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+            processarResultadoAudienciasRealizadas();
+            return;
+        }
+        ultimaAssinaturaAR = assinaturaAtual;
+        setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
     }
 
     // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
@@ -5523,12 +5584,22 @@
         // ver iniciarBuscaAudienciasRealizadas/processarResultadoAudienciasRealizadas.
         if (formularioAudienciasRealizadas()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
-            const temResultado = !!document.querySelector('table.resultTable');
-            if (estadoAtual === 'preenchendo_audienciasrealizadas' || estadoAtual === 'coletando_audienciasrealizadas') {
-                if (temResultado) processarResultadoAudienciasRealizadas();
-                else iniciarBuscaAudienciasRealizadas();
+            // 'preenchendo_...' é só "ainda vou pesquisar" (nunca tem resultado nenhum
+            // ainda de propósito) — dispara a pesquisa direto, sem checar tabela.
+            // 'coletando_...' é "esperando o resultado de uma pesquisa que já disparei" —
+            // aí sim precisa esperar a tabela aparecer E estabilizar antes de ler (ver
+            // aguardarResultadoAREEstabilizarEProcessar) — checar só "existe tabela"
+            // pegava valores da pesquisa ANTERIOR, ainda não substituídos pelo AJAX.
+            if (estadoAtual === 'preenchendo_audienciasrealizadas') {
+                iniciarBuscaAudienciasRealizadas();
                 return;
             }
+            if (estadoAtual === 'coletando_audienciasrealizadas') {
+                ultimaAssinaturaAR = null;
+                aguardarResultadoAREEstabilizarEProcessar(0);
+                return;
+            }
+            const temResultado = !!document.querySelector('table.resultTable');
             if (!temResultado) {
                 if (!mostrarBotoesIndividuais()) return;
                 const bPreencher = document.createElement('button');
@@ -5760,7 +5831,7 @@
         // Primeiro item específico da categoria Crime (ver CATEGORIAS_PAINEL/
         // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
         // do Cível-Geral, só aparece na seção própria da aba Crime.
-        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Audiências', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
+        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Aud. Termo Pendentes', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Segundo item específico do Crime — resumo + tabela da Pauta de Horários (ver
         // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
         // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
@@ -6422,7 +6493,7 @@
             return `
                 <div class="pa-group">
                     <p class="pa-group-lbl">${g.rotulo}</p>
-                    ${itens}${itemAtivos}
+                    ${itemAtivos}${itens}
                 </div>`;
         }).join('');
         const montarContagem = (catId) => itensVisiveis(catId).map(r => `
@@ -6511,8 +6582,17 @@
                 store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
             };
         }
-        painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
-        painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
+        // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
+        // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
+        // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
+        // marcar/desmarcar tudo precisa sincronizar o localStorage manualmente, senão o
+        // checkbox mostra um estado que não é o que fica salvo (some ao recarregar).
+        function marcarDesmarcarTudo(valor) {
+            painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
+            if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+        }
+        painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
+        painel.querySelector('#pa-desmarcar-tudo').onclick = () => marcarDesmarcarTudo(false);
         painel.querySelector('.pa-btn-colapsar').onclick = () => {
             const body = painel.querySelector('.pa-body');
             const btn = painel.querySelector('.pa-btn-colapsar');
