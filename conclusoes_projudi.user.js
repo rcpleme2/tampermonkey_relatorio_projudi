@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.19
+// @version      20.20
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5831,15 +5831,22 @@
         // Primeiro item específico da categoria Crime (ver CATEGORIAS_PAINEL/
         // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
         // do Cível-Geral, só aparece na seção própria da aba Crime.
-        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Aud. Termo Pendentes', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
+        // rotuloChecklist (opcional): texto mostrado SÓ no checklist do painel, ao lado do
+        // checkbox — quando o item está dentro de um subgrupo (ver "subgrupo" abaixo), o
+        // subtítulo do subgrupo já deixa o contexto claro ("AUDIÊNCIAS" acima de
+        // "Pendentes"/"Designadas"/"Realizadas"), então repetir "Audiências" em cada linha
+        // é redundante. Sem rotuloChecklist, o checklist cai em "rotulo" (usado em todo o
+        // resto — capa, mensagens de status, diálogo de pular etc. — que continuam com o
+        // nome completo, sem ambiguidade fora do contexto visual do subgrupo).
+        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   rotuloChecklist: 'Pendentes', curto: 'Aud. Termo', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Segundo item específico do Crime — resumo + tabela da Pauta de Horários (ver
         // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
         // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
-        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
+        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', rotuloChecklist: 'Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Terceiro item específico do Crime — totais de Estatísticas de Audiência, geral e
         // por usuário (ver iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas).
         // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
-        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
+        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', rotuloChecklist: 'Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Quarto item específico do Crime — apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
@@ -6347,6 +6354,15 @@
                     const prog = lerProgressoAR();
                     if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} usuário(s))`;
                 }
+                // Mandados são 3 relatórios encadeados num único item de fila (status
+                // 13 -> 6 -> 4, mesma tela) — sem indicar a fase, "Coletando Mandados…"
+                // fica parado no mesmo texto por bastante tempo, sem dar pra saber em
+                // qual dos 3 está.
+                if (chave === 'mandados') {
+                    const fase = store.getItem(CHAVE_MANDADOS_FASE);
+                    const cfgFase = fase && cfgMandadosPorFase(fase);
+                    if (cfgFase) txt += ` — fase: <strong>${cfgFase.pdf.titulo}</strong>`;
+                }
                 return txt;
             }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
@@ -6454,7 +6470,7 @@
             const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
             return `
                     <label class="${classeItem}">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}${seletorPeriodo}
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -6777,9 +6793,12 @@
             display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
             margin-bottom: 12px; padding: 8px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px;
         }
-        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; }
-        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; }
-        #painel-automacao .pa-count .l { color: #52514E; }
+        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; min-width: 0; }
+        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; flex-shrink: 0; }
+        /* min-width:0 (no pai) + overflow/nowrap aqui — sem isso, um rótulo comprido
+           (ex.: "Aud. Termo Pendentes") quebrava linha dentro da célula do grid, jogando
+           o número pra fora da primeira linha em vez de truncar com "…" */
+        #painel-automacao .pa-count .l { color: #52514E; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         #painel-automacao .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl {
@@ -6788,8 +6807,11 @@
         }
         #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
         #painel-automacao .pa-group-lbl.especifico { color: #3A5A7D; }
+        /* margin-left 0 (não 14px) + text-align:left explícito — o cabeçalho do subgrupo
+           (ex.: "AUDIÊNCIAS") fica alinhado à mesma margem esquerda dos demais itens do
+           grupo, não recuado/deslocado do resto da lista. */
         #painel-automacao .pa-subgroup-lbl {
-            font-size: .68em; font-weight: 600; color: #82807A; margin: 4px 0 2px 14px;
+            font-size: .68em; font-weight: 600; color: #82807A; margin: 4px 0 2px 0; text-align: left;
             text-transform: uppercase; letter-spacing: .02em;
         }
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
