@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.34
+// @version      20.35
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -542,6 +542,61 @@
                 { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
             ],
         },
+    };
+
+    // Relatório de Processos Suspensos por PRAZO DETERMINADO — MESMA tela/endpoint do
+    // CFG_SUSPENSOS acima (processoBuscaSuspenso.do), mas alcançada por um caminho
+    // diferente: em vez do número/link direto da página inicial (que já vai pronto pra
+    // "Tempo Indeterminado"), aqui se navega até uma TELA DE FILTROS
+    // (processoBuscaSuspensoForm) e clica em Pesquisar com os filtros padrão da tela —
+    // que trazem AMBOS os tipos (prazo determinado e indeterminado) misturados. A tabela
+    // de resultado nesse caminho tem uma coluna a mais que a de CFG_SUSPENSOS ("Fim
+    // Suspensão"), usada tanto para reconhecer a tela (ver detecta) quanto para filtrar
+    // client-side: linhas cujo texto da coluna "Prazo" seja "Sem Prazo" são indeterminadas
+    // e descartadas (extrai retorna null — ver coletarPaginaAtual). Colunas da tabela:
+    // [0]Processo [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+    // [5]Motivo da Suspensão [6]Dias Paralisado.
+    const CFG_SUSPENSOS_PRAZO = {
+        prefixo: 'projudi_suspensosprazo_',
+        // "Zero suspensos por prazo determinado" é uma informação válida (mesmo racional
+        // de CFG_SUSPENSOS/CFG_APREENSOES) — mostra a linha mesmo vazia, desde que coletada.
+        mostrarSeVazio: true,
+        // Mais específico que CFG_SUSPENSOS.detecta (que casaria aqui também, por causa de
+        // "Início Suspensão") — por isso detectarConfig() precisa checar este ANTES daquele
+        // (ver comentário em detectarConfig).
+        detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab),
+        minTds: 7,
+        usaAtuacao: false,
+        nomeArquivo: 'suspensos_prazo_projudi',
+        rotulos: { coletar: 'Extrair Suspensos com Prazo', coletarMais: 'Extrair mais (Suspensos com Prazo)', baixar: '⬇ Baixar Suspensos com Prazo' },
+        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }],
+        extrai: (tds, atuacao) => {
+            const prazoTexto = textoCelula(tds[2]);
+            // "Sem Prazo" = suspensão por tempo INDETERMINADO — não é o que este relatório
+            // quer (isso já é o CFG_SUSPENSOS acima); descarta a linha.
+            if (/^sem\s+prazo$/i.test(prazoTexto.trim())) return null;
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[6]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                prazo: prazoTexto,
+                inicioSuspensao: textoCelula(tds[3]),
+                fimSuspensao: textoCelula(tds[4]),
+                dias,
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))],
+        // Sem cfg.pdf genérico: o resumo pedido (classe com mais processos, tempo médio de
+        // suspensão POR CLASSE, processo com fim de suspensão mais LONGA) não cabe no
+        // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
+        // existe noção de média por classe) — ver gerarPDFSuspensosPrazo.
+        pdfCustom: (dados, somenteResumo) => gerarPDFSuspensosPrazo(dados, somenteResumo),
     };
 
     // Verifica qual "Situação" está marcada no formulário de Audiências (audienciaForm) —
@@ -1793,6 +1848,38 @@
                 console.log(`[Projudi Apreensões] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Apreensões] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de Processos Suspensos com Prazo (processoBuscaSuspenso.do, mesmo
+    // endpoint de CFG_SUSPENSOS, mas alcançada via menu "Suspensos" em vez do link direto
+    // da home — cai num FORM, não nos resultados).
+    function formularioSuspensoPrazo() {
+        const form = document.getElementById('processoBuscaSuspensoForm');
+        return form && form.querySelector('#prazoIndeterminado') ? form : null;
+    }
+
+    // Não altera nenhum campo — os filtros padrão da tela ("Tipo da Suspensão" = Todos,
+    // "Tempo Indeterminado" desmarcado) já trazem os dois tipos misturados; é o filtro
+    // client-side de CFG_SUSPENSOS_PRAZO.extrai (ignora "Sem Prazo") que separa por prazo
+    // determinado. Só clica em Pesquisar.
+    function preencherEPesquisarSuspensoPrazo() {
+        const form = formularioSuspensoPrazo();
+        if (!form) return;
+
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Suspensos c/ Prazo] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Suspensos c/ Prazo] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Suspensos c/ Prazo] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -3419,6 +3506,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_SUSPENSOS_PRAZO) {
+            return {
+                rotulo: TITULO_SUSPENSOS_PRAZO,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
@@ -3741,6 +3835,7 @@
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
+        const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
 
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
         // não é mais um card à parte no topo da capa.
@@ -3912,6 +4007,21 @@
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
+            });
+        }
+        // "Suspensos com Prazo" — linha do Cartório (mesmo padrão de "Bens Apreendidos"/
+        // "Outros Cumprimentos" acima). Indicador: total de processos suspensos por prazo
+        // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de fim
+        // de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
+        if (secaoSuspensosPrazo) {
+            const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
+            linhasCartorio.push({
+                nome: 'Suspensos com Prazo',
+                indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
+                detalhamento: fimMaisLongo
+                    ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
+                    : 'Nenhum processo suspenso por prazo determinado',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
             });
         }
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
@@ -5243,6 +5353,180 @@
         return paginaInicial;
     }
 
+    const TITULO_SUSPENSOS_PRAZO = 'Suspensos com Prazo Determinado';
+
+    // Duração em dias (fim - início) de uma suspensão por prazo determinado. null se
+    // qualquer uma das duas datas não for parseável (não deveria acontecer nos dados reais
+    // — Início/Fim Suspensão vêm em DD/MM/AAAA — mas evita gerar NaN no PDF).
+    function duracaoSuspensaoDias(d) {
+        const ini = parseDataBR(d.inicioSuspensao);
+        const fim = parseDataBR(d.fimSuspensao);
+        if (ini == null || fim == null) return null;
+        return Math.round((fim - ini) / DIA_MS);
+    }
+
+    // Registro com a data de Fim Suspensão MAIS LONGA (mais distante no futuro) — o
+    // equivalente "ao contrário" de acharMaisAntigo (que acha a MENOR data).
+    function acharFimMaisLongo(dados) {
+        let best = null;
+        dados.forEach(d => {
+            const ts = parseDataBR(d.fimSuspensao);
+            if (ts == null) return;
+            if (!best || ts > best.ts) best = { ts, dataStr: (d.fimSuspensao || '').trim(), registro: d };
+        });
+        return best;
+    }
+
+    // Tempo médio de suspensão (fim - início, em dias) agrupado por Classe Processual,
+    // ordenado da classe com MAIS processos suspensos para a com menos (pedido do
+    // usuário: destacar a classe mais volumosa primeiro; em empate, maior média primeiro).
+    function mediaSuspensaoPorClasse(dados) {
+        const mapa = new Map();
+        dados.forEach(d => {
+            const classe = (d.classe || '').trim() || '(vazio)';
+            const dur = duracaoSuspensaoDias(d);
+            if (dur == null) return;
+            if (!mapa.has(classe)) mapa.set(classe, []);
+            mapa.get(classe).push(dur);
+        });
+        return [...mapa.entries()]
+            .map(([classe, duracoes]) => ({
+                classe,
+                quantidade: duracoes.length,
+                media: duracoes.reduce((s, v) => s + v, 0) / duracoes.length,
+            }))
+            .sort((a, b) => b.quantidade - a.quantidade || b.media - a.media);
+    }
+
+    function gerarPDFSuspensosPrazo(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSuspensosPrazo(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo && dados.length) {
+            const pgTabela = montarTabelaSuspensosPrazo(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `suspensos_prazo_projudi${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO (KPIs + lista "Classe — média de dias") do relatório de Suspensos
+    // com Prazo Determinado. Requisitos do usuário (b.2): quantidade de processos;
+    // classe processual com mais processos suspensos; tempo médio de suspensão por
+    // classe. E (b.1, também aqui) o processo com a data de fim de suspensão mais longa.
+    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const porClasse = mediaSuspensaoPorClasse(dados);
+        const classeTop = porClasse[0] || null;
+        const fimMaisLongo = acharFimMaisLongo(dados);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, m + 8);
+        const yLinha = m + 8 + 4.2;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW3 = (uw - 2 * gap) / 3;
+        desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
+            classeTop ? textoTruncadoParaLargura(doc, classeTop.classe, kW3 - 6) : '—',
+            classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+        desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Fim de Suspensão Mais Distante',
+            fimMaisLongo ? fimMaisLongo.dataStr : '—',
+            fimMaisLongo ? [textoTruncadoParaLargura(doc, `Processo ${fimMaisLongo.registro.processo}`, kW3 - 6)] : [],
+            true, COR.vermelho);
+
+        // Lista "Classe — média de dias de suspensão", uma linha por classe (já ordenada
+        // por quantidade de processos, maior primeiro — ver mediaSuspensaoPorClasse).
+        const listaY = kY + 28 + gap + 4;
+        tituloSecao(doc, m, listaY, uw, 'Tempo médio de suspensão por Classe Processual');
+        doc.autoTable({
+            columns: [
+                { header: 'Classe Processual', dataKey: 'classe' },
+                { header: 'Processos', dataKey: 'quantidade' },
+                { header: 'Média de Dias Suspenso', dataKey: 'media' },
+            ],
+            body: porClasse.map(c => ({ classe: c.classe, quantidade: String(c.quantidade), media: c.media.toFixed(1).replace('.', ',') })),
+            startY: listaY + 4,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                classe: { cellWidth: uw * 0.56 },
+                quantidade: { cellWidth: uw * 0.2, halign: 'right' },
+                media: { cellWidth: uw * 0.24, halign: 'right' },
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+    }
+
+    // Tabela discriminada — Processo, Classe, Prazo, Início Suspensão, Fim Suspensão —
+    // ORDENADA pela data de Fim Suspensão DESCENDENTE (mais longa primeiro, pedido do
+    // usuário). Registros sem data de fim parseável vão ao final.
+    function montarTabelaSuspensosPrazo(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a.fimSuspensao);
+            const tb = parseDataBR(b.fimSuspensao);
+            const va = ta == null ? -Infinity : ta;
+            const vb = tb == null ? -Infinity : tb;
+            return vb - va;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
+
+        const colunas = [
+            { header: 'Processo', width: 30, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 44, get: (d) => d.classe },
+            { header: 'Prazo', width: 30, get: (d) => d.prazo },
+            { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
+            { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
+        ];
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
@@ -5289,10 +5573,15 @@
         const thead = document.querySelector('table.resultTable thead');
         const cab = thead ? thead.textContent : '';
         let cfg = null;
+        // CFG_SUSPENSOS_PRAZO vem antes de CFG_SUSPENSOS: a tabela de Suspensos com Prazo
+        // Determinado TAMBÉM tem "Início Suspensão" (o regex largo de CFG_SUSPENSOS
+        // casaria com ela por engano), mas só ela tem "Fim Suspensão" — regex mais
+        // específico primeiro.
+        if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
         // CFG_SUSPENSOS vem antes de CFG_PARALISADOS: a tabela de Suspensos por Prazo
         // Indeterminado também tem a coluna "Dias Paralisado" (o regex de Paralisados
         // sozinho a reconheceria por engano), mas só ela tem "Início Suspensão".
-        if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
+        else if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
         else if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
         else if (CFG_AUDIENCIAS.detecta(cab)) cfg = CFG_AUDIENCIAS;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
@@ -5565,7 +5854,7 @@
         if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
         if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
-        if (navAlvo === 'suspensos') return /processoBuscaSuspenso\.do/i;
+        if (navAlvo === 'suspensos' || navAlvo === 'suspensosprazo') return /processoBuscaSuspenso\.do/i;
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
@@ -5969,6 +6258,30 @@
             }
         }
 
+        // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
+        // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
+        // automação, não pela presença de resultados).
+        if (formularioSuspensoPrazo()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_suspensosprazo') {
+                console.log('[Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_suspensosprazo');
+                preencherEPesquisarSuspensoPrazo();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso para pesquisar com os filtros
+            // padrão da tela.
+            if (estadoAtual !== 'coletando_suspensosprazo' && mostrarBotoesIndividuais()) {
+                const bSuspensoPrazo = document.createElement('button');
+                bSuspensoPrazo.type = 'button';
+                bSuspensoPrazo.className = 'projudi-btn';
+                bSuspensoPrazo.title = 'Pesquisa com os filtros padrão da tela — não altera nenhum campo';
+                bSuspensoPrazo.textContent = 'Preencher e Pesquisar (Suspensos com Prazo)';
+                bSuspensoPrazo.onclick = () => preencherEPesquisarSuspensoPrazo();
+                buttonBar.appendChild(bSuspensoPrazo);
+            }
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -6137,6 +6450,10 @@
         // injetarPainel) — o link de Suspensos por Prazo Indeterminado abre a tabela de
         // resultados direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
         { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Estatísticas Gerais' },
+        // Suspensos com Prazo Determinado: passa por uma tela de filtros própria (por
+        // isso precisaPreencher: true, mesmo padrão de Apreensões/Paralisados) antes de
+        // chegar nos resultados — ver formularioSuspensoPrazo/preencherEPesquisarSuspensoPrazo.
+        { key: 'suspensosprazo', cfg: CFG_SUSPENSOS_PRAZO, navAlvo: 'suspensosprazo', rotulo: 'Suspensos com Prazo', curto: 'Susp. c/ Prazo', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         // ── Pendências ───────────────────────────────────────────────────────────────
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
@@ -6358,6 +6675,10 @@
         }
         else if (alvo === 'remessas') link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /em\s+remessa.*exceto\s+processos\s+conclusos/i);
         else if (alvo === 'suspensos') link = acharLinkAoLadoDoLabel(/suspensos\s+por\s+tempo\s+indeterminado/i);
+        // "Suspensos com Prazo" usa um link DIFERENTE do anterior — o de texto "Suspensos"
+        // (sozinho) num submenu, que leva à TELA DE FILTROS (processoBuscaSuspensoForm),
+        // não direto aos resultados como o link acima.
+        else if (alvo === 'suspensosprazo') link = acharLinkMenu(/processoBuscaSuspenso\.do/i, /^suspensos$/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
