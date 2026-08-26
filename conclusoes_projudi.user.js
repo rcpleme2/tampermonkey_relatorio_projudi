@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.8
+// @version      20.9
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4770,23 +4770,38 @@
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
-        // A URL exata de destino do clique na aba pode variar — não trava o diagnóstico
-        // por URL (ver paginaOutrosCumprimentos, que detecta pelo conteúdo); casa qualquer
-        // URL como "esperada" para não gerar falso positivo de "0 registros" antes da hora.
-        if (navAlvo === 'outroscumprimentos') return /.*/;
+        // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
+        // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
+        // que renderizam só um aviso de "nenhum resultado" em vez de tabela) disparar em
+        // QUALQUER página enquanto a automação esperava esse relatório, inclusive na
+        // página ainda carregando logo após o clique na aba — batendo "0 registros" antes
+        // mesmo da tabela existir. Esse relatório nunca usa esse fallback: ele sempre
+        // renderiza as duas tabelas (mesmo com tudo zerado), então quem decide "não achou
+        // nada"/"desistiu de esperar" é só tratarPaginaOutrosCumprimentos() (ver
+        // injetarBotoes), com sua própria espera ativa e timeout.
         return null;
     }
 
     // Espera a tabela "Cumprimento" (a maior, injetada via AJAX depois do HTML inicial —
     // ver comentário em injetarBotoes) aparecer no DOM antes de seguir. Poll a cada 500ms,
-    // teto de ~15s (30 tentativas) como salvaguarda — depois disso desiste silenciosamente
-    // (loga um aviso), tratando como "essa tela não é Outros Cumprimentos de verdade" ou
-    // "carregamento travou/demorou demais".
+    // teto de ~15s (30 tentativas) como salvaguarda. Se a automação está esperando
+    // exatamente este relatório, desistir aqui não pode deixá-la travada pra sempre (era
+    // o motivo do antigo fallback genérico de "0 registros" em injetarBotoes — removido
+    // pra este relatório porque disparava cedo demais, veja urlEsperadaRelatorio) — então
+    // trata como "0 registros" e avança, exatamente como os demais relatórios fazem
+    // quando a tela realmente não tem resultado. Fora da automação (uso manual), só
+    // avisa — não há fila pra travar, e o usuário pode tentar de novo manualmente.
     function tratarPaginaOutrosCumprimentos(tentativa) {
         tentativa = tentativa || 0;
         if (!paginaOutrosCumprimentos()) {
             if (tentativa >= 30) {
                 console.warn('[Projudi Outros Cumprimentos] a tabela "Cumprimento" não apareceu em ~15s — desistindo (tela pode ter mudado ou carregamento travou).');
+                const estadoDesistencia = store.getItem(AUTO_ESTADO);
+                if (estadoDesistencia === 'coletando_outroscumprimentos' || estadoDesistencia === 'preenchendo_outroscumprimentos') {
+                    console.warn('[Projudi Outros Cumprimentos] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    store.setItem(CFG_OUTROS_CUMPRIMENTOS.prefixo + 'coletado', '1');
+                    avancarAutomacao(CFG_OUTROS_CUMPRIMENTOS);
+                }
                 return;
             }
             setTimeout(() => tratarPaginaOutrosCumprimentos(tentativa + 1), 500);
