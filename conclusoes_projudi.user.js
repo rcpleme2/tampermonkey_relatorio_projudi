@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.17
+// @version      20.20
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -60,6 +60,11 @@
     // Grava/atualiza a contagem de processos ativos da atuação atual — acumulado entre
     // rodadas da automação (uma por atuação), como os demais relatórios.
     function gravarProcessosAtivosSeDisponivel() {
+        // Opção controlável pelo painel (ver CHAVE_INCLUIR_ATIVOS/injetarPainel) — default
+        // marcado (comportamento antigo: sempre coleta). Checar aqui, na COLETA, e não só
+        // na hora de montar a capa em gerarPDFConjunto, evita acumular dados obsoletos no
+        // mapa de atuações quando o usuário desmarcou a opção deliberadamente.
+        if (!incluirProcessosAtivos()) return;
         const n = lerProcessosAtivos();
         if (n == null) return;
         const atuacao = lerAtuacao() || '(sem atuação)';
@@ -728,7 +733,7 @@
     // independente de quantas expansões estão em voo ao mesmo tempo. O tamanho do lote é
     // um meio-termo: grande o bastante para acelerar de verdade, pequeno o bastante para
     // não sobrecarregar o Projudi nem estourar o tempo de resposta de uma leva só.
-    const TAMANHO_LOTE_EXPANSAO_AD = 15;
+    const TAMANHO_LOTE_EXPANSAO_AD = 30;
 
     async function expandirLoteDeLinhas(lote) {
         lote.forEach(linha => {
@@ -1000,7 +1005,15 @@
         };
     }
 
+    const CHAVE_ASSINATURA_ANTERIOR_AR = 'projudi_audienciasrealizadas_assinatura_anterior';
+
     function submitAR(form) {
+        // Guarda o que está na tela ANTES de pesquisar — usado depois por
+        // aguardarResultadoAREEstabilizarEProcessar pra exigir que o resultado MUDE em
+        // relação a isso antes de considerar "estabilizado" (ver comentário lá). Precisa
+        // ir em localStorage, não uma variável do módulo — se a pesquisa navegar pra uma
+        // página nova de verdade, uma variável JS comum se perderia no reload.
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_AR, assinaturaResultadoAR());
         const btn = form.querySelector('#searchButton');
         setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1200);
     }
@@ -1054,6 +1067,59 @@
         setUsuarioAR(form, prox.value);
         store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'usuario', value: prox.value, label: prox.label }));
         submitAR(form);
+    }
+
+    // Assinatura do resultado atualmente exibido — usada só pra detectar quando a tabela
+    // "parou de mudar" (ver aguardarResultadoAREEstabilizarEProcessar), não tem outro uso.
+    function assinaturaResultadoAR() {
+        return `${lerTotalRealizadasAR()}|${JSON.stringify(lerExtrasAR())}`;
+    }
+    let ultimaAssinaturaAR = null;
+
+    // A tabela de totais desta tela é preenchida via AJAX depois do HTML inicial da
+    // página (mesma lição já aprendida em Outros Cumprimentos/Mandados) — processar o
+    // resultado assim que a página "termina" de carregar pegava valores ainda da consulta
+    // ANTERIOR (o usuário via números certos na tela um instante depois, mas o script já
+    // tinha lido e registrado o valor desatualizado — o sintoma relatado: "o script repete
+    // valores, mesmo a tela não mostrando valores idênticos").
+    //
+    // Só comparar duas leituras seguidas não basta: se o valor ANTIGO ficar parado na tela
+    // por duas checagens (poll de 500ms) antes do AJAX realmente atualizar, o algoritmo
+    // "estabiliza" cedo demais com o valor errado (bug encontrado escrevendo o teste desta
+    // correção — teste_ar_estabilizacao.js). Por isso exige TAMBÉM que o valor tenha
+    // MUDADO em relação ao que estava na tela antes desta pesquisa começar (ver
+    // CHAVE_ASSINATURA_ANTERIOR_AR/submitAR) — só depois disso passa a valer a checagem de
+    // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
+    // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
+    // caso raro em que o valor novo coincide por acaso com o antigo).
+    function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
+        tentativa = tentativa || 0;
+        const temTabela = !!document.querySelector('table.resultTable');
+        if (!temTabela) {
+            if (tentativa >= 30) {
+                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+                const form = formularioAudienciasRealizadas();
+                if (form) submitAR(form);
+                return;
+            }
+            setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
+            return;
+        }
+        const assinaturaAtual = assinaturaResultadoAR();
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
+        const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
+        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaAR) {
+            console.log(`[Projudi Audiências Realizadas] resultado estável na tentativa ${tentativa} — processando`);
+            processarResultadoAudienciasRealizadas();
+            return;
+        }
+        if (tentativa >= 30) {
+            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+            processarResultadoAudienciasRealizadas();
+            return;
+        }
+        ultimaAssinaturaAR = assinaturaAtual;
+        setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
     }
 
     // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
@@ -5238,6 +5304,7 @@
         // Uso manual — injeta os botões (Extrair + Baixar PDF) logo após a segunda
         // tabela (ou no fim do body, como último recurso), já que não há
         // table.buttonBar nesta tela.
+        if (!mostrarBotoesIndividuais()) return;
         if (!document.getElementById('btn-outroscumprimentos-extrair')) {
             const { tabelaPrincipal } = tabelasOutrosCumprimentos();
             const ancora = (tabelaPrincipal && tabelaPrincipal.parentNode) || document.body;
@@ -5366,6 +5433,7 @@
                 preencherEPesquisarTempoMedio();
                 return;
             }
+            if (!mostrarBotoesIndividuais()) return;
 
             const sel = document.createElement('select');
             sel.id = 'sel-periodo-tm';
@@ -5423,6 +5491,7 @@
             // para cada um. Uma vez que já há resultados na tela, cai para o fluxo normal
             // de coleta/exportação mais abaixo.
             if (!document.querySelector('table.resultTable tbody tr')) {
+                if (!mostrarBotoesIndividuais()) return;
                 const bParalisados = document.createElement('button');
                 bParalisados.type = 'button';
                 bParalisados.className = 'projudi-btn';
@@ -5457,6 +5526,7 @@
                 return;
             }
             if (detectarConfig() !== CFG_AUDIENCIAS) {
+                if (!mostrarBotoesIndividuais()) return;
                 const bAudiencias = document.createElement('button');
                 bAudiencias.type = 'button';
                 bAudiencias.className = 'projudi-btn';
@@ -5487,6 +5557,7 @@
                 return;
             }
             if (!pautaAudienciasTemResultados()) {
+                if (!mostrarBotoesIndividuais()) return;
                 const bPreencher = document.createElement('button');
                 bPreencher.type = 'button';
                 bPreencher.className = 'projudi-btn';
@@ -5496,6 +5567,7 @@
                 buttonBar.appendChild(bPreencher);
                 return;
             }
+            if (!mostrarBotoesIndividuais()) return;
             const bExtrair = document.createElement('button');
             bExtrair.type = 'button';
             bExtrair.className = 'projudi-btn';
@@ -5512,13 +5584,24 @@
         // ver iniciarBuscaAudienciasRealizadas/processarResultadoAudienciasRealizadas.
         if (formularioAudienciasRealizadas()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
-            const temResultado = !!document.querySelector('table.resultTable');
-            if (estadoAtual === 'preenchendo_audienciasrealizadas' || estadoAtual === 'coletando_audienciasrealizadas') {
-                if (temResultado) processarResultadoAudienciasRealizadas();
-                else iniciarBuscaAudienciasRealizadas();
+            // 'preenchendo_...' é só "ainda vou pesquisar" (nunca tem resultado nenhum
+            // ainda de propósito) — dispara a pesquisa direto, sem checar tabela.
+            // 'coletando_...' é "esperando o resultado de uma pesquisa que já disparei" —
+            // aí sim precisa esperar a tabela aparecer E estabilizar antes de ler (ver
+            // aguardarResultadoAREEstabilizarEProcessar) — checar só "existe tabela"
+            // pegava valores da pesquisa ANTERIOR, ainda não substituídos pelo AJAX.
+            if (estadoAtual === 'preenchendo_audienciasrealizadas') {
+                iniciarBuscaAudienciasRealizadas();
                 return;
             }
+            if (estadoAtual === 'coletando_audienciasrealizadas') {
+                ultimaAssinaturaAR = null;
+                aguardarResultadoAREEstabilizarEProcessar(0);
+                return;
+            }
+            const temResultado = !!document.querySelector('table.resultTable');
             if (!temResultado) {
+                if (!mostrarBotoesIndividuais()) return;
                 const bPreencher = document.createElement('button');
                 bPreencher.type = 'button';
                 bPreencher.className = 'projudi-btn';
@@ -5531,6 +5614,7 @@
                 buttonBar.appendChild(bPreencher);
                 return;
             }
+            if (!mostrarBotoesIndividuais()) return;
             const bExtrair = document.createElement('button');
             bExtrair.type = 'button';
             bExtrair.className = 'projudi-btn';
@@ -5561,7 +5645,7 @@
             // Uso manual (fora da automação): a tela já convive com resultados de uma
             // pesquisa anterior (própria ou de outra sessão), então não há como usar
             // "sem linha nenhuma" para decidir se o botão deve aparecer.
-            if (estadoAtual !== 'coletando_apreensoes') {
+            if (estadoAtual !== 'coletando_apreensoes' && mostrarBotoesIndividuais()) {
                 const bPendentes = document.createElement('button');
                 bPendentes.type = 'button';
                 bPendentes.className = 'projudi-btn';
@@ -5684,6 +5768,13 @@
     const CHAVE_MOSTRAR_BOTOES = 'projudi_mostrar_botoes_individuais';
     function mostrarBotoesIndividuais() { return store.getItem(CHAVE_MOSTRAR_BOTOES) === '1'; }
 
+    // Checkbox "Processos Ativos" do painel (ver injetarPainel/gravarProcessosAtivosSeDisponivel
+    // /gerarPDFConjunto) — default MARCADO (chave ausente = true) para preservar o
+    // comportamento histórico (sempre incluído), já que este recurso é novo e não deve
+    // mudar nada pra quem nunca abriu essa opção.
+    const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
+    function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
+
     function desembrulharArray(valor) {
         let v = valor, t = 0;
         while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { break; } t++; }
@@ -5740,15 +5831,22 @@
         // Primeiro item específico da categoria Crime (ver CATEGORIAS_PAINEL/
         // categoriaEspecifica em injetarPainel) — não entra nos grupos Cartório/Gabinete
         // do Cível-Geral, só aparece na seção própria da aba Crime.
-        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   curto: 'Audiências', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // rotuloChecklist (opcional): texto mostrado SÓ no checklist do painel, ao lado do
+        // checkbox — quando o item está dentro de um subgrupo (ver "subgrupo" abaixo), o
+        // subtítulo do subgrupo já deixa o contexto claro ("AUDIÊNCIAS" acima de
+        // "Pendentes"/"Designadas"/"Realizadas"), então repetir "Audiências" em cada linha
+        // é redundante. Sem rotuloChecklist, o checklist cai em "rotulo" (usado em todo o
+        // resto — capa, mensagens de status, diálogo de pular etc. — que continuam com o
+        // nome completo, sem ambiguidade fora do contexto visual do subgrupo).
+        { key: 'audiencias',  cfg: CFG_AUDIENCIAS,  navAlvo: 'audiencias',  rotulo: 'Audiências Pendentes',   rotuloChecklist: 'Pendentes', curto: 'Aud. Termo', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Segundo item específico do Crime — resumo + tabela da Pauta de Horários (ver
         // coletarAudienciasDesignadas). Como cada extração recalcula tudo do zero (a
         // "página" gravada é sempre um único resumo), "Extrair mais" não faz sentido aqui.
-        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'audienciasdesignadas', cfg: CFG_AUDIENCIAS_DESIGNADAS, navAlvo: 'audienciasdesignadas', rotulo: 'Audiências Designadas', rotuloChecklist: 'Designadas', curto: 'Aud. Designadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Terceiro item específico do Crime — totais de Estatísticas de Audiência, geral e
         // por usuário (ver iniciarBuscaAudienciasRealizadas/finalizarAudienciasRealizadas).
         // Assim como Audiências Designadas, cada extração recalcula tudo do zero.
-        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'audienciasrealizadas', cfg: CFG_AUDIENCIAS_REALIZADAS, navAlvo: 'audienciasrealizadas', rotulo: 'Audiências Realizadas', rotuloChecklist: 'Realizadas', curto: 'Aud. Realizadas', categoriaEspecifica: 'crime', precisaPreencher: true, subgrupo: 'Audiências' },
         // Quarto item específico do Crime — apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
@@ -6256,6 +6354,15 @@
                     const prog = lerProgressoAR();
                     if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} usuário(s))`;
                 }
+                // Mandados são 3 relatórios encadeados num único item de fila (status
+                // 13 -> 6 -> 4, mesma tela) — sem indicar a fase, "Coletando Mandados…"
+                // fica parado no mesmo texto por bastante tempo, sem dar pra saber em
+                // qual dos 3 está.
+                if (chave === 'mandados') {
+                    const fase = store.getItem(CHAVE_MANDADOS_FASE);
+                    const cfgFase = fase && cfgMandadosPorFase(fase);
+                    if (cfgFase) txt += ` — fase: <strong>${cfgFase.pdf.titulo}</strong>`;
+                }
                 return txt;
             }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
@@ -6302,7 +6409,7 @@
         }
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+        painel.querySelectorAll('.pa-check, .pa-check-extra, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
             el.disabled = emCurso;
         });
 
@@ -6360,17 +6467,49 @@
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
+            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
             return `
-                    <label class="pa-item">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotulo}${seletorPeriodo}
+                    <label class="${classeItem}">
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                     </label>`;
         }
+        // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
+        // "subgrupo" (rótulo puramente visual, ver campo opcional subgrupo em
+        // REPORTS_AUTOMACAO), preservando a ordem de aparição — itens sem subgrupo
+        // continuam soltos, sem cabeçalho, exatamente como antes deste recurso. Não é
+        // uma estrutura de fila diferente: cada item continua sendo o mesmo
+        // <input class="pa-check" data-key="...">, só com um wrapper visual em volta.
+        function linhasComSubgrupos(itens) {
+            let html = '';
+            let subgrupoAberto = null;
+            itens.forEach(r => {
+                if (r.subgrupo !== subgrupoAberto) {
+                    subgrupoAberto = r.subgrupo || null;
+                    if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
+                }
+                html += linhaChecklistItem(r);
+            });
+            return html;
+        }
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
-            const itens = itensCivel.filter(r => r.dominio === g.chave).map(linhaChecklistItem).join('');
+            const itensGrupo = itensCivel.filter(r => r.dominio === g.chave);
+            const itens = linhasComSubgrupos(itensGrupo);
+            // Checkbox extra "Processos Ativos" — não é um item de REPORTS_AUTOMACAO (não
+            // navega/coleta paginado, é lido passivamente na página inicial — ver
+            // gravarProcessosAtivosSeDisponivel), por isso NÃO usa a classe .pa-check (que
+            // alimenta a fila de automação em #pa-iniciar) — usa .pa-check-extra, própria,
+            // e persiste em CHAVE_INCLUIR_ATIVOS, default marcado (preserva o
+            // comportamento histórico de sempre incluir a linha na capa).
+            const itemAtivos = g.chave === 'cartorio'
+                ? `
+                    <label class="pa-item pa-item-extra" title="Inclui a contagem de Processos Ativos (lida na página inicial do Projudi) como uma linha do Cartório na capa do PDF conjunto">
+                        <input type="checkbox" class="pa-check-extra" id="pa-incluir-ativos" data-key="processosativos" ${incluirProcessosAtivos() ? 'checked' : ''}> Processos Ativos
+                    </label>`
+                : '';
             return `
                 <div class="pa-group">
                     <p class="pa-group-lbl">${g.rotulo}</p>
-                    ${itens}
+                    ${itemAtivos}${itens}
                 </div>`;
         }).join('');
         const montarContagem = (catId) => itensVisiveis(catId).map(r => `
@@ -6379,7 +6518,7 @@
         // espaço reservado em vez de uma seção vazia.
         const montarGrupoEspecifico = (cat) => {
             const itens = itensEspecificos(cat.id);
-            return itens.length ? itens.map(linhaChecklistItem).join('')
+            return itens.length ? linhasComSubgrupos(itens)
                 : `<div class="pa-placeholder">Itens específicos desta categoria — a definir</div>`;
         };
         const categoriaSalva = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
@@ -6453,8 +6592,23 @@
         painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
             store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
         };
-        painel.querySelector('#pa-marcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = true; });
-        painel.querySelector('#pa-desmarcar-tudo').onclick = () => painel.querySelectorAll('.pa-check').forEach(c => { c.checked = false; });
+        const chkAtivos = painel.querySelector('#pa-incluir-ativos');
+        if (chkAtivos) {
+            chkAtivos.onchange = (ev) => {
+                store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
+            };
+        }
+        // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
+        // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
+        // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
+        // marcar/desmarcar tudo precisa sincronizar o localStorage manualmente, senão o
+        // checkbox mostra um estado que não é o que fica salvo (some ao recarregar).
+        function marcarDesmarcarTudo(valor) {
+            painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
+            if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+        }
+        painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
+        painel.querySelector('#pa-desmarcar-tudo').onclick = () => marcarDesmarcarTudo(false);
         painel.querySelector('.pa-btn-colapsar').onclick = () => {
             const body = painel.querySelector('.pa-body');
             const btn = painel.querySelector('.pa-btn-colapsar');
@@ -6487,7 +6641,93 @@
         });
         aplicarCategoria(categoriaInicial);
 
+        habilitarArrastePainel(painel);
         atualizarPainel();
+    }
+
+    // Posição arrastada do painel (ver habilitarArrastePainel), persistida entre
+    // recarregamentos de página. Guardamos {top, left} em px absolutos (não top/right)
+    // porque a conversão right->left só pode ser feita uma vez, no início do arraste
+    // (ver dentro de habilitarArrastePainel) — depois disso o painel sempre usa left.
+    const CHAVE_PAINEL_POSICAO = 'projudi_painel_posicao';
+    function lerPosicaoSalvaPainel() {
+        try {
+            const raw = store.getItem(CHAVE_PAINEL_POSICAO);
+            if (!raw) return null;
+            const pos = JSON.parse(raw);
+            if (pos && typeof pos.top === 'number' && typeof pos.left === 'number') return pos;
+        } catch (e) { /* ignora posição corrompida — volta ao padrão fixo top/right */ }
+        return null;
+    }
+
+    // Trava {top, left} dentro da área visível da janela, considerando o tamanho atual
+    // do painel — evita que o usuário arraste (ou solte o mouse fora da janela) e perca
+    // o painel fora da tela, sem forma fácil de recuperá-lo.
+    function limitarPosicaoNaTela(top, left, largura, altura) {
+        const maxLeft = Math.max(0, window.innerWidth - largura);
+        const maxTop = Math.max(0, window.innerHeight - altura);
+        return {
+            top: Math.min(Math.max(0, top), maxTop),
+            left: Math.min(Math.max(0, left), maxLeft),
+        };
+    }
+
+    // Arrastar-e-soltar pelo cabeçalho (.pa-head), exceto sobre os ícones de
+    // colapsar/fechar (.pa-icon-btn) — precisam continuar clicáveis normalmente, sem
+    // iniciar um arraste. Ao restaurar uma posição salva, sobrepõe o top/right fixo do
+    // CSS por left/top absolutos; sem posição salva, mantém o CSS original (top:8px;
+    // right:8px) intocado até o primeiro arraste.
+    function habilitarArrastePainel(painel) {
+        const head = painel.querySelector('.pa-head');
+        if (!head) return;
+
+        const posSalva = lerPosicaoSalvaPainel();
+        if (posSalva) {
+            const rect0 = painel.getBoundingClientRect();
+            const limitada = limitarPosicaoNaTela(posSalva.top, posSalva.left, rect0.width, rect0.height);
+            painel.style.top = limitada.top + 'px';
+            painel.style.left = limitada.left + 'px';
+            painel.style.right = 'auto';
+        }
+
+        let arrastando = false;
+        let offsetX = 0, offsetY = 0;
+
+        head.addEventListener('mousedown', (ev) => {
+            if (ev.target.closest('.pa-icon-btn')) return; // colapsar/fechar continuam clicáveis
+            // Converte a posição atual (que pode ainda estar em top/right, fixada só por
+            // CSS) para top/left absolutos ANTES de começar a mover — sem isso o painel
+            // "pularia" de lugar no primeiro movimento do mouse.
+            const rect = painel.getBoundingClientRect();
+            painel.style.top = rect.top + 'px';
+            painel.style.left = rect.left + 'px';
+            painel.style.right = 'auto';
+            offsetX = ev.clientX - rect.left;
+            offsetY = ev.clientY - rect.top;
+            arrastando = true;
+            head.classList.add('pa-arrastando');
+            ev.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (ev) => {
+            if (!arrastando) return;
+            const rect = painel.getBoundingClientRect();
+            const alvo = limitarPosicaoNaTela(ev.clientY - offsetY, ev.clientX - offsetX, rect.width, rect.height);
+            painel.style.top = alvo.top + 'px';
+            painel.style.left = alvo.left + 'px';
+        });
+
+        function encerrarArraste() {
+            if (!arrastando) return;
+            arrastando = false;
+            head.classList.remove('pa-arrastando');
+            const rect = painel.getBoundingClientRect();
+            const alvo = limitarPosicaoNaTela(rect.top, rect.left, rect.width, rect.height);
+            painel.style.top = alvo.top + 'px';
+            painel.style.left = alvo.left + 'px';
+            store.setItem(CHAVE_PAINEL_POSICAO, JSON.stringify({ top: alvo.top, left: alvo.left }));
+        }
+        document.addEventListener('mouseup', encerrarArraste);
     }
 
     GM_addStyle(`
@@ -6501,7 +6741,9 @@
             display: flex; align-items: center; justify-content: space-between;
             padding: 10px 11px; border-bottom: 1px solid #DEDDD6;
             border-left: 3px solid #3A5A7D; background: #F4F4F1;
+            cursor: move;
         }
+        #painel-automacao .pa-head.pa-arrastando { cursor: grabbing; }
         #painel-automacao .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
         #painel-automacao .pa-icons { display: flex; gap: 4px; }
         #painel-automacao .pa-icon-btn {
@@ -6551,9 +6793,12 @@
             display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
             margin-bottom: 12px; padding: 8px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px;
         }
-        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; }
-        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; }
-        #painel-automacao .pa-count .l { color: #52514E; }
+        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; min-width: 0; }
+        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; flex-shrink: 0; }
+        /* min-width:0 (no pai) + overflow/nowrap aqui — sem isso, um rótulo comprido
+           (ex.: "Aud. Termo Pendentes") quebrava linha dentro da célula do grid, jogando
+           o número pra fora da primeira linha em vez de truncar com "…" */
+        #painel-automacao .pa-count .l { color: #52514E; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         #painel-automacao .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl {
@@ -6562,7 +6807,16 @@
         }
         #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
         #painel-automacao .pa-group-lbl.especifico { color: #3A5A7D; }
+        /* margin-left 0 (não 14px) + text-align:left explícito — o cabeçalho do subgrupo
+           (ex.: "AUDIÊNCIAS") fica alinhado à mesma margem esquerda dos demais itens do
+           grupo, não recuado/deslocado do resto da lista. */
+        #painel-automacao .pa-subgroup-lbl {
+            font-size: .68em; font-weight: 600; color: #82807A; margin: 4px 0 2px 0; text-align: left;
+            text-transform: uppercase; letter-spacing: .02em;
+        }
         #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+        #painel-automacao .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item-extra { border-top: 1px dashed #DEDDD6; margin-top: 4px; padding-top: 6px; }
         #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
         #painel-automacao .pa-placeholder {
