@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.35
+// @version      20.36
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -569,8 +569,8 @@
         usaAtuacao: false,
         nomeArquivo: 'suspensos_prazo_projudi',
         rotulos: { coletar: 'Extrair Suspensos com Prazo', coletarMais: 'Extrair mais (Suspensos com Prazo)', baixar: '⬇ Baixar Suspensos com Prazo' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'],
-        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }],
+        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Motivo da Suspensão', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 16 }],
         extrai: (tds, atuacao) => {
             const prazoTexto = textoCelula(tds[2]);
             // "Sem Prazo" = suspensão por tempo INDETERMINADO — não é o que este relatório
@@ -586,12 +586,13 @@
                 prazo: prazoTexto,
                 inicioSuspensao: textoCelula(tds[3]),
                 fimSuspensao: textoCelula(tds[4]),
+                motivo: textoCelula(tds[5]),
                 dias,
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))],
+        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias))],
         // Sem cfg.pdf genérico: o resumo pedido (classe com mais processos, tempo médio de
         // suspensão POR CLASSE, processo com fim de suspensão mais LONGA) não cabe no
         // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
@@ -5402,12 +5403,36 @@
         const doc = novoDocPDF();
         montarResumoSuspensosPrazo(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (dados.length) {
+            const pgMotivo = montarGraficoMotivoSuspensosPrazo(doc, dados, false);
+            doc.outline.add(null, 'Motivo da Suspensão', { pageNumber: pgMotivo });
+        }
         if (!somenteResumo && dados.length) {
             const pgTabela = montarTabelaSuspensosPrazo(doc, dados, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `suspensos_prazo_projudi${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página dedicada ao gráfico de barras "Motivo da Suspensão" (pedido do usuário,
+    // além do resumo já existente) — motivo é texto livre demais pra caber como mais um
+    // card no resumo sem apertar o layout, e "somenteResumo" também deve mostrar esse
+    // gráfico (é resumo/estatística, não tabela discriminada).
+    function montarGraficoMotivoSuspensosPrazo(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        const itens = contarPorCampo(dados, 'motivo', 12, null, false, null);
+        desenharBarras(doc, m, m, pw - 2 * m, ph - 2 * m - 14, 'Processos por Motivo da Suspensão', itens, (v) => String(v), COR.aqua);
+        desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        return paginaInicial;
     }
 
     // Página de RESUMO (KPIs + lista "Classe — média de dias") do relatório de Suspensos
@@ -5502,6 +5527,7 @@
             { header: 'Prazo', width: 30, get: (d) => d.prazo },
             { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
             { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
+            { header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
