@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.49
+// @version      20.50
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4396,28 +4396,20 @@
 
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
-        // Total de ativos somado de TODAS as atuações já coletadas (a mesma soma que a
-        // linha "Processos Ativos" da capa mostra) — usado para normalizar os indicadores
-        // de pendência pelo TAMANHO do acervo, pedido da Corregedoria para poder comparar
-        // varas de porte diferente ("63 paralisados" não diz muito sozinho; "4,9 por 100
-        // ativos" diz). Soma total, não por competência — os Mandados nem gravam
-        // atuacao/competencia, então uma taxa por competência deixaria eles de fora.
-        const totalAtivosGeral = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-        // '' quando o total de ativos é 0/desconhecido (ainda não coletado, ou opção
-        // "incluir Ativos" desmarcada) — nesse caso o indicador sai como sempre saiu, sem
-        // taxa, em vez de mostrar "Infinity" ou dividir por zero.
-        function taxaPor100Ativos(n) {
-            if (!totalAtivosGeral) return '';
-            return ` · ${(n / totalAtivosGeral * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}/100 ativos`;
-        }
         const linhasCartorio = [];
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
-        // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo).
+        // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo). Indicador
+        // enxuto (só a contagem básica, pedido do usuário — ficava populado/confuso com
+        // prioritários e a taxa por 100 ativos junto); prioritários e "mais antiga" vão
+        // para o detalhamento.
         function linhaTarefa(t, nome) {
+            const detalhes = [];
+            if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
+            if (t.maisAntiga != null) detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)`);
             return {
                 nome,
-                indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}${taxaPor100Ativos(t.pendentes)}`,
-                detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
+                indicador: `${t.pendentes} pendente(s)`,
+                detalhamento: detalhes.length ? detalhes.join(' · ') : '—',
                 situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
                 corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
                 semSituacao: false,
@@ -4512,23 +4504,10 @@
             .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
             .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo));
         if (itensMandados.length) {
-            // Indicador do grupo "Mandados" (pedido do usuário): em vez de um total único
-            // somando tudo, separa por ONDE a pendência está — "aguarda cumprimento"
-            // (Cumprimento, já unificado lido+não lido — está com o oficial de justiça) x
-            // "pendente no cartório" (Retorno + Decurso — ainda depende de análise do
-            // próprio cartório, não do oficial) — e por urgência (normal x urgente; não
-            // usa mais "prioritário", que era o rótulo genérico de outros relatórios,
-            // Mandados usa "urgente" desde o começo — ver rotuloPrioridade* de cada CFG).
-            const itemCumprimento = itensMandados.find(t => t.secao.cfgOriginal === CFG_MANDADOS_CUMPRIMENTO);
-            const itensCartorioMandados = itensMandados.filter(t => t.secao.cfgOriginal !== CFG_MANDADOS_CUMPRIMENTO); // Retorno + Decurso
-            const pendCumprimento = itemCumprimento ? itemCumprimento.pendentes : 0;
-            const pendCartorioMandados = itensCartorioMandados.reduce((s, t) => s + t.pendentes, 0);
-            const totalMandados = pendCumprimento + pendCartorioMandados;
-            const totalUrgentesMandados = itensMandados.reduce((s, t) => s + t.prioritarios, 0);
-            const totalNormaisMandados = totalMandados - totalUrgentesMandados;
-            itensPendencias.push(linhaGrupo('Mandados',
-                `${pendCumprimento} aguarda cumprimento · ${pendCartorioMandados} pendente(s) no cartório · `
-                + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)${taxaPor100Ativos(totalMandados)}`));
+            // Cabeçalho do grupo "Mandados" sem indicador/detalhamento (pedido do
+            // usuário) — o resumo agregado ficava confuso ali; cada subitem (Retorno/
+            // Cumprimento/Decurso) já tem seu próprio indicador/detalhamento via linhaTarefa.
+            itensPendencias.push(linhaGrupo('Mandados', ''));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
@@ -4697,16 +4676,14 @@
             usouPagina1 = true;
         }
 
-        // Logo após a capa (achado geral) e antes dos resumos por relatório — ver
-        // montarProcessosMultiplasPendencias. Null quando não há nenhum processo
-        // repetido em 2+ relatórios (nada a mostrar). "primeira" segue !usouPagina1, como
-        // todo outro bloco desta função — cobre o caso raro de a capa não ter sido
-        // desenhada (temConteudo=false) e esta ser a primeira página de verdade.
-        const pgMultiplasPendencias = montarProcessosMultiplasPendencias(doc, secoes, !usouPagina1, false);
-        if (pgMultiplasPendencias) {
-            usouPagina1 = true;
-            doc.outline.add(null, 'Processos com Múltiplas Pendências', { pageNumber: pgMultiplasPendencias });
-        }
+        // "Processos com Múltiplas Pendências" DESABILITADO por pedido do usuário (por
+        // enquanto) — a função montarProcessosMultiplasPendencias continua no código,
+        // só não é mais chamada aqui. Para reabilitar, descomentar o bloco abaixo.
+        // const pgMultiplasPendencias = montarProcessosMultiplasPendencias(doc, secoes, !usouPagina1, false);
+        // if (pgMultiplasPendencias) {
+        //     usouPagina1 = true;
+        //     doc.outline.add(null, 'Processos com Múltiplas Pendências', { pageNumber: pgMultiplasPendencias });
+        // }
 
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -8468,7 +8445,7 @@
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
-                        <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Excel conjunto</button>
+                        <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Dados em planilha</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
