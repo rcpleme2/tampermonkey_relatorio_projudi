@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.40
+// @version      20.41
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -16,7 +16,16 @@
     'use strict';
 
     const store = window.localStorage;
-    const STALE_MS = 2 * 60 * 1000; // 2 minutos sem atividade => coleta em andamento considerada obsoleta
+    // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
+    // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
+    // RELOAD do Projudi, e nesse reload específico (diferente do primeiro reload após
+    // Pesquisar) não sobra nenhuma flag de fallback além de KEY_RODANDO — se o site
+    // demorar mais que STALE_MS pra responder (plausível numa sessão já carregada de
+    // estado, comentário já registrado em CFG_TEMPOMEDIO.pageSizeSelect sobre o Projudi
+    // já ter travado antes), obsoleta() volta true e injetarBotoes() cai no ramo que
+    // limpa a flag `rodando` (limparFlags) em vez de retomar — automação trava pra
+    // sempre em "coletando_tempomedio", sem nenhum sinal de erro.
+    const STALE_MS = 6 * 60 * 1000; // 6 minutos sem atividade => coleta em andamento considerada obsoleta
 
     // ── Leitura da Atuação atual ────────────────────────────────────────────────
 
@@ -773,19 +782,14 @@
         return form && form.querySelector('#divTiposAudiencia') ? form : null;
     }
 
-    // Marca todos os tipos de audiência, define a Data Fim para 10 anos à frente de hoje e
-    // pesquisa. Não depende do "Todas" cascatear os checkboxes individuais via JS da
-    // página — marca cada input[name="idsTiposAudiencia"] diretamente, garantindo o mesmo
-    // resultado independente desse comportamento.
-    function preencherEPesquisarPautaAudiencias() {
-        const form = formularioPautaAudiencias();
-        if (!form) return;
-
-        // O Projudi cascateia os tipos individuais a partir de um CLIQUE de verdade no
-        // checkbox "Todas" (onclick da própria página) — só marcar checked=true e disparar
-        // "change" não é suficiente (regressão: parou de funcionar depois de um merge, que
-        // silenciosamente perdeu o .click() real). Clica de verdade e, como rede de
-        // segurança, ainda confere se sobrou algum tipo desmarcado.
+    // Marca "Todas" (clique de verdade — o Projudi cascateia os tipos individuais a
+    // partir do onclick da própria página; só checked=true+dispatchEvent('change') NÃO
+    // funciona, regressão já corrigida antes) e devolve se a marcação ficou completa
+    // (Todas marcada E nenhum tipo individual sobrou desmarcado). Sempre tenta o fallback
+    // manual em cima do que sobrar, então normalmente já sai completo na 1ª chamada —
+    // usado em retry por aguardarTiposAudienciaEPesquisar quando os checkboxes ainda não
+    // estavam no DOM na primeira tentativa.
+    function marcarTodosOsTiposAudiencia(form) {
         const checkTodos = form.querySelector('input[name="checkMarcaTodos"]');
         if (checkTodos && !checkTodos.checked) {
             console.log('[Projudi Audiências Designadas] clicando no checkbox "Todas"');
@@ -797,7 +801,36 @@
             console.warn(`[Projudi Audiências Designadas] "Todas" não marcou ${semMarcar.length} tipo(s) — marcando manualmente`);
             semMarcar.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
         }
+        const aindaFaltando = [...todos].filter(chk => !chk.checked).length;
         console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s) (Todas=${checkTodos ? checkTodos.checked : 'n/d'})`);
+        return { total: todos.length, completo: todos.length > 0 && aindaFaltando === 0 && (!checkTodos || checkTodos.checked) };
+    }
+
+    // Espera os checkboxes de tipo existirem no DOM (podem ser populados via AJAX depois
+    // do formulário aparecer — mesma armadilha já documentada para Outros Cumprimentos),
+    // marca "Todas" e só ENTÃO dispara a pesquisa — antes disso o setTimeout de Pesquisar
+    // disparava incondicionalmente 1,5s depois do preenchimento, sem checar se a marcação
+    // realmente pegou; se os checkboxes ainda não existissem nesse instante, "nenhum tipo
+    // sobrou desmarcado" era (tecnicamente) verdade com ZERO tipos marcados, e a pesquisa
+    // saía incompleta sem nenhum aviso. Poll curto (até ~1,5s) + até 2 tentativas de
+    // marcação antes de desistir e pesquisar mesmo assim (evita travar a automação por
+    // uma tela que genuinamente não tenha tipos configurados).
+    function aguardarTiposAudienciaEPesquisar(form, tentativa) {
+        tentativa = tentativa || 0;
+        const jaTemTipos = form.querySelectorAll('input[name="idsTiposAudiencia"]').length > 0;
+        if (!jaTemTipos && tentativa < 5) {
+            setTimeout(() => aguardarTiposAudienciaEPesquisar(form, tentativa + 1), 300);
+            return;
+        }
+        const resultado = marcarTodosOsTiposAudiencia(form);
+        if (!resultado.completo && tentativa < 2) {
+            // Tenta de novo (mais uma rodada de clique + fallback) antes de desistir.
+            setTimeout(() => aguardarTiposAudienciaEPesquisar(form, tentativa + 1), 400);
+            return;
+        }
+        if (!resultado.completo) {
+            console.warn('[Projudi Audiências Designadas] não foi possível confirmar todos os tipos marcados — pesquisando mesmo assim para não travar a automação.');
+        }
 
         const campoFim = form.querySelector('#dataFinal');
         if (campoFim) {
@@ -814,6 +847,12 @@
         setTimeout(() => {
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
+    }
+
+    function preencherEPesquisarPautaAudiencias() {
+        const form = formularioPautaAudiencias();
+        if (!form) return;
+        aguardarTiposAudienciaEPesquisar(form, 0);
     }
 
     // Detecta se a página já tem os resultados da pauta (pelo menos uma tabela interna
@@ -2375,14 +2414,30 @@
             marcarAtividade();
             console.log('[Projudi] continuar() — coletando página atual');
 
-            const dadosPagina = coletarPaginaAtual();
-            let total;
+            // coletarPaginaAtual() (cfg.extrai por linha) ficava FORA deste try — uma
+            // exceção numa linha atípica da tabela (célula em formato inesperado) subia
+            // sem tratamento, deixava KEY_RODANDO travado pra sempre e, como não há
+            // reload, obsoleta()/STALE_MS nunca era reavaliado: trava silenciosa até o
+            // usuário clicar em "Pular" (relatado em Conclusões — extrai() mais complexo
+            // do arquivo — e em Suspensos por Prazo Indeterminado). Além de limpar
+            // KEY_RODANDO como o catch já fazia para adicionarPagina, se a automação
+            // estiver esperando exatamente este relatório, marca "erro" (mesma flag do
+            // botão "Pular" — foiInterrompidoPorErro) e avança a fila sozinha, em vez de
+            // depender do watchdog genérico (ver verificarTravamentoAutomacao) para sair
+            // do travamento só minutos depois.
+            let dadosPagina, total;
             try {
+                dadosPagina = coletarPaginaAtual();
                 total = adicionarPagina(dadosPagina);
             } catch (err) {
                 store.removeItem(KEY_RODANDO);
-                atualizarStatus(`Erro ao armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
+                atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
                 console.error('[Exportar Projudi]', err);
+                // avancarAutomacao já confere sozinha se a automação está mesmo
+                // esperando este cfg (senão é um no-op) — chamar sempre é seguro.
+                store.setItem(cfg.prefixo + 'erro', '1');
+                console.warn('[Auto Projudi] erro durante a coleta — avançando a fila automaticamente em vez de travar');
+                avancarAutomacao(cfg);
                 render();
                 return;
             }
@@ -2405,6 +2460,17 @@
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
                 const dica = cfg.usaAtuacao ? ' Troque de atuação e colete mais, ou baixe a planilha.' : ' Baixe a planilha ou colete mais.';
                 atualizarStatus(`Coleta concluída. Acumulado: ${total} registros${extra}.${dica}`);
+                // Relatado pelo usuário: um relatório (Suspensos com Prazo) rodou até o
+                // fim sem erro mas exportou zero, apesar de a tela mostrar processos —
+                // investigação estática não achou o bug (extrai/minTds/detecta/formulário
+                // conferem com uma captura real da tela). Este aviso é diagnóstico: se
+                // acontecer de novo, "0 linhas encontradas" aqui mostra que a tabela lida
+                // não era a certa (página errada/ainda carregando); "N encontradas, 0
+                // extraídas" (log já existente em coletarPaginaAtual, acima) mostra que o
+                // filtro dentro de extrai() descartou tudo.
+                if (total === 0 && cfg.mostrarSeVazio) {
+                    console.warn(`[Projudi] "${cfg.prefixo}" terminou com 0 registros acumulados — se a tela mostrava processos, confira os logs de "coletarPaginaAtual" acima (linhas encontradas vs. extraídas) para saber se foi a leitura da tabela ou o filtro de extrai() que zerou.`);
+                }
                 // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — se ainda
                 // restam meses na fila, volta para a tela de filtros e pesquisa o próximo em
                 // vez de avançar para o próximo relatório da automação.
@@ -6539,13 +6605,18 @@
             console.log('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
-            // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
+            // Diagnóstico tardio: se depois de 15s ainda estamos no formulário (o clique
+            // não "pegou" — pode acontecer com o site lento), reclica UMA vez em vez de só
+            // avisar no console. O watchdog genérico (verificarTravamentoAutomacao) cobre
+            // o caso de o site estar de fato travado além disso.
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
                 const temResultado = !!document.querySelector('table.resultTable');
                 console.log(`[Projudi TM] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
-                    console.warn('[Projudi TM] ainda sem resultado após 15s — o site pode estar lento; se persistir por muito mais tempo, clique em Pesquisar manualmente.');
+                    console.warn('[Projudi TM] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
+                    const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+                    if (btnRetry && !btnRetry.disabled) btnRetry.click();
                 }
             }, 15000);
         }, 1500);
@@ -7626,24 +7697,25 @@
         setTimeout(passoAutomacao, 900);
     }
 
-    // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
-    // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo. Marca o
-    // relatório em andamento como interrompido por erro (ver foiInterrompidoPorErro — o
-    // Relatório PDF avisa disso, ao invés de fingir que os dados estão completos) e avança
-    // a fila normalmente, como se o relatório tivesse terminado.
-    function pularRelatorioAtual() {
-        const estado = store.getItem(AUTO_ESTADO);
-        if (!estado) return;
-        let key = null;
-        if (estado.startsWith('coletando_')) key = estado.slice('coletando_'.length);
-        else if (estado.startsWith('preenchendo_')) key = estado.slice('preenchendo_'.length);
-        else if (estado.startsWith('travado_')) key = estado.slice('travado_'.length);
-        if (!key) return;
-        const rel = relatorioPorChave(key);
-        if (!rel) return;
-        if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
+    // Descobre o "key" do item de fila atual a partir de AUTO_ESTADO, cobrindo os 3
+    // prefixos possíveis (coletando_/preenchendo_/travado_) — usado tanto pelo botão
+    // "Pular" quanto pelo watchdog automático.
+    function keyDoEstadoAtual(estado) {
+        if (!estado) return null;
+        if (estado.startsWith('coletando_')) return estado.slice('coletando_'.length);
+        if (estado.startsWith('preenchendo_')) return estado.slice('preenchendo_'.length);
+        if (estado.startsWith('travado_')) return estado.slice('travado_'.length);
+        return null;
+    }
 
-        console.warn(`[Auto Projudi] usuário pulou a extração de "${rel.rotulo}" (estado="${estado}")`);
+    // Núcleo de "pular a extração atual" — marca o relatório em andamento como
+    // interrompido por erro (ver foiInterrompidoPorErro — o Relatório PDF avisa disso,
+    // ao invés de fingir que os dados estão completos) e avança a fila normalmente, como
+    // se o relatório tivesse terminado. Extraído de pularRelatorioAtual (botão manual,
+    // que só confirma e chama isto) para ser reaproveitado pelo watchdog automático
+    // (verificarTravamentoAutomacao), que não tem `confirm()` nem pode esperar o usuário.
+    function executarPular(rel, motivo) {
+        console.warn(`[Auto Projudi] pulando a extração de "${rel.rotulo}" (${motivo})`);
         // Item pode ter mais de um cfg (ver "mandados" — 3 fases internas): marca erro/
         // coletado em todos, mesmo que só uma fase estivesse em andamento — os dados das
         // fases não alcançadas ficam ausentes de qualquer forma (mostrarSeVazio faria o
@@ -7663,12 +7735,66 @@
         if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
 
         const fila = lerFilaAutomacao();
-        const idx = fila.indexOf(key);
+        const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         store.setItem('projudi_auto_lock', String(Date.now()));
         atualizarPainel();
         setTimeout(passoAutomacao, 300);
+    }
+
+    // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
+    // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo.
+    function pularRelatorioAtual() {
+        const estado = store.getItem(AUTO_ESTADO);
+        const key = keyDoEstadoAtual(estado);
+        if (!key) return;
+        const rel = relatorioPorChave(key);
+        if (!rel) return;
+        if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
+        executarPular(rel, 'pulado manualmente pelo usuário');
+    }
+
+    // ── Watchdog genérico ────────────────────────────────────────────────────────────
+    // Antes desta função, a ÚNICA forma de sair de "coletando_X"/"preenchendo_X" quando a
+    // coleta trava (por qualquer motivo, inclusive causas ainda não mapeadas) era o
+    // usuário perceber e clicar em "Pular" — passoAutomacao() propositalmente não faz
+    // nada nesses estados (quem conduz é a própria página). Chamado no mesmo
+    // setInterval de 2s de bootstrap() que já roda passoAutomacao/atualizarPainel.
+    const WATCHDOG_STALL_MS = 3 * 60 * 1000; // 3 min sem nenhum progresso registrado
+    // Guarda {key, inicio, disparado} do item de fila que o watchdog está observando —
+    // "inicio" é gravado na PRIMEIRA vez que este item é visto (cobre o tempo antes de
+    // qualquer cfg ter seu próprio "ts" gravado — ex.: um relatório com
+    // precisaPreencher pode passar um tempo preenchendo filtros antes da 1ª coleta de
+    // página) e reiniciado sempre que o item da fila muda.
+    const CHAVE_WATCHDOG = 'projudi_auto_watchdog';
+    function verificarTravamentoAutomacao() {
+        const estado = store.getItem(AUTO_ESTADO);
+        const key = (estado && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_')))
+            ? estado.slice(estado.indexOf('_') + 1) : null;
+        if (!key) { store.removeItem(CHAVE_WATCHDOG); return; }
+
+        let vigia = null;
+        try { vigia = JSON.parse(store.getItem(CHAVE_WATCHDOG) || 'null'); } catch (e) { vigia = null; }
+        if (!vigia || vigia.key !== key) {
+            vigia = { key, inicio: Date.now(), disparado: false };
+            store.setItem(CHAVE_WATCHDOG, JSON.stringify(vigia));
+            return; // acabou de começar a observar — nada a fazer ainda
+        }
+        if (vigia.disparado) return; // já pulou este item, aguardando o próximo mudar a key
+
+        const rel = relatorioPorChave(key);
+        if (!rel) return;
+        const tss = cfgsDoRelatorio(rel)
+            .map(cfg => parseInt(store.getItem(cfg.prefixo + 'ts') || '0', 10))
+            .filter(Boolean);
+        const ultimaAtividade = Math.max(vigia.inicio, ...tss);
+        const parado = Date.now() - ultimaAtividade;
+        if (parado < WATCHDOG_STALL_MS) return;
+
+        vigia.disparado = true;
+        store.setItem(CHAVE_WATCHDOG, JSON.stringify(vigia));
+        executarPular(rel, `travamento detectado automaticamente — ${Math.round(parado / 1000)}s sem progresso`);
     }
 
     // Executa o passo de navegação do estado atual. Pode ser chamado por qualquer frame;
@@ -7742,6 +7868,16 @@
     function iniciarAutomacao(fila, periodoTM) {
         fila = (fila || []).filter(k => relatorioPorChave(k));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
+        // Limpa a flag "erro" (marcada por um Pular manual ou pelo watchdog numa rodada
+        // ANTERIOR) dos relatórios que voltam a entrar na fila — sem isso, uma nova
+        // rodada bem-sucedida ainda constaria "interrompido por erro" no PDF por causa de
+        // uma tentativa antiga, mesmo já tendo coletado dados novos e válidos desta vez
+        // (a coleta em si já ACUMULA entre rodadas — README: "troque de atuação e colete
+        // mais" —, só a flag de erro não era resetada).
+        fila.forEach(key => {
+            const rel = relatorioPorChave(key);
+            cfgsDoRelatorio(rel).forEach(cfg => store.removeItem(cfg.prefixo + 'erro'));
+        });
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
         // Monta a fila de meses do Tempo Médio uma única vez aqui, no início — nunca dentro
@@ -7777,6 +7913,7 @@
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
+        store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
         store.removeItem(CHAVE_MANDADOS_FASE);
         atualizarPainel();
@@ -8360,7 +8497,11 @@
         // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
         // página, uma falha na tentativa imediata (ex.: frame ainda carregando) deixava a
         // automação parada até uma ação manual do usuário.
-        setInterval(() => { chamarSeguro(atualizarPainel, 'atualizarPainel'); chamarSeguro(passoAutomacao, 'passoAutomacao'); }, 2000);
+        setInterval(() => {
+            chamarSeguro(atualizarPainel, 'atualizarPainel');
+            chamarSeguro(passoAutomacao, 'passoAutomacao');
+            chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
+        }, 2000);
     }
 
     if (document.readyState === 'loading') {
