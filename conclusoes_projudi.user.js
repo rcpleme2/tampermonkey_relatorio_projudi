@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.38
+// @version      20.39
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4181,6 +4181,19 @@
         });
         cartorio.linhas = linhasCartorio;
 
+        // Ordem dos RESUMOS DETALHADOS (páginas individuais, Passo 1 mais abaixo) segue a
+        // MESMA ordem em que cada relatório aparece na tabela unificada acima (pedido do
+        // usuário) — sem isso, a ordem das páginas de resumo era a ordem de coleta
+        // (CFGS_CARTORIO/secoesEntrada), que já não bate com os subgrupos "Estatísticas
+        // Gerais"/"Pendências"/"Audiências"/"Outros" da capa. cfgOriginal ausente do mapa
+        // (não deveria acontecer — todo item de itensCartorio/outrasSecoes também vira uma
+        // linha de linhasCartorio) cai pro fim, só por segurança.
+        const ordemNaCapa = new Map();
+        linhasCartorio.forEach((l, i) => { if (l.cfgOriginal && !ordemNaCapa.has(l.cfgOriginal)) ordemNaCapa.set(l.cfgOriginal, i); });
+        const posNaCapa = (cfgOriginal) => ordemNaCapa.has(cfgOriginal) ? ordemNaCapa.get(cfgOriginal) : Infinity;
+        itensCartorio.sort((a, b) => posNaCapa(a.secao.cfgOriginal) - posNaCapa(b.secao.cfgOriginal));
+        outrasSecoes.sort((a, b) => posNaCapa(a.cfgOriginal) - posNaCapa(b.cfgOriginal));
+
         let gabinete = { itens: [], totalPendentes: 0, totalPrioritarios: 0, situacao: 'regular' };
         if (secaoGabinete) {
             const porJuiz = new Map();
@@ -5610,12 +5623,16 @@
         const kW3 = (uw - 2 * gap) / 3;
         desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(dados.length), [], true, COR.azul);
         desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
-            classeTop ? textoTruncadoParaLargura(doc, classeTop.classe, kW3 - 6) : '—',
+            classeTop ? classeTop.classe : '—',
             classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+        // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
+        // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
+        // certa (bold, já ativa no momento do desenho); "subs" usa
+        // doc.splitTextToSize(...)[0], que quebra em espaço e descarta o resto da linha
+        // sem aviso — foi isso que sumia com o número (card mostrava só "Processo").
         desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Fim de Suspensão Mais Distante',
-            fimMaisLongo ? fimMaisLongo.dataStr : '—',
-            fimMaisLongo ? [textoTruncadoParaLargura(doc, `Processo ${fimMaisLongo.registro.processo}`, kW3 - 6)] : [],
-            true, COR.vermelho);
+            fimMaisLongo ? fimMaisLongo.registro.processo : '—',
+            fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
 
         // Lista "Classe — média de dias de suspensão", uma linha por classe (já ordenada
         // por quantidade de processos, maior primeiro — ver mediaSuspensaoPorClasse).
@@ -5718,11 +5735,13 @@
     // de tempo"). Mesma aproximação de dias de DIA_MS/365 usada acima.
     function faixasTempoInstanciaRecursal(dados) {
         const now = Date.now();
+        // Faixas pedidas pelo usuário (3, sem lacuna): Até 2 anos / 2 a 5 anos / mais de
+        // 5 anos — "mais de 5 anos" cobre o que o pedido original chamava de "mais de 10
+        // anos", só que sem deixar processos de 5 a 10 anos sem faixa própria.
         const faixas = [
-            { label: 'Até 6 meses', min: 0, max: 182, valor: 0 },
-            { label: '6 meses a 1 ano', min: 182, max: 365, valor: 0 },
-            { label: '1 a 2 anos', min: 365, max: 730, valor: 0 },
-            { label: 'Mais de 2 anos', min: 730, max: Infinity, valor: 0 },
+            { label: 'Até 2 anos', min: 0, max: 730, valor: 0 },
+            { label: 'De 2 a 5 anos', min: 730, max: 1825, valor: 0 },
+            { label: 'Mais de 5 anos', min: 1825, max: Infinity, valor: 0 },
         ];
         dados.forEach(d => {
             const ts = parseDataBR(d.dataEnvio);
@@ -7082,7 +7101,13 @@
             if (porId) return porId;
         }
         for (const d of docs) {
-            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
+            // genérico já causou falso positivo: em telas que NÃO são a home (ex.: a
+            // automação ainda na tela de resultados de outro relatório), o menu lateral
+            // do Projudi pode ter um link de texto igual em outro contexto, e cliclar nele
+            // não abre a aba de verdade — a automação ficava com o estado avançado
+            // (preenchendo_X) mas a tela continuava travada no relatório anterior.
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
             for (const a of candidatos) {
                 if (/^outros\s+cumprimentos$/i.test((a.textContent || '').trim())) return a;
             }
@@ -7116,7 +7141,13 @@
             if (porId) return porId;
         }
         for (const d of docs) {
-            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
+            // genérico já causou falso positivo: em telas que NÃO são a home (ex.: a
+            // automação ainda na tela de resultados de outro relatório), o menu lateral
+            // do Projudi pode ter um link de texto igual em outro contexto, e cliclar nele
+            // não abre a aba de verdade — a automação ficava com o estado avançado
+            // (preenchendo_X) mas a tela continuava travada no relatório anterior.
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
             for (const a of candidatos) {
                 if (/^an[áa]lise\s+de\s+juntadas$/i.test((a.textContent || '').trim())) return a;
             }
@@ -7250,16 +7281,17 @@
                 console.error(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
                 return;
             }
-            if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas' || rel.navAlvo === 'suspensos') {
-                // O link de Paralisados/Remessas/Suspensos só existe no card da página
-                // inicial — se a automação estiver saindo de outro relatório (ex.:
-                // resultados de Paralisados), esse link não está na página atual e
-                // navegarMenu falha silenciosamente sem nunca sair dali. Volta à início
-                // primeiro; o estado continua "ir_X" para tentar de novo assim que a
-                // home carregar.
-                console.log(`[Auto Projudi] link de "${rel.navAlvo}" não está nesta página — voltando à início para tentar de lá`);
-                navegarMenu('inicio');
-            }
+            // Praticamente todo link/aba de menu (Paralisados, Remessas, Suspensos,
+            // Suspensos com Prazo, Em Instância Recursal, Mandados, Outros Cumprimentos —
+            // e por padrão qualquer relatório novo, salvo indicação em contrário) só
+            // existe na página inicial — se a automação estiver saindo de outro relatório
+            // (ex.: resultados de Paralisados), esse link/aba não está na página atual e
+            // navegarMenu falha silenciosamente sem nunca sair dali (era isso que fazia a
+            // automação "travar" sem alterar nada até o usuário clicar em "Pular"). Volta
+            // à início em toda tentativa sem sucesso; o estado continua "ir_X" para tentar
+            // de novo assim que a home carregar.
+            console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
+            navegarMenu('inicio');
         }
     }
 
