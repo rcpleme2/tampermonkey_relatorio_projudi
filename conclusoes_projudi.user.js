@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.48
+// @version      20.49
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -568,35 +568,51 @@
         // "Fim Suspensão" sozinho não distingue mais esta tela de CFG_SUSPENSOS_PRAZO
         // (ambas têm — ver comentário acima); o que distingue é o checkbox do formulário.
         detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab) && prazoIndeterminadoMarcado(),
-        // CONFIRMADO por 2 capturas reais recentes (comparadas lado a lado — indeterminado
-        // e determinado): a tabela SÓ TEM 6 colunas — [0]Processo [1]Classe [2]Prazo
-        // [3]Início Suspensão [4]Fim Suspensão [5]Dias Paralisado. NÃO existe mais coluna
-        // "Motivo da Suspensão" (a suposição de 7 colunas, de uma captura mais antiga,
-        // estava desatualizada/errada — minTds:7 descartava TODA linha silenciosamente,
-        // já que nenhuma linha real tinha 7 tds; "o script não identificou" relatado pelo
-        // usuário era exatamente isso).
+        // CONFIRMADO por capturas reais: a tabela tem 6 colunas na maioria das varas —
+        // [0]Processo [1]Classe [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+        // [5]Dias Paralisado —, mas a ÁREA CRIME tem uma coluna a mais, "Motivo da
+        // Suspensão", entre Fim Suspensão e Dias Paralisado (7 colunas). minTds fica em 6
+        // (o mínimo comum); "Dias Paralisado" é sempre a ÚLTIMA coluna (tds[tds.length-1]),
+        // então o índice funciona nos dois formatos sem precisar saber de antemão qual é.
         minTds: 6,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_indeterminado_projudi',
         rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }],
+        // cabecalhos/larguras são getters: incluem "Motivo da Suspensão" só quando os
+        // dados já coletados tiverem esse campo (área Crime) — nas demais áreas a coluna
+        // simplesmente não existe, como pedido.
+        get cabecalhos() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? ['Processo', 'Classe Processual', 'Início Suspensão', 'Motivo da Suspensão', 'Dias Paralisado', 'Prioritário']
+                : ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'];
+        },
+        get larguras() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 11 }]
+                : [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }];
+        },
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[5]);
+            const temMotivo = tds.length >= 7;
+            const diasTexto = textoCelula(tds[tds.length - 1]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
                 classe: textoCelula(tds[1]),
                 inicioSuspensao: textoCelula(tds[3]),
+                motivo: temMotivo ? textoCelula(tds[5]) : '',
                 dias,
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
+        linha: (d) => (d.motivo
+            ? [d.processo, d.classe, d.inicioSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não']
+            : [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não']),
         // Tratado como mais uma tarefa do Cartório (mesmo esquema genérico de Juntadas/
         // Retorno — ver gerarPDFConjunto): entra no resumo/tabela por seção e na mini-
         // tabela de situação da capa, sem precisar de uma página "Estatísticas Gerais"
@@ -613,12 +629,19 @@
             distribuicoes: [
                 { titulo: 'Suspensos por Classe Processual', campo: 'classe', topN: 12 },
             ],
-            colunas: [
-                { header: 'Processo', width: 30, get: (d) => d.processo },
-                { header: 'Classe', width: 40, get: (d) => d.classe },
-                { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
-                { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
-            ],
+            // colunas também é um getter, mesma regra da coluna Excel acima: só entra
+            // "Motivo da Suspensão" quando os dados coletados vieram da área Crime.
+            get colunas() {
+                const temMotivo = lerDadosDe(CFG_SUSPENSOS.prefixo).some(d => d.motivo);
+                const base = [
+                    { header: 'Processo', width: 30, get: (d) => d.processo },
+                    { header: 'Classe', width: 40, get: (d) => d.classe },
+                    { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
+                ];
+                if (temMotivo) base.push({ header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo });
+                base.push({ header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) });
+                return base;
+            },
         },
     };
 
@@ -646,15 +669,30 @@
         // precisa estar DESMARCADO (a busca "com prazo" usa os filtros padrão, sem marcar
         // esse checkbox — ver preencherEPesquisarSuspensoPrazo).
         detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab) && !prazoIndeterminadoMarcado(),
-        // 6 colunas — CONFIRMADO por captura real: NÃO existe mais coluna "Motivo da
-        // Suspensão" nesta tela (nem na de CFG_SUSPENSOS). minTds:7 (suposição anterior,
-        // baseada numa captura desatualizada) descartava TODA linha silenciosamente.
+        // 6 colunas na maioria das varas, 7 na área Crime (coluna extra "Motivo da
+        // Suspensão" entre Fim Suspensão e Dias Paralisado) — mesma situação de
+        // CFG_SUSPENSOS, ver comentário grande lá. minTds fica em 6 (mínimo comum);
+        // "Dias Paralisado" é sempre a ÚLTIMA coluna, então tds[tds.length-1] funciona
+        // nos dois formatos.
         minTds: 6,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_prazo_projudi',
         rotulos: { coletar: 'Extrair Suspensos com Prazo', coletarMais: 'Extrair mais (Suspensos com Prazo)', baixar: '⬇ Baixar Suspensos com Prazo' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'],
-        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }],
+        // cabecalhos/larguras são getters — mesma regra de CFG_SUSPENSOS: só incluem
+        // "Motivo da Suspensão" quando os dados já coletados trouxerem esse campo (área
+        // Crime); nas demais áreas a coluna não existe.
+        get cabecalhos() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Motivo da Suspensão', 'Dias Paralisado']
+                : ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'];
+        },
+        get larguras() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 16 }]
+                : [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+        },
         extrai: (tds, atuacao) => {
             const prazoTexto = textoCelula(tds[2]);
             // "Sem Prazo" = suspensão por tempo INDETERMINADO — não é o que este relatório
@@ -662,7 +700,8 @@
             if (/^sem\s+prazo$/i.test(prazoTexto.trim())) return null;
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[5]);
+            const temMotivo = tds.length >= 7;
+            const diasTexto = textoCelula(tds[tds.length - 1]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
@@ -670,12 +709,15 @@
                 prazo: prazoTexto,
                 inicioSuspensao: textoCelula(tds[3]),
                 fimSuspensao: textoCelula(tds[4]),
+                motivo: temMotivo ? textoCelula(tds[5]) : '',
                 dias,
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))],
+        linha: (d) => (d.motivo
+            ? [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias))]
+            : [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))]),
         // Sem cfg.pdf genérico: o resumo pedido (classe com mais processos, tempo médio de
         // suspensão POR CLASSE, processo com fim de suspensão mais LONGA) não cabe no
         // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
@@ -1389,10 +1431,21 @@
         let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0 };
         try { extrasGeral = JSON.parse(store.getItem(CHAVE_EXTRAS_GERAL_AR) || 'null') || extrasGeral; } catch (e) { /* ignore */ }
 
+        // O mínimo agora considera o TOTAL do usuário no período (realizadas + canceladas
+        // + não realizadas + redesignadas), não só "realizadas" — pedido do usuário: um
+        // magistrado com poucas realizadas mas muitas canceladas/redesignadas ainda teve
+        // atividade relevante na vara e não deve ficar fora da lista por esse motivo.
+        const totalUsuarioAR = (u) => u.quantidade + (u.canceladas || 0) + (u.naoRealizadas || 0) + (u.redesignadas || 0);
         const porUsuario = acumulado
-            .filter(u => u.quantidade >= MIN_AUDIENCIAS_POR_USUARIO_AR)
+            .filter(u => totalUsuarioAR(u) >= MIN_AUDIENCIAS_POR_USUARIO_AR)
             .sort((a, b) => b.quantidade - a.quantidade);
-        const usuariosIgnorados = acumulado.length - porUsuario.length;
+        // Magistrados abaixo do mínimo — relacionados de forma discreta no PDF (pedido do
+        // usuário, "para futura conferência"), não escondidos silenciosamente.
+        const usuariosAbaixoDoMinimo = acumulado
+            .filter(u => totalUsuarioAR(u) < MIN_AUDIENCIAS_POR_USUARIO_AR)
+            .map(u => ({ nome: u.nome, total: totalUsuarioAR(u) }))
+            .sort((a, b) => b.total - a.total);
+        const usuariosIgnorados = usuariosAbaixoDoMinimo.length;
 
         const resumo = {
             geradoEm: new Date().toISOString(),
@@ -1403,10 +1456,11 @@
             periodo,
             porUsuario,
             usuariosIgnorados,
+            usuariosAbaixoDoMinimo,
             totalUsuarios: acumulado.length,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(total>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -5447,7 +5501,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, totalUsuarios: 0, competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, usuariosAbaixoDoMinimo: [], totalUsuarios: 0, competencia: '' };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -5459,8 +5513,12 @@
         doc.text(linhasSubtitulo, m, m + 8);
         let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-        const obs = `Observação: o detalhamento por usuário mostra apenas quem realizou ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
+        let obs = `Observação: o detalhamento por usuário mostra apenas quem teve, no total (realizadas + canceladas + não `
+            + `realizadas + redesignadas), ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
             + `(${r.usuariosIgnorados} usuário(s) abaixo desse mínimo não aparecem na lista, mas contam no total geral).`;
+        if (r.usuariosAbaixoDoMinimo && r.usuariosAbaixoDoMinimo.length) {
+            obs += ` Abaixo do mínimo: ${r.usuariosAbaixoDoMinimo.map(u => `${u.nome} (${u.total})`).join(', ')}.`;
+        }
         const linhasObs = doc.splitTextToSize(obs, uw);
         doc.text(linhasObs, m, yObs);
         const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
@@ -6246,14 +6304,18 @@
         const paginaInicial = doc.internal.getNumberOfPages();
         tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
 
+        // "Motivo da Suspensão" só existe na área Crime — entra na tabela discriminada só
+        // quando algum registro coletado trouxer esse campo (ver CFG_SUSPENSOS_PRAZO.extrai).
+        const temMotivo = dados.some(d => d.motivo);
         const colunas = [
             { header: 'Processo', width: 30, get: (d) => d.processo },
             { header: 'Classe Processual', width: 44, get: (d) => d.classe },
             { header: 'Prazo', width: 30, get: (d) => d.prazo },
             { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
             { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
-            { header: 'Dias Paralisado', width: 24, get: (d) => (d.dias == null ? '' : String(d.dias)) },
         ];
+        if (temMotivo) colunas.push({ header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo });
+        colunas.push({ header: 'Dias Paralisado', width: 24, get: (d) => (d.dias == null ? '' : String(d.dias)) });
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
 
