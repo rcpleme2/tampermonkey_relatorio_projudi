@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.43
+// @version      20.44
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2468,6 +2468,29 @@
                 store.removeItem(KEY_RODANDO);
                 atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
                 console.error('[Exportar Projudi]', err);
+                // QuotaExceededError = o localStorage do navegador ENCHEU (limite de
+                // ~5-10MB por origem) — relatado em produção com Apreensões na página 10.
+                // Isso não é um problema deste relatório específico: TODO próximo write em
+                // QUALQUER cfg vai falhar do mesmo jeito (o armazenamento é compartilhado
+                // por origem), então "avançar a fila automaticamente" (o que os demais
+                // erros fazem) só espalharia o mesmo erro pelos relatórios seguintes, um a
+                // um, sem o usuário entender o que está acontecendo. Em vez disso, para a
+                // automação por completo com uma mensagem clara e acionável — desde a
+                // rodada anterior "não limpar mais automaticamente" faz os dados
+                // acumularem entre exportações, o que deixa isso mais provável de
+                // acontecer com o tempo.
+                if (err.name === 'QuotaExceededError') {
+                    console.error('[Auto Projudi] armazenamento do navegador CHEIO — parando a automação (não adianta avançar, o próximo write falharia igual)');
+                    store.setItem(AUTO_ESTADO, 'armazenamento_cheio');
+                    store.setItem('projudi_auto_lock', String(Date.now()));
+                    atualizarPainel();
+                    alert('O armazenamento do navegador ficou cheio durante a coleta.\n\n'
+                        + 'Os dados já coletados até agora foram mantidos. Baixe/exporte o que já tem (PDF, '
+                        + 'Excel ou planilha individual) e depois clique em "Limpar" no painel antes de continuar — '
+                        + 'senão a próxima coleta vai falhar do mesmo jeito.');
+                    render();
+                    return;
+                }
                 // avancarAutomacao já confere sozinha se a automação está mesmo
                 // esperando este cfg (senão é um no-op) — chamar sempre é seguro.
                 store.setItem(cfg.prefixo + 'erro', '1');
@@ -6582,8 +6605,13 @@
         // Limpa o período acumulado de uma rodada anterior (ver preencherEPesquisarTempoMedio)
         // para não herdar por engano o "fim" de uma extração antiga.
         store.removeItem('projudi_tempomedio_periodo');
+        store.removeItem(CHAVE_MES_ATUAL_TM);
         return fila;
     }
+
+    // Mês atualmente em busca (já removido da fila em preencherEPesquisarTempoMedio) —
+    // só pra exibição de progresso no painel, ver atualizarPainel.
+    const CHAVE_MES_ATUAL_TM = 'projudi_tempomedio_mes_atual';
 
     function lerFilaMesesTempoMedio() {
         // Mesma proteção usada em lerDadosDe/desembrulharArray: o valor às vezes volta
@@ -6608,6 +6636,10 @@
         // Remove o mês do início da fila agora — quando essa pesquisa terminar de coletar
         // (ver criarColetor/continuar), o próximo item (se houver) dispara uma nova rodada.
         store.setItem(CHAVE_FILA_MESES_TM, JSON.stringify(fila.slice(1)));
+        // Guarda qual mês está em andamento (já saiu da fila acima, então não dá mais pra
+        // achar em lerFilaMesesTempoMedio) — usado só pra mostrar no status do painel
+        // (ver atualizarPainel) qual mês está sendo coletado agora e quantos faltam.
+        store.setItem(CHAVE_MES_ATUAL_TM, JSON.stringify(mes));
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
@@ -6652,6 +6684,12 @@
         setTimeout(() => {
             console.log('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
+            // Marca atividade no MOMENTO do clique — sem isso, todo o tempo de busca
+            // (que pode passar de minutos com o site lento, ver STALE_MS) ficava sem
+            // nenhum sinal de progresso pro watchdog genérico (verificarTravamentoAutomacao),
+            // que contava esse tempo como travamento e pulava o mês antes da hora (relatado
+            // pelo usuário: "pulando indevidamente só pelo tempo decorrido").
+            store.setItem(CFG_TEMPOMEDIO.prefixo + 'ts', String(Date.now()));
 
             // Diagnóstico tardio: se depois de 15s ainda estamos no formulário (o clique
             // não "pegou" — pode acontecer com o site lento), reclica UMA vez em vez de só
@@ -6665,6 +6703,7 @@
                     console.warn('[Projudi TM] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
                     const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
                     if (btnRetry && !btnRetry.disabled) btnRetry.click();
+                    store.setItem(CFG_TEMPOMEDIO.prefixo + 'ts', String(Date.now()));
                 }
             }, 15000);
         }, 1500);
@@ -7792,7 +7831,7 @@
         // Limpa o estado transitório de relatórios com fila própria — senão a próxima
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
-        if (rel.key === 'tempomedio') store.removeItem(CHAVE_FILA_MESES_TM);
+        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
         if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
@@ -7824,7 +7863,15 @@
     // usuário perceber e clicar em "Pular" — passoAutomacao() propositalmente não faz
     // nada nesses estados (quem conduz é a própria página). Chamado no mesmo
     // setInterval de 2s de bootstrap() que já roda passoAutomacao/atualizarPainel.
-    const WATCHDOG_STALL_MS = 3 * 60 * 1000; // 3 min sem nenhum progresso registrado
+    // Era 3 min; aumentado pra 8 depois de um pulo indevido relatado (Tempo Médio):
+    // entre o clique em Pesquisar de um novo mês e a página de resultados carregar, não
+    // há NENHUM "ts" gravado (marcarAtividade só roda dentro do coletor, que só começa
+    // depois da página responder) — com o site lento (mesmo cenário que motivou
+    // STALE_MS = 6 min numa rodada anterior), essa espera sozinha já passava dos 3 min
+    // antigos e o watchdog pulava um mês que ainda estava sendo buscado de verdade.
+    // 8 min dá margem folgada acima de STALE_MS (6 min), pra nunca competir com a
+    // recuperação automática que STALE_MS/obsoleta() já cobrem.
+    const WATCHDOG_STALL_MS = 8 * 60 * 1000;
     // Guarda {key, inicio, disparado} do item de fila que o watchdog está observando —
     // "inicio" é gravado na PRIMEIRA vez que este item é visto (cobre o tempo antes de
     // qualquer cfg ter seu próprio "ts" gravado — ex.: um relatório com
@@ -7875,8 +7922,10 @@
         // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
         // preencherEPesquisarParalisado). "travado_X" = desistiu de navegar depois de
         // várias tentativas (ver ir_ abaixo) — só sai desse estado com "Limpar" ou
-        // retomando a automação do zero.
-        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')) return;
+        // retomando a automação do zero. "armazenamento_cheio" = QuotaExceededError (ver
+        // continuar() em criarColetor) — parada definitiva, mesma saída só com "Limpar".
+        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')
+            || estado === 'armazenamento_cheio') return;
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
@@ -7994,6 +8043,7 @@
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem(CHAVE_FILA_MESES_TM);
+        store.removeItem(CHAVE_MES_ATUAL_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
@@ -8062,12 +8112,22 @@
         try {
             const wb = XLSX.utils.book_new();
             const abasUsadas = new Set();
+            const ignorados = [];
             secoes.forEach(({ dados, cfg }) => {
+                // Relatórios de "resumo único" (Audiências Designadas/Realizadas, Outros
+                // Cumprimentos — dados = 1 objeto agregado, não uma lista por processo)
+                // não têm cfg.linha/cabecalhos/larguras (nunca tiveram exportação Excel
+                // própria, o botão individual deles nem oferece "Baixar planilha") — sem
+                // essa checagem, dados.map(cfg.linha) quebrava com "undefined is not a
+                // function" assim que o Excel conjunto incluía qualquer um dos três.
+                if (!cfg.linha || !cfg.cabecalhos) { ignorados.push(cfg.nomeArquivo); return; }
                 const linhas = dados.map(cfg.linha);
                 const ws = XLSX.utils.aoa_to_sheet([cfg.cabecalhos, ...linhas]);
                 ws['!cols'] = cfg.larguras;
                 XLSX.utils.book_append_sheet(wb, ws, nomeAbaExcel(cfg.nomeArquivo, abasUsadas));
             });
+            if (ignorados.length) console.log(`[Projudi] Excel conjunto — ignorados (sem formato de linha por processo): ${ignorados.join(', ')}`);
+            if (!wb.SheetNames.length) { alert('Nenhum dos relatórios coletados tem uma tabela exportável em linhas (Audiências Designadas/Realizadas e Outros Cumprimentos não entram no Excel conjunto).'); return; }
             const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
             const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
             baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.xlsx`);
@@ -8101,11 +8161,14 @@
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
         const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + lerDadosDe(cfg.prefixo).length, 0) }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
-        const emCurso = estado !== 'inativo' && estado !== 'concluido';
-        const travado = estado.startsWith('travado_');
+        const emCurso = estado !== 'inativo' && estado !== 'concluido' && estado !== 'armazenamento_cheio';
+        const travado = estado.startsWith('travado_') || estado === 'armazenamento_cheio';
         const estadoTexto = (() => {
             if (estado === 'inativo') return 'Pronto para iniciar';
             if (estado === 'concluido') return 'Coleta concluída';
+            if (estado === 'armazenamento_cheio') {
+                return 'Armazenamento do navegador cheio — baixe/exporte os dados coletados e clique em "Limpar" antes de continuar.';
+            }
             if (estado === 'ir_fim') return 'Finalizando…';
             if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `Preenchendo filtros de <strong>${rel ? rel.rotulo : estado}</strong>…`; }
             if (estado.startsWith('coletando_')) {
@@ -8137,6 +8200,18 @@
                     const fase = store.getItem(CHAVE_MANDADOS_FASE);
                     const rotuloFase = ROTULOS_FASE_MANDADOS[fase];
                     if (rotuloFase) txt += ` — fase: <strong>${rotuloFase}</strong>`;
+                }
+                // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — sem
+                // indicar qual mês e quantos faltam, "Coletando Tempo Médio…" fica parado
+                // no mesmo texto por várias buscas seguidas, sem dar pra saber se está
+                // progredindo (pedido do usuário).
+                if (chave === 'tempomedio') {
+                    const mesAtual = desembrulharObjeto(store.getItem(CHAVE_MES_ATUAL_TM));
+                    const restantes = lerFilaMesesTempoMedio().length;
+                    if (mesAtual && mesAtual.rotulo) {
+                        txt += ` — mês <strong>${mesAtual.rotulo}</strong>`;
+                        txt += restantes > 0 ? ` (${restantes} mês(es) restante(s) depois deste)` : ' (último mês da fila)';
+                    }
                 }
                 return txt;
             }
