@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.46
+// @version      20.45
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -17,144 +17,7 @@
 (function () {
     'use strict';
 
-    // ── Armazenamento (IndexedDB, cota muito maior que localStorage) ────────────────
-    // localStorage tem um limite fixo por origem (~5-10MB, sem NENHUMA forma de aumentar
-    // via código — já estourou em produção, ver QuotaExceededError relatado com
-    // Apreensões). IndexedDB usa uma cota administrada pelo navegador, tipicamente uma
-    // fração grande do disco livre — ordens de magnitude maior.
-    //
-    // Pra não reescrever as centenas de chamadas `store.getItem/setItem/removeItem`
-    // espalhadas pelo arquivo (todas síncronas, por design — o resto do script não muda
-    // NADA), `store` continua com a MESMA interface síncrona de sempre: um cache em
-    // memória (Map) é a fonte de verdade pra leitura; toda escrita atualiza o cache na
-    // hora (síncrono) e agenda uma gravação no IndexedDB em segundo plano (assíncrono,
-    // sem bloquear quem chamou). O cache é carregado do IndexedDB ANTES de bootstrap()
-    // rodar pela primeira vez — ver hidratarStoreEIniciar() no fim do arquivo, que seguia
-    // a inicialização até o IndexedDB responder.
-    const NOME_DB_ARMAZENAMENTO = 'projudi_extrator_db';
-    const NOME_OBJECT_STORE_ARMAZENAMENTO = 'kv';
-    const storeCache = new Map();
-    let dbConexao = null;
-    // Decidido UMA vez por hidratarStoreEIniciar(), antes de bootstrap() rodar (nada no
-    // script escreve em "store" antes disso) — 'indexeddb' normalmente, 'localstorage' só
-    // no fallback (IndexedDB indisponível). Nunca troca depois de decidido: um valor só
-    // sendo escolhido depois que a hidratação síncrona-de-fato já terminou evitaria janela
-    // de corrida onde uma escrita no meio do caminho iria pro backend errado (ou se
-    // perderia) — como só há esse UM ponto de decisão, e ele sempre roda antes de
-    // qualquer escrita real, essa janela não existe na prática.
-    let backendArmazenamento = null;
-
-    function abrirDB() {
-        return new Promise((resolve, reject) => {
-            if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB indisponível neste navegador/contexto')); return; }
-            const req = indexedDB.open(NOME_DB_ARMAZENAMENTO, 1);
-            req.onupgradeneeded = () => { req.result.createObjectStore(NOME_OBJECT_STORE_ARMAZENAMENTO); };
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
-    }
-
-    function carregarTudoDoDB(db) {
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(NOME_OBJECT_STORE_ARMAZENAMENTO, 'readonly');
-            const osKeys = tx.objectStore(NOME_OBJECT_STORE_ARMAZENAMENTO).getAllKeys();
-            const osVals = tx.objectStore(NOME_OBJECT_STORE_ARMAZENAMENTO).getAll();
-            tx.oncomplete = () => {
-                const mapa = new Map();
-                (osKeys.result || []).forEach((k, i) => mapa.set(k, osVals.result[i]));
-                resolve(mapa);
-            };
-            tx.onerror = () => reject(tx.error);
-        });
-    }
-
-    // Persiste em segundo plano no backend já decidido — NUNCA lança pra quem chamou
-    // (store.setItem/removeItem continuam síncronos e nunca falham do ponto de vista de
-    // quem chama; o cache em memória já está atualizado antes disso rodar). Se a própria
-    // gravação falhar (cota do IndexedDB/localStorage esgotada — a do IndexedDB é bem
-    // mais rara, dado o tamanho, mas ainda possível), aciona o mesmo alerta de
-    // "armazenamento cheio" já usado antes, só que agora de forma assíncrona (ver
-    // dispararArmazenamentoCheio mais abaixo).
-    function persistirChave(chave, valor) {
-        if (backendArmazenamento === 'localstorage') {
-            try { window.localStorage.setItem(chave, valor); }
-            catch (err) { console.error('[Projudi] falha ao gravar no localStorage:', chave, err); dispararArmazenamentoCheio(err); }
-            return;
-        }
-        if (!dbConexao) return; // hidratação ainda não terminou — não deveria acontecer, ver comentário acima
-        try {
-            const tx = dbConexao.transaction(NOME_OBJECT_STORE_ARMAZENAMENTO, 'readwrite');
-            tx.objectStore(NOME_OBJECT_STORE_ARMAZENAMENTO).put(valor, chave);
-            tx.onerror = () => {
-                console.error('[Projudi] falha ao gravar no IndexedDB:', chave, tx.error);
-                dispararArmazenamentoCheio(tx.error);
-            };
-        } catch (err) {
-            console.error('[Projudi] exceção ao gravar no IndexedDB:', chave, err);
-            dispararArmazenamentoCheio(err);
-        }
-    }
-
-    function removerChavePersistida(chave) {
-        if (backendArmazenamento === 'localstorage') {
-            try { window.localStorage.removeItem(chave); } catch (err) { console.error('[Projudi] falha ao remover do localStorage:', chave, err); }
-            return;
-        }
-        if (!dbConexao) return;
-        try {
-            const tx = dbConexao.transaction(NOME_OBJECT_STORE_ARMAZENAMENTO, 'readwrite');
-            tx.objectStore(NOME_OBJECT_STORE_ARMAZENAMENTO).delete(chave);
-        } catch (err) { console.error('[Projudi] exceção ao remover do IndexedDB:', chave, err); }
-    }
-
-    // Interface IDÊNTICA à de localStorage (getItem/setItem/removeItem síncronos) — é
-    // por isso que nenhuma outra linha do arquivo precisou mudar. SEMPRE lê/escreve no
-    // cache em memória primeiro (nunca reaponta pra outro backend depois de criado) —
-    // só o destino da persistência em segundo plano (persistirChave) varia.
-    const store = {
-        getItem(chave) { return storeCache.has(chave) ? storeCache.get(chave) : null; },
-        setItem(chave, valor) { const v = String(valor); storeCache.set(chave, v); persistirChave(chave, v); },
-        removeItem(chave) { storeCache.delete(chave); removerChavePersistida(chave); },
-    };
-
-    // Chamado tanto pela falha SÍNCRONA (raríssima agora, ex. JSON.stringify de um objeto
-    // circular) capturada em criarColetor.continuar(), quanto pela falha ASSÍNCRONA de
-    // gravarNoDB acima (o caminho comum agora que a gravação em si não bloqueia mais quem
-    // chamou) — mesmo efeito nos dois casos: para a automação com um estado dedicado
-    // (reconhecido em passoAutomacao/atualizarPainel/verificarTravamentoAutomacao) em vez
-    // de deixar os relatórios seguintes falharem um a um pelo mesmo motivo.
-    let alertaArmazenamentoJaMostrado = false;
-    function dispararArmazenamentoCheio(err) {
-        store.setItem(AUTO_ESTADO, 'armazenamento_cheio');
-        store.setItem('projudi_auto_lock', String(Date.now()));
-        if (typeof atualizarPainel === 'function') atualizarPainel();
-        if (!alertaArmazenamentoJaMostrado) {
-            alertaArmazenamentoJaMostrado = true;
-            alert('O armazenamento ficou cheio durante a coleta.\n\n'
-                + 'Os dados já coletados até agora foram mantidos. Baixe/exporte o que já tem (PDF, '
-                + 'Excel ou planilha individual) e depois clique em "Limpar" no painel antes de continuar — '
-                + 'senão a próxima coleta vai falhar do mesmo jeito.'
-                + (err && err.message ? `\n\nDetalhe técnico: ${err.message}` : ''));
-        }
-    }
-
-    // Migra dados de uma instalação anterior (localStorage, de antes desta versão) — só
-    // roda se o IndexedDB estiver vazio (primeira vez depois da atualização): copia tudo
-    // que existir em localStorage sob o prefixo "projudi_" pro cache/IndexedDB novos, SEM
-    // apagar o localStorage original (mais seguro — se a migração falhar no meio, os
-    // dados antigos continuam intactos lá, e uma próxima tentativa não perde nada).
-    function migrarDeLocalStorageSeNecessario() {
-        try {
-            for (let i = 0; i < window.localStorage.length; i++) {
-                const chave = window.localStorage.key(i);
-                if (chave && chave.startsWith('projudi_') && !storeCache.has(chave)) {
-                    const valor = window.localStorage.getItem(chave);
-                    storeCache.set(chave, valor);
-                    persistirChave(chave, valor);
-                }
-            }
-        } catch (err) { console.error('[Projudi] falha ao migrar dados do localStorage:', err); }
-    }
+    const store = window.localStorage;
     // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
     // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
     // RELOAD do Projudi, e nesse reload específico (diferente do primeiro reload após
@@ -2605,15 +2468,26 @@
                 store.removeItem(KEY_RODANDO);
                 atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
                 console.error('[Exportar Projudi]', err);
-                // Essa captura síncrona agora é rara (a gravação em si virou assíncrona,
-                // ver gravarNoDB) — mas ainda cobre erros síncronos genuínos (ex.: um
-                // objeto circular quebrando JSON.stringify). QuotaExceededError (cota
-                // esgotada) tem o mesmo tratamento aqui e no caminho assíncrono comum —
-                // ver dispararArmazenamentoCheio: não adianta avançar pro próximo
-                // relatório, o armazenamento é compartilhado por origem e o próximo write
-                // falharia igual.
+                // QuotaExceededError = o localStorage do navegador ENCHEU (limite de
+                // ~5-10MB por origem) — relatado em produção com Apreensões na página 10.
+                // Isso não é um problema deste relatório específico: TODO próximo write em
+                // QUALQUER cfg vai falhar do mesmo jeito (o armazenamento é compartilhado
+                // por origem), então "avançar a fila automaticamente" (o que os demais
+                // erros fazem) só espalharia o mesmo erro pelos relatórios seguintes, um a
+                // um, sem o usuário entender o que está acontecendo. Em vez disso, para a
+                // automação por completo com uma mensagem clara e acionável — desde a
+                // rodada anterior "não limpar mais automaticamente" faz os dados
+                // acumularem entre exportações, o que deixa isso mais provável de
+                // acontecer com o tempo.
                 if (err.name === 'QuotaExceededError') {
-                    dispararArmazenamentoCheio(err);
+                    console.error('[Auto Projudi] armazenamento do navegador CHEIO — parando a automação (não adianta avançar, o próximo write falharia igual)');
+                    store.setItem(AUTO_ESTADO, 'armazenamento_cheio');
+                    store.setItem('projudi_auto_lock', String(Date.now()));
+                    atualizarPainel();
+                    alert('O armazenamento do navegador ficou cheio durante a coleta.\n\n'
+                        + 'Os dados já coletados até agora foram mantidos. Baixe/exporte o que já tem (PDF, '
+                        + 'Excel ou planilha individual) e depois clique em "Limpar" no painel antes de continuar — '
+                        + 'senão a próxima coleta vai falhar do mesmo jeito.');
                     render();
                     return;
                 }
@@ -2625,14 +2499,6 @@
                 render();
                 return;
             }
-
-            // A gravação de cada página agora é assíncrona em segundo plano
-            // (persistirChave) — uma falha de armazenamento nela NÃO lança mais aqui
-            // dentro (dispararArmazenamentoCheio já rodou direto de lá, síncrono o
-            // bastante pra já ter marcado AUTO_ESTADO antes de chegar neste ponto). Sem
-            // esta checagem, continuar() achava que a página "foi coletada com sucesso" e
-            // seguia clicando "próxima página" mesmo com o armazenamento já cheio.
-            if (store.getItem(AUTO_ESTADO) === 'armazenamento_cheio') { render(); return; }
 
             const pagina = numeroPaginaAtual();
             const totReg = totalRegistrosPagina();
@@ -8872,41 +8738,9 @@
         }, 2000);
     }
 
-    // Carrega o cache do IndexedDB ANTES de bootstrap() rodar pela primeira vez — todo o
-    // resto do script assume "store" já pronto e síncrono (ver comentário grande no topo
-    // do arquivo, junto da definição de "store"). Se o IndexedDB não estiver disponível
-    // por qualquer motivo (ex.: modo privado restrito em algum navegador), cai pro
-    // localStorage direto como fallback — mantém o script funcionando (com o limite de
-    // sempre) em vez de travar a inicialização inteira.
-    async function hidratarStoreEIniciar() {
-        try {
-            dbConexao = await abrirDB();
-            const carregado = await carregarTudoDoDB(dbConexao);
-            // backendArmazenamento só é decidido AQUI, depois que a conexão com o
-            // IndexedDB já está pronta — persistirChave/removerChavePersistida (chamadas
-            // por store.setItem/removeItem) checam esse valor antes de qualquer escrita,
-            // então não há janela onde uma escrita real aconteça antes da decisão.
-            backendArmazenamento = 'indexeddb';
-            carregado.forEach((v, k) => storeCache.set(k, v));
-            if (storeCache.size === 0) migrarDeLocalStorageSeNecessario();
-        } catch (err) {
-            console.error('[Projudi] IndexedDB indisponível — usando localStorage como fallback (limite de armazenamento menor):', err);
-            backendArmazenamento = 'localstorage';
-            // Hidrata o cache a partir do localStorage já existente — mesma ideia da
-            // migração acima, só que aqui o localStorage JÁ É o backend definitivo (não
-            // uma cópia única), então lê tudo, não só quando o cache estiver vazio.
-            try {
-                for (let i = 0; i < window.localStorage.length; i++) {
-                    const chave = window.localStorage.key(i);
-                    if (chave && chave.startsWith('projudi_')) storeCache.set(chave, window.localStorage.getItem(chave));
-                }
-            } catch (err2) { console.error('[Projudi] falha ao ler localStorage no fallback:', err2); }
-        }
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', bootstrap);
-        } else {
-            bootstrap();
-        }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bootstrap);
+    } else {
+        bootstrap();
     }
-    hidratarStoreEIniciar();
 })();
