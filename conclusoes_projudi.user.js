@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.50
+// @version      21.0
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18,6 +18,72 @@
     'use strict';
 
     const store = window.localStorage;
+
+    // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
+    // localStorage para tudo mais) ──────────────────────────────────────────────────
+    // O `localStorage` tem uma cota pequena (~5-10MB por origem) e relatórios grandes
+    // (ex.: Apreensões, Conclusões) já estouraram essa cota em produção, travando a
+    // automação no meio da coleta. Uma tentativa anterior de resolver isso migrou TUDO
+    // (inclusive o estado de controle da automação, como AUTO_ESTADO) para IndexedDB —
+    // e quebrou, porque o Projudi roda o script em VÁRIAS frames simultâneas (menu,
+    // conteúdo, ...) sem `@noframes`, e o IndexedDB é assíncrono: cada frame acabava com
+    // sua própria cópia em memória, sem sincronia entre elas (status desatualizado, loop
+    // de extração repetida — ver histórico do commit que reverteu aquela tentativa).
+    //
+    // Esta versão é mais conservadora: só as PÁGINAS DE DADOS coletadas (os arrays
+    // grandes, um por página de resultado — chave `prefixo+'pagina_N'`) vão para o
+    // IndexedDB. TODO o estado de controle continua em `localStorage`, exatamente como
+    // antes — síncrono e realmente compartilhado entre frames (AUTO_ESTADO, num_paginas,
+    // coletado, rodando, contadores pequenos como total_registros/atuacoes/tem_motivo).
+    // Como a coleta paginada de um relatório sempre acontece numa ÚNICA frame que recarrega
+    // a cada página (nunca duas frames escrevendo as mesmas páginas ao mesmo tempo), não
+    // há a mesma condição de corrida que quebrou a tentativa anterior — só é preciso
+    // aguardar (`await`) a escrita no IndexedDB terminar ANTES de navegar para a próxima
+    // página, senão o reload perde os dados que ainda não tinham sido persistidos.
+    const IDB_NOME = 'projudi_paginas_extracao';
+    const IDB_VERSAO = 1;
+    const IDB_OBJSTORE = 'paginas';
+    let _idbPromise = null;
+    function abrirIDB() {
+        if (_idbPromise) return _idbPromise;
+        _idbPromise = new Promise((resolve, reject) => {
+            if (typeof indexedDB === 'undefined') { reject(new Error('IndexedDB indisponível')); return; }
+            const req = indexedDB.open(IDB_NOME, IDB_VERSAO);
+            req.onupgradeneeded = () => {
+                if (!req.result.objectStoreNames.contains(IDB_OBJSTORE)) req.result.createObjectStore(IDB_OBJSTORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error || new Error('Falha ao abrir IndexedDB'));
+        });
+        return _idbPromise;
+    }
+    async function idbSet(chave, valor) {
+        const db = await abrirIDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_OBJSTORE, 'readwrite');
+            tx.objectStore(IDB_OBJSTORE).put(valor, chave);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Falha ao gravar no IndexedDB'));
+        });
+    }
+    async function idbGet(chave) {
+        const db = await abrirIDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_OBJSTORE, 'readonly');
+            const req = tx.objectStore(IDB_OBJSTORE).get(chave);
+            req.onsuccess = () => resolve(req.result === undefined ? null : req.result);
+            req.onerror = () => reject(req.error || new Error('Falha ao ler do IndexedDB'));
+        });
+    }
+    async function idbDelete(chave) {
+        const db = await abrirIDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_OBJSTORE, 'readwrite');
+            tx.objectStore(IDB_OBJSTORE).delete(chave);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Falha ao apagar do IndexedDB'));
+        });
+    }
     // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
     // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
     // RELOAD do Projudi, e nesse reload específico (diferente do primeiro reload após
@@ -580,15 +646,19 @@
         rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
         // cabecalhos/larguras são getters: incluem "Motivo da Suspensão" só quando os
         // dados já coletados tiverem esse campo (área Crime) — nas demais áreas a coluna
-        // simplesmente não existe, como pedido.
+        // simplesmente não existe, como pedido. Lêem uma flag pequena gravada em
+        // localStorage por extrai() (não os dados em si, que agora vivem no IndexedDB —
+        // ver abrirIDB — e só são lidos de forma assíncrona; cabecalhos/larguras
+        // continuam síncronos porque o Excel genérico os lê como valor direto, não com
+        // await, em vários outros pontos do código).
         get cabecalhos() {
-            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            const temMotivo = store.getItem(this.prefixo + 'tem_motivo') === '1';
             return temMotivo
                 ? ['Processo', 'Classe Processual', 'Início Suspensão', 'Motivo da Suspensão', 'Dias Paralisado', 'Prioritário']
                 : ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'];
         },
         get larguras() {
-            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            const temMotivo = store.getItem(this.prefixo + 'tem_motivo') === '1';
             return temMotivo
                 ? [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 11 }]
                 : [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }];
@@ -597,6 +667,7 @@
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
             const temMotivo = tds.length >= 7;
+            if (temMotivo) store.setItem(CFG_SUSPENSOS.prefixo + 'tem_motivo', '1');
             const diasTexto = textoCelula(tds[tds.length - 1]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
@@ -632,7 +703,7 @@
             // colunas também é um getter, mesma regra da coluna Excel acima: só entra
             // "Motivo da Suspensão" quando os dados coletados vieram da área Crime.
             get colunas() {
-                const temMotivo = lerDadosDe(CFG_SUSPENSOS.prefixo).some(d => d.motivo);
+                const temMotivo = store.getItem(CFG_SUSPENSOS.prefixo + 'tem_motivo') === '1';
                 const base = [
                     { header: 'Processo', width: 30, get: (d) => d.processo },
                     { header: 'Classe', width: 40, get: (d) => d.classe },
@@ -682,13 +753,13 @@
         // "Motivo da Suspensão" quando os dados já coletados trouxerem esse campo (área
         // Crime); nas demais áreas a coluna não existe.
         get cabecalhos() {
-            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            const temMotivo = store.getItem(this.prefixo + 'tem_motivo') === '1';
             return temMotivo
                 ? ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Motivo da Suspensão', 'Dias Paralisado']
                 : ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'];
         },
         get larguras() {
-            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            const temMotivo = store.getItem(this.prefixo + 'tem_motivo') === '1';
             return temMotivo
                 ? [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 16 }]
                 : [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
@@ -701,6 +772,7 @@
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
             const temMotivo = tds.length >= 7;
+            if (temMotivo) store.setItem(CFG_SUSPENSOS_PRAZO.prefixo + 'tem_motivo', '1');
             const diasTexto = textoCelula(tds[tds.length - 1]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
@@ -1901,20 +1973,29 @@
     // normal (fim da fase "naolidos", ver avancarOuConcluirFaseMandados) quanto no caminho
     // de "contador nunca apareceu" (ver tratarFaseMandadosPendentes) — sempre o mesmo
     // caminho de código, mesmo com os dois datasets vazios.
-    function mesclarMandadosCumprimento() {
-        const lidos = lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_LIDO.prefixo);
-        const naoLidos = lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.prefixo);
+    async function mesclarMandadosCumprimento() {
+        const lidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_LIDO.prefixo);
+        const naoLidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.prefixo);
         const todos = [...lidos, ...naoLidos];
+        // O resultado mesclado grava no formato "página única" — CFG_MANDADOS_CUMPRIMENTO
+        // não passa pelo coletor paginado, então continua indo pro localStorage como
+        // sempre (lerDadosDe cai pro localStorage quando não acha a chave no IndexedDB —
+        // ver comentário grande em lerDadosDe).
         store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'pagina_0', JSON.stringify(todos));
         store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'num_paginas', '1');
         store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'coletado', '1');
-        [CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO].forEach(cfg => {
+        for (const cfg of [CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO]) {
             const n = parseInt(store.getItem(cfg.prefixo + 'num_paginas') || '0', 10);
-            for (let i = 0; i < n; i++) store.removeItem(cfg.prefixo + 'pagina_' + i);
+            for (let i = 0; i < n; i++) {
+                try { await idbDelete(cfg.prefixo + 'pagina_' + i); } catch (e) { /* ignora */ }
+                store.removeItem(cfg.prefixo + 'pagina_' + i); // legado
+            }
             store.removeItem(cfg.prefixo + 'num_paginas');
             store.removeItem(cfg.prefixo + 'coletado');
             store.removeItem(cfg.prefixo + 'erro');
-        });
+            store.removeItem(cfg.prefixo + 'total_registros');
+            store.removeItem(cfg.prefixo + 'atuacoes');
+        }
         console.log(`[Auto Projudi Mandados] mesclagem concluída: ${lidos.length} lido(s) + ${naoLidos.length} não lido(s) = ${todos.length} pendente(s) de cumprimento`);
     }
     // Chave que persiste em qual fase (status) a automação de Mandados está, entre
@@ -1954,8 +2035,10 @@
             store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
             store.setItem(AUTO_ESTADO, 'coletando_mandados');
             [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO, CFG_MANDADOS_DECURSO].forEach(marcarColetaMandadosVazia);
-            mesclarMandadosCumprimento(); // ambos os datasets vazios -> relatório final também vazio (0 pendentes)
-            avancarAutomacao(CFG_MANDADOS_RETORNO);
+            // ambos os datasets vazios -> relatório final também vazio (0 pendentes);
+            // avancarAutomacao só depois da mesclagem terminar, senão a capa/PDF podem
+            // ler o relatório de Mandados ainda sem o 'coletado' marcado.
+            mesclarMandadosCumprimento().then(() => avancarAutomacao(CFG_MANDADOS_RETORNO));
             return;
         }
         store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
@@ -1969,11 +2052,14 @@
     // Chamado ao terminar a coleta de uma fase (via cfg.aoTerminarColeta, ver
     // criarColetor/continuar) — troca o filtro de status e clica Filtrar para a próxima
     // fase, ou (se já era a última) avança a fila de automação de verdade.
-    function avancarOuConcluirFaseMandados(faseAtual) {
+    async function avancarOuConcluirFaseMandados(faseAtual) {
         // A fase "naolidos" (status=4) é a SEGUNDA das duas metades de "Pendentes de
         // Cumprimento" (a primeira é "cumprimento", status=6) — ao concluí-la, mescla os
         // dois datasets no relatório final antes de seguir (ver mesclarMandadosCumprimento).
-        if (faseAtual === 'naolidos') mesclarMandadosCumprimento();
+        // Aguarda terminar antes de continuar (chamada via `await cfg.aoTerminarColeta()`
+        // em criarColetor/continuar) — senão o clique em "Filtrar" logo abaixo poderia
+        // navegar/recarregar a página antes da mesclagem salvar tudo.
+        if (faseAtual === 'naolidos') await mesclarMandadosCumprimento();
         const prox = proximaFaseMandados(faseAtual);
         if (!prox) {
             avancarAutomacao(CFG_MANDADOS_RETORNO); // relatorioPorCfg mapeia p/ o item "mandados" da fila
@@ -2391,6 +2477,15 @@
         // isso permite ao PDF conjunto distinguir "não coletado" de "coletado, zero registros"
         // (ver Suspensos por Prazo Indeterminado em gerarPDFConjunto/baixarPDFConjunto).
         const KEY_COLETADO    = cfg.prefixo + 'coletado';
+        // Contadores pequenos, mantidos em localStorage (síncronos) em paralelo às
+        // páginas de dados — que agora vão para o IndexedDB (ver abrirIDB). Sem eles,
+        // contarRegistros()/contarAtuacoes() (chamadas o tempo todo por render(), a cada
+        // página coletada, para atualizar o texto dos botões) precisariam ler TODAS as
+        // páginas do IndexedDB de novo a cada chamada — lento e, pior, tornaria render()
+        // assíncrona, espalhando await por dezenas de pontos que hoje esperam atualização
+        // imediata da UI.
+        const KEY_TOTAL_REGISTROS = cfg.prefixo + 'total_registros';
+        const KEY_ATUACOES        = cfg.prefixo + 'atuacoes';
 
         function marcarAtividade() { store.setItem(KEY_TS, String(Date.now())); }
         function obsoleta() {
@@ -2399,49 +2494,65 @@
         }
         function rodando() { return store.getItem(KEY_RODANDO) === '1'; }
 
-        function limparTudo() {
+        async function limparTudo() {
             const n = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
-            for (let i = 0; i < n; i++) store.removeItem(KEY_PAGINA_PREF + i);
+            for (let i = 0; i < n; i++) {
+                try { await idbDelete(KEY_PAGINA_PREF + i); } catch (e) { /* ignora — página pode nunca ter ido pro IDB */ }
+                store.removeItem(KEY_PAGINA_PREF + i); // legado (páginas gravadas antes desta migração)
+            }
             store.removeItem(KEY_NUM_PAGINAS);
             store.removeItem(KEY_RODANDO);
             store.removeItem(KEY_TS);
             store.removeItem(KEY_COLETADO);
+            store.removeItem(KEY_TOTAL_REGISTROS);
+            store.removeItem(KEY_ATUACOES);
+            // Flag pequena usada só por CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO (ver comentário
+            // em "get cabecalhos" desses cfgs) — remover aqui também, genericamente, evita
+            // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
+            // (da área Crime) que não foi limpa antes de recomeçar.
+            store.removeItem(cfg.prefixo + 'tem_motivo');
         }
 
-        function adicionarPagina(dadosPagina) {
+        async function adicionarPagina(dadosPagina) {
             const idx = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
-            store.setItem(KEY_PAGINA_PREF + idx, JSON.stringify(dadosPagina));
+            await idbSet(KEY_PAGINA_PREF + idx, dadosPagina);
             store.setItem(KEY_NUM_PAGINAS, String(idx + 1));
-            return contarRegistros();
-        }
-
-        function normalizarParaArray(valor) {
-            let v = valor, t = 0;
-            while (typeof v === 'string' && t < 5) {
-                try { v = JSON.parse(v); } catch (e) { break; }
-                t++;
+            const totalAntes = parseInt(store.getItem(KEY_TOTAL_REGISTROS) || '0', 10);
+            const totalDepois = totalAntes + dadosPagina.length;
+            store.setItem(KEY_TOTAL_REGISTROS, String(totalDepois));
+            if (cfg.usaAtuacao) {
+                let atuacoes = [];
+                try { atuacoes = JSON.parse(store.getItem(KEY_ATUACOES) || '[]'); } catch (e) { /* ignore */ }
+                const s = new Set(atuacoes);
+                dadosPagina.forEach(d => { if (d.atuacao) s.add(d.atuacao); });
+                store.setItem(KEY_ATUACOES, JSON.stringify([...s]));
             }
-            return Array.isArray(v) ? v : null;
+            return totalDepois;
         }
 
-        function lerTudo() {
+        async function lerTudo() {
             const n = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
             let dados = [];
             for (let i = 0; i < n; i++) {
+                let parte = null;
+                try { parte = await idbGet(KEY_PAGINA_PREF + i); } catch (e) { /* IndexedDB indisponível — cai para localStorage */ }
+                if (Array.isArray(parte)) { dados = dados.concat(parte); continue; }
+                // Legado: páginas gravadas em localStorage antes desta migração (ex.: uma
+                // coleta em andamento no exato momento da atualização do script).
                 const bruto = store.getItem(KEY_PAGINA_PREF + i);
                 if (!bruto) continue;
-                const parte = normalizarParaArray(bruto);
-                if (parte) dados = dados.concat(parte);
+                const legado = desembrulharArray(bruto);
+                if (legado) dados = dados.concat(legado);
                 else console.error('[Exportar Projudi] parte ilegível no índice', i);
             }
             return dados;
         }
 
-        function contarRegistros() { return lerTudo().length; }
+        // Síncronas (leem os contadores pequenos em localStorage, nunca o IndexedDB) —
+        // ver comentário em KEY_TOTAL_REGISTROS/KEY_ATUACOES acima.
+        function contarRegistros() { return parseInt(store.getItem(KEY_TOTAL_REGISTROS) || '0', 10); }
         function contarAtuacoes() {
-            const s = new Set(lerTudo().map(d => d.atuacao || ''));
-            s.delete('');
-            return s.size;
+            try { return (JSON.parse(store.getItem(KEY_ATUACOES) || '[]')).length; } catch (e) { return 0; }
         }
 
         function coletarPaginaAtual() {
@@ -2479,7 +2590,10 @@
         // sem linhas de detalhe por processo, aguenta o valor máximo). Relatórios sem
         // cfg.pageSizeSelect simplesmente não mexem em nenhum seletor (comportamento
         // anterior, preservado).
-        function iniciar() {
+        // async e devolve a Promise de continuar() (quando chega lá) — assim quem chama
+        // iniciar() e precisa saber quando a coleta de fato terminou (ex.: testes) pode
+        // dar await nela; produção continua chamando sem await, igual antes.
+        async function iniciar() {
             // Antes de iniciar, ajusta a página para exibir o tamanho configurado em
             // cfg.pageSizeSelect (se houver e a opção existir no seletor). Quando o valor
             // do select muda, o Projudi recarrega a página; o estado KEY_RODANDO já estará
@@ -2503,10 +2617,14 @@
             console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
             marcarAtividade();
-            continuar();
+            return continuar();
         }
 
-        function continuar() {
+        // Assíncrona: adicionarPagina() agora grava no IndexedDB (ver comentário grande
+        // em abrirIDB) — precisa terminar ANTES do clique em "próxima página" mais
+        // abaixo, senão o reload do Projudi mataria a escrita no meio do caminho e a
+        // página coletada se perderia silenciosamente.
+        async function continuar() {
             desabilitarBotoes(true);
             marcarAtividade();
             console.log('[Projudi] continuar() — coletando página atual');
@@ -2525,7 +2643,7 @@
             let dadosPagina, total;
             try {
                 dadosPagina = coletarPaginaAtual();
-                total = adicionarPagina(dadosPagina);
+                total = await adicionarPagina(dadosPagina);
             } catch (err) {
                 store.removeItem(KEY_RODANDO);
                 atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
@@ -2604,16 +2722,17 @@
                     // avancarOuConcluirFaseMandados) — em vez de avançar direto para o
                     // próximo item da fila de automação, decide o que fazer a seguir
                     // (trocar filtro e pesquisar de novo, ou só então avançar a fila).
-                    cfg.aoTerminarColeta();
+                    await cfg.aoTerminarColeta();
                 } else {
                     avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
                 }
             }
         }
 
-        function baixar() {
+        async function baixar() {
             try {
-                const dados = lerTudo();
+                atualizarStatus('Lendo dados coletados...');
+                const dados = await lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
                 gerarEbaixarExcel(dados, cfg);
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
@@ -2624,14 +2743,15 @@
             }
         }
 
-        function pdf(somenteResumo) {
+        async function pdf(somenteResumo) {
             try {
-                const dados = lerTudo();
+                atualizarStatus('Lendo dados coletados...');
+                const dados = await lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
                 if (cfg.pdfCustom) cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
                 // Após exportar o PDF, limpa os dados acumulados automaticamente — evita
                 // que uma coleta antiga fique acumulada/misturada com a próxima.
-                limparTudo();
+                await limparTudo();
                 render();
                 const extraResumo = somenteResumo ? ' (apenas resumo)' : '';
                 atualizarStatus(`✓ PDF gerado com ${dados.length} registros${extraResumo}. Dados acumulados apagados — pronto para nova coleta.`);
@@ -2643,12 +2763,13 @@
 
         // Só usado pelo relatório de Conclusões (cfg.pdfPorJuiz === true): um PDF com uma
         // seção por juiz responsável, para poder ser expedido individualmente.
-        function pdfPorJuiz() {
+        async function pdfPorJuiz() {
             try {
-                const dados = lerTudo();
+                atualizarStatus('Lendo dados coletados...');
+                const dados = await lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
                 gerarPDFConclusoesPorJuiz(dados);
-                limparTudo();
+                await limparTudo();
                 render();
                 atualizarStatus(`✓ PDF por juiz gerado com ${dados.length} registros. Dados acumulados apagados — pronto para nova coleta.`);
             } catch (err) {
@@ -2657,8 +2778,8 @@
             }
         }
 
-        function limpar() {
-            limparTudo();
+        async function limpar() {
+            await limparTudo();
             render();
             atualizarStatus('Dados acumulados apagados. Pronto para uma nova coleta.');
         }
@@ -6909,8 +7030,8 @@
             bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
             bBaixar.textContent = CFG_OUTROS_CUMPRIMENTOS.rotulos.baixar;
             bBaixar.onclick = () => {
-                coletarOutrosCumprimentos(() => {
-                    const dados = lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
+                coletarOutrosCumprimentos(async () => {
+                    const dados = await lerDadosDe(CFG_OUTROS_CUMPRIMENTOS.prefixo);
                     gerarPDFOutrosCumprimentos(dados);
                 });
             };
@@ -7423,15 +7544,47 @@
         return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
     }
 
+    // Contagem RÁPIDA e SÍNCRONA de registros acumulados — usada só para exibição (painel
+    // de automação, confirmação antes de reiniciar) onde ler o IndexedDB inteiro a cada
+    // atualização seria lento demais (atualizarPainel roda a cada poucos segundos). Usa o
+    // contador pequeno que criarColetor mantém em localStorage (KEY_TOTAL_REGISTROS); para
+    // relatórios de payload único que nunca passaram por criarColetor (Mandados mesclado,
+    // Audiências, Outros Cumprimentos), cai para contar a página única direto do
+    // localStorage — sem IndexedDB nesses casos, então continua síncrono.
+    function contarRegistrosSync(prefixo) {
+        const totalRegistrado = store.getItem(prefixo + 'total_registros');
+        if (totalRegistrado != null) return parseInt(totalRegistrado, 10) || 0;
+        const n = parseInt(store.getItem(prefixo + 'num_paginas') || '0', 10);
+        let total = 0;
+        for (let i = 0; i < n; i++) {
+            const bruto = store.getItem(prefixo + 'pagina_' + i);
+            if (!bruto) continue;
+            const parte = desembrulharArray(bruto);
+            if (parte) total += parte.length;
+        }
+        return total;
+    }
+
     // Lê os dados acumulados de um relatório a partir do prefixo de armazenamento.
-    function lerDadosDe(prefixo) {
+    // Assíncrona: as páginas de dados podem estar no IndexedDB (coleta paginada via
+    // criarColetor — ver comentário grande em abrirIDB) ou ainda no localStorage
+    // (relatórios de payload pequeno que nunca passaram por criarColetor, ex.: Mandados
+    // mesclado, Audiências Realizadas/Designadas, Outros Cumprimentos — continuam
+    // gravando direto com store.setItem, sem precisar migrar). Tenta o IndexedDB
+    // primeiro; se não achar a chave lá, cai para o localStorage — cobre os dois casos
+    // com o mesmo código, sem cada chamador precisar saber onde o dado está.
+    async function lerDadosDe(prefixo) {
         const n = parseInt(store.getItem(prefixo + 'num_paginas') || '0', 10);
         let dados = [];
         for (let i = 0; i < n; i++) {
-            const b = store.getItem(prefixo + 'pagina_' + i);
+            const chave = prefixo + 'pagina_' + i;
+            let parte = null;
+            try { parte = await idbGet(chave); } catch (e) { /* IndexedDB indisponível — cai para localStorage */ }
+            if (Array.isArray(parte)) { dados = dados.concat(parte); continue; }
+            const b = store.getItem(chave);
             if (!b) continue;
-            const parte = desembrulharArray(b);
-            if (parte) dados = dados.concat(parte);
+            const legado = desembrulharArray(b);
+            if (legado) dados = dados.concat(legado);
         }
         return dados;
     }
@@ -8096,14 +8249,14 @@
     // interno resolvido por cfgsDoRelatorio) — usado tanto pelo PDF conjunto quanto pelo
     // Excel conjunto, pra não duplicar o mesmo filtro (mostrarSeVazio/foiColetado) nos
     // dois lugares.
-    function secoesColetadas() {
-        return REPORTS_AUTOMACAO
-            .flatMap(r => cfgsDoRelatorio(r).map(cfg => ({ dados: lerDadosDe(cfg.prefixo), cfg })))
-            .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
+    async function secoesColetadas() {
+        const cfgs = REPORTS_AUTOMACAO.flatMap(r => cfgsDoRelatorio(r));
+        const secoes = await Promise.all(cfgs.map(async cfg => ({ dados: await lerDadosDe(cfg.prefixo), cfg })));
+        return secoes.filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
-    function baixarPDFConjunto(somenteResumo) {
-        const secoes = secoesColetadas();
+    async function baixarPDFConjunto(somenteResumo) {
+        const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             gerarPDFConjunto(secoes, somenteResumo);
@@ -8137,8 +8290,8 @@
     // discriminada de CADA relatório já coletado, uma aba por relatório (hoje só existia
     // exportação individual, um .xlsx por relatório — ver gerarEbaixarExcel). Reaproveita
     // cfg.cabecalhos/cfg.larguras/cfg.linha, os mesmos usados pela exportação individual.
-    function gerarEbaixarExcelConjunto() {
-        const secoes = secoesColetadas();
+    async function gerarEbaixarExcelConjunto() {
+        const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             const wb = XLSX.utils.book_new();
@@ -8190,7 +8343,7 @@
         const painel = document.getElementById('painel-automacao');
         if (!painel) return;
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
-        const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + lerDadosDe(cfg.prefixo).length, 0) }));
+        const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + contarRegistrosSync(cfg.prefixo), 0) }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
         const emCurso = estado !== 'inativo' && estado !== 'concluido' && estado !== 'armazenamento_cheio';
         const travado = estado.startsWith('travado_') || estado === 'armazenamento_cheio';
@@ -8471,7 +8624,7 @@
             // (ex.: Suspensos coletado e vazio), que lerDadosDe sozinho não pegaria.
             const temDadosPrevios = fila.some(key => {
                 const rel = relatorioPorChave(key);
-                return rel && cfgsDoRelatorio(rel).some(cfg => lerDadosDe(cfg.prefixo).length > 0 || foiColetado(cfg));
+                return rel && cfgsDoRelatorio(rel).some(cfg => contarRegistrosSync(cfg.prefixo) > 0 || foiColetado(cfg));
             });
             if (temDadosPrevios) {
                 const apagar = confirm('Já existem dados coletados para um ou mais relatórios marcados.\n\nOK = apagar tudo e começar do zero.\nCancelar = continuar acumulando (padrão).');
