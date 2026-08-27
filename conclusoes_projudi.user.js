@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.39
+// @version      20.40
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -215,10 +215,41 @@
             processoCampo: 'processo',
             tipoCampo: 'tipoConclusao',
             mediaLabel: 'conclusões / dia',
+            // KPIs "Com/Sem pré-análise" no RESUMO GERAL (pedido da Corregedoria) — já
+            // existiam só no PDF por juiz (ver montarResumoJuizConclusoes/temPreAnalise);
+            // separa a fila da assessoria (sem pré-análise) da fila do magistrado
+            // (pré-analisado, aguardando decisão).
+            // acento é o NOME da cor ('aqua'/'ambar'/...), não o array RGB — CFG_CONCLUSOES
+            // é montado antes de `const COR` existir no arquivo (TDZ), então não dá pra
+            // referenciar COR.aqua aqui; montarResumoGenerico resolve o nome em COR[nome]
+            // na hora de desenhar, quando COR já está definida.
+            kpisExtras: [
+                {
+                    titulo: 'Com pré-análise', acento: 'aqua',
+                    calc: (sub) => sub.filter(temPreAnalise).length,
+                    subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
+                },
+                {
+                    titulo: 'Sem pré-análise', acento: 'ambar',
+                    calc: (sub) => sub.length - sub.filter(temPreAnalise).length,
+                },
+            ],
             distribuicoes: [
                 { titulo: 'Conclusões por Magistrado(a)', campo: 'responsavel', topN: 12 },
                 { titulo: 'Conclusões por Agrupador', campo: 'agrupador', topN: 12 },
                 { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
+                // "Aguardando decisão" (pedido da Corregedoria): tempo desde a PRÉ-ANÁLISE,
+                // não desde a remessa — um processo pré-analisado há 120 dias é um achado
+                // (está parado na mesa do magistrado); medido por dtRemessa isso não se
+                // distingue de "acabou de ser pré-analisado". Só entre quem tem
+                // pré-análise; usa calc() porque não é uma contagem por CAMPO categórico.
+                {
+                    titulo: 'Aguardando decisão (dias desde a pré-análise)',
+                    calc: (sub) => {
+                        const dias = sub.filter(temPreAnalise).map(d => diasDesdePreAnalise(d, Date.now())).filter(v => v !== '').map(Number);
+                        return { tipo: 'barras', itens: faixasDeDias(dias).filter(f => f.valor > 0) };
+                    },
+                },
             ],
             // Larguras somam 174mm — cabem na área útil (~186mm em A4 retrato com margem
             // de 12mm); antes somavam 206mm e a tabela vazava a borda direita da página.
@@ -2539,6 +2570,7 @@
         ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
         vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
         azulTint: [238, 242, 246],  // fundo da faixa de SUBGRUPO na capa unificada (mais claro que "cartao")
+        vinho:    [104, 38, 38],    // pior faixa etária (>180 dias) — ver COR_SEVERIDADE
     };
 
     const DIA_MS = 86400000;
@@ -2589,6 +2621,51 @@
             }
         }
         return arr;
+    }
+
+    // Agrupa registros por MÊS de um campo de data BR, em ordem cronológica, PREENCHENDO
+    // com zero os meses sem registro — sem esse preenchimento dois meses distantes ficam
+    // lado a lado no gráfico e a tendência mente. valorCampo (opcional) é um campo
+    // numérico do registro, para também devolver soma/média do mês (ex.: 'dias' no Tempo
+    // Médio). Devolve [{label:'MM/AA', chave:'AAAA-MM', n, soma, media}].
+    function agruparPorMes(dados, campoData, valorCampo) {
+        const mapa = new Map();
+        (dados || []).forEach(d => {
+            const ts = parseDataBR(d[campoData]);
+            if (ts == null) return;
+            const dt = new Date(ts);
+            const chave = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+            if (!mapa.has(chave)) mapa.set(chave, { n: 0, soma: 0, comValor: 0 });
+            const acc = mapa.get(chave);
+            acc.n++;
+            if (valorCampo) {
+                const v = d[valorCampo];
+                if (typeof v === 'number' && !isNaN(v)) { acc.soma += v; acc.comValor++; }
+            }
+        });
+        if (!mapa.size) return [];
+        const chaves = [...mapa.keys()].sort();
+        const [anoIni, mesIni] = chaves[0].split('-').map(Number);
+        const [anoFim, mesFim] = chaves[chaves.length - 1].split('-').map(Number);
+        const pontos = [];
+        let ano = anoIni, mes = mesIni;
+        // Teto de segurança: 132 meses (11 anos — folga sobre os 10 anos de busca de
+        // Audiências Designadas). Protege contra uma data corrompida no futuro distante
+        // virar um laço de milhares de iterações (e um gráfico ilegível).
+        while ((ano < anoFim || (ano === anoFim && mes <= mesFim)) && pontos.length < 132) {
+            const chave = `${ano}-${String(mes).padStart(2, '0')}`;
+            const acc = mapa.get(chave) || { n: 0, soma: 0, comValor: 0 };
+            pontos.push({
+                label: `${String(mes).padStart(2, '0')}/${String(ano).slice(2)}`,
+                chave,
+                n: acc.n,
+                soma: acc.soma,
+                media: acc.comValor ? acc.soma / acc.comValor : null,
+            });
+            mes++;
+            if (mes > 12) { mes = 1; ano++; }
+        }
+        return pontos;
     }
 
     const COR_PRIORITARIO = COR.vermelho;  // realce dos prioritários (mesma cor em todo o relatório)
@@ -2682,19 +2759,42 @@
         return comData / dias.size;
     }
 
-    // Faixas de tempo de espera, separando prioritários de normais.
+    // Faixas de tempo de espera, separando prioritários de normais. A 4ª faixa (>180 dias)
+    // foi acrescentada a pedido da Corregedoria: numa correição o passivo MUITO antigo é o
+    // achado central, e antes ele ficava diluído dentro de um único "Mais de 90 dias".
+    // Rótulos curtos de propósito — desenharBarrasFaixas trunca em UMA linha
+    // (splitTextToSize(...)[0]) numa coluna de no máximo 36mm.
     function faixasPorPrioridade(dados, campoData, now) {
         const b = [
             { label: 'Até 30 dias', prioritarios: 0, normais: 0 },
             { label: '31 a 90 dias', prioritarios: 0, normais: 0 },
-            { label: 'Mais de 90 dias', prioritarios: 0, normais: 0 },
+            { label: '91 a 180 dias', prioritarios: 0, normais: 0 },
+            { label: '+180 dias', prioritarios: 0, normais: 0 },
         ];
         dados.forEach(d => {
             const ts = parseDataBR(d[campoData]);
             if (ts == null) return;
             const dias = Math.floor((now - ts) / DIA_MS);
-            const idx = dias > 90 ? 2 : (dias > 30 ? 1 : 0);
+            const idx = dias > 180 ? 3 : (dias > 90 ? 2 : (dias > 30 ? 1 : 0));
             if (d.prioritario) b[idx].prioritarios++; else b[idx].normais++;
+        });
+        return b;
+    }
+
+    // Mesmas faixas de faixasPorPrioridade, mas para uma lista já reduzida a números de
+    // dias (não a um campo de data) — usada pelo gráfico de "aguardando decisão" das
+    // Conclusões, que mede dias desde a PRÉ-ANÁLISE, não desde a conclusão.
+    function faixasDeDias(listaDias) {
+        const b = [
+            { label: 'Até 30 dias', valor: 0 },
+            { label: '31 a 90 dias', valor: 0 },
+            { label: '91 a 180 dias', valor: 0 },
+            { label: '+180 dias', valor: 0 },
+        ];
+        listaDias.forEach(dias => {
+            if (dias == null) return;
+            const idx = dias > 180 ? 3 : (dias > 90 ? 2 : (dias > 30 ? 1 : 0));
+            b[idx].valor++;
         });
         return b;
     }
@@ -2829,7 +2929,10 @@
 
     // Cores de severidade por faixa (até 30d / 31-90d / mais de 90d), usadas como
     // marcador de ponto ao lado do rótulo — reforça a leitura sem depender só das barras.
-    const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
+    // Uma cor por faixa etária, na ordem em que faixasPorPrioridade as devolve — precisa
+    // ter ao menos tantas entradas quanto faixas, senão a PIOR faixa cai no fallback
+    // cinza de desenharBarrasFaixas e a leitura de severidade se inverte.
+    const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho, COR.vinho];
 
     // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha —
     // o vermelho é sempre prioritário, nunca a faixa. rotuloPrioritario/rotuloNormal
@@ -2915,6 +3018,50 @@
         doc.textWithLink(label, pw / 2 - w / 2, ph - 6, { pageNumber });
     }
 
+    // Primeira primitiva de SÉRIE TEMPORAL do arquivo — até aqui só existiam barras
+    // horizontais (categorias sem ordem intrínseca). Barras VERTICAIS por mês, não
+    // polilinha: mais robusto de desenhar em jsPDF puro (sem depender de resolver
+    // interseção de eixo/escala) e mais legível impresso em A4 numa faixa estreita.
+    // pontos: [{label:'MM/AA', n|soma|media, ...}] na ordem cronológica (ver
+    // agruparPorMes) — já vem com meses vazios preenchidos com zero, então a barra
+    // "some" no gráfico em vez de o mês desaparecer da linha do tempo.
+    // campoValor: qual campo de "pontos" plotar ('n', 'soma' ou 'media'); fmt formata o
+    // valor acima da barra.
+    function desenharSerieMensal(doc, x, y, w, h, titulo, pontos, campoValor, fmt, cor) {
+        fmt = fmt || (v => String(v));
+        cor = cor || COR.azul;
+        tituloSecao(doc, x, y + 4, w, titulo);
+        if (!pontos.length) return;
+        const topo = y + 10;
+        const rotuloH = 8;
+        const valorH = 5;
+        const areaH = Math.max(6, h - 10 - rotuloH - valorH);
+        const baseY = topo + areaH;
+        const maxVal = Math.max(1, ...pontos.map(p => p[campoValor] || 0));
+        // Largura de barra derivada de w/quantidade (precisa aguentar até 24 meses sem
+        // colidir) — mesmo espírito adaptativo de desenharBarras/desenharBarrasFaixas.
+        const passo = w / pontos.length;
+        const barW = Math.max(1.2, Math.min(10, passo * 0.55));
+        const fonteValor = Math.max(4.6, Math.min(6.5, passo * 0.42));
+        const fonteRotulo = Math.max(4.6, Math.min(6.2, passo * 0.4));
+
+        doc.setDrawColor(...COR.base); doc.setLineWidth(0.2); doc.line(x, baseY, x + w, baseY);
+
+        pontos.forEach((p, i) => {
+            const cxBar = x + i * passo + passo / 2;
+            const val = p[campoValor] || 0;
+            const bh = Math.max(0, (val / maxVal) * areaH);
+            doc.setFillColor(...cor);
+            doc.roundedRect(cxBar - barW / 2, baseY - bh, barW, bh, 0.5, 0.5, 'F');
+            if (val > 0) {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+                doc.text(fmt(val), cxBar, baseY - bh - 1.2, { align: 'center' });
+            }
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(fonteRotulo); doc.setTextColor(...COR.tintaSec);
+            doc.text(p.label, cxBar, baseY + rotuloH - 3, { align: 'center' });
+        });
+    }
+
     // Distribui uma lista de gráficos numa grade de 2 colunas (span:2 ocupa a largura
     // toda) dentro da área (x, y, w, hDisponivel) informada — reutilizado tanto para os
     // gráficos da 1ª página do resumo quanto para os que foram para a 2ª página.
@@ -2942,6 +3089,7 @@
             const cy = y + c.pos.row * (chartH + 10);
             const cw = c.pos.span === 2 ? w : colW;
             if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
+            else if (c.tipo === 'serie') desenharSerieMensal(doc, cx, cy, cw, chartH, c.titulo, c.pontos, c.campoValor, c.fmt, c.cor);
             else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
         });
     }
@@ -3013,6 +3161,16 @@
                 const media = (typeof contexto.mediaSoma === 'number') ? contexto.mediaSoma : mediaPorDia(sub, p.dataCampo);
                 kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
             }
+            // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
+            // "Com/Sem pré-análise" no resumo geral, que antes só existiam no PDF por
+            // juiz — ver montarResumoJuizConclusoes). Relatórios que não definem
+            // p.kpisExtras ficam byte-a-byte como antes desta mudança.
+            if (Array.isArray(p.kpisExtras)) {
+                p.kpisExtras.forEach(k => {
+                    const valor = k.calc(sub);
+                    kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(sub, valor) : []), acento: COR[k.acento] || COR.aqua });
+                });
+            }
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
             kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
@@ -3042,9 +3200,22 @@
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
+                // Cada entrada normalmente é {titulo, campo, topN, ...} e vira uma contagem
+                // categórica via contarPorCampo. Uma entrada com `calc(sub)` (ponto de
+                // extensão novo, hoje só usado por CFG_CONCLUSOES p/ o gráfico de "aguardando
+                // decisão" por faixa de dias desde a pré-análise, que não é uma contagem por
+                // CAMPO) pula contarPorCampo e usa o que `calc` devolver direto — precisa
+                // devolver {tipo:'faixas', faixas} ou {itens} (mesmo formato que os outros
+                // tipos já aceitam em desenharGradeGraficos).
                 ...p.distribuicoes
-                    .map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros, g.minValor), pagina2: !!g.pagina2 }))
-                    .filter(c => c.itens.length),
+                    .map(g => {
+                        if (typeof g.calc === 'function') {
+                            const r = g.calc(sub) || {};
+                            return { tipo: r.tipo || 'barras', span: g.span || 1, titulo: g.titulo, itens: r.itens || [], faixas: r.faixas, pagina2: !!g.pagina2 };
+                        }
+                        return { tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros, g.minValor), pagina2: !!g.pagina2 };
+                    })
+                    .filter(c => (c.faixas && c.faixas.length) || (c.itens && c.itens.length)),
             ];
             const chartsP1 = chartsTodos.filter(c => !c.pagina2);
             const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
@@ -3866,6 +4037,89 @@
         return s.dados.length > 0;
     }
 
+    // Seções cujo `dados` é um objeto-resumo único (não uma lista por processo) — cruzar
+    // "processo" nelas misturaria maçãs com laranjas (Outros Cumprimentos nem tem
+    // `processo`; Designadas/Realizadas guardam um resumo agregado, ver
+    // coletarAudienciasDesignadas/finalizarAudienciasRealizadas). Ficam de fora do
+    // cruzamento de múltiplas pendências.
+    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS];
+
+    // Página "Processos com Múltiplas Pendências" — cruza o número do processo entre TODOS
+    // os relatórios coletados nesta rodada (pedido da Corregedoria: hoje cada relatório é
+    // uma ilha; um processo que está paralisado E com mandado pendente E suspenso é um
+    // achado mais forte que qualquer um desses sozinho, e o dado pra ver isso já está todo
+    // ali, só nunca tinha sido cruzado). Sem link de "voltar ao resumo" — não há uma única
+    // seção-alvo por linha, então não entra no PASSO 4.
+    function montarProcessosMultiplasPendencias(doc, secoes, primeira, comIndice) {
+        const mapa = new Map(); // processo -> Set(rotulo)
+        secoes.forEach(s => {
+            if (CFGS_SEM_PROCESSO_POR_LINHA.includes(s.cfgOriginal)) return;
+            (s.dados || []).forEach(d => {
+                const p = d && d.processo;
+                if (!p || typeof p !== 'string') return;
+                if (!mapa.has(p)) mapa.set(p, new Set());
+                mapa.get(p).add(s.rotulo);
+            });
+        });
+        const cruzados = [...mapa.entries()]
+            .filter(([, rotulos]) => rotulos.size >= 2)
+            .map(([processo, rotulos]) => ({ processo, quantidade: rotulos.size, rotulos: [...rotulos].sort() }))
+            .sort((a, b) => b.quantidade - a.quantidade || a.processo.localeCompare(b.processo));
+        if (!cruzados.length) return null;
+
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const titulo = 'Processos com Múltiplas Pendências';
+
+        if (!primeira) doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${cruzados.length} processo(s) com 2 ou mais pendências ao mesmo tempo`, m, m + 8);
+        let yObs = m + 8 + 4.2;
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const obs = 'Cruzamento pelo número do processo entre os relatórios coletados nesta rodada (não inclui Outros '
+            + 'Cumprimentos, Audiências Designadas nem Audiências Realizadas — não têm um registro por processo).';
+        const linhasObs = doc.splitTextToSize(obs, uw);
+        doc.text(linhasObs, m, yObs);
+        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const kY = yLinha + 5;
+        desenharCard(doc, m, kY, uw, 26, 'Processos com Múltiplas Pendências', String(cruzados.length),
+            [`Maior concentração: ${cruzados[0].quantidade} pendências (processo ${cruzados[0].processo})`], true, COR.vinho);
+
+        const tY = kY + 26 + 8;
+        doc.autoTable({
+            columns: [
+                { header: 'Processo', dataKey: 'processo' },
+                { header: 'Nº de Pendências', dataKey: 'quantidade' },
+                { header: 'Em quais relatórios', dataKey: 'rotulos' },
+            ],
+            body: cruzados.map(c => ({ processo: c.processo, quantidade: String(c.quantidade), rotulos: c.rotulos.join(', ') })),
+            startY: tY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.vinho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8.5 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                processo: { cellWidth: uw * 0.24, fontStyle: 'bold', textColor: COR.tinta },
+                quantidade: { cellWidth: uw * 0.16, halign: 'right' },
+                rotulos: { cellWidth: uw * 0.6 },
+            },
+            didDrawPage: () => desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+        return paginaInicial;
+    }
+
     function gerarPDFConjunto(secoesEntrada, somenteResumo) {
         const doc = novoDocPDF();
         const agora = new Date();
@@ -3947,13 +4201,27 @@
 
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
+        // Total de ativos somado de TODAS as atuações já coletadas (a mesma soma que a
+        // linha "Processos Ativos" da capa mostra) — usado para normalizar os indicadores
+        // de pendência pelo TAMANHO do acervo, pedido da Corregedoria para poder comparar
+        // varas de porte diferente ("63 paralisados" não diz muito sozinho; "4,9 por 100
+        // ativos" diz). Soma total, não por competência — os Mandados nem gravam
+        // atuacao/competencia, então uma taxa por competência deixaria eles de fora.
+        const totalAtivosGeral = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
+        // '' quando o total de ativos é 0/desconhecido (ainda não coletado, ou opção
+        // "incluir Ativos" desmarcada) — nesse caso o indicador sai como sempre saiu, sem
+        // taxa, em vez de mostrar "Infinity" ou dividir por zero.
+        function taxaPor100Ativos(n) {
+            if (!totalAtivosGeral) return '';
+            return ` · ${(n / totalAtivosGeral * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}/100 ativos`;
+        }
         const linhasCartorio = [];
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
         // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo).
         function linhaTarefa(t, nome) {
             return {
                 nome,
-                indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}`,
+                indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}${taxaPor100Ativos(t.pendentes)}`,
                 detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
                 situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
                 corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
@@ -4065,7 +4333,7 @@
             const totalNormaisMandados = totalMandados - totalUrgentesMandados;
             itensPendencias.push(linhaGrupo('Mandados',
                 `${pendCumprimento} aguarda cumprimento · ${pendCartorioMandados} pendente(s) no cartório · `
-                + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)`));
+                + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)${taxaPor100Ativos(totalMandados)}`));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
@@ -4232,6 +4500,17 @@
             desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
             doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
             usouPagina1 = true;
+        }
+
+        // Logo após a capa (achado geral) e antes dos resumos por relatório — ver
+        // montarProcessosMultiplasPendencias. Null quando não há nenhum processo
+        // repetido em 2+ relatórios (nada a mostrar). "primeira" segue !usouPagina1, como
+        // todo outro bloco desta função — cobre o caso raro de a capa não ter sido
+        // desenhada (temConteudo=false) e esta ser a primeira página de verdade.
+        const pgMultiplasPendencias = montarProcessosMultiplasPendencias(doc, secoes, !usouPagina1, false);
+        if (pgMultiplasPendencias) {
+            usouPagina1 = true;
+            doc.outline.add(null, 'Processos com Múltiplas Pendências', { pageNumber: pgMultiplasPendencias });
         }
 
         const pw = doc.internal.pageSize.getWidth();
@@ -4536,6 +4815,34 @@
 
         desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
 
+        // ═══ PÁGINA "Evolução mensal" — pedido da Corregedoria: o relatório já coleta até
+        // 24 meses (mês a mês, ver PERIODOS_TEMPOMEDIO), mas o dado nunca tinha virado
+        // série — cada mês só era mais uma linha na tabela discriminada. Volume + tempo
+        // médio mês a mês é a manchete da tendência, por isso entra ANTES das páginas de
+        // "gráficos complementares" (por usuário/tipo). Só desenha com mais de 1 mês —
+        // com 1 só mês não há tendência a mostrar (mesma política de gráfico vazio
+        // omitido usada no resto do arquivo).
+        const porMes = agruparPorMes(validos, 'dtAnalise', 'dias');
+        if (porMes.length > 1) {
+            doc.addPage();
+            let hyM = m + 2;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_TEMPOMEDIO, m, hyM);
+            hyM += 8;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Evolução mensal', m, hyM);
+            hyM += 3;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hyM, pw - m, hyM);
+
+            const gY0m = hyM + 6;
+            const chartGapM = 8;
+            const disponivelM = ph - m - gY0m - 14;
+            const alturaM = Math.max(30, (disponivelM - chartGapM) / 2);
+            desenharSerieMensal(doc, m, gY0m, uw, alturaM, 'Volume de cumprimentos por mês', porMes, 'n', (v) => String(v), COR.azul);
+            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.aqua);
+            desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+
         // ═══ PÁGINA 2 (só quando há dados): Tempo médio por Usuário do Cartório e por
         // Tipo de Conclusão — o resumo agora pode passar de uma página quando esses
         // gráficos complementares não cabem na primeira (que já vem cheia com os 4+2+1
@@ -4685,9 +4992,27 @@
 
         const gap = 6;
         const kY = yLinha + 5;
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,             kY, kW2, 28, 'Audiências Pendentes', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        // "Vencidas" = data da audiência já passou e o termo continua pendente — ou seja,
+        // a audiência foi realizada e o termo nunca foi lançado. diasAteAudiencia já
+        // devolve valor NEGATIVO nesse caso; o dado sempre existiu (é a coluna "Dias até a
+        // Audiência" da tabela), mas nunca tinha sido destacado. É o achado de correição
+        // deste relatório: audiência futura sem termo é normal, audiência passada não.
+        const vencidas = dados.filter(d => {
+            const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+            return n != null && n < 0;
+        });
+        const maisAntigaVencida = vencidas.reduce((best, d) => {
+            const ts = parseDataBR(d.dataAudiencia);
+            return ts != null && (best === null || ts < best.ts) ? { ts, data: d.dataAudiencia } : best;
+        }, null);
+        const kW3aud = (uw - 2 * gap) / 3;
+        desenharCard(doc, m,                     kY, kW3aud, 28, 'Audiências Pendentes', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW3aud + gap,      kY, kW3aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        desenharCard(doc, m + 2 * (kW3aud + gap), kY, kW3aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
+            [maisAntigaVencida
+                ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
+                : 'nenhuma audiência já realizada sem termo'],
+            true, vencidas.length ? COR.vinho : COR.aqua);
 
         // Altura FIXA para o gráfico (não consome o resto da página) — deixa espaço para a
         // tabela discriminada logo abaixo, na mesma página quando couber.
@@ -4739,9 +5064,21 @@
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             didParseCell: (data) => {
-                if (data.section === 'body' && data.column.index === 0 && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                if (data.section !== 'body') return;
+                const d = ordenados[data.row.index];
+                if (!d) return;
+                if (data.column.index === 0 && d.prioritario) {
                     data.cell.styles.textColor = COR_PRIORITARIO;
                     data.cell.styles.fontStyle = 'bold';
+                }
+                // Vencida (audiência já realizada, termo pendente): destaca a coluna de
+                // dias em vinho — mesma cor do card, para amarrar as duas leituras.
+                if (data.column.index === 3) {
+                    const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+                    if (n != null && n < 0) {
+                        data.cell.styles.textColor = COR.vinho;
+                        data.cell.styles.fontStyle = 'bold';
+                    }
                 }
             },
             didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
@@ -4888,6 +5225,19 @@
             } else {
                 desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
             }
+        }
+
+        // Pauta por MÊS futuro (pedido da Corregedoria) — até aqui só existia a
+        // concentração por dia da semana; isso mostra até onde a pauta se estende e em
+        // qual mês ela concentra (ex.: útil pra ver se a vara já está "vendendo" data
+        // muito distante). r.tabela tem uma linha por processo com a data da audiência —
+        // reaproveita agruparPorMes (mesmo agregador do Tempo Médio).
+        const porMesAD = agruparPorMes(r.tabela || [], 'data');
+        if (porMesAD.length > 1) {
+            doc.addPage();
+            tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
+            desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
     }
 
@@ -5098,10 +5448,47 @@
             const top = [...r].sort((a, b) => b.pendentes - a.pendentes).slice(0, 15);
             const itensBarras = top.map(it => ({ label: it.tipo, valor: it.pendentes }));
             desenharBarras(doc, m, tY, uw, 54, `Maiores pendências por tipo (top ${top.length} de ${r.length})`, itensBarras, undefined, COR.azul);
+
+            // Gráfico de ETAPAS (pedido da Corregedoria): o total por tipo, acima, diz
+            // QUANTO está parado; este diz ONDE do fluxo está parado — que é o que aponta
+            // o gargalo. Ordem do FLUXO (conferir → expedir → assinar → devolvido →
+            // decurso), não por volume: a sequência é a informação.
+            const etapas = etapasOutrosCumprimentos(r);
+            const somaEtapas = etapas.reduce((s, e) => s + e.valor, 0);
+            if (somaEtapas > 0) {
+                const eY = tY + 54 + 8;
+                desenharBarras(doc, m, eY, uw, 46, 'Em que etapa do fluxo está parado', etapas, undefined, COR.ambar);
+                // Aviso obrigatório: as 5 etapas são um SUBCONJUNTO de
+                // CAMPOS_PENDENTES_PRINCIPAL, então a soma delas não fecha com o total
+                // pendente (que inclui aguardando depósito, AR digital etc.), e a tabela
+                // BNMP fica fora. Sem essa ressalva o número parece errado numa reunião.
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
+                const notaEtapas = `Soma das etapas: ${somaEtapas} de ${totalPendentes} pendente(s). A diferença são tipos em `
+                    + 'etapas não listadas acima (ex.: aguardando depósito, retorno de AR digital); a tabela BNMP não entra nesta soma.';
+                doc.text(doc.splitTextToSize(notaEtapas, uw), m, eY + 46 + 3.5);
+            }
             desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         } else {
             desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
+    }
+
+    // Etapas do fluxo de "Outros Cumprimentos", na ordem em que o trabalho percorre o
+    // cartório/gabinete. Só a tabela principal tem essas colunas — os registros de origem
+    // 'bnmp' só trazem paraExpedir e ficariam misturando dois fluxos diferentes, então
+    // ficam de fora. Etapas zeradas são omitidas (mesma política dos demais gráficos).
+    const ETAPAS_OUTROS_CUMPRIMENTOS = [
+        { campo: 'paraConferir', label: 'Para conferir' },
+        { campo: 'paraExpedir', label: 'Para expedir' },
+        { campo: 'paraAssinar', label: 'Para assinar' },
+        { campo: 'devolvidoJuiz', label: 'Devolvido pelo juiz' },
+        { campo: 'decursoPrazo', label: 'Decurso de prazo' },
+    ];
+    function etapasOutrosCumprimentos(dados) {
+        const principal = (dados || []).filter(d => d.origem !== 'bnmp');
+        return ETAPAS_OUTROS_CUMPRIMENTOS
+            .map(e => ({ label: e.label, valor: principal.reduce((s, d) => s + (d[e.campo] || 0), 0) }))
+            .filter(e => e.valor > 0);
     }
 
     // Tabela discriminada — uma linha por tipo de cumprimento, ordenada por pendentes
@@ -5206,6 +5593,53 @@
         return pagina;
     }
 
+    // ── Gargalo por "Último Movimento" (Paralisados e Remessas) ────────────────
+    // Paralisados e Remessas são a MESMA tela do Projudi com filtros diferentes, e seus
+    // resumos são espelhos exatos um do outro — por isso a página complementar vive aqui,
+    // compartilhada, em vez de duplicada nos dois montarResumo*.
+    //
+    // "Último Movimento" diz POR QUE o processo parou (aguardando AR, no contador,
+    // suspenso...), que é o gargalo que a Corregedoria procura; o resumo só mostrava tempo
+    // médio por classe, que não aponta causa. O campo é texto livre vindo da célula da
+    // tabela, então normalizamos antes de contar: caixa alta, espaços colapsados e corte do
+    // complemento após " - " / "(" — sem isso cada linha vira uma categoria única (ex.:
+    // "REMETIDOS AO CONTADOR - 12/03/2026") e o gráfico não agrega nada.
+    function limparUltimoMovimento(s) {
+        return String(s || '')
+            .split(/\s+-\s+|\(/)[0]
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toUpperCase();
+    }
+
+    // Página complementar com o gráfico de último movimento. Só desenha se houver algo a
+    // mostrar (mesma política de "gráfico vazio é omitido" do resumo genérico).
+    function montarPaginaUltimoMovimento(doc, dados, titulo, tituloGrafico, comIndice) {
+        const itens = contarPorCampo(dados, 'ultimoMovimento', 12, limparUltimoMovimento);
+        if (!itens.length) return;
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.addPage();
+        let hy = m + 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, hy);
+        hy += 8;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text('Gráficos complementares', m, hy);
+        hy += 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
+
+        const gY0 = hy + 6;
+        desenharBarras(doc, m, gY0, uw, ph - m - gY0 - 14, tituloGrafico, itens, undefined, COR.ambar);
+        desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
     // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
     // calcular a partir de duas datas): KPIs + top 10 mais tempo paralisados + média por classe.
@@ -5299,6 +5733,10 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        // Página 2: gargalo por último movimento (ver montarPaginaUltimoMovimento) — a
+        // página 1 já está cheia (3+2+1 cards e dois gráficos que consomem toda a altura).
+        montarPaginaUltimoMovimento(doc, dados, TITULO_PARALISADOS, 'Processos parados por último movimento', comIndice);
     }
 
     // Tabela discriminada do relatório de Paralisados (sempre inicia em página nova).
@@ -5452,6 +5890,10 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        // Mesma página complementar de Paralisados (ver montarPaginaUltimoMovimento) — em
+        // Remessas o último movimento indica onde a remessa emperrou.
+        montarPaginaUltimoMovimento(doc, dados, TITULO_REMESSAS, 'Remessas paradas por último movimento', comIndice);
     }
 
     // Tabela discriminada do relatório de Remessas em Aberto (sempre inicia em página
