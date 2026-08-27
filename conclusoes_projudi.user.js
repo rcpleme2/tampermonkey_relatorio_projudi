@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.47
+// @version      20.48
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -545,19 +545,18 @@
 
     // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
     // acessado pelo número na página inicial, com o checkbox "Tempo Indeterminado" já
-    // marcado — ver prazoIndeterminadoMarcado). Colunas da tabela — CONFIRMADO por
-    // captura real da tela (mhtml com 0 resultados): a tabela tem SEMPRE 7 colunas,
-    // IGUAIS às de CFG_SUSPENSOS_PRAZO — [0]Processo [1]Classe Processual [2]Prazo
-    // [3]Início Suspensão [4]Fim Suspensão [5]Motivo da Suspensão [6]Dias Paralisado —
-    // mesmo com zero resultados e mesmo aqui, na busca "indeterminado" (o backend do
-    // Projudi já filtra as LINHAS pelo checkbox, mas a estrutura de COLUNAS da tabela é
-    // sempre a mesma). A suposição anterior de que essa tela tinha só 6 colunas (sem
-    // "Fim Suspensão"/"Motivo") estava errada — vinha de uma amostra antiga incompleta, e
-    // causava dois bugs reais: (1) cfg.extrai lia "dias" de tds[5] (que aqui é "Motivo da
-    // Suspensão", texto, não número — dias saía sempre null); (2) detectarConfig() não
-    // tinha como distinguir esta tela da de CFG_SUSPENSOS_PRAZO só pelo cabeçalho (as
-    // duas têm "Fim Suspensão"), fazendo a automação escolher a cfg errada e travar
-    // (ver detectarConfig — agora usa prazoIndeterminadoMarcado() pra decidir).
+    // marcado — ver prazoIndeterminadoMarcado). Colunas da tabela — CONFIRMADO por 2
+    // capturas reais recentes lado a lado (indeterminado e determinado): a tabela tem
+    // SEMPRE 6 colunas, IGUAIS às de CFG_SUSPENSOS_PRAZO — [0]Processo
+    // [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+    // [5]Dias Paralisado (a tela NÃO tem mais coluna "Motivo da Suspensão" — o Projudi
+    // parece ter removido esse campo; uma suposição anterior, de uma captura mais antiga
+    // que ainda mostrava 7 colunas com "Motivo", ficou desatualizada e causava minTds:7
+    // descartando TODA linha silenciosamente, já que nenhuma linha real tinha mais de 6
+    // tds — "o relatório não identificou os suspensos" relatado pelo usuário era
+    // exatamente isso). O que distingue esta tela da de CFG_SUSPENSOS_PRAZO não é mais o
+    // cabeçalho (as duas têm as MESMAS 6 colunas) — é o checkbox "Tempo Indeterminado" do
+    // formulário (ver prazoIndeterminadoMarcado(), usado em ambos os detecta() abaixo).
     // Sem pdf/pdfCustom próprio — entra na seção "Estatísticas Gerais" do relatório
     // conjunto (ver gerarPDFConjunto), não como relatório individual com resumo/gráficos.
     const CFG_SUSPENSOS = {
@@ -569,7 +568,14 @@
         // "Fim Suspensão" sozinho não distingue mais esta tela de CFG_SUSPENSOS_PRAZO
         // (ambas têm — ver comentário acima); o que distingue é o checkbox do formulário.
         detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab) && prazoIndeterminadoMarcado(),
-        minTds: 7,
+        // CONFIRMADO por 2 capturas reais recentes (comparadas lado a lado — indeterminado
+        // e determinado): a tabela SÓ TEM 6 colunas — [0]Processo [1]Classe [2]Prazo
+        // [3]Início Suspensão [4]Fim Suspensão [5]Dias Paralisado. NÃO existe mais coluna
+        // "Motivo da Suspensão" (a suposição de 7 colunas, de uma captura mais antiga,
+        // estava desatualizada/errada — minTds:7 descartava TODA linha silenciosamente,
+        // já que nenhuma linha real tinha 7 tds; "o script não identificou" relatado pelo
+        // usuário era exatamente isso).
+        minTds: 6,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_indeterminado_projudi',
         rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
@@ -578,7 +584,7 @@
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[6]);
+            const diasTexto = textoCelula(tds[5]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
@@ -634,18 +640,21 @@
         // de CFG_SUSPENSOS/CFG_APREENSOES) — mostra a linha mesmo vazia, desde que coletada.
         mostrarSeVazio: true,
         // "Fim Suspensão" sozinho casaria com as DUAS telas (CFG_SUSPENSOS_PRAZO e
-        // CFG_SUSPENSOS têm exatamente o mesmo cabeçalho de 7 colunas — confirmado por
-        // captura real da tela; ver comentário grande em CFG_SUSPENSOS acima) — o que
-        // distingue é o checkbox "Tempo Indeterminado" do formulário: aqui precisa estar
-        // DESMARCADO (a busca "com prazo" usa os filtros padrão, sem marcar esse
-        // checkbox — ver preencherEPesquisarSuspensoPrazo).
+        // CFG_SUSPENSOS têm exatamente o mesmo cabeçalho de 6 colunas — confirmado por 2
+        // capturas reais recentes lado a lado; ver comentário grande em CFG_SUSPENSOS
+        // acima) — o que distingue é o checkbox "Tempo Indeterminado" do formulário: aqui
+        // precisa estar DESMARCADO (a busca "com prazo" usa os filtros padrão, sem marcar
+        // esse checkbox — ver preencherEPesquisarSuspensoPrazo).
         detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab) && !prazoIndeterminadoMarcado(),
-        minTds: 7,
+        // 6 colunas — CONFIRMADO por captura real: NÃO existe mais coluna "Motivo da
+        // Suspensão" nesta tela (nem na de CFG_SUSPENSOS). minTds:7 (suposição anterior,
+        // baseada numa captura desatualizada) descartava TODA linha silenciosamente.
+        minTds: 6,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_prazo_projudi',
         rotulos: { coletar: 'Extrair Suspensos com Prazo', coletarMais: 'Extrair mais (Suspensos com Prazo)', baixar: '⬇ Baixar Suspensos com Prazo' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Motivo da Suspensão', 'Dias Paralisado'],
-        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 16 }],
+        cabecalhos: ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }],
         extrai: (tds, atuacao) => {
             const prazoTexto = textoCelula(tds[2]);
             // "Sem Prazo" = suspensão por tempo INDETERMINADO — não é o que este relatório
@@ -653,7 +662,7 @@
             if (/^sem\s+prazo$/i.test(prazoTexto.trim())) return null;
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[6]);
+            const diasTexto = textoCelula(tds[5]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
@@ -661,13 +670,12 @@
                 prazo: prazoTexto,
                 inicioSuspensao: textoCelula(tds[3]),
                 fimSuspensao: textoCelula(tds[4]),
-                motivo: textoCelula(tds[5]),
                 dias,
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias))],
+        linha: (d) => [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))],
         // Sem cfg.pdf genérico: o resumo pedido (classe com mais processos, tempo médio de
         // suspensão POR CLASSE, processo com fim de suspensão mais LONGA) não cabe no
         // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
@@ -6140,36 +6148,12 @@
         const doc = novoDocPDF();
         montarResumoSuspensosPrazo(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        if (dados.length) {
-            const pgMotivo = montarGraficoMotivoSuspensosPrazo(doc, dados, false);
-            doc.outline.add(null, 'Motivo da Suspensão', { pageNumber: pgMotivo });
-        }
         if (!somenteResumo && dados.length) {
             const pgTabela = montarTabelaSuspensosPrazo(doc, dados, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `suspensos_prazo_projudi${sufixo}_${dataArquivo()}.pdf`);
-    }
-
-    // Página dedicada ao gráfico de barras "Motivo da Suspensão" (pedido do usuário,
-    // além do resumo já existente) — motivo é texto livre demais pra caber como mais um
-    // card no resumo sem apertar o layout, e "somenteResumo" também deve mostrar esse
-    // gráfico (é resumo/estatística, não tabela discriminada).
-    function montarGraficoMotivoSuspensosPrazo(doc, dados, comIndice) {
-        const agora = new Date();
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 12;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-
-        doc.addPage();
-        const paginaInicial = doc.internal.getNumberOfPages();
-        const itens = contarPorCampo(dados, 'motivo', 12, null, false, null);
-        desenharBarras(doc, m, m, pw - 2 * m, ph - 2 * m - 14, 'Processos por Motivo da Suspensão', itens, (v) => String(v), COR.aqua);
-        desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice);
-        return paginaInicial;
     }
 
     // Página de RESUMO (KPIs + lista "Classe — média de dias") do relatório de Suspensos
@@ -6268,7 +6252,7 @@
             { header: 'Prazo', width: 30, get: (d) => d.prazo },
             { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
             { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
-            { header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo },
+            { header: 'Dias Paralisado', width: 24, get: (d) => (d.dias == null ? '' : String(d.dias)) },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
