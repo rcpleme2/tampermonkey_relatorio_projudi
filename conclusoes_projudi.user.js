@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.41
+// @version      20.42
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
+// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
+// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
@@ -906,7 +908,7 @@
     // independente de quantas expansões estão em voo ao mesmo tempo. O tamanho do lote é
     // um meio-termo: grande o bastante para acelerar de verdade, pequeno o bastante para
     // não sobrecarregar o Projudi nem estourar o tempo de resposta de uma leva só.
-    const TAMANHO_LOTE_EXPANSAO_AD = 30;
+    const TAMANHO_LOTE_EXPANSAO_AD = 100;
 
     async function expandirLoteDeLinhas(lote) {
         lote.forEach(linha => {
@@ -3773,7 +3775,7 @@
         }
         if (cfg === CFG_TEMPOMEDIO) {
             return {
-                rotulo: 'Tempo Médio de Cumprimento',
+                rotulo: 'Tempo médio de cumprimento de decisões / sentenças',
                 montarResumo: (doc, dados, primeira, comIndice) => montarResumoTempoMedio(doc, dados, primeira, comIndice),
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
@@ -4161,14 +4163,23 @@
         desenharCard(doc, m, kY, uw, 26, 'Processos com Múltiplas Pendências', String(cruzados.length),
             [`Maior concentração: ${cruzados[0].quantidade} pendências (processo ${cruzados[0].processo})`], true, COR.vinho);
 
+        // Tabela limitada aos 30 primeiros (já ordenados por nº de pendências desc) —
+        // pedido do usuário; o KPI acima e o subtítulo continuam com o TOTAL real
+        // (cruzados.length, sem corte), só a tabela discriminada é que corta.
+        const LIMITE_TABELA_MULTIPLAS_PENDENCIAS = 30;
+        const cruzadosTabela = cruzados.slice(0, LIMITE_TABELA_MULTIPLAS_PENDENCIAS);
         const tY = kY + 26 + 8;
+        if (cruzados.length > LIMITE_TABELA_MULTIPLAS_PENDENCIAS) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+            doc.text(`Exibindo os ${LIMITE_TABELA_MULTIPLAS_PENDENCIAS} processos com mais pendências, de ${cruzados.length} no total.`, m, tY - 3);
+        }
         doc.autoTable({
             columns: [
                 { header: 'Processo', dataKey: 'processo' },
                 { header: 'Nº de Pendências', dataKey: 'quantidade' },
                 { header: 'Em quais relatórios', dataKey: 'rotulos' },
             ],
-            body: cruzados.map(c => ({ processo: c.processo, quantidade: String(c.quantidade), rotulos: c.rotulos.join(', ') })),
+            body: cruzadosTabela.map(c => ({ processo: c.processo, quantidade: String(c.quantidade), rotulos: c.rotulos.join(', ') })),
             startY: tY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
@@ -4468,7 +4479,7 @@
                 if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
             }
             itensOutros.push({
-                nome: 'Tempo Médio de Cumprimento',
+                nome: 'Tempo médio de cumprimento de decisões / sentenças',
                 indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
                 detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
@@ -4764,7 +4775,7 @@
         });
     }
 
-    const TITULO_TEMPOMEDIO = 'Tempo Médio de Cumprimento';
+    const TITULO_TEMPOMEDIO = 'Tempo médio de cumprimento de decisões / sentenças';
 
     function gerarPDFTempoMedio(dados, somenteResumo) {
         const doc = novoDocPDF();
@@ -4971,7 +4982,7 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo Médio de Cumprimento');
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo médio de cumprimento de decisões / sentenças');
 
         const colunas = [
             { header: 'Processo', width: 28, get: (d) => d.processo },
@@ -5071,10 +5082,14 @@
             const ts = parseDataBR(d.dataAudiencia);
             return ts != null && (best === null || ts < best.ts) ? { ts, data: d.dataAudiencia } : best;
         }, null);
-        const kW3aud = (uw - 2 * gap) / 3;
-        desenharCard(doc, m,                     kY, kW3aud, 28, 'Audiências Pendentes', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3aud + gap,      kY, kW3aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
-        desenharCard(doc, m + 2 * (kW3aud + gap), kY, kW3aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
+        // Card "Audiências Pendentes" (total) removido — pedido do usuário, era
+        // redundante com o subtítulo da página (linha logo acima, já mostra
+        // "N audiência(s) pendente(s)"). Só 2 cards agora, em vez de 3, cada um dobra de
+        // largura (mesmo padrão de 2-em-linha usado em outros relatórios) — resolve o
+        // corte de texto que "Vencidas — termo pendente" sofria espremido num terço.
+        const kW2aud = (uw - gap) / 2;
+        desenharCard(doc, m,             kY, kW2aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        desenharCard(doc, m + kW2aud + gap, kY, kW2aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
             [maisAntigaVencida
                 ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
                 : 'nenhuma audiência já realizada sem termo'],
@@ -7557,6 +7572,21 @@
         return null;
     }
 
+    // Confirma que o `<label>` existe (estamos na página certa) mas a célula ao lado NÃO
+    // tem link — mesmo padrão já visto noutro campo do mesmo card da home ("Físicos: --",
+    // sem link quando não há nada a mostrar). Usado para distinguir "zero processos
+    // suspensos, o widget nem desenha o link" de "ainda não estamos na home" — só faz
+    // sentido chamar DEPOIS de acharLinkAoLadoDoLabel já ter falhado.
+    function labelSemLinkEncontrado(labelRe) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('td.label label')) {
+                if (labelRe.test(label.textContent)) return true;
+            }
+        }
+        return false;
+    }
+
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
@@ -7770,7 +7800,13 @@
     const CHAVE_WATCHDOG = 'projudi_auto_watchdog';
     function verificarTravamentoAutomacao() {
         const estado = store.getItem(AUTO_ESTADO);
-        const key = (estado && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_')))
+        // "travado_X" (passoAutomacao desistiu de navegar depois de LIMITE_TENTATIVAS,
+        // ver mais abaixo) também entra aqui agora — antes só coletando_/preenchendo_
+        // eram observados, então um relatório cujo link de navegação nunca aparece (ex.:
+        // Suspensos por Prazo Indeterminado quando o contador é zero e o card da home não
+        // renderiza link algum) ficava parado em "travado_" pra sempre, sem nada
+        // recuperando sozinho.
+        const key = (estado && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')))
             ? estado.slice(estado.indexOf('_') + 1) : null;
         if (!key) { store.removeItem(CHAVE_WATCHDOG); return; }
 
@@ -7828,6 +7864,21 @@
             if (navegarMenu(rel.navAlvo)) {
                 store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
+                return;
+            }
+            // Suspensos por Prazo Indeterminado: o card da home só mostra um link quando
+            // há pelo menos 1 processo suspenso (mesmo padrão do campo "Físicos: --" no
+            // mesmo card, que também nunca vira link) — com zero, navegarMenu('suspensos')
+            // ia falhar pra sempre, batendo as 8 tentativas e travando em "travado_" (o
+            // relatório que relatou esse travamento é justamente o único cujo card some o
+            // link em vez de mostrar "0"). Detecta esse caso ANTES de gastar as tentativas
+            // e trata como "0 registros" — mesmo padrão já usado para buttonBar ausente.
+            if (rel.navAlvo === 'suspensos' && labelSemLinkEncontrado(/suspensos\s+por\s+tempo\s+indeterminado/i)) {
+                console.log('[Auto Projudi] card de "Suspensos por Tempo Indeterminado" sem link (0 processos) — marcando coletado sem navegar');
+                store.removeItem('projudi_auto_nav_falhas');
+                store.setItem(AUTO_ESTADO, 'coletando_' + key);
+                store.setItem(CFG_SUSPENSOS.prefixo + 'coletado', '1');
+                avancarAutomacao(CFG_SUSPENSOS);
                 return;
             }
             // Conta tentativas malsucedidas para este alvo — se o link nunca aparecer
@@ -7927,18 +7978,68 @@
     // relatório foi interrompido antes de terminar; os dados que existem são parciais.
     function foiInterrompidoPorErro(cfg) { return store.getItem(cfg.prefixo + 'erro') === '1'; }
 
-    function baixarPDFConjunto(somenteResumo) {
-        const secoes = REPORTS_AUTOMACAO
+    // Todas as seções já coletadas (qualquer relatório de REPORTS_AUTOMACAO, cada cfg
+    // interno resolvido por cfgsDoRelatorio) — usado tanto pelo PDF conjunto quanto pelo
+    // Excel conjunto, pra não duplicar o mesmo filtro (mostrarSeVazio/foiColetado) nos
+    // dois lugares.
+    function secoesColetadas() {
+        return REPORTS_AUTOMACAO
             .flatMap(r => cfgsDoRelatorio(r).map(cfg => ({ dados: lerDadosDe(cfg.prefixo), cfg })))
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
+    }
+
+    function baixarPDFConjunto(somenteResumo) {
+        const secoes = secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             gerarPDFConjunto(secoes, somenteResumo);
-            // Após exportar o PDF conjunto, limpa tudo automaticamente — evita que uma
-            // coleta antiga fique acumulada/misturada com a próxima automação.
-            limparTudoAutomacao();
+            // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
+            // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
+            // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
+            // dados existentes — ver onclick de #pa-iniciar em injetarPainel).
         }
         catch (err) { alert('Erro ao gerar Relatório PDF: ' + err.message); console.error(err); }
+    }
+
+    // Nome de aba do Excel — a partir de cfg.nomeArquivo (sempre presente, já curto e
+    // único por cfg): tira o sufixo "_projudi", troca "_" por espaço, capitaliza. Nomes
+    // de aba do Excel têm limite de 31 caracteres, não podem repetir nem conter
+    // [ ] : * ? / \ — trunca e desambigua com "(2)", "(3)"... se precisar.
+    function nomeAbaExcel(nomeArquivo, jaUsados) {
+        let base = (nomeArquivo || 'dados').replace(/_projudi$/, '').replace(/_/g, ' ').trim();
+        base = base.charAt(0).toUpperCase() + base.slice(1);
+        base = base.replace(/[[\]:*?/\\]/g, '').slice(0, 31).trim() || 'Dados';
+        let candidato = base, i = 2;
+        while (jaUsados.has(candidato.toLowerCase())) {
+            const sufixo = ` (${i})`;
+            candidato = base.slice(0, 31 - sufixo.length) + sufixo;
+            i++;
+        }
+        jaUsados.add(candidato.toLowerCase());
+        return candidato;
+    }
+
+    // Excel conjunto — pedido do usuário: uma única planilha .xlsx com a tabela
+    // discriminada de CADA relatório já coletado, uma aba por relatório (hoje só existia
+    // exportação individual, um .xlsx por relatório — ver gerarEbaixarExcel). Reaproveita
+    // cfg.cabecalhos/cfg.larguras/cfg.linha, os mesmos usados pela exportação individual.
+    function gerarEbaixarExcelConjunto() {
+        const secoes = secoesColetadas();
+        if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
+        try {
+            const wb = XLSX.utils.book_new();
+            const abasUsadas = new Set();
+            secoes.forEach(({ dados, cfg }) => {
+                const linhas = dados.map(cfg.linha);
+                const ws = XLSX.utils.aoa_to_sheet([cfg.cabecalhos, ...linhas]);
+                ws['!cols'] = cfg.larguras;
+                XLSX.utils.book_append_sheet(wb, ws, nomeAbaExcel(cfg.nomeArquivo, abasUsadas));
+            });
+            const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+            const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.xlsx`);
+        }
+        catch (err) { alert('Erro ao gerar Excel conjunto: ' + err.message); console.error(err); }
     }
 
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
@@ -8021,6 +8122,7 @@
         if (dot) dot.classList.toggle('alerta', travado);
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
+        painel.querySelector('#pa-excel').disabled = total === 0;
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
         // escape para quando a coleta trava (ver pularRelatorioAtual).
         const btnPular = painel.querySelector('#pa-pular');
@@ -8204,6 +8306,7 @@
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
+                        <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Excel conjunto</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
@@ -8221,12 +8324,27 @@
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
             const periodoTM = periodoSelTM ? periodoSelTM.value : '1m';
+            // Pedido do usuário: desde que "Limpar" deixou de rodar sozinho depois do PDF
+            // (ver baixarPDFConjunto), reiniciar "Automatizar" por cima de dados já
+            // coletados dos relatórios marcados precisa de uma escolha explícita —
+            // continuar acumulando (comportamento padrão de iniciarAutomacao) ou apagar e
+            // recomeçar do zero. foiColetado cobre também "0 registros, mas já rodou"
+            // (ex.: Suspensos coletado e vazio), que lerDadosDe sozinho não pegaria.
+            const temDadosPrevios = fila.some(key => {
+                const rel = relatorioPorChave(key);
+                return rel && cfgsDoRelatorio(rel).some(cfg => lerDadosDe(cfg.prefixo).length > 0 || foiColetado(cfg));
+            });
+            if (temDadosPrevios) {
+                const apagar = confirm('Já existem dados coletados para um ou mais relatórios marcados.\n\nOK = apagar tudo e começar do zero.\nCancelar = continuar acumulando (padrão).');
+                if (apagar) limparTudoAutomacao();
+            }
             iniciarAutomacao(fila, periodoTM);
         };
         painel.querySelector('#pa-pdf').onclick = () => {
             const chk = painel.querySelector('#pa-somente-resumo');
             baixarPDFConjunto(!!(chk && chk.checked));
         };
+        painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
         painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
