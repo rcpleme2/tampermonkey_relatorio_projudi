@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.42
+// @version      20.43
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -464,6 +464,22 @@
         return el ? el.value : null;
     }
 
+    // CFG_SUSPENSOS (indeterminado) e CFG_SUSPENSOS_PRAZO (determinado) usam a MESMA
+    // tabela/URL/cabeçalho (processoBuscaSuspenso.do) — confirmado por captura real da
+    // tela: AS DUAS sempre têm as 7 colunas, inclusive "Fim Suspensão", mesmo com zero
+    // resultados (a suposição anterior de que a tela de indeterminado tinha um cabeçalho
+    // "mais curto", sem "Fim Suspensão", estava errada — era só uma amostra antiga
+    // incompleta). Ou seja, o cabeçalho SOZINHO não distingue as duas telas — era isso
+    // que fazia a automação detectar CFG_SUSPENSOS_PRAZO por engano na tela de
+    // indeterminado (link navegava certo, chegava na tela certa, mas cfg errado =
+    // querColetarAuto sempre false = travava pra sempre em "coletando_suspensos"). O que
+    // realmente distingue é o checkbox "Tempo Indeterminado" do formulário — mesmo padrão
+    // já usado para Paralisados/Remessas (opcaoBuscaParalisadoSelecionada, acima).
+    function prazoIndeterminadoMarcado() {
+        const el = document.querySelector('#prazoIndeterminado');
+        return !!(el && el.checked);
+    }
+
     // Relatório de Processos Paralisados (processoBuscaParalisado.do, opcaoBusca=1 "Na
     // secretaria"). Colunas da tabela: [0]semáforo [1]checkbox [2]Processo [3]Seq.
     // [4]Classe Processual [5]Dias Paralisado [6]Razão Externa (não usado) [7]Último Movimento
@@ -528,8 +544,20 @@
     };
 
     // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
-    // acessado pelo número na página inicial). Colunas da tabela: [0]Processo
-    // [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão [5]Dias Paralisado.
+    // acessado pelo número na página inicial, com o checkbox "Tempo Indeterminado" já
+    // marcado — ver prazoIndeterminadoMarcado). Colunas da tabela — CONFIRMADO por
+    // captura real da tela (mhtml com 0 resultados): a tabela tem SEMPRE 7 colunas,
+    // IGUAIS às de CFG_SUSPENSOS_PRAZO — [0]Processo [1]Classe Processual [2]Prazo
+    // [3]Início Suspensão [4]Fim Suspensão [5]Motivo da Suspensão [6]Dias Paralisado —
+    // mesmo com zero resultados e mesmo aqui, na busca "indeterminado" (o backend do
+    // Projudi já filtra as LINHAS pelo checkbox, mas a estrutura de COLUNAS da tabela é
+    // sempre a mesma). A suposição anterior de que essa tela tinha só 6 colunas (sem
+    // "Fim Suspensão"/"Motivo") estava errada — vinha de uma amostra antiga incompleta, e
+    // causava dois bugs reais: (1) cfg.extrai lia "dias" de tds[5] (que aqui é "Motivo da
+    // Suspensão", texto, não número — dias saía sempre null); (2) detectarConfig() não
+    // tinha como distinguir esta tela da de CFG_SUSPENSOS_PRAZO só pelo cabeçalho (as
+    // duas têm "Fim Suspensão"), fazendo a automação escolher a cfg errada e travar
+    // (ver detectarConfig — agora usa prazoIndeterminadoMarcado() pra decidir).
     // Sem pdf/pdfCustom próprio — entra na seção "Estatísticas Gerais" do relatório
     // conjunto (ver gerarPDFConjunto), não como relatório individual com resumo/gráficos.
     const CFG_SUSPENSOS = {
@@ -538,8 +566,10 @@
         // foiColetado) — "zero suspensos" é uma informação relevante, não um vazio a
         // esconder.
         mostrarSeVazio: true,
-        detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab),
-        minTds: 6,
+        // "Fim Suspensão" sozinho não distingue mais esta tela de CFG_SUSPENSOS_PRAZO
+        // (ambas têm — ver comentário acima); o que distingue é o checkbox do formulário.
+        detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab) && prazoIndeterminadoMarcado(),
+        minTds: 7,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_indeterminado_projudi',
         rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
@@ -548,7 +578,7 @@
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[5]);
+            const diasTexto = textoCelula(tds[6]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
@@ -603,10 +633,13 @@
         // "Zero suspensos por prazo determinado" é uma informação válida (mesmo racional
         // de CFG_SUSPENSOS/CFG_APREENSOES) — mostra a linha mesmo vazia, desde que coletada.
         mostrarSeVazio: true,
-        // Mais específico que CFG_SUSPENSOS.detecta (que casaria aqui também, por causa de
-        // "Início Suspensão") — por isso detectarConfig() precisa checar este ANTES daquele
-        // (ver comentário em detectarConfig).
-        detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab),
+        // "Fim Suspensão" sozinho casaria com as DUAS telas (CFG_SUSPENSOS_PRAZO e
+        // CFG_SUSPENSOS têm exatamente o mesmo cabeçalho de 7 colunas — confirmado por
+        // captura real da tela; ver comentário grande em CFG_SUSPENSOS acima) — o que
+        // distingue é o checkbox "Tempo Indeterminado" do formulário: aqui precisa estar
+        // DESMARCADO (a busca "com prazo" usa os filtros padrão, sem marcar esse
+        // checkbox — ver preencherEPesquisarSuspensoPrazo).
+        detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab) && !prazoIndeterminadoMarcado(),
         minTds: 7,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_prazo_projudi',
