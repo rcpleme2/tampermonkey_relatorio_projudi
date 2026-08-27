@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.33
+// @version      20.50
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
+// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
+// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
@@ -16,7 +18,16 @@
     'use strict';
 
     const store = window.localStorage;
-    const STALE_MS = 2 * 60 * 1000; // 2 minutos sem atividade => coleta em andamento considerada obsoleta
+    // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
+    // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
+    // RELOAD do Projudi, e nesse reload específico (diferente do primeiro reload após
+    // Pesquisar) não sobra nenhuma flag de fallback além de KEY_RODANDO — se o site
+    // demorar mais que STALE_MS pra responder (plausível numa sessão já carregada de
+    // estado, comentário já registrado em CFG_TEMPOMEDIO.pageSizeSelect sobre o Projudi
+    // já ter travado antes), obsoleta() volta true e injetarBotoes() cai no ramo que
+    // limpa a flag `rodando` (limparFlags) em vez de retomar — automação trava pra
+    // sempre em "coletando_tempomedio", sem nenhum sinal de erro.
+    const STALE_MS = 6 * 60 * 1000; // 6 minutos sem atividade => coleta em andamento considerada obsoleta
 
     // ── Leitura da Atuação atual ────────────────────────────────────────────────
 
@@ -215,10 +226,41 @@
             processoCampo: 'processo',
             tipoCampo: 'tipoConclusao',
             mediaLabel: 'conclusões / dia',
+            // KPIs "Com/Sem pré-análise" no RESUMO GERAL (pedido da Corregedoria) — já
+            // existiam só no PDF por juiz (ver montarResumoJuizConclusoes/temPreAnalise);
+            // separa a fila da assessoria (sem pré-análise) da fila do magistrado
+            // (pré-analisado, aguardando decisão).
+            // acento é o NOME da cor ('aqua'/'ambar'/...), não o array RGB — CFG_CONCLUSOES
+            // é montado antes de `const COR` existir no arquivo (TDZ), então não dá pra
+            // referenciar COR.aqua aqui; montarResumoGenerico resolve o nome em COR[nome]
+            // na hora de desenhar, quando COR já está definida.
+            kpisExtras: [
+                {
+                    titulo: 'Com pré-análise', acento: 'aqua',
+                    calc: (sub) => sub.filter(temPreAnalise).length,
+                    subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
+                },
+                {
+                    titulo: 'Sem pré-análise', acento: 'ambar',
+                    calc: (sub) => sub.length - sub.filter(temPreAnalise).length,
+                },
+            ],
             distribuicoes: [
                 { titulo: 'Conclusões por Magistrado(a)', campo: 'responsavel', topN: 12 },
                 { titulo: 'Conclusões por Agrupador', campo: 'agrupador', topN: 12 },
                 { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
+                // "Aguardando decisão" (pedido da Corregedoria): tempo desde a PRÉ-ANÁLISE,
+                // não desde a remessa — um processo pré-analisado há 120 dias é um achado
+                // (está parado na mesa do magistrado); medido por dtRemessa isso não se
+                // distingue de "acabou de ser pré-analisado". Só entre quem tem
+                // pré-análise; usa calc() porque não é uma contagem por CAMPO categórico.
+                {
+                    titulo: 'Aguardando decisão (dias desde a pré-análise)',
+                    calc: (sub) => {
+                        const dias = sub.filter(temPreAnalise).map(d => diasDesdePreAnalise(d, Date.now())).filter(v => v !== '').map(Number);
+                        return { tipo: 'barras', itens: faixasDeDias(dias).filter(f => f.valor > 0) };
+                    },
+                },
             ],
             // Larguras somam 174mm — cabem na área útil (~186mm em A4 retrato com margem
             // de 12mm); antes somavam 206mm e a tabela vazava a borda direita da página.
@@ -422,6 +464,22 @@
         return el ? el.value : null;
     }
 
+    // CFG_SUSPENSOS (indeterminado) e CFG_SUSPENSOS_PRAZO (determinado) usam a MESMA
+    // tabela/URL/cabeçalho (processoBuscaSuspenso.do) — confirmado por captura real da
+    // tela: AS DUAS sempre têm as 7 colunas, inclusive "Fim Suspensão", mesmo com zero
+    // resultados (a suposição anterior de que a tela de indeterminado tinha um cabeçalho
+    // "mais curto", sem "Fim Suspensão", estava errada — era só uma amostra antiga
+    // incompleta). Ou seja, o cabeçalho SOZINHO não distingue as duas telas — era isso
+    // que fazia a automação detectar CFG_SUSPENSOS_PRAZO por engano na tela de
+    // indeterminado (link navegava certo, chegava na tela certa, mas cfg errado =
+    // querColetarAuto sempre false = travava pra sempre em "coletando_suspensos"). O que
+    // realmente distingue é o checkbox "Tempo Indeterminado" do formulário — mesmo padrão
+    // já usado para Paralisados/Remessas (opcaoBuscaParalisadoSelecionada, acima).
+    function prazoIndeterminadoMarcado() {
+        const el = document.querySelector('#prazoIndeterminado');
+        return !!(el && el.checked);
+    }
+
     // Relatório de Processos Paralisados (processoBuscaParalisado.do, opcaoBusca=1 "Na
     // secretaria"). Colunas da tabela: [0]semáforo [1]checkbox [2]Processo [3]Seq.
     // [4]Classe Processual [5]Dias Paralisado [6]Razão Externa (não usado) [7]Último Movimento
@@ -486,8 +544,19 @@
     };
 
     // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
-    // acessado pelo número na página inicial). Colunas da tabela: [0]Processo
-    // [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão [5]Dias Paralisado.
+    // acessado pelo número na página inicial, com o checkbox "Tempo Indeterminado" já
+    // marcado — ver prazoIndeterminadoMarcado). Colunas da tabela — CONFIRMADO por 2
+    // capturas reais recentes lado a lado (indeterminado e determinado): a tabela tem
+    // SEMPRE 6 colunas, IGUAIS às de CFG_SUSPENSOS_PRAZO — [0]Processo
+    // [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+    // [5]Dias Paralisado (a tela NÃO tem mais coluna "Motivo da Suspensão" — o Projudi
+    // parece ter removido esse campo; uma suposição anterior, de uma captura mais antiga
+    // que ainda mostrava 7 colunas com "Motivo", ficou desatualizada e causava minTds:7
+    // descartando TODA linha silenciosamente, já que nenhuma linha real tinha mais de 6
+    // tds — "o relatório não identificou os suspensos" relatado pelo usuário era
+    // exatamente isso). O que distingue esta tela da de CFG_SUSPENSOS_PRAZO não é mais o
+    // cabeçalho (as duas têm as MESMAS 6 colunas) — é o checkbox "Tempo Indeterminado" do
+    // formulário (ver prazoIndeterminadoMarcado(), usado em ambos os detecta() abaixo).
     // Sem pdf/pdfCustom próprio — entra na seção "Estatísticas Gerais" do relatório
     // conjunto (ver gerarPDFConjunto), não como relatório individual com resumo/gráficos.
     const CFG_SUSPENSOS = {
@@ -496,29 +565,54 @@
         // foiColetado) — "zero suspensos" é uma informação relevante, não um vazio a
         // esconder.
         mostrarSeVazio: true,
-        detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab),
+        // "Fim Suspensão" sozinho não distingue mais esta tela de CFG_SUSPENSOS_PRAZO
+        // (ambas têm — ver comentário acima); o que distingue é o checkbox do formulário.
+        detecta: (cab) => /in[íi]cio\s+suspens[ãa]o/i.test(cab) && prazoIndeterminadoMarcado(),
+        // CONFIRMADO por capturas reais: a tabela tem 6 colunas na maioria das varas —
+        // [0]Processo [1]Classe [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+        // [5]Dias Paralisado —, mas a ÁREA CRIME tem uma coluna a mais, "Motivo da
+        // Suspensão", entre Fim Suspensão e Dias Paralisado (7 colunas). minTds fica em 6
+        // (o mínimo comum); "Dias Paralisado" é sempre a ÚLTIMA coluna (tds[tds.length-1]),
+        // então o índice funciona nos dois formatos sem precisar saber de antemão qual é.
         minTds: 6,
         usaAtuacao: false,
         nomeArquivo: 'suspensos_indeterminado_projudi',
         rotulos: { coletar: 'Extrair Suspensos', coletarMais: 'Extrair mais (Suspensos)', baixar: '⬇ Baixar Suspensos' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }],
+        // cabecalhos/larguras são getters: incluem "Motivo da Suspensão" só quando os
+        // dados já coletados tiverem esse campo (área Crime) — nas demais áreas a coluna
+        // simplesmente não existe, como pedido.
+        get cabecalhos() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? ['Processo', 'Classe Processual', 'Início Suspensão', 'Motivo da Suspensão', 'Dias Paralisado', 'Prioritário']
+                : ['Processo', 'Classe Processual', 'Início Suspensão', 'Dias Paralisado', 'Prioritário'];
+        },
+        get larguras() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 30 }, { wch: 16 }, { wch: 11 }]
+                : [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 11 }];
+        },
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
-            const diasTexto = textoCelula(tds[5]);
+            const temMotivo = tds.length >= 7;
+            const diasTexto = textoCelula(tds[tds.length - 1]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
             return {
                 processo,
                 classe: textoCelula(tds[1]),
                 inicioSuspensao: textoCelula(tds[3]),
+                motivo: temMotivo ? textoCelula(tds[5]) : '',
                 dias,
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
+        linha: (d) => (d.motivo
+            ? [d.processo, d.classe, d.inicioSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não']
+            : [d.processo, d.classe, d.inicioSuspensao, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não']),
         // Tratado como mais uma tarefa do Cartório (mesmo esquema genérico de Juntadas/
         // Retorno — ver gerarPDFConjunto): entra no resumo/tabela por seção e na mini-
         // tabela de situação da capa, sem precisar de uma página "Estatísticas Gerais"
@@ -535,13 +629,147 @@
             distribuicoes: [
                 { titulo: 'Suspensos por Classe Processual', campo: 'classe', topN: 12 },
             ],
-            colunas: [
-                { header: 'Processo', width: 30, get: (d) => d.processo },
-                { header: 'Classe', width: 40, get: (d) => d.classe },
-                { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
-                { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
-            ],
+            // colunas também é um getter, mesma regra da coluna Excel acima: só entra
+            // "Motivo da Suspensão" quando os dados coletados vieram da área Crime.
+            get colunas() {
+                const temMotivo = lerDadosDe(CFG_SUSPENSOS.prefixo).some(d => d.motivo);
+                const base = [
+                    { header: 'Processo', width: 30, get: (d) => d.processo },
+                    { header: 'Classe', width: 40, get: (d) => d.classe },
+                    { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
+                ];
+                if (temMotivo) base.push({ header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo });
+                base.push({ header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) });
+                return base;
+            },
         },
+    };
+
+    // Relatório de Processos Suspensos por PRAZO DETERMINADO — MESMA tela/endpoint do
+    // CFG_SUSPENSOS acima (processoBuscaSuspenso.do), mas alcançada por um caminho
+    // diferente: em vez do número/link direto da página inicial (que já vai pronto pra
+    // "Tempo Indeterminado"), aqui se navega até uma TELA DE FILTROS
+    // (processoBuscaSuspensoForm) e clica em Pesquisar com os filtros padrão da tela —
+    // que trazem AMBOS os tipos (prazo determinado e indeterminado) misturados. A tabela
+    // de resultado nesse caminho tem uma coluna a mais que a de CFG_SUSPENSOS ("Fim
+    // Suspensão"), usada tanto para reconhecer a tela (ver detecta) quanto para filtrar
+    // client-side: linhas cujo texto da coluna "Prazo" seja "Sem Prazo" são indeterminadas
+    // e descartadas (extrai retorna null — ver coletarPaginaAtual). Colunas da tabela:
+    // [0]Processo [1]Classe Processual [2]Prazo [3]Início Suspensão [4]Fim Suspensão
+    // [5]Motivo da Suspensão [6]Dias Paralisado.
+    const CFG_SUSPENSOS_PRAZO = {
+        prefixo: 'projudi_suspensosprazo_',
+        // "Zero suspensos por prazo determinado" é uma informação válida (mesmo racional
+        // de CFG_SUSPENSOS/CFG_APREENSOES) — mostra a linha mesmo vazia, desde que coletada.
+        mostrarSeVazio: true,
+        // "Fim Suspensão" sozinho casaria com as DUAS telas (CFG_SUSPENSOS_PRAZO e
+        // CFG_SUSPENSOS têm exatamente o mesmo cabeçalho de 6 colunas — confirmado por 2
+        // capturas reais recentes lado a lado; ver comentário grande em CFG_SUSPENSOS
+        // acima) — o que distingue é o checkbox "Tempo Indeterminado" do formulário: aqui
+        // precisa estar DESMARCADO (a busca "com prazo" usa os filtros padrão, sem marcar
+        // esse checkbox — ver preencherEPesquisarSuspensoPrazo).
+        detecta: (cab) => /fim\s+suspens[ãa]o/i.test(cab) && !prazoIndeterminadoMarcado(),
+        // 6 colunas na maioria das varas, 7 na área Crime (coluna extra "Motivo da
+        // Suspensão" entre Fim Suspensão e Dias Paralisado) — mesma situação de
+        // CFG_SUSPENSOS, ver comentário grande lá. minTds fica em 6 (mínimo comum);
+        // "Dias Paralisado" é sempre a ÚLTIMA coluna, então tds[tds.length-1] funciona
+        // nos dois formatos.
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'suspensos_prazo_projudi',
+        rotulos: { coletar: 'Extrair Suspensos com Prazo', coletarMais: 'Extrair mais (Suspensos com Prazo)', baixar: '⬇ Baixar Suspensos com Prazo' },
+        // cabecalhos/larguras são getters — mesma regra de CFG_SUSPENSOS: só incluem
+        // "Motivo da Suspensão" quando os dados já coletados trouxerem esse campo (área
+        // Crime); nas demais áreas a coluna não existe.
+        get cabecalhos() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Motivo da Suspensão', 'Dias Paralisado']
+                : ['Processo', 'Classe Processual', 'Prazo', 'Início Suspensão', 'Fim Suspensão', 'Dias Paralisado'];
+        },
+        get larguras() {
+            const temMotivo = lerDadosDe(this.prefixo).some(d => d.motivo);
+            return temMotivo
+                ? [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 30 }, { wch: 16 }]
+                : [{ wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+        },
+        extrai: (tds, atuacao) => {
+            const prazoTexto = textoCelula(tds[2]);
+            // "Sem Prazo" = suspensão por tempo INDETERMINADO — não é o que este relatório
+            // quer (isso já é o CFG_SUSPENSOS acima); descarta a linha.
+            if (/^sem\s+prazo$/i.test(prazoTexto.trim())) return null;
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const temMotivo = tds.length >= 7;
+            const diasTexto = textoCelula(tds[tds.length - 1]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                prazo: prazoTexto,
+                inicioSuspensao: textoCelula(tds[3]),
+                fimSuspensao: textoCelula(tds[4]),
+                motivo: temMotivo ? textoCelula(tds[5]) : '',
+                dias,
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => (d.motivo
+            ? [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, d.motivo, (d.dias == null ? '' : String(d.dias))]
+            : [d.processo, d.classe, d.prazo, d.inicioSuspensao, d.fimSuspensao, (d.dias == null ? '' : String(d.dias))]),
+        // Sem cfg.pdf genérico: o resumo pedido (classe com mais processos, tempo médio de
+        // suspensão POR CLASSE, processo com fim de suspensão mais LONGA) não cabe no
+        // mecanismo genérico (montarResumoGenerico assume "aging" = data mais antiga, e não
+        // existe noção de média por classe) — ver gerarPDFSuspensosPrazo.
+        pdfCustom: (dados, somenteResumo) => gerarPDFSuspensosPrazo(dados, somenteResumo),
+    };
+
+    // ── Em Instância Recursal (processoBuscaInstanciaSuperior.do) ──────────────────────
+    // No Projudi o relatório se chama "Processos Remetidos para Instância Superior"; o
+    // usuário se refere a ele como "Em Instância Recursal" — mantemos o rótulo amigável
+    // na interface/PDF e o nome técnico só nas variáveis internas. Alcançado pelo menu
+    // "Em Instância Superior" > "Remetidos" (ver navegarMenu) — ATENÇÃO: existe outro
+    // link de menu com o MESMO texto "Remetidos" mas href diferente
+    // (processosRemetidos.do, sem "Busca"/"Instancia"/"Superior" — é outro relatório do
+    // Projudi); a regex de URL usada em acharLinkMenu já é específica o bastante para não
+    // confundir os dois. A tela cai direto no form (situação "Em Instância Superior" já
+    // vem marcada por padrão) convivendo com a table.resultTable, mesmo padrão de
+    // Apreensões/Paralisados/Suspensos com Prazo — ver formularioInstanciaRecursal/
+    // preencherEPesquisarInstanciaRecursal. Colunas da tabela: [0]Processo
+    // [1]Classe Processual [2]Partes (tabela aninhada — ignorada) [3]Enviado [4]Recebido
+    // (vazio nesta situação — ignorado).
+    const CFG_INSTANCIA_RECURSAL = {
+        prefixo: 'projudi_instanciarecursal_',
+        // "Zero processos em instância recursal" é informação válida (mesmo racional dos
+        // demais relatórios de Estatísticas Gerais) — mostra a linha mesmo vazia.
+        mostrarSeVazio: true,
+        // "Enviado"/"Recebido" sozinhos são genéricos demais (poderiam colidir com outras
+        // telas de remessa/mandado) — exige as duas colunas MAIS "Classe Processual" no
+        // mesmo cabeçalho, o que é específico desta tela.
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /\benviado\b/i.test(cab) && /\brecebido\b/i.test(cab),
+        minTds: 5,
+        usaAtuacao: false,
+        nomeArquivo: 'instancia_recursal_projudi',
+        rotulos: { coletar: 'Extrair Instância Recursal', coletarMais: 'Extrair mais (Instância Recursal)', baixar: '⬇ Baixar Instância Recursal' },
+        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                dataEnvio: textoCelula(tds[3]),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.dataEnvio],
+        // Sem cfg.pdf genérico: o resumo pedido (detalhamento dos enviados há mais de 2
+        // anos, distribuição por faixa de tempo desde o envio) não cabe no mecanismo
+        // genérico — ver gerarPDFInstanciaRecursal.
+        pdfCustom: (dados, somenteResumo) => gerarPDFInstanciaRecursal(dados, somenteResumo),
     };
 
     // Verifica qual "Situação" está marcada no formulário de Audiências (audienciaForm) —
@@ -639,19 +867,14 @@
         return form && form.querySelector('#divTiposAudiencia') ? form : null;
     }
 
-    // Marca todos os tipos de audiência, define a Data Fim para 10 anos à frente de hoje e
-    // pesquisa. Não depende do "Todas" cascatear os checkboxes individuais via JS da
-    // página — marca cada input[name="idsTiposAudiencia"] diretamente, garantindo o mesmo
-    // resultado independente desse comportamento.
-    function preencherEPesquisarPautaAudiencias() {
-        const form = formularioPautaAudiencias();
-        if (!form) return;
-
-        // O Projudi cascateia os tipos individuais a partir de um CLIQUE de verdade no
-        // checkbox "Todas" (onclick da própria página) — só marcar checked=true e disparar
-        // "change" não é suficiente (regressão: parou de funcionar depois de um merge, que
-        // silenciosamente perdeu o .click() real). Clica de verdade e, como rede de
-        // segurança, ainda confere se sobrou algum tipo desmarcado.
+    // Marca "Todas" (clique de verdade — o Projudi cascateia os tipos individuais a
+    // partir do onclick da própria página; só checked=true+dispatchEvent('change') NÃO
+    // funciona, regressão já corrigida antes) e devolve se a marcação ficou completa
+    // (Todas marcada E nenhum tipo individual sobrou desmarcado). Sempre tenta o fallback
+    // manual em cima do que sobrar, então normalmente já sai completo na 1ª chamada —
+    // usado em retry por aguardarTiposAudienciaEPesquisar quando os checkboxes ainda não
+    // estavam no DOM na primeira tentativa.
+    function marcarTodosOsTiposAudiencia(form) {
         const checkTodos = form.querySelector('input[name="checkMarcaTodos"]');
         if (checkTodos && !checkTodos.checked) {
             console.log('[Projudi Audiências Designadas] clicando no checkbox "Todas"');
@@ -663,7 +886,36 @@
             console.warn(`[Projudi Audiências Designadas] "Todas" não marcou ${semMarcar.length} tipo(s) — marcando manualmente`);
             semMarcar.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
         }
+        const aindaFaltando = [...todos].filter(chk => !chk.checked).length;
         console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s) (Todas=${checkTodos ? checkTodos.checked : 'n/d'})`);
+        return { total: todos.length, completo: todos.length > 0 && aindaFaltando === 0 && (!checkTodos || checkTodos.checked) };
+    }
+
+    // Espera os checkboxes de tipo existirem no DOM (podem ser populados via AJAX depois
+    // do formulário aparecer — mesma armadilha já documentada para Outros Cumprimentos),
+    // marca "Todas" e só ENTÃO dispara a pesquisa — antes disso o setTimeout de Pesquisar
+    // disparava incondicionalmente 1,5s depois do preenchimento, sem checar se a marcação
+    // realmente pegou; se os checkboxes ainda não existissem nesse instante, "nenhum tipo
+    // sobrou desmarcado" era (tecnicamente) verdade com ZERO tipos marcados, e a pesquisa
+    // saía incompleta sem nenhum aviso. Poll curto (até ~1,5s) + até 2 tentativas de
+    // marcação antes de desistir e pesquisar mesmo assim (evita travar a automação por
+    // uma tela que genuinamente não tenha tipos configurados).
+    function aguardarTiposAudienciaEPesquisar(form, tentativa) {
+        tentativa = tentativa || 0;
+        const jaTemTipos = form.querySelectorAll('input[name="idsTiposAudiencia"]').length > 0;
+        if (!jaTemTipos && tentativa < 5) {
+            setTimeout(() => aguardarTiposAudienciaEPesquisar(form, tentativa + 1), 300);
+            return;
+        }
+        const resultado = marcarTodosOsTiposAudiencia(form);
+        if (!resultado.completo && tentativa < 2) {
+            // Tenta de novo (mais uma rodada de clique + fallback) antes de desistir.
+            setTimeout(() => aguardarTiposAudienciaEPesquisar(form, tentativa + 1), 400);
+            return;
+        }
+        if (!resultado.completo) {
+            console.warn('[Projudi Audiências Designadas] não foi possível confirmar todos os tipos marcados — pesquisando mesmo assim para não travar a automação.');
+        }
 
         const campoFim = form.querySelector('#dataFinal');
         if (campoFim) {
@@ -680,6 +932,12 @@
         setTimeout(() => {
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
+    }
+
+    function preencherEPesquisarPautaAudiencias() {
+        const form = formularioPautaAudiencias();
+        if (!form) return;
+        aguardarTiposAudienciaEPesquisar(form, 0);
     }
 
     // Detecta se a página já tem os resultados da pauta (pelo menos uma tabela interna
@@ -733,7 +991,7 @@
     // independente de quantas expansões estão em voo ao mesmo tempo. O tamanho do lote é
     // um meio-termo: grande o bastante para acelerar de verdade, pequeno o bastante para
     // não sobrecarregar o Projudi nem estourar o tempo de resposta de uma leva só.
-    const TAMANHO_LOTE_EXPANSAO_AD = 30;
+    const TAMANHO_LOTE_EXPANSAO_AD = 100;
 
     async function expandirLoteDeLinhas(lote) {
         lote.forEach(linha => {
@@ -1173,10 +1431,21 @@
         let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0 };
         try { extrasGeral = JSON.parse(store.getItem(CHAVE_EXTRAS_GERAL_AR) || 'null') || extrasGeral; } catch (e) { /* ignore */ }
 
+        // O mínimo agora considera o TOTAL do usuário no período (realizadas + canceladas
+        // + não realizadas + redesignadas), não só "realizadas" — pedido do usuário: um
+        // magistrado com poucas realizadas mas muitas canceladas/redesignadas ainda teve
+        // atividade relevante na vara e não deve ficar fora da lista por esse motivo.
+        const totalUsuarioAR = (u) => u.quantidade + (u.canceladas || 0) + (u.naoRealizadas || 0) + (u.redesignadas || 0);
         const porUsuario = acumulado
-            .filter(u => u.quantidade >= MIN_AUDIENCIAS_POR_USUARIO_AR)
+            .filter(u => totalUsuarioAR(u) >= MIN_AUDIENCIAS_POR_USUARIO_AR)
             .sort((a, b) => b.quantidade - a.quantidade);
-        const usuariosIgnorados = acumulado.length - porUsuario.length;
+        // Magistrados abaixo do mínimo — relacionados de forma discreta no PDF (pedido do
+        // usuário, "para futura conferência"), não escondidos silenciosamente.
+        const usuariosAbaixoDoMinimo = acumulado
+            .filter(u => totalUsuarioAR(u) < MIN_AUDIENCIAS_POR_USUARIO_AR)
+            .map(u => ({ nome: u.nome, total: totalUsuarioAR(u) }))
+            .sort((a, b) => b.total - a.total);
+        const usuariosIgnorados = usuariosAbaixoDoMinimo.length;
 
         const resumo = {
             geradoEm: new Date().toISOString(),
@@ -1187,10 +1456,11 @@
             periodo,
             porUsuario,
             usuariosIgnorados,
+            usuariosAbaixoDoMinimo,
             totalUsuarios: acumulado.length,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(total>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -1798,6 +2068,71 @@
         }, 1500);
     }
 
+    // Tela de filtros de Processos Suspensos com Prazo (processoBuscaSuspenso.do, mesmo
+    // endpoint de CFG_SUSPENSOS, mas alcançada via menu "Suspensos" em vez do link direto
+    // da home — cai num FORM, não nos resultados).
+    function formularioSuspensoPrazo() {
+        const form = document.getElementById('processoBuscaSuspensoForm');
+        return form && form.querySelector('#prazoIndeterminado') ? form : null;
+    }
+
+    // Não altera nenhum campo — os filtros padrão da tela ("Tipo da Suspensão" = Todos,
+    // "Tempo Indeterminado" desmarcado) já trazem os dois tipos misturados; é o filtro
+    // client-side de CFG_SUSPENSOS_PRAZO.extrai (ignora "Sem Prazo") que separa por prazo
+    // determinado. Só clica em Pesquisar.
+    function preencherEPesquisarSuspensoPrazo() {
+        const form = formularioSuspensoPrazo();
+        if (!form) return;
+
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Suspensos c/ Prazo] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Suspensos c/ Prazo] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Suspensos c/ Prazo] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de "Em Instância Recursal" (processoBuscaInstanciaSuperior.do) —
+    // form + table.resultTable juntos desde o primeiro carregamento, mesmo padrão de
+    // Suspensos com Prazo acima. O rádio "Em Instância Superior" (value="P") já vem
+    // marcado por padrão — é exatamente o filtro que o relatório quer, não precisa
+    // alterar nenhum campo.
+    function formularioInstanciaRecursal() {
+        const form = document.getElementById('processoBuscaInstanciaSuperiorForm');
+        return form && form.querySelector('input[name="situacao"]') ? form : null;
+    }
+
+    // ATENÇÃO: este formulário usa o botão #searchButton ("Filtrar"), NÃO #pesquisar como
+    // os demais relatórios de tela de filtros (Apreensões/Paralisados/Suspensos com
+    // Prazo) — id diferente confirmado no HTML real da tela.
+    function preencherEPesquisarInstanciaRecursal() {
+        const form = formularioInstanciaRecursal();
+        if (!form) return;
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Instância Recursal] botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Instância Recursal] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Instância Recursal] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Instância Recursal] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
     // ── Outros Cumprimentos (Mesa do Magistrado) — mesaAnalista.do?actionType=
     // listaOutrosCumprimentos ───────────────────────────────────────────────────
     // Diferente de TODOS os demais relatórios: não é uma lista paginada de processos, é
@@ -2126,7 +2461,10 @@
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
                 if (tds.length < cfg.minTds) return;
-                dados.push(cfg.extrai(tds, atuacao, contexto));
+                // cfg.extrai pode devolver null para descartar a linha (ex.: Suspensos com
+                // Prazo ignora linhas "Sem Prazo" — não são suspensão por prazo determinado).
+                const d = cfg.extrai(tds, atuacao, contexto);
+                if (d) dados.push(d);
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             return dados;
@@ -2173,14 +2511,53 @@
             marcarAtividade();
             console.log('[Projudi] continuar() — coletando página atual');
 
-            const dadosPagina = coletarPaginaAtual();
-            let total;
+            // coletarPaginaAtual() (cfg.extrai por linha) ficava FORA deste try — uma
+            // exceção numa linha atípica da tabela (célula em formato inesperado) subia
+            // sem tratamento, deixava KEY_RODANDO travado pra sempre e, como não há
+            // reload, obsoleta()/STALE_MS nunca era reavaliado: trava silenciosa até o
+            // usuário clicar em "Pular" (relatado em Conclusões — extrai() mais complexo
+            // do arquivo — e em Suspensos por Prazo Indeterminado). Além de limpar
+            // KEY_RODANDO como o catch já fazia para adicionarPagina, se a automação
+            // estiver esperando exatamente este relatório, marca "erro" (mesma flag do
+            // botão "Pular" — foiInterrompidoPorErro) e avança a fila sozinha, em vez de
+            // depender do watchdog genérico (ver verificarTravamentoAutomacao) para sair
+            // do travamento só minutos depois.
+            let dadosPagina, total;
             try {
+                dadosPagina = coletarPaginaAtual();
                 total = adicionarPagina(dadosPagina);
             } catch (err) {
                 store.removeItem(KEY_RODANDO);
-                atualizarStatus(`Erro ao armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
+                atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
                 console.error('[Exportar Projudi]', err);
+                // QuotaExceededError = o localStorage do navegador ENCHEU (limite de
+                // ~5-10MB por origem) — relatado em produção com Apreensões na página 10.
+                // Isso não é um problema deste relatório específico: TODO próximo write em
+                // QUALQUER cfg vai falhar do mesmo jeito (o armazenamento é compartilhado
+                // por origem), então "avançar a fila automaticamente" (o que os demais
+                // erros fazem) só espalharia o mesmo erro pelos relatórios seguintes, um a
+                // um, sem o usuário entender o que está acontecendo. Em vez disso, para a
+                // automação por completo com uma mensagem clara e acionável — desde a
+                // rodada anterior "não limpar mais automaticamente" faz os dados
+                // acumularem entre exportações, o que deixa isso mais provável de
+                // acontecer com o tempo.
+                if (err.name === 'QuotaExceededError') {
+                    console.error('[Auto Projudi] armazenamento do navegador CHEIO — parando a automação (não adianta avançar, o próximo write falharia igual)');
+                    store.setItem(AUTO_ESTADO, 'armazenamento_cheio');
+                    store.setItem('projudi_auto_lock', String(Date.now()));
+                    atualizarPainel();
+                    alert('O armazenamento do navegador ficou cheio durante a coleta.\n\n'
+                        + 'Os dados já coletados até agora foram mantidos. Baixe/exporte o que já tem (PDF, '
+                        + 'Excel ou planilha individual) e depois clique em "Limpar" no painel antes de continuar — '
+                        + 'senão a próxima coleta vai falhar do mesmo jeito.');
+                    render();
+                    return;
+                }
+                // avancarAutomacao já confere sozinha se a automação está mesmo
+                // esperando este cfg (senão é um no-op) — chamar sempre é seguro.
+                store.setItem(cfg.prefixo + 'erro', '1');
+                console.warn('[Auto Projudi] erro durante a coleta — avançando a fila automaticamente em vez de travar');
+                avancarAutomacao(cfg);
                 render();
                 return;
             }
@@ -2203,6 +2580,17 @@
                 const extra = cfg.usaAtuacao ? ` de ${contarAtuacoes()} atuação(ões)` : '';
                 const dica = cfg.usaAtuacao ? ' Troque de atuação e colete mais, ou baixe a planilha.' : ' Baixe a planilha ou colete mais.';
                 atualizarStatus(`Coleta concluída. Acumulado: ${total} registros${extra}.${dica}`);
+                // Relatado pelo usuário: um relatório (Suspensos com Prazo) rodou até o
+                // fim sem erro mas exportou zero, apesar de a tela mostrar processos —
+                // investigação estática não achou o bug (extrai/minTds/detecta/formulário
+                // conferem com uma captura real da tela). Este aviso é diagnóstico: se
+                // acontecer de novo, "0 linhas encontradas" aqui mostra que a tabela lida
+                // não era a certa (página errada/ainda carregando); "N encontradas, 0
+                // extraídas" (log já existente em coletarPaginaAtual, acima) mostra que o
+                // filtro dentro de extrai() descartou tudo.
+                if (total === 0 && cfg.mostrarSeVazio) {
+                    console.warn(`[Projudi] "${cfg.prefixo}" terminou com 0 registros acumulados — se a tela mostrava processos, confira os logs de "coletarPaginaAtual" acima (linhas encontradas vs. extraídas) para saber se foi a leitura da tabela ou o filtro de extrai() que zerou.`);
+                }
                 // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — se ainda
                 // restam meses na fila, volta para a tela de filtros e pesquisa o próximo em
                 // vez de avançar para o próximo relatório da automação.
@@ -2367,6 +2755,8 @@
         aqua:     [82, 116, 103],   // secundário / positivo (verde-acinzentado)
         ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
         vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
+        azulTint: [238, 242, 246],  // fundo da faixa de SUBGRUPO na capa unificada (mais claro que "cartao")
+        vinho:    [104, 38, 38],    // pior faixa etária (>180 dias) — ver COR_SEVERIDADE
     };
 
     const DIA_MS = 86400000;
@@ -2417,6 +2807,51 @@
             }
         }
         return arr;
+    }
+
+    // Agrupa registros por MÊS de um campo de data BR, em ordem cronológica, PREENCHENDO
+    // com zero os meses sem registro — sem esse preenchimento dois meses distantes ficam
+    // lado a lado no gráfico e a tendência mente. valorCampo (opcional) é um campo
+    // numérico do registro, para também devolver soma/média do mês (ex.: 'dias' no Tempo
+    // Médio). Devolve [{label:'MM/AA', chave:'AAAA-MM', n, soma, media}].
+    function agruparPorMes(dados, campoData, valorCampo) {
+        const mapa = new Map();
+        (dados || []).forEach(d => {
+            const ts = parseDataBR(d[campoData]);
+            if (ts == null) return;
+            const dt = new Date(ts);
+            const chave = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+            if (!mapa.has(chave)) mapa.set(chave, { n: 0, soma: 0, comValor: 0 });
+            const acc = mapa.get(chave);
+            acc.n++;
+            if (valorCampo) {
+                const v = d[valorCampo];
+                if (typeof v === 'number' && !isNaN(v)) { acc.soma += v; acc.comValor++; }
+            }
+        });
+        if (!mapa.size) return [];
+        const chaves = [...mapa.keys()].sort();
+        const [anoIni, mesIni] = chaves[0].split('-').map(Number);
+        const [anoFim, mesFim] = chaves[chaves.length - 1].split('-').map(Number);
+        const pontos = [];
+        let ano = anoIni, mes = mesIni;
+        // Teto de segurança: 132 meses (11 anos — folga sobre os 10 anos de busca de
+        // Audiências Designadas). Protege contra uma data corrompida no futuro distante
+        // virar um laço de milhares de iterações (e um gráfico ilegível).
+        while ((ano < anoFim || (ano === anoFim && mes <= mesFim)) && pontos.length < 132) {
+            const chave = `${ano}-${String(mes).padStart(2, '0')}`;
+            const acc = mapa.get(chave) || { n: 0, soma: 0, comValor: 0 };
+            pontos.push({
+                label: `${String(mes).padStart(2, '0')}/${String(ano).slice(2)}`,
+                chave,
+                n: acc.n,
+                soma: acc.soma,
+                media: acc.comValor ? acc.soma / acc.comValor : null,
+            });
+            mes++;
+            if (mes > 12) { mes = 1; ano++; }
+        }
+        return pontos;
     }
 
     const COR_PRIORITARIO = COR.vermelho;  // realce dos prioritários (mesma cor em todo o relatório)
@@ -2510,19 +2945,42 @@
         return comData / dias.size;
     }
 
-    // Faixas de tempo de espera, separando prioritários de normais.
+    // Faixas de tempo de espera, separando prioritários de normais. A 4ª faixa (>180 dias)
+    // foi acrescentada a pedido da Corregedoria: numa correição o passivo MUITO antigo é o
+    // achado central, e antes ele ficava diluído dentro de um único "Mais de 90 dias".
+    // Rótulos curtos de propósito — desenharBarrasFaixas trunca em UMA linha
+    // (splitTextToSize(...)[0]) numa coluna de no máximo 36mm.
     function faixasPorPrioridade(dados, campoData, now) {
         const b = [
             { label: 'Até 30 dias', prioritarios: 0, normais: 0 },
             { label: '31 a 90 dias', prioritarios: 0, normais: 0 },
-            { label: 'Mais de 90 dias', prioritarios: 0, normais: 0 },
+            { label: '91 a 180 dias', prioritarios: 0, normais: 0 },
+            { label: '+180 dias', prioritarios: 0, normais: 0 },
         ];
         dados.forEach(d => {
             const ts = parseDataBR(d[campoData]);
             if (ts == null) return;
             const dias = Math.floor((now - ts) / DIA_MS);
-            const idx = dias > 90 ? 2 : (dias > 30 ? 1 : 0);
+            const idx = dias > 180 ? 3 : (dias > 90 ? 2 : (dias > 30 ? 1 : 0));
             if (d.prioritario) b[idx].prioritarios++; else b[idx].normais++;
+        });
+        return b;
+    }
+
+    // Mesmas faixas de faixasPorPrioridade, mas para uma lista já reduzida a números de
+    // dias (não a um campo de data) — usada pelo gráfico de "aguardando decisão" das
+    // Conclusões, que mede dias desde a PRÉ-ANÁLISE, não desde a conclusão.
+    function faixasDeDias(listaDias) {
+        const b = [
+            { label: 'Até 30 dias', valor: 0 },
+            { label: '31 a 90 dias', valor: 0 },
+            { label: '91 a 180 dias', valor: 0 },
+            { label: '+180 dias', valor: 0 },
+        ];
+        listaDias.forEach(dias => {
+            if (dias == null) return;
+            const idx = dias > 180 ? 3 : (dias > 90 ? 2 : (dias > 30 ? 1 : 0));
+            b[idx].valor++;
         });
         return b;
     }
@@ -2657,7 +3115,10 @@
 
     // Cores de severidade por faixa (até 30d / 31-90d / mais de 90d), usadas como
     // marcador de ponto ao lado do rótulo — reforça a leitura sem depender só das barras.
-    const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho];
+    // Uma cor por faixa etária, na ordem em que faixasPorPrioridade as devolve — precisa
+    // ter ao menos tantas entradas quanto faixas, senão a PIOR faixa cai no fallback
+    // cinza de desenharBarrasFaixas e a leitura de severidade se inverte.
+    const COR_SEVERIDADE = [COR.aqua, COR.ambar, COR.vermelho, COR.vinho];
 
     // Barras agrupadas por faixa: duas sub-barras (prioritários x normais) por linha —
     // o vermelho é sempre prioritário, nunca a faixa. rotuloPrioritario/rotuloNormal
@@ -2743,6 +3204,50 @@
         doc.textWithLink(label, pw / 2 - w / 2, ph - 6, { pageNumber });
     }
 
+    // Primeira primitiva de SÉRIE TEMPORAL do arquivo — até aqui só existiam barras
+    // horizontais (categorias sem ordem intrínseca). Barras VERTICAIS por mês, não
+    // polilinha: mais robusto de desenhar em jsPDF puro (sem depender de resolver
+    // interseção de eixo/escala) e mais legível impresso em A4 numa faixa estreita.
+    // pontos: [{label:'MM/AA', n|soma|media, ...}] na ordem cronológica (ver
+    // agruparPorMes) — já vem com meses vazios preenchidos com zero, então a barra
+    // "some" no gráfico em vez de o mês desaparecer da linha do tempo.
+    // campoValor: qual campo de "pontos" plotar ('n', 'soma' ou 'media'); fmt formata o
+    // valor acima da barra.
+    function desenharSerieMensal(doc, x, y, w, h, titulo, pontos, campoValor, fmt, cor) {
+        fmt = fmt || (v => String(v));
+        cor = cor || COR.azul;
+        tituloSecao(doc, x, y + 4, w, titulo);
+        if (!pontos.length) return;
+        const topo = y + 10;
+        const rotuloH = 8;
+        const valorH = 5;
+        const areaH = Math.max(6, h - 10 - rotuloH - valorH);
+        const baseY = topo + areaH;
+        const maxVal = Math.max(1, ...pontos.map(p => p[campoValor] || 0));
+        // Largura de barra derivada de w/quantidade (precisa aguentar até 24 meses sem
+        // colidir) — mesmo espírito adaptativo de desenharBarras/desenharBarrasFaixas.
+        const passo = w / pontos.length;
+        const barW = Math.max(1.2, Math.min(10, passo * 0.55));
+        const fonteValor = Math.max(4.6, Math.min(6.5, passo * 0.42));
+        const fonteRotulo = Math.max(4.6, Math.min(6.2, passo * 0.4));
+
+        doc.setDrawColor(...COR.base); doc.setLineWidth(0.2); doc.line(x, baseY, x + w, baseY);
+
+        pontos.forEach((p, i) => {
+            const cxBar = x + i * passo + passo / 2;
+            const val = p[campoValor] || 0;
+            const bh = Math.max(0, (val / maxVal) * areaH);
+            doc.setFillColor(...cor);
+            doc.roundedRect(cxBar - barW / 2, baseY - bh, barW, bh, 0.5, 0.5, 'F');
+            if (val > 0) {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+                doc.text(fmt(val), cxBar, baseY - bh - 1.2, { align: 'center' });
+            }
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(fonteRotulo); doc.setTextColor(...COR.tintaSec);
+            doc.text(p.label, cxBar, baseY + rotuloH - 3, { align: 'center' });
+        });
+    }
+
     // Distribui uma lista de gráficos numa grade de 2 colunas (span:2 ocupa a largura
     // toda) dentro da área (x, y, w, hDisponivel) informada — reutilizado tanto para os
     // gráficos da 1ª página do resumo quanto para os que foram para a 2ª página.
@@ -2770,6 +3275,7 @@
             const cy = y + c.pos.row * (chartH + 10);
             const cw = c.pos.span === 2 ? w : colW;
             if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
+            else if (c.tipo === 'serie') desenharSerieMensal(doc, cx, cy, cw, chartH, c.titulo, c.pontos, c.campoValor, c.fmt, c.cor);
             else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
         });
     }
@@ -2841,6 +3347,16 @@
                 const media = (typeof contexto.mediaSoma === 'number') ? contexto.mediaSoma : mediaPorDia(sub, p.dataCampo);
                 kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
             }
+            // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
+            // "Com/Sem pré-análise" no resumo geral, que antes só existiam no PDF por
+            // juiz — ver montarResumoJuizConclusoes). Relatórios que não definem
+            // p.kpisExtras ficam byte-a-byte como antes desta mudança.
+            if (Array.isArray(p.kpisExtras)) {
+                p.kpisExtras.forEach(k => {
+                    const valor = k.calc(sub);
+                    kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(sub, valor) : []), acento: COR[k.acento] || COR.aqua });
+                });
+            }
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
             kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
@@ -2870,9 +3386,22 @@
                 // Gráficos de distribuição sem nenhum item qualificado (ex.: minValor, quando
                 // nenhum processo tem mais de uma ocorrência) são omitidos inteiramente, em
                 // vez de aparecer vazios.
+                // Cada entrada normalmente é {titulo, campo, topN, ...} e vira uma contagem
+                // categórica via contarPorCampo. Uma entrada com `calc(sub)` (ponto de
+                // extensão novo, hoje só usado por CFG_CONCLUSOES p/ o gráfico de "aguardando
+                // decisão" por faixa de dias desde a pré-análise, que não é uma contagem por
+                // CAMPO) pula contarPorCampo e usa o que `calc` devolver direto — precisa
+                // devolver {tipo:'faixas', faixas} ou {itens} (mesmo formato que os outros
+                // tipos já aceitam em desenharGradeGraficos).
                 ...p.distribuicoes
-                    .map(g => ({ tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros, g.minValor), pagina2: !!g.pagina2 }))
-                    .filter(c => c.itens.length),
+                    .map(g => {
+                        if (typeof g.calc === 'function') {
+                            const r = g.calc(sub) || {};
+                            return { tipo: r.tipo || 'barras', span: g.span || 1, titulo: g.titulo, itens: r.itens || [], faixas: r.faixas, pagina2: !!g.pagina2 };
+                        }
+                        return { tipo: 'barras', span: g.span || 1, titulo: g.titulo, itens: contarPorCampo(sub, g.campo, g.topN, g.limpar, g.semOutros, g.minValor), pagina2: !!g.pagina2 };
+                    })
+                    .filter(c => (c.faixas && c.faixas.length) || (c.itens && c.itens.length)),
             ];
             const chartsP1 = chartsTodos.filter(c => !c.pagina2);
             const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
@@ -3364,7 +3893,7 @@
         }
         if (cfg === CFG_TEMPOMEDIO) {
             return {
-                rotulo: 'Tempo Médio de Cumprimento',
+                rotulo: 'Tempo médio de cumprimento de decisões / sentenças',
                 montarResumo: (doc, dados, primeira, comIndice) => montarResumoTempoMedio(doc, dados, primeira, comIndice),
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
@@ -3414,6 +3943,20 @@
                 rotulo: TITULO_OUTROS_CUMPRIMENTOS,
                 montarResumo: (doc, dados, primeira, comIndice) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice),
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
+            };
+        }
+        if (cfg === CFG_SUSPENSOS_PRAZO) {
+            return {
+                rotulo: TITULO_SUSPENSOS_PRAZO,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
+            };
+        }
+        if (cfg === CFG_INSTANCIA_RECURSAL) {
+            return {
+                rotulo: TITULO_INSTANCIA_RECURSAL,
+                montarResumo: (doc, dados, primeira, comIndice) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
             };
         }
         return {
@@ -3547,12 +4090,19 @@
             // espaços) — a forma mais robusta no jspdf-autotable para uma indentação por
             // LINHA (não por coluna inteira), já que columnStyles/didParseCell não têm um
             // "padding-left por célula" nativo confiável entre versões.
-            body: cfg.linhas.map(l => ({
-                nome: (l.grupoPai ? '     ' : '') + l.nome,
-                indicador: l.indicador,
-                detalhamento: l.detalhamento,
-                situacao: l.semSituacao ? '—' : l.situacaoLabel,
-            })),
+            // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
+            // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
+            // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
+            // reaproveitada só como 4ª coluna alinhada à direita, sem estilo de situação
+            // de verdade (ver didParseCell abaixo).
+            body: cfg.linhas.map(l => l.subgrupoCabecalho
+                ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
+                : {
+                    nome: (l.grupoPai ? '     ' : '') + l.nome,
+                    indicador: l.indicador,
+                    detalhamento: l.detalhamento,
+                    situacao: l.semSituacao ? '—' : l.situacaoLabel,
+                }),
             startY: yy,
             margin: { left: x, right: pw - x - w, bottom: 14 },
             theme: 'grid',
@@ -3569,6 +4119,17 @@
                 if (data.section !== 'body') return;
                 const l = cfg.linhas[data.row.index];
                 if (!l) return;
+                // Faixa de SUBGRUPO (nível acima de grupoCabecalho) — fundo azul bem claro
+                // (COR.azulTint, distinto do "cartao" neutro do cabeçalho de grupo),
+                // versalete em negrito na cor azul (mesmo acento usado em tituloSecao).
+                if (l.subgrupoCabecalho) {
+                    data.cell.styles.fillColor = COR.azulTint;
+                    data.cell.styles.fontStyle = 'bold';
+                    data.cell.styles.fontSize = 8.2;
+                    data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.azul : COR.tintaSec;
+                    if (data.column.dataKey === 'situacao') data.cell.styles.halign = 'right';
+                    return;
+                }
                 // Cabeçalho de grupo (pai, ex. "Mandados"/"Audiências"): fundo sutil +
                 // negrito em toda a linha, sem cor de situação (não tem situação própria).
                 if (l.grupoCabecalho) {
@@ -3589,7 +4150,7 @@
             didDrawCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'nome') {
                     const l = cfg.linhas[data.row.index];
-                    if (l && !l.grupoCabecalho) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
+                    if (l && !l.grupoCabecalho && !l.subgrupoCabecalho) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
                 }
             },
         });
@@ -3660,6 +4221,98 @@
             return !!(resumo && resumo.tabela && resumo.tabela.length);
         }
         return s.dados.length > 0;
+    }
+
+    // Seções cujo `dados` é um objeto-resumo único (não uma lista por processo) — cruzar
+    // "processo" nelas misturaria maçãs com laranjas (Outros Cumprimentos nem tem
+    // `processo`; Designadas/Realizadas guardam um resumo agregado, ver
+    // coletarAudienciasDesignadas/finalizarAudienciasRealizadas). Ficam de fora do
+    // cruzamento de múltiplas pendências.
+    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS];
+
+    // Página "Processos com Múltiplas Pendências" — cruza o número do processo entre TODOS
+    // os relatórios coletados nesta rodada (pedido da Corregedoria: hoje cada relatório é
+    // uma ilha; um processo que está paralisado E com mandado pendente E suspenso é um
+    // achado mais forte que qualquer um desses sozinho, e o dado pra ver isso já está todo
+    // ali, só nunca tinha sido cruzado). Sem link de "voltar ao resumo" — não há uma única
+    // seção-alvo por linha, então não entra no PASSO 4.
+    function montarProcessosMultiplasPendencias(doc, secoes, primeira, comIndice) {
+        const mapa = new Map(); // processo -> Set(rotulo)
+        secoes.forEach(s => {
+            if (CFGS_SEM_PROCESSO_POR_LINHA.includes(s.cfgOriginal)) return;
+            (s.dados || []).forEach(d => {
+                const p = d && d.processo;
+                if (!p || typeof p !== 'string') return;
+                if (!mapa.has(p)) mapa.set(p, new Set());
+                mapa.get(p).add(s.rotulo);
+            });
+        });
+        const cruzados = [...mapa.entries()]
+            .filter(([, rotulos]) => rotulos.size >= 2)
+            .map(([processo, rotulos]) => ({ processo, quantidade: rotulos.size, rotulos: [...rotulos].sort() }))
+            .sort((a, b) => b.quantidade - a.quantidade || a.processo.localeCompare(b.processo));
+        if (!cruzados.length) return null;
+
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const titulo = 'Processos com Múltiplas Pendências';
+
+        if (!primeira) doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${cruzados.length} processo(s) com 2 ou mais pendências ao mesmo tempo`, m, m + 8);
+        let yObs = m + 8 + 4.2;
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const obs = 'Cruzamento pelo número do processo entre os relatórios coletados nesta rodada (não inclui Outros '
+            + 'Cumprimentos, Audiências Designadas nem Audiências Realizadas — não têm um registro por processo).';
+        const linhasObs = doc.splitTextToSize(obs, uw);
+        doc.text(linhasObs, m, yObs);
+        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const kY = yLinha + 5;
+        desenharCard(doc, m, kY, uw, 26, 'Processos com Múltiplas Pendências', String(cruzados.length),
+            [`Maior concentração: ${cruzados[0].quantidade} pendências (processo ${cruzados[0].processo})`], true, COR.vinho);
+
+        // Tabela limitada aos 30 primeiros (já ordenados por nº de pendências desc) —
+        // pedido do usuário; o KPI acima e o subtítulo continuam com o TOTAL real
+        // (cruzados.length, sem corte), só a tabela discriminada é que corta.
+        const LIMITE_TABELA_MULTIPLAS_PENDENCIAS = 30;
+        const cruzadosTabela = cruzados.slice(0, LIMITE_TABELA_MULTIPLAS_PENDENCIAS);
+        const tY = kY + 26 + 8;
+        if (cruzados.length > LIMITE_TABELA_MULTIPLAS_PENDENCIAS) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+            doc.text(`Exibindo os ${LIMITE_TABELA_MULTIPLAS_PENDENCIAS} processos com mais pendências, de ${cruzados.length} no total.`, m, tY - 3);
+        }
+        doc.autoTable({
+            columns: [
+                { header: 'Processo', dataKey: 'processo' },
+                { header: 'Nº de Pendências', dataKey: 'quantidade' },
+                { header: 'Em quais relatórios', dataKey: 'rotulos' },
+            ],
+            body: cruzadosTabela.map(c => ({ processo: c.processo, quantidade: String(c.quantidade), rotulos: c.rotulos.join(', ') })),
+            startY: tY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.vinho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8.5 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                processo: { cellWidth: uw * 0.24, fontStyle: 'bold', textColor: COR.tinta },
+                quantidade: { cellWidth: uw * 0.16, halign: 'right' },
+                rotulos: { cellWidth: uw * 0.6 },
+            },
+            didDrawPage: () => desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+        return paginaInicial;
     }
 
     function gerarPDFConjunto(secoesEntrada, somenteResumo) {
@@ -3738,15 +4391,66 @@
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
+        const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
+        const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
-        // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
-        // não é mais um card à parte no topo da capa.
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
+        // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
+        // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo). Indicador
+        // enxuto (só a contagem básica, pedido do usuário — ficava populado/confuso com
+        // prioritários e a taxa por 100 ativos junto); prioritários e "mais antiga" vão
+        // para o detalhamento.
+        function linhaTarefa(t, nome) {
+            const detalhes = [];
+            if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
+            if (t.maisAntiga != null) detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)`);
+            return {
+                nome,
+                indicador: `${t.pendentes} pendente(s)`,
+                detalhamento: detalhes.length ? detalhes.join(' · ') : '—',
+                situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
+                corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
+                semSituacao: false,
+                cfgOriginal: t.secao.cfgOriginal,
+            };
+        }
+        // Linha de CABEÇALHO DE GRUPO (pai, ex. "Mandados") — bold, sem indicador/
+        // detalhamento/situação próprios de um relatório (cfgOriginal: null, então nunca
+        // vira link — ver PASSO 4 em gerarPDFConjunto, e secaoTemTabela/o passo de página
+        // de resumo não a alcançam porque ela não corresponde a nenhuma seção).
+        // "indicador" aqui é o agregado do grupo, calculado por quem chama.
+        function linhaGrupo(nome, indicador) {
+            return { nome, indicador, detalhamento: '', situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null, grupoCabecalho: true };
+        }
+        // Faixa de SUBGRUPO — nível ACIMA de linhaGrupo, espelhando os mesmos subgrupos do
+        // popup do painel de automação (REPORTS_AUTOMACAO[].subgrupo — pedido do usuário:
+        // a capa unificada deve refletir a mesma organização "Estatísticas Gerais" /
+        // "Pendências" / "Audiências" / "Outros" que o painel já usa). Ver
+        // desenharBlocoCartorioUnificado para o desenho (faixa cheia, colSpan).
+        function linhaSubgrupo(nome, contagem) {
+            return { nome, contagem, subgrupoCabecalho: true, cfgOriginal: null };
+        }
+        // Empilha a faixa de subgrupo seguida dos itens informados — só se houver ao
+        // menos um item (subgrupo vazio não aparece). A contagem exibida na faixa conta
+        // só itens de PRIMEIRO nível (sem grupoPai) — um grupo como "Mandados" (pai + 3
+        // filhas indentadas) conta como 1 item, não 4, mesmo padrão do popup do painel.
+        function empilharSubgrupo(nome, itens, unidade) {
+            if (!itens.length) return;
+            const contagem = itens.filter(l => !l.grupoPai).length;
+            linhasCartorio.push(linhaSubgrupo(nome, `${contagem} ${unidade || 'item(ns)'}`));
+            linhasCartorio.push(...itens);
+        }
+
+        // ── Estatísticas Gerais (Ativos, Suspensos indeterminado/com prazo, Instância
+        // Recursal) ──────────────────────────────────────────────────────────────────
+        const itensEstatisticasGerais = [];
+        // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
+        // não é mais um card à parte no topo da capa.
         if (atuacoesAtivas.length) {
             const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            linhasCartorio.push({
+            itensEstatisticasGerais.push({
                 nome: 'Processos Ativos',
                 indicador: `${totalAtivos} ativo(s)`,
                 detalhamento: atuacoesAtivas.length > 1
@@ -3755,29 +4459,39 @@
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
             });
         }
-        // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
-        // soltos quanto pelas filhas de um grupo (ver linhaGrupo abaixo).
-        function linhaTarefa(t, nome) {
-            return {
-                nome,
-                indicador: `${t.pendentes} pendente(s)${t.prioritarios ? ` · ${t.prioritarios} prior.` : ''}`,
-                detalhamento: t.maisAntiga != null ? `Mais antiga: ${t.maisAntiga} dia(s)` : '—',
-                situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
-                corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
-                semSituacao: false,
-                cfgOriginal: t.secao.cfgOriginal,
-            };
+        const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
+        if (itemSuspensos) itensEstatisticasGerais.push(linhaTarefa(itemSuspensos, itemSuspensos.rotulo));
+        // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
+        // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de
+        // fim de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
+        if (secaoSuspensosPrazo) {
+            const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
+            itensEstatisticasGerais.push({
+                nome: 'Suspensos com Prazo',
+                indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
+                detalhamento: fimMaisLongo
+                    ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
+                    : 'Nenhum processo suspenso por prazo determinado',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
+            });
         }
-        // Linha de CABEÇALHO DE GRUPO (pai) — bold, sem indicador/detalhamento/situação
-        // próprios de um relatório (cfgOriginal: null, então nunca vira link — ver PASSO 4
-        // em gerarPDFConjunto, e secaoTemTabela/o passo de página de resumo não a alcançam
-        // porque ela não corresponde a nenhuma seção). "indicador" aqui é o agregado do
-        // grupo, calculado por quem chama (ver grupos "Mandados"/"Audiências" abaixo).
-        function linhaGrupo(nome, indicador) {
-            return { nome, indicador, detalhamento: '', situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null, grupoCabecalho: true };
+        // "Em Instância Recursal" — indicador: total em instância recursal.
+        // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
+        if (secaoInstanciaRecursal) {
+            const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
+            itensEstatisticasGerais.push({
+                nome: 'Em Instância Recursal',
+                indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
+                detalhamento: maisDe2Anos.length
+                    ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
+                    : 'Nenhum processo enviado há mais de 2 anos',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
+            });
         }
+        empilharSubgrupo('Estatísticas Gerais', itensEstatisticasGerais);
 
-        // Estrutura de 2 níveis (pedido do usuário): "Mandados" e "Audiências" viram um
+        // ── Pendências (Juntadas, Retorno, Paralisados, Remessas, Mandados) ─────────
+        // Estrutura de 2 níveis (pedido do usuário, já existente): "Mandados" vira um
         // item PAI com subitens indentados, em vez de linhas soltas — ver
         // desenharBlocoCartorioUnificado (indentação visual + estilo do cabeçalho de
         // grupo) e PASSO 4 em gerarPDFConjunto (link só nas filhas).
@@ -3786,59 +4500,29 @@
             [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
         ]);
         const itensMandados = CFGS_GRUPO_MANDADOS.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
-
-        // Itens soltos de sempre (Juntadas/Retorno de Conclusão/Paralisados/Remessas/
-        // Suspensos) — tudo que não faz parte do grupo Mandados.
-        linhasCartorio.push(...itensCartorio
-            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal))
-            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo)));
-
+        const itensPendencias = itensCartorio
+            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
+            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo));
         if (itensMandados.length) {
-            // Indicador do grupo "Mandados" (pedido do usuário): em vez de um total único
-            // somando tudo, separa por ONDE a pendência está — "aguarda cumprimento"
-            // (Cumprimento, já unificado lido+não lido — está com o oficial de justiça) x
-            // "pendente no cartório" (Retorno + Decurso — ainda depende de análise do
-            // próprio cartório, não do oficial) — e por urgência (normal x urgente; não
-            // usa mais "prioritário", que era o rótulo genérico de outros relatórios,
-            // Mandados usa "urgente" desde o começo — ver rotuloPrioridade* de cada CFG).
-            const itemCumprimento = itensMandados.find(t => t.secao.cfgOriginal === CFG_MANDADOS_CUMPRIMENTO);
-            const itensCartorioMandados = itensMandados.filter(t => t.secao.cfgOriginal !== CFG_MANDADOS_CUMPRIMENTO); // Retorno + Decurso
-            const pendCumprimento = itemCumprimento ? itemCumprimento.pendentes : 0;
-            const pendCartorioMandados = itensCartorioMandados.reduce((s, t) => s + t.pendentes, 0);
-            const totalMandados = pendCumprimento + pendCartorioMandados;
-            const totalUrgentesMandados = itensMandados.reduce((s, t) => s + t.prioritarios, 0);
-            const totalNormaisMandados = totalMandados - totalUrgentesMandados;
-            linhasCartorio.push(linhaGrupo('Mandados',
-                `${pendCumprimento} aguarda cumprimento · ${pendCartorioMandados} pendente(s) no cartório · `
-                + `${totalNormaisMandados} normal(is) · ${totalUrgentesMandados} urgente(s)`));
+            // Cabeçalho do grupo "Mandados" sem indicador/detalhamento (pedido do
+            // usuário) — o resumo agregado ficava confuso ali; cada subitem (Retorno/
+            // Cumprimento/Decurso) já tem seu próprio indicador/detalhamento via linhaTarefa.
+            itensPendencias.push(linhaGrupo('Mandados', ''));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
-                linhasCartorio.push(l);
+                itensPendencias.push(l);
             });
         }
+        empilharSubgrupo('Pendências', itensPendencias);
 
-        if (secaoTempoMedio) {
-            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
-            const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
-            let periodoTxt = '';
-            {
-                const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
-                if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
-            }
-            linhasCartorio.push({
-                nome: 'Tempo Médio de Cumprimento',
-                indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
-                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
-            });
-        }
-        // Grupo "Audiências": Pendentes/Designadas/Realizadas são naturezas de dado
-        // DIFERENTES (audiências sem termo, designações futuras, estatística de
-        // realizadas) — não faz sentido somar os totais num indicador único do pai, ao
-        // contrário de "Mandados" acima. O indicador do pai vira só a contagem de
-        // sub-relatórios presentes.
-        const filhasAudiencias = [];
+        // ── Audiências (Pendentes, Designadas, Realizadas) ──────────────────────────
+        // Pendentes/Designadas/Realizadas são naturezas de dado DIFERENTES (audiências
+        // sem termo, designações futuras, estatística de realizadas) — não faz sentido
+        // somar os totais num indicador único; a própria faixa de subgrupo já mostra a
+        // contagem de sub-relatórios presentes (não precisa mais de um linhaGrupo próprio
+        // "Audiências" como antes — a faixa de subgrupo assumiu esse papel).
+        const itensAudiencias = [];
         if (secaoAudiencias) {
             let detalhamento = '—';
             let mais = null;
@@ -3850,7 +4534,7 @@
                 const dias = Math.round((now - mais.ts) / DIA_MS);
                 detalhamento = `Mais antiga sem termo: ${mais.data} (${dias} dia(s))`;
             }
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Pendentes',
                 indicador: `${secaoAudiencias.dados.length} audiência(s)`,
                 detalhamento, situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS,
@@ -3862,7 +4546,7 @@
             const diasAteUltima = tsUltima != null ? Math.round((tsUltima - now) / DIA_MS) : null;
             const statusAD = classificarSituacaoPorDias(diasAteUltima, 180, 360);
             const infoAD = SITUACAO_INFO[statusAD] || SITUACAO_INFO.regular;
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Designadas',
                 indicador: `${r.totalDesignadas || 0} designada(s)`,
                 detalhamento: r.ultimaData ? `Última: ${r.ultimaData} (${diasAteUltima} dia(s))` : '—',
@@ -3871,16 +4555,32 @@
         }
         if (secaoAudienciasRealizadas) {
             const r = secaoAudienciasRealizadas.dados[0] || {};
-            filhasAudiencias.push({
+            itensAudiencias.push({
                 nome: 'Realizadas',
                 indicador: `${r.totalGeral || 0} realizada(s)`,
                 detalhamento: `${r.canceladas || 0} cancel. · ${r.naoRealizadas || 0} não real. · ${r.redesignadas || 0} redesig.`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS_REALIZADAS,
             });
         }
-        if (filhasAudiencias.length) {
-            linhasCartorio.push(linhaGrupo('Audiências', `${filhasAudiencias.length} sub-relatório(s)`));
-            filhasAudiencias.forEach(l => { l.grupoPai = 'Audiências'; linhasCartorio.push(l); });
+        empilharSubgrupo('Audiências', itensAudiencias, 'sub-relatório(s)');
+
+        // ── Outros (itens do Cartório sem subgrupo no popup do painel: Tempo Médio,
+        // Bens Apreendidos, Outros Cumprimentos) ────────────────────────────────────
+        const itensOutros = [];
+        if (secaoTempoMedio) {
+            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
+            const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
+            let periodoTxt = '';
+            {
+                const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
+                if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
+            }
+            itensOutros.push({
+                nome: 'Tempo médio de cumprimento de decisões / sentenças',
+                indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
+                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
+            });
         }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
@@ -3890,27 +4590,28 @@
         if (secaoApreensoes) {
             const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
             const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
-            linhasCartorio.push({
+            itensOutros.push({
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
             });
         }
-        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado (pedido do
-        // usuário: linha própria no Cartório, mesmo padrão de "Bens Apreendidos"). O
+        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
         // indicador é o total pendente somado de todos os tipos com pendência > 0; o
         // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
         if (secaoOutrosCumprimentos) {
             const totalPendentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.pendentes || 0), 0);
             const totalUrgentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.urgentes || 0), 0);
-            linhasCartorio.push({
+            itensOutros.push({
                 nome: 'Outros Cumprimentos',
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
             });
         }
+        empilharSubgrupo('Outros', itensOutros);
+
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
         // fingir que terminou normalmente.
@@ -3921,6 +4622,19 @@
             }
         });
         cartorio.linhas = linhasCartorio;
+
+        // Ordem dos RESUMOS DETALHADOS (páginas individuais, Passo 1 mais abaixo) segue a
+        // MESMA ordem em que cada relatório aparece na tabela unificada acima (pedido do
+        // usuário) — sem isso, a ordem das páginas de resumo era a ordem de coleta
+        // (CFGS_CARTORIO/secoesEntrada), que já não bate com os subgrupos "Estatísticas
+        // Gerais"/"Pendências"/"Audiências"/"Outros" da capa. cfgOriginal ausente do mapa
+        // (não deveria acontecer — todo item de itensCartorio/outrasSecoes também vira uma
+        // linha de linhasCartorio) cai pro fim, só por segurança.
+        const ordemNaCapa = new Map();
+        linhasCartorio.forEach((l, i) => { if (l.cfgOriginal && !ordemNaCapa.has(l.cfgOriginal)) ordemNaCapa.set(l.cfgOriginal, i); });
+        const posNaCapa = (cfgOriginal) => ordemNaCapa.has(cfgOriginal) ? ordemNaCapa.get(cfgOriginal) : Infinity;
+        itensCartorio.sort((a, b) => posNaCapa(a.secao.cfgOriginal) - posNaCapa(b.secao.cfgOriginal));
+        outrasSecoes.sort((a, b) => posNaCapa(a.cfgOriginal) - posNaCapa(b.cfgOriginal));
 
         let gabinete = { itens: [], totalPendentes: 0, totalPrioritarios: 0, situacao: 'regular' };
         if (secaoGabinete) {
@@ -3961,6 +4675,15 @@
             doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
             usouPagina1 = true;
         }
+
+        // "Processos com Múltiplas Pendências" DESABILITADO por pedido do usuário (por
+        // enquanto) — a função montarProcessosMultiplasPendencias continua no código,
+        // só não é mais chamada aqui. Para reabilitar, descomentar o bloco abaixo.
+        // const pgMultiplasPendencias = montarProcessosMultiplasPendencias(doc, secoes, !usouPagina1, false);
+        // if (pgMultiplasPendencias) {
+        //     usouPagina1 = true;
+        //     doc.outline.add(null, 'Processos com Múltiplas Pendências', { pageNumber: pgMultiplasPendencias });
+        // }
 
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -4147,7 +4870,7 @@
         });
     }
 
-    const TITULO_TEMPOMEDIO = 'Tempo Médio de Cumprimento';
+    const TITULO_TEMPOMEDIO = 'Tempo médio de cumprimento de decisões / sentenças';
 
     function gerarPDFTempoMedio(dados, somenteResumo) {
         const doc = novoDocPDF();
@@ -4264,6 +4987,34 @@
 
         desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
 
+        // ═══ PÁGINA "Evolução mensal" — pedido da Corregedoria: o relatório já coleta até
+        // 24 meses (mês a mês, ver PERIODOS_TEMPOMEDIO), mas o dado nunca tinha virado
+        // série — cada mês só era mais uma linha na tabela discriminada. Volume + tempo
+        // médio mês a mês é a manchete da tendência, por isso entra ANTES das páginas de
+        // "gráficos complementares" (por usuário/tipo). Só desenha com mais de 1 mês —
+        // com 1 só mês não há tendência a mostrar (mesma política de gráfico vazio
+        // omitido usada no resto do arquivo).
+        const porMes = agruparPorMes(validos, 'dtAnalise', 'dias');
+        if (porMes.length > 1) {
+            doc.addPage();
+            let hyM = m + 2;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_TEMPOMEDIO, m, hyM);
+            hyM += 8;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Evolução mensal', m, hyM);
+            hyM += 3;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hyM, pw - m, hyM);
+
+            const gY0m = hyM + 6;
+            const chartGapM = 8;
+            const disponivelM = ph - m - gY0m - 14;
+            const alturaM = Math.max(30, (disponivelM - chartGapM) / 2);
+            desenharSerieMensal(doc, m, gY0m, uw, alturaM, 'Volume de cumprimentos por mês', porMes, 'n', (v) => String(v), COR.azul);
+            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.aqua);
+            desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+
         // ═══ PÁGINA 2 (só quando há dados): Tempo médio por Usuário do Cartório e por
         // Tipo de Conclusão — o resumo agora pode passar de uma página quando esses
         // gráficos complementares não cabem na primeira (que já vem cheia com os 4+2+1
@@ -4326,7 +5077,7 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo Médio de Cumprimento');
+        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo médio de cumprimento de decisões / sentenças');
 
         const colunas = [
             { header: 'Processo', width: 28, get: (d) => d.processo },
@@ -4413,9 +5164,31 @@
 
         const gap = 6;
         const kY = yLinha + 5;
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,             kY, kW2, 28, 'Audiências Pendentes', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        // "Vencidas" = data da audiência já passou e o termo continua pendente — ou seja,
+        // a audiência foi realizada e o termo nunca foi lançado. diasAteAudiencia já
+        // devolve valor NEGATIVO nesse caso; o dado sempre existiu (é a coluna "Dias até a
+        // Audiência" da tabela), mas nunca tinha sido destacado. É o achado de correição
+        // deste relatório: audiência futura sem termo é normal, audiência passada não.
+        const vencidas = dados.filter(d => {
+            const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+            return n != null && n < 0;
+        });
+        const maisAntigaVencida = vencidas.reduce((best, d) => {
+            const ts = parseDataBR(d.dataAudiencia);
+            return ts != null && (best === null || ts < best.ts) ? { ts, data: d.dataAudiencia } : best;
+        }, null);
+        // Card "Audiências Pendentes" (total) removido — pedido do usuário, era
+        // redundante com o subtítulo da página (linha logo acima, já mostra
+        // "N audiência(s) pendente(s)"). Só 2 cards agora, em vez de 3, cada um dobra de
+        // largura (mesmo padrão de 2-em-linha usado em outros relatórios) — resolve o
+        // corte de texto que "Vencidas — termo pendente" sofria espremido num terço.
+        const kW2aud = (uw - gap) / 2;
+        desenharCard(doc, m,             kY, kW2aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+        desenharCard(doc, m + kW2aud + gap, kY, kW2aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
+            [maisAntigaVencida
+                ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
+                : 'nenhuma audiência já realizada sem termo'],
+            true, vencidas.length ? COR.vinho : COR.aqua);
 
         // Altura FIXA para o gráfico (não consome o resto da página) — deixa espaço para a
         // tabela discriminada logo abaixo, na mesma página quando couber.
@@ -4467,9 +5240,21 @@
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             didParseCell: (data) => {
-                if (data.section === 'body' && data.column.index === 0 && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                if (data.section !== 'body') return;
+                const d = ordenados[data.row.index];
+                if (!d) return;
+                if (data.column.index === 0 && d.prioritario) {
                     data.cell.styles.textColor = COR_PRIORITARIO;
                     data.cell.styles.fontStyle = 'bold';
+                }
+                // Vencida (audiência já realizada, termo pendente): destaca a coluna de
+                // dias em vinho — mesma cor do card, para amarrar as duas leituras.
+                if (data.column.index === 3) {
+                    const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+                    if (n != null && n < 0) {
+                        data.cell.styles.textColor = COR.vinho;
+                        data.cell.styles.fontStyle = 'bold';
+                    }
                 }
             },
             didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
@@ -4617,6 +5402,19 @@
                 desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
             }
         }
+
+        // Pauta por MÊS futuro (pedido da Corregedoria) — até aqui só existia a
+        // concentração por dia da semana; isso mostra até onde a pauta se estende e em
+        // qual mês ela concentra (ex.: útil pra ver se a vara já está "vendendo" data
+        // muito distante). r.tabela tem uma linha por processo com a data da audiência —
+        // reaproveita agruparPorMes (mesmo agregador do Tempo Médio).
+        const porMesAD = agruparPorMes(r.tabela || [], 'data');
+        if (porMesAD.length > 1) {
+            doc.addPage();
+            tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
+            desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
     }
 
     // Tabela discriminada com TODAS as audiências designadas (data/hora/processo/tipo) —
@@ -4680,7 +5478,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, totalUsuarios: 0, competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, usuariosAbaixoDoMinimo: [], totalUsuarios: 0, competencia: '' };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -4692,8 +5490,12 @@
         doc.text(linhasSubtitulo, m, m + 8);
         let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-        const obs = `Observação: o detalhamento por usuário mostra apenas quem realizou ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
+        let obs = `Observação: o detalhamento por usuário mostra apenas quem teve, no total (realizadas + canceladas + não `
+            + `realizadas + redesignadas), ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
             + `(${r.usuariosIgnorados} usuário(s) abaixo desse mínimo não aparecem na lista, mas contam no total geral).`;
+        if (r.usuariosAbaixoDoMinimo && r.usuariosAbaixoDoMinimo.length) {
+            obs += ` Abaixo do mínimo: ${r.usuariosAbaixoDoMinimo.map(u => `${u.nome} (${u.total})`).join(', ')}.`;
+        }
         const linhasObs = doc.splitTextToSize(obs, uw);
         doc.text(linhasObs, m, yObs);
         const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
@@ -4826,10 +5628,47 @@
             const top = [...r].sort((a, b) => b.pendentes - a.pendentes).slice(0, 15);
             const itensBarras = top.map(it => ({ label: it.tipo, valor: it.pendentes }));
             desenharBarras(doc, m, tY, uw, 54, `Maiores pendências por tipo (top ${top.length} de ${r.length})`, itensBarras, undefined, COR.azul);
+
+            // Gráfico de ETAPAS (pedido da Corregedoria): o total por tipo, acima, diz
+            // QUANTO está parado; este diz ONDE do fluxo está parado — que é o que aponta
+            // o gargalo. Ordem do FLUXO (conferir → expedir → assinar → devolvido →
+            // decurso), não por volume: a sequência é a informação.
+            const etapas = etapasOutrosCumprimentos(r);
+            const somaEtapas = etapas.reduce((s, e) => s + e.valor, 0);
+            if (somaEtapas > 0) {
+                const eY = tY + 54 + 8;
+                desenharBarras(doc, m, eY, uw, 46, 'Em que etapa do fluxo está parado', etapas, undefined, COR.ambar);
+                // Aviso obrigatório: as 5 etapas são um SUBCONJUNTO de
+                // CAMPOS_PENDENTES_PRINCIPAL, então a soma delas não fecha com o total
+                // pendente (que inclui aguardando depósito, AR digital etc.), e a tabela
+                // BNMP fica fora. Sem essa ressalva o número parece errado numa reunião.
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
+                const notaEtapas = `Soma das etapas: ${somaEtapas} de ${totalPendentes} pendente(s). A diferença são tipos em `
+                    + 'etapas não listadas acima (ex.: aguardando depósito, retorno de AR digital); a tabela BNMP não entra nesta soma.';
+                doc.text(doc.splitTextToSize(notaEtapas, uw), m, eY + 46 + 3.5);
+            }
             desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         } else {
             desenharRodape(doc, TITULO_OUTROS_CUMPRIMENTOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
+    }
+
+    // Etapas do fluxo de "Outros Cumprimentos", na ordem em que o trabalho percorre o
+    // cartório/gabinete. Só a tabela principal tem essas colunas — os registros de origem
+    // 'bnmp' só trazem paraExpedir e ficariam misturando dois fluxos diferentes, então
+    // ficam de fora. Etapas zeradas são omitidas (mesma política dos demais gráficos).
+    const ETAPAS_OUTROS_CUMPRIMENTOS = [
+        { campo: 'paraConferir', label: 'Para conferir' },
+        { campo: 'paraExpedir', label: 'Para expedir' },
+        { campo: 'paraAssinar', label: 'Para assinar' },
+        { campo: 'devolvidoJuiz', label: 'Devolvido pelo juiz' },
+        { campo: 'decursoPrazo', label: 'Decurso de prazo' },
+    ];
+    function etapasOutrosCumprimentos(dados) {
+        const principal = (dados || []).filter(d => d.origem !== 'bnmp');
+        return ETAPAS_OUTROS_CUMPRIMENTOS
+            .map(e => ({ label: e.label, valor: principal.reduce((s, d) => s + (d[e.campo] || 0), 0) }))
+            .filter(e => e.valor > 0);
     }
 
     // Tabela discriminada — uma linha por tipo de cumprimento, ordenada por pendentes
@@ -4934,6 +5773,53 @@
         return pagina;
     }
 
+    // ── Gargalo por "Último Movimento" (Paralisados e Remessas) ────────────────
+    // Paralisados e Remessas são a MESMA tela do Projudi com filtros diferentes, e seus
+    // resumos são espelhos exatos um do outro — por isso a página complementar vive aqui,
+    // compartilhada, em vez de duplicada nos dois montarResumo*.
+    //
+    // "Último Movimento" diz POR QUE o processo parou (aguardando AR, no contador,
+    // suspenso...), que é o gargalo que a Corregedoria procura; o resumo só mostrava tempo
+    // médio por classe, que não aponta causa. O campo é texto livre vindo da célula da
+    // tabela, então normalizamos antes de contar: caixa alta, espaços colapsados e corte do
+    // complemento após " - " / "(" — sem isso cada linha vira uma categoria única (ex.:
+    // "REMETIDOS AO CONTADOR - 12/03/2026") e o gráfico não agrega nada.
+    function limparUltimoMovimento(s) {
+        return String(s || '')
+            .split(/\s+-\s+|\(/)[0]
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toUpperCase();
+    }
+
+    // Página complementar com o gráfico de último movimento. Só desenha se houver algo a
+    // mostrar (mesma política de "gráfico vazio é omitido" do resumo genérico).
+    function montarPaginaUltimoMovimento(doc, dados, titulo, tituloGrafico, comIndice) {
+        const itens = contarPorCampo(dados, 'ultimoMovimento', 12, limparUltimoMovimento);
+        if (!itens.length) return;
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.addPage();
+        let hy = m + 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, hy);
+        hy += 8;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text('Gráficos complementares', m, hy);
+        hy += 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
+
+        const gY0 = hy + 6;
+        desenharBarras(doc, m, gY0, uw, ph - m - gY0 - 14, tituloGrafico, itens, undefined, COR.ambar);
+        desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF do relatório de Processos Paralisados ───────────────────────────────
     // Segue o mesmo padrão do Tempo Médio (dias já vêm prontos do Projudi, sem precisar
     // calcular a partir de duas datas): KPIs + top 10 mais tempo paralisados + média por classe.
@@ -5027,6 +5913,10 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        // Página 2: gargalo por último movimento (ver montarPaginaUltimoMovimento) — a
+        // página 1 já está cheia (3+2+1 cards e dois gráficos que consomem toda a altura).
+        montarPaginaUltimoMovimento(doc, dados, TITULO_PARALISADOS, 'Processos parados por último movimento', comIndice);
     }
 
     // Tabela discriminada do relatório de Paralisados (sempre inicia em página nova).
@@ -5180,6 +6070,10 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        // Mesma página complementar de Paralisados (ver montarPaginaUltimoMovimento) — em
+        // Remessas o último movimento indica onde a remessa emperrou.
+        montarPaginaUltimoMovimento(doc, dados, TITULO_REMESSAS, 'Remessas paradas por último movimento', comIndice);
     }
 
     // Tabela discriminada do relatório de Remessas em Aberto (sempre inicia em página
@@ -5240,6 +6134,357 @@
         return paginaInicial;
     }
 
+    const TITULO_SUSPENSOS_PRAZO = 'Suspensos com Prazo Determinado';
+
+    // Duração em dias (fim - início) de uma suspensão por prazo determinado. null se
+    // qualquer uma das duas datas não for parseável (não deveria acontecer nos dados reais
+    // — Início/Fim Suspensão vêm em DD/MM/AAAA — mas evita gerar NaN no PDF).
+    function duracaoSuspensaoDias(d) {
+        const ini = parseDataBR(d.inicioSuspensao);
+        const fim = parseDataBR(d.fimSuspensao);
+        if (ini == null || fim == null) return null;
+        return Math.round((fim - ini) / DIA_MS);
+    }
+
+    // Registro com a data de Fim Suspensão MAIS LONGA (mais distante no futuro) — o
+    // equivalente "ao contrário" de acharMaisAntigo (que acha a MENOR data).
+    function acharFimMaisLongo(dados) {
+        let best = null;
+        dados.forEach(d => {
+            const ts = parseDataBR(d.fimSuspensao);
+            if (ts == null) return;
+            if (!best || ts > best.ts) best = { ts, dataStr: (d.fimSuspensao || '').trim(), registro: d };
+        });
+        return best;
+    }
+
+    // Tempo médio de suspensão (fim - início, em dias) agrupado por Classe Processual,
+    // ordenado da classe com MAIS processos suspensos para a com menos (pedido do
+    // usuário: destacar a classe mais volumosa primeiro; em empate, maior média primeiro).
+    function mediaSuspensaoPorClasse(dados) {
+        const mapa = new Map();
+        dados.forEach(d => {
+            const classe = (d.classe || '').trim() || '(vazio)';
+            const dur = duracaoSuspensaoDias(d);
+            if (dur == null) return;
+            if (!mapa.has(classe)) mapa.set(classe, []);
+            mapa.get(classe).push(dur);
+        });
+        return [...mapa.entries()]
+            .map(([classe, duracoes]) => ({
+                classe,
+                quantidade: duracoes.length,
+                media: duracoes.reduce((s, v) => s + v, 0) / duracoes.length,
+            }))
+            .sort((a, b) => b.quantidade - a.quantidade || b.media - a.media);
+    }
+
+    function gerarPDFSuspensosPrazo(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSuspensosPrazo(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo && dados.length) {
+            const pgTabela = montarTabelaSuspensosPrazo(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `suspensos_prazo_projudi${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO (KPIs + lista "Classe — média de dias") do relatório de Suspensos
+    // com Prazo Determinado. Requisitos do usuário (b.2): quantidade de processos;
+    // classe processual com mais processos suspensos; tempo médio de suspensão por
+    // classe. E (b.1, também aqui) o processo com a data de fim de suspensão mais longa.
+    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const porClasse = mediaSuspensaoPorClasse(dados);
+        const classeTop = porClasse[0] || null;
+        const fimMaisLongo = acharFimMaisLongo(dados);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, m + 8);
+        const yLinha = m + 8 + 4.2;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW3 = (uw - 2 * gap) / 3;
+        desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
+            classeTop ? classeTop.classe : '—',
+            classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+        // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
+        // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
+        // certa (bold, já ativa no momento do desenho); "subs" usa
+        // doc.splitTextToSize(...)[0], que quebra em espaço e descarta o resto da linha
+        // sem aviso — foi isso que sumia com o número (card mostrava só "Processo").
+        desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Fim de Suspensão Mais Distante',
+            fimMaisLongo ? fimMaisLongo.registro.processo : '—',
+            fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
+
+        // Lista "Classe — média de dias de suspensão", uma linha por classe (já ordenada
+        // por quantidade de processos, maior primeiro — ver mediaSuspensaoPorClasse).
+        const listaY = kY + 28 + gap + 4;
+        tituloSecao(doc, m, listaY, uw, 'Tempo médio de suspensão por Classe Processual');
+        doc.autoTable({
+            columns: [
+                { header: 'Classe Processual', dataKey: 'classe' },
+                { header: 'Processos', dataKey: 'quantidade' },
+                { header: 'Média de Dias Suspenso', dataKey: 'media' },
+            ],
+            body: porClasse.map(c => ({ classe: c.classe, quantidade: String(c.quantidade), media: c.media.toFixed(1).replace('.', ',') })),
+            startY: listaY + 4,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                classe: { cellWidth: uw * 0.56 },
+                quantidade: { cellWidth: uw * 0.2, halign: 'right' },
+                media: { cellWidth: uw * 0.24, halign: 'right' },
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+    }
+
+    // Tabela discriminada — Processo, Classe, Prazo, Início Suspensão, Fim Suspensão —
+    // ORDENADA pela data de Fim Suspensão DESCENDENTE (mais longa primeiro, pedido do
+    // usuário). Registros sem data de fim parseável vão ao final.
+    function montarTabelaSuspensosPrazo(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a.fimSuspensao);
+            const tb = parseDataBR(b.fimSuspensao);
+            const va = ta == null ? -Infinity : ta;
+            const vb = tb == null ? -Infinity : tb;
+            return vb - va;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
+
+        // "Motivo da Suspensão" só existe na área Crime — entra na tabela discriminada só
+        // quando algum registro coletado trouxer esse campo (ver CFG_SUSPENSOS_PRAZO.extrai).
+        const temMotivo = dados.some(d => d.motivo);
+        const colunas = [
+            { header: 'Processo', width: 30, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 44, get: (d) => d.classe },
+            { header: 'Prazo', width: 30, get: (d) => d.prazo },
+            { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
+            { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
+        ];
+        if (temMotivo) colunas.push({ header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo });
+        colunas.push({ header: 'Dias Paralisado', width: 24, get: (d) => (d.dias == null ? '' : String(d.dias)) });
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
+    const TITULO_INSTANCIA_RECURSAL = 'Em Instância Recursal';
+
+    // Processos cuja data de envio (dataEnvio) já passou de "anos" anos atrás, ordenados
+    // por data de envio CRESCENTE (mais antigo primeiro — mesmo critério pedido para a
+    // tabela discriminada, ver montarTabelaInstanciaRecursal). Usa a mesma aproximação de
+    // "anos * 365 dias" já empregada em outros cálculos de dias decorridos do script (ver
+    // DIA_MS) — não precisa ser calendário-preciso. Registros sem data parseável nunca
+    // entram aqui (não há como saber há quanto tempo foram enviados).
+    function processosEnviadosHaMaisDeXAnos(dados, anos) {
+        const limite = Date.now() - anos * 365 * DIA_MS;
+        return dados
+            .map(d => ({ registro: d, ts: parseDataBR(d.dataEnvio) }))
+            .filter(x => x.ts != null && x.ts <= limite)
+            .sort((a, b) => a.ts - b.ts);
+    }
+
+    // Faixas de tempo desde o envio (pedido do usuário, item b: "distribuição por faixa
+    // de tempo"). Mesma aproximação de dias de DIA_MS/365 usada acima.
+    function faixasTempoInstanciaRecursal(dados) {
+        const now = Date.now();
+        // Faixas pedidas pelo usuário (3, sem lacuna): Até 2 anos / 2 a 5 anos / mais de
+        // 5 anos — "mais de 5 anos" cobre o que o pedido original chamava de "mais de 10
+        // anos", só que sem deixar processos de 5 a 10 anos sem faixa própria.
+        const faixas = [
+            { label: 'Até 2 anos', min: 0, max: 730, valor: 0 },
+            { label: 'De 2 a 5 anos', min: 730, max: 1825, valor: 0 },
+            { label: 'Mais de 5 anos', min: 1825, max: Infinity, valor: 0 },
+        ];
+        dados.forEach(d => {
+            const ts = parseDataBR(d.dataEnvio);
+            if (ts == null) return;
+            const dias = (now - ts) / DIA_MS;
+            const faixa = faixas.find(f => dias >= f.min && dias < f.max) || faixas[faixas.length - 1];
+            faixa.valor++;
+        });
+        return faixas;
+    }
+
+    function gerarPDFInstanciaRecursal(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoInstanciaRecursal(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo && dados.length) {
+            const pgTabela = montarTabelaInstanciaRecursal(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `instancia_recursal_projudi${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO: KPIs (total em instância recursal, total enviado há mais de 2
+    // anos), lista dos processos enviados há mais de 2 anos (processo + data de envio,
+    // via mini-tabela — pode ser longa demais para um card sem apertar o layout, mesmo
+    // racional de outras listas potencialmente grandes do script) e o gráfico de barras
+    // "remetidos por faixa de tempo desde o envio" (item b do pedido do usuário).
+    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const maisDe2Anos = processosEnviadosHaMaisDeXAnos(dados, 2);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, m + 8);
+        const yLinha = m + 8 + 4.2;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
+
+        // Gráfico "remetidos por faixa de tempo desde o envio" (item b).
+        const graficoY = kY + 24 + gap;
+        const graficoH = 46;
+        desenharBarras(doc, m, graficoY, uw, graficoH, 'Processos por Faixa de Tempo desde o Envio', faixasTempoInstanciaRecursal(dados), (v) => String(v), COR.aqua);
+
+        // Lista dos processos enviados há mais de 2 anos — mini-tabela (não card: a
+        // quantidade de processos pode ser grande, e desenharCardLista/medirAlturaCardLista
+        // não paginam sozinhos; doc.autoTable já pagina e nunca corta o número do processo).
+        const listaY = graficoY + graficoH + gap;
+        tituloSecao(doc, m, listaY, uw, 'Processos enviados há mais de 2 anos');
+        if (maisDe2Anos.length) {
+            doc.autoTable({
+                columns: [
+                    { header: 'Processo', dataKey: 'processo' },
+                    { header: 'Data de Envio', dataKey: 'dataEnvio' },
+                ],
+                body: maisDe2Anos.map(x => ({ processo: x.registro.processo, dataEnvio: x.registro.dataEnvio })),
+                startY: listaY + 4,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: {
+                    processo: { cellWidth: uw * 0.65 },
+                    dataEnvio: { cellWidth: uw * 0.35, halign: 'right' },
+                },
+                didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+        } else {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Nenhum processo enviado há mais de 2 anos.', m, listaY + 6);
+            desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        }
+    }
+
+    // Tabela discriminada — Processo, Classe, Data de Envio — ORDENADA por data de envio
+    // CRESCENTE (mais antigo primeiro, pedido do usuário: "a partir daquele enviado há
+    // mais tempo"). Registros sem data parseável vão ao final.
+    function montarTabelaInstanciaRecursal(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataEnvio);
+            const tb = parseDataBR(b.dataEnvio);
+            const va = ta == null ? Infinity : ta;
+            const vb = tb == null ? Infinity : tb;
+            return va - vb;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
+
+        const colunas = [
+            { header: 'Processo', width: 40, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 70, get: (d) => d.classe },
+            { header: 'Data de Envio', width: 30, get: (d) => d.dataEnvio },
+        ];
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
@@ -5286,10 +6531,16 @@
         const thead = document.querySelector('table.resultTable thead');
         const cab = thead ? thead.textContent : '';
         let cfg = null;
+        // CFG_SUSPENSOS_PRAZO vem antes de CFG_SUSPENSOS: a tabela de Suspensos com Prazo
+        // Determinado TAMBÉM tem "Início Suspensão" (o regex largo de CFG_SUSPENSOS
+        // casaria com ela por engano), mas só ela tem "Fim Suspensão" — regex mais
+        // específico primeiro.
+        if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
+        else if (CFG_INSTANCIA_RECURSAL.detecta(cab)) cfg = CFG_INSTANCIA_RECURSAL;
         // CFG_SUSPENSOS vem antes de CFG_PARALISADOS: a tabela de Suspensos por Prazo
         // Indeterminado também tem a coluna "Dias Paralisado" (o regex de Paralisados
         // sozinho a reconheceria por engano), mas só ela tem "Início Suspensão".
-        if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
+        else if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
         else if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
         else if (CFG_AUDIENCIAS.detecta(cab)) cfg = CFG_AUDIENCIAS;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
@@ -5316,6 +6567,7 @@
         else if (paginaOutrosCumprimentos()) cfg = CFG_OUTROS_CUMPRIMENTOS;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
+        else if (/processoBuscaInstanciaSuperior\.do/i.test(location.pathname + location.search)) cfg = CFG_INSTANCIA_RECURSAL;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
@@ -5376,8 +6628,13 @@
         // Limpa o período acumulado de uma rodada anterior (ver preencherEPesquisarTempoMedio)
         // para não herdar por engano o "fim" de uma extração antiga.
         store.removeItem('projudi_tempomedio_periodo');
+        store.removeItem(CHAVE_MES_ATUAL_TM);
         return fila;
     }
+
+    // Mês atualmente em busca (já removido da fila em preencherEPesquisarTempoMedio) —
+    // só pra exibição de progresso no painel, ver atualizarPainel.
+    const CHAVE_MES_ATUAL_TM = 'projudi_tempomedio_mes_atual';
 
     function lerFilaMesesTempoMedio() {
         // Mesma proteção usada em lerDadosDe/desembrulharArray: o valor às vezes volta
@@ -5402,6 +6659,10 @@
         // Remove o mês do início da fila agora — quando essa pesquisa terminar de coletar
         // (ver criarColetor/continuar), o próximo item (se houver) dispara uma nova rodada.
         store.setItem(CHAVE_FILA_MESES_TM, JSON.stringify(fila.slice(1)));
+        // Guarda qual mês está em andamento (já saiu da fila acima, então não dá mais pra
+        // achar em lerFilaMesesTempoMedio) — usado só pra mostrar no status do painel
+        // (ver atualizarPainel) qual mês está sendo coletado agora e quantos faltam.
+        store.setItem(CHAVE_MES_ATUAL_TM, JSON.stringify(mes));
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
@@ -5446,14 +6707,26 @@
         setTimeout(() => {
             console.log('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
+            // Marca atividade no MOMENTO do clique — sem isso, todo o tempo de busca
+            // (que pode passar de minutos com o site lento, ver STALE_MS) ficava sem
+            // nenhum sinal de progresso pro watchdog genérico (verificarTravamentoAutomacao),
+            // que contava esse tempo como travamento e pulava o mês antes da hora (relatado
+            // pelo usuário: "pulando indevidamente só pelo tempo decorrido").
+            store.setItem(CFG_TEMPOMEDIO.prefixo + 'ts', String(Date.now()));
 
-            // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
+            // Diagnóstico tardio: se depois de 15s ainda estamos no formulário (o clique
+            // não "pegou" — pode acontecer com o site lento), reclica UMA vez em vez de só
+            // avisar no console. O watchdog genérico (verificarTravamentoAutomacao) cobre
+            // o caso de o site estar de fato travado além disso.
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
                 const temResultado = !!document.querySelector('table.resultTable');
                 console.log(`[Projudi TM] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
-                    console.warn('[Projudi TM] ainda sem resultado após 15s — o site pode estar lento; se persistir por muito mais tempo, clique em Pesquisar manualmente.');
+                    console.warn('[Projudi TM] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
+                    const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+                    if (btnRetry && !btnRetry.disabled) btnRetry.click();
+                    store.setItem(CFG_TEMPOMEDIO.prefixo + 'ts', String(Date.now()));
                 }
             }, 15000);
         }, 1500);
@@ -5562,7 +6835,8 @@
         if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
         if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
-        if (navAlvo === 'suspensos') return /processoBuscaSuspenso\.do/i;
+        if (navAlvo === 'suspensos' || navAlvo === 'suspensosprazo') return /processoBuscaSuspenso\.do/i;
+        if (navAlvo === 'instanciarecursal') return /processoBuscaInstanciaSuperior\.do/i;
         if (navAlvo === 'audiencias') return /audiencia\/busca\.do/i;
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
@@ -5966,6 +7240,55 @@
             }
         }
 
+        // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
+        // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
+        // automação, não pela presença de resultados).
+        if (formularioSuspensoPrazo()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_suspensosprazo') {
+                console.log('[Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_suspensosprazo');
+                preencherEPesquisarSuspensoPrazo();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso para pesquisar com os filtros
+            // padrão da tela.
+            if (estadoAtual !== 'coletando_suspensosprazo' && mostrarBotoesIndividuais()) {
+                const bSuspensoPrazo = document.createElement('button');
+                bSuspensoPrazo.type = 'button';
+                bSuspensoPrazo.className = 'projudi-btn';
+                bSuspensoPrazo.title = 'Pesquisa com os filtros padrão da tela — não altera nenhum campo';
+                bSuspensoPrazo.textContent = 'Preencher e Pesquisar (Suspensos com Prazo)';
+                bSuspensoPrazo.onclick = () => preencherEPesquisarSuspensoPrazo();
+                buttonBar.appendChild(bSuspensoPrazo);
+            }
+        }
+
+        // Tela de filtros de "Em Instância Recursal" (processoBuscaInstanciaSuperior.do,
+        // alcançada pelo menu "Em Instância Superior" > "Remetidos") — mesmo padrão de
+        // Suspensos com Prazo acima: decide pelo ESTADO da automação, não pela presença de
+        // resultados; botão de pesquisa é "Filtrar" (#searchButton), não "Pesquisar".
+        if (formularioInstanciaRecursal()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_instanciarecursal') {
+                console.log('[Projudi Instância Recursal] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_instanciarecursal');
+                preencherEPesquisarInstanciaRecursal();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso para filtrar com os padrões da
+            // tela (situação "Em Instância Superior" já vem marcada).
+            if (estadoAtual !== 'coletando_instanciarecursal' && mostrarBotoesIndividuais()) {
+                const bInstanciaRecursal = document.createElement('button');
+                bInstanciaRecursal.type = 'button';
+                bInstanciaRecursal.className = 'projudi-btn';
+                bInstanciaRecursal.title = 'Filtra com os padrões da tela (Em Instância Superior) — não altera nenhum campo';
+                bInstanciaRecursal.textContent = 'Preencher e Pesquisar (Instância Recursal)';
+                bInstanciaRecursal.onclick = () => preencherEPesquisarInstanciaRecursal();
+                buttonBar.appendChild(bInstanciaRecursal);
+            }
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
         // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
         let cfg = detectarConfig();
@@ -6134,6 +7457,14 @@
         // injetarPainel) — o link de Suspensos por Prazo Indeterminado abre a tabela de
         // resultados direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
         { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Estatísticas Gerais' },
+        // Suspensos com Prazo Determinado: passa por uma tela de filtros própria (por
+        // isso precisaPreencher: true, mesmo padrão de Apreensões/Paralisados) antes de
+        // chegar nos resultados — ver formularioSuspensoPrazo/preencherEPesquisarSuspensoPrazo.
+        { key: 'suspensosprazo', cfg: CFG_SUSPENSOS_PRAZO, navAlvo: 'suspensosprazo', rotulo: 'Suspensos com Prazo', curto: 'Susp. c/ Prazo', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
+        // "Em Instância Recursal": também passa por tela de filtros própria (situação "Em
+        // Instância Superior" já vem marcada, só precisa clicar em Filtrar) — ver
+        // formularioInstanciaRecursal/preencherEPesquisarInstanciaRecursal.
+        { key: 'instanciarecursal', cfg: CFG_INSTANCIA_RECURSAL, navAlvo: 'instanciarecursal', rotulo: 'Em Instância Recursal', curto: 'Inst. Recursal', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         // ── Pendências ───────────────────────────────────────────────────────────────
         { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
@@ -6336,6 +7667,21 @@
         return null;
     }
 
+    // Confirma que o `<label>` existe (estamos na página certa) mas a célula ao lado NÃO
+    // tem link — mesmo padrão já visto noutro campo do mesmo card da home ("Físicos: --",
+    // sem link quando não há nada a mostrar). Usado para distinguir "zero processos
+    // suspensos, o widget nem desenha o link" de "ainda não estamos na home" — só faz
+    // sentido chamar DEPOIS de acharLinkAoLadoDoLabel já ter falhado.
+    function labelSemLinkEncontrado(labelRe) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('td.label label')) {
+                if (labelRe.test(label.textContent)) return true;
+            }
+        }
+        return false;
+    }
+
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
@@ -6355,6 +7701,16 @@
         }
         else if (alvo === 'remessas') link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /em\s+remessa.*exceto\s+processos\s+conclusos/i);
         else if (alvo === 'suspensos') link = acharLinkAoLadoDoLabel(/suspensos\s+por\s+tempo\s+indeterminado/i);
+        // "Suspensos com Prazo" usa um link DIFERENTE do anterior — o de texto "Suspensos"
+        // (sozinho) num submenu, que leva à TELA DE FILTROS (processoBuscaSuspensoForm),
+        // não direto aos resultados como o link acima.
+        else if (alvo === 'suspensosprazo') link = acharLinkMenu(/processoBuscaSuspenso\.do/i, /^suspensos$/i);
+        // "Em Instância Recursal" (nome amigável) = "Processos Remetidos para Instância
+        // Superior" no Projudi — menu "Em Instância Superior" > "Remetidos". ATENÇÃO: há
+        // OUTRO link de menu também com texto "Remetidos" mas href processosRemetidos.do
+        // (SEM "Busca"/"Instancia"/"Superior") — relatório diferente; a regex de URL abaixo
+        // já é específica o bastante pra não confundir os dois.
+        else if (alvo === 'instanciarecursal') link = acharLinkMenu(/processoBuscaInstanciaSuperior\.do/i, /^remetidos$/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
@@ -6383,7 +7739,13 @@
             if (porId) return porId;
         }
         for (const d of docs) {
-            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
+            // genérico já causou falso positivo: em telas que NÃO são a home (ex.: a
+            // automação ainda na tela de resultados de outro relatório), o menu lateral
+            // do Projudi pode ter um link de texto igual em outro contexto, e cliclar nele
+            // não abre a aba de verdade — a automação ficava com o estado avançado
+            // (preenchendo_X) mas a tela continuava travada no relatório anterior.
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
             for (const a of candidatos) {
                 if (/^outros\s+cumprimentos$/i.test((a.textContent || '').trim())) return a;
             }
@@ -6417,7 +7779,13 @@
             if (porId) return porId;
         }
         for (const d of docs) {
-            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a, ul li a');
+            // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
+            // genérico já causou falso positivo: em telas que NÃO são a home (ex.: a
+            // automação ainda na tela de resultados de outro relatório), o menu lateral
+            // do Projudi pode ter um link de texto igual em outro contexto, e cliclar nele
+            // não abre a aba de verdade — a automação ficava com o estado avançado
+            // (preenchendo_X) mas a tela continuava travada no relatório anterior.
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
             for (const a of candidatos) {
                 if (/^an[áa]lise\s+de\s+juntadas$/i.test((a.textContent || '').trim())) return a;
             }
@@ -6454,24 +7822,25 @@
         setTimeout(passoAutomacao, 900);
     }
 
-    // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
-    // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo. Marca o
-    // relatório em andamento como interrompido por erro (ver foiInterrompidoPorErro — o
-    // Relatório PDF avisa disso, ao invés de fingir que os dados estão completos) e avança
-    // a fila normalmente, como se o relatório tivesse terminado.
-    function pularRelatorioAtual() {
-        const estado = store.getItem(AUTO_ESTADO);
-        if (!estado) return;
-        let key = null;
-        if (estado.startsWith('coletando_')) key = estado.slice('coletando_'.length);
-        else if (estado.startsWith('preenchendo_')) key = estado.slice('preenchendo_'.length);
-        else if (estado.startsWith('travado_')) key = estado.slice('travado_'.length);
-        if (!key) return;
-        const rel = relatorioPorChave(key);
-        if (!rel) return;
-        if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
+    // Descobre o "key" do item de fila atual a partir de AUTO_ESTADO, cobrindo os 3
+    // prefixos possíveis (coletando_/preenchendo_/travado_) — usado tanto pelo botão
+    // "Pular" quanto pelo watchdog automático.
+    function keyDoEstadoAtual(estado) {
+        if (!estado) return null;
+        if (estado.startsWith('coletando_')) return estado.slice('coletando_'.length);
+        if (estado.startsWith('preenchendo_')) return estado.slice('preenchendo_'.length);
+        if (estado.startsWith('travado_')) return estado.slice('travado_'.length);
+        return null;
+    }
 
-        console.warn(`[Auto Projudi] usuário pulou a extração de "${rel.rotulo}" (estado="${estado}")`);
+    // Núcleo de "pular a extração atual" — marca o relatório em andamento como
+    // interrompido por erro (ver foiInterrompidoPorErro — o Relatório PDF avisa disso,
+    // ao invés de fingir que os dados estão completos) e avança a fila normalmente, como
+    // se o relatório tivesse terminado. Extraído de pularRelatorioAtual (botão manual,
+    // que só confirma e chama isto) para ser reaproveitado pelo watchdog automático
+    // (verificarTravamentoAutomacao), que não tem `confirm()` nem pode esperar o usuário.
+    function executarPular(rel, motivo) {
+        console.warn(`[Auto Projudi] pulando a extração de "${rel.rotulo}" (${motivo})`);
         // Item pode ter mais de um cfg (ver "mandados" — 3 fases internas): marca erro/
         // coletado em todos, mesmo que só uma fase estivesse em andamento — os dados das
         // fases não alcançadas ficam ausentes de qualquer forma (mostrarSeVazio faria o
@@ -6485,18 +7854,94 @@
         // Limpa o estado transitório de relatórios com fila própria — senão a próxima
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
-        if (rel.key === 'tempomedio') store.removeItem(CHAVE_FILA_MESES_TM);
+        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
         if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
 
         const fila = lerFilaAutomacao();
-        const idx = fila.indexOf(key);
+        const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         store.setItem('projudi_auto_lock', String(Date.now()));
         atualizarPainel();
         setTimeout(passoAutomacao, 300);
+    }
+
+    // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
+    // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo.
+    function pularRelatorioAtual() {
+        const estado = store.getItem(AUTO_ESTADO);
+        const key = keyDoEstadoAtual(estado);
+        if (!key) return;
+        const rel = relatorioPorChave(key);
+        if (!rel) return;
+        if (!confirm(`Pular a extração de "${rel.rotulo}"? Ele vai constar no Relatório PDF como interrompido por erro.`)) return;
+        executarPular(rel, 'pulado manualmente pelo usuário');
+    }
+
+    // ── Watchdog genérico ────────────────────────────────────────────────────────────
+    // Antes desta função, a ÚNICA forma de sair de "coletando_X"/"preenchendo_X" quando a
+    // coleta trava (por qualquer motivo, inclusive causas ainda não mapeadas) era o
+    // usuário perceber e clicar em "Pular" — passoAutomacao() propositalmente não faz
+    // nada nesses estados (quem conduz é a própria página). Chamado no mesmo
+    // setInterval de 2s de bootstrap() que já roda passoAutomacao/atualizarPainel.
+    // Era 3 min; aumentado pra 8 depois de um pulo indevido relatado (Tempo Médio):
+    // entre o clique em Pesquisar de um novo mês e a página de resultados carregar, não
+    // há NENHUM "ts" gravado (marcarAtividade só roda dentro do coletor, que só começa
+    // depois da página responder) — com o site lento (mesmo cenário que motivou
+    // STALE_MS = 6 min numa rodada anterior), essa espera sozinha já passava dos 3 min
+    // antigos e o watchdog pulava um mês que ainda estava sendo buscado de verdade.
+    // 8 min dá margem folgada acima de STALE_MS (6 min), pra nunca competir com a
+    // recuperação automática que STALE_MS/obsoleta() já cobrem.
+    const WATCHDOG_STALL_MS = 8 * 60 * 1000;
+    // Guarda {key, inicio, disparado} do item de fila que o watchdog está observando —
+    // "inicio" é gravado na PRIMEIRA vez que este item é visto (cobre o tempo antes de
+    // qualquer cfg ter seu próprio "ts" gravado — ex.: um relatório com
+    // precisaPreencher pode passar um tempo preenchendo filtros antes da 1ª coleta de
+    // página) e reiniciado sempre que o item da fila muda.
+    const CHAVE_WATCHDOG = 'projudi_auto_watchdog';
+    function verificarTravamentoAutomacao() {
+        const estado = store.getItem(AUTO_ESTADO);
+        // "travado_X" (passoAutomacao desistiu de navegar depois de LIMITE_TENTATIVAS,
+        // ver mais abaixo) também entra aqui agora — antes só coletando_/preenchendo_
+        // eram observados, então um relatório cujo link de navegação nunca aparece (ex.:
+        // Suspensos por Prazo Indeterminado quando o contador é zero e o card da home não
+        // renderiza link algum) ficava parado em "travado_" pra sempre, sem nada
+        // recuperando sozinho.
+        const key = (estado && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')))
+            ? estado.slice(estado.indexOf('_') + 1) : null;
+        if (!key) { store.removeItem(CHAVE_WATCHDOG); return; }
+        // Pedido do usuário: sem limite de tempo para Tempo Médio especificamente — é o
+        // relatório mais sujeito a buscas legitimamente longas (mês a mês, site lento com
+        // muito estado acumulado — ver STALE_MS/comentário no clique de Pesquisar), e o
+        // watchdog genérico já pulou meses em andamento por engano mesmo depois de o
+        // limite ter sido aumentado. Continua com o diagnóstico de 15s (reclica em
+        // Pesquisar) e com o botão "Pular" manual como únicas saídas de um travamento
+        // real nesse relatório específico.
+        if (key === 'tempomedio') { store.removeItem(CHAVE_WATCHDOG); return; }
+
+        let vigia = null;
+        try { vigia = JSON.parse(store.getItem(CHAVE_WATCHDOG) || 'null'); } catch (e) { vigia = null; }
+        if (!vigia || vigia.key !== key) {
+            vigia = { key, inicio: Date.now(), disparado: false };
+            store.setItem(CHAVE_WATCHDOG, JSON.stringify(vigia));
+            return; // acabou de começar a observar — nada a fazer ainda
+        }
+        if (vigia.disparado) return; // já pulou este item, aguardando o próximo mudar a key
+
+        const rel = relatorioPorChave(key);
+        if (!rel) return;
+        const tss = cfgsDoRelatorio(rel)
+            .map(cfg => parseInt(store.getItem(cfg.prefixo + 'ts') || '0', 10))
+            .filter(Boolean);
+        const ultimaAtividade = Math.max(vigia.inicio, ...tss);
+        const parado = Date.now() - ultimaAtividade;
+        if (parado < WATCHDOG_STALL_MS) return;
+
+        vigia.disparado = true;
+        store.setItem(CHAVE_WATCHDOG, JSON.stringify(vigia));
+        executarPular(rel, `travamento detectado automaticamente — ${Math.round(parado / 1000)}s sem progresso`);
     }
 
     // Executa o passo de navegação do estado atual. Pode ser chamado por qualquer frame;
@@ -6508,8 +7953,10 @@
         // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
         // preencherEPesquisarParalisado). "travado_X" = desistiu de navegar depois de
         // várias tentativas (ver ir_ abaixo) — só sai desse estado com "Limpar" ou
-        // retomando a automação do zero.
-        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')) return;
+        // retomando a automação do zero. "armazenamento_cheio" = QuotaExceededError (ver
+        // continuar() em criarColetor) — parada definitiva, mesma saída só com "Limpar".
+        if (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')
+            || estado === 'armazenamento_cheio') return;
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
@@ -6532,6 +7979,21 @@
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
                 return;
             }
+            // Suspensos por Prazo Indeterminado: o card da home só mostra um link quando
+            // há pelo menos 1 processo suspenso (mesmo padrão do campo "Físicos: --" no
+            // mesmo card, que também nunca vira link) — com zero, navegarMenu('suspensos')
+            // ia falhar pra sempre, batendo as 8 tentativas e travando em "travado_" (o
+            // relatório que relatou esse travamento é justamente o único cujo card some o
+            // link em vez de mostrar "0"). Detecta esse caso ANTES de gastar as tentativas
+            // e trata como "0 registros" — mesmo padrão já usado para buttonBar ausente.
+            if (rel.navAlvo === 'suspensos' && labelSemLinkEncontrado(/suspensos\s+por\s+tempo\s+indeterminado/i)) {
+                console.log('[Auto Projudi] card de "Suspensos por Tempo Indeterminado" sem link (0 processos) — marcando coletado sem navegar');
+                store.removeItem('projudi_auto_nav_falhas');
+                store.setItem(AUTO_ESTADO, 'coletando_' + key);
+                store.setItem(CFG_SUSPENSOS.prefixo + 'coletado', '1');
+                avancarAutomacao(CFG_SUSPENSOS);
+                return;
+            }
             // Conta tentativas malsucedidas para este alvo — se o link nunca aparecer
             // (ex.: o widget da página inicial não carregou o card esperado), depois de
             // várias tentativas paramos em vez de ficar tentando pra sempre em silêncio
@@ -6551,16 +8013,17 @@
                 console.error(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
                 return;
             }
-            if (rel.navAlvo === 'paralisados' || rel.navAlvo === 'remessas' || rel.navAlvo === 'suspensos') {
-                // O link de Paralisados/Remessas/Suspensos só existe no card da página
-                // inicial — se a automação estiver saindo de outro relatório (ex.:
-                // resultados de Paralisados), esse link não está na página atual e
-                // navegarMenu falha silenciosamente sem nunca sair dali. Volta à início
-                // primeiro; o estado continua "ir_X" para tentar de novo assim que a
-                // home carregar.
-                console.log(`[Auto Projudi] link de "${rel.navAlvo}" não está nesta página — voltando à início para tentar de lá`);
-                navegarMenu('inicio');
-            }
+            // Praticamente todo link/aba de menu (Paralisados, Remessas, Suspensos,
+            // Suspensos com Prazo, Em Instância Recursal, Mandados, Outros Cumprimentos —
+            // e por padrão qualquer relatório novo, salvo indicação em contrário) só
+            // existe na página inicial — se a automação estiver saindo de outro relatório
+            // (ex.: resultados de Paralisados), esse link/aba não está na página atual e
+            // navegarMenu falha silenciosamente sem nunca sair dali (era isso que fazia a
+            // automação "travar" sem alterar nada até o usuário clicar em "Pular"). Volta
+            // à início em toda tentativa sem sucesso; o estado continua "ir_X" para tentar
+            // de novo assim que a home carregar.
+            console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
+            navegarMenu('inicio');
         }
     }
 
@@ -6569,6 +8032,16 @@
     function iniciarAutomacao(fila, periodoTM) {
         fila = (fila || []).filter(k => relatorioPorChave(k));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
+        // Limpa a flag "erro" (marcada por um Pular manual ou pelo watchdog numa rodada
+        // ANTERIOR) dos relatórios que voltam a entrar na fila — sem isso, uma nova
+        // rodada bem-sucedida ainda constaria "interrompido por erro" no PDF por causa de
+        // uma tentativa antiga, mesmo já tendo coletado dados novos e válidos desta vez
+        // (a coleta em si já ACUMULA entre rodadas — README: "troque de atuação e colete
+        // mais" —, só a flag de erro não era resetada).
+        fila.forEach(key => {
+            const rel = relatorioPorChave(key);
+            cfgsDoRelatorio(rel).forEach(cfg => store.removeItem(cfg.prefixo + 'erro'));
+        });
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
         // Monta a fila de meses do Tempo Médio uma única vez aqui, no início — nunca dentro
@@ -6601,9 +8074,11 @@
         store.removeItem('projudi_auto_periodo_tm');
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem(CHAVE_FILA_MESES_TM);
+        store.removeItem(CHAVE_MES_ATUAL_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
+        store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
         store.removeItem(CHAVE_MANDADOS_FASE);
         atualizarPainel();
@@ -6617,18 +8092,78 @@
     // relatório foi interrompido antes de terminar; os dados que existem são parciais.
     function foiInterrompidoPorErro(cfg) { return store.getItem(cfg.prefixo + 'erro') === '1'; }
 
-    function baixarPDFConjunto(somenteResumo) {
-        const secoes = REPORTS_AUTOMACAO
+    // Todas as seções já coletadas (qualquer relatório de REPORTS_AUTOMACAO, cada cfg
+    // interno resolvido por cfgsDoRelatorio) — usado tanto pelo PDF conjunto quanto pelo
+    // Excel conjunto, pra não duplicar o mesmo filtro (mostrarSeVazio/foiColetado) nos
+    // dois lugares.
+    function secoesColetadas() {
+        return REPORTS_AUTOMACAO
             .flatMap(r => cfgsDoRelatorio(r).map(cfg => ({ dados: lerDadosDe(cfg.prefixo), cfg })))
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
+    }
+
+    function baixarPDFConjunto(somenteResumo) {
+        const secoes = secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
             gerarPDFConjunto(secoes, somenteResumo);
-            // Após exportar o PDF conjunto, limpa tudo automaticamente — evita que uma
-            // coleta antiga fique acumulada/misturada com a próxima automação.
-            limparTudoAutomacao();
+            // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
+            // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
+            // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
+            // dados existentes — ver onclick de #pa-iniciar em injetarPainel).
         }
         catch (err) { alert('Erro ao gerar Relatório PDF: ' + err.message); console.error(err); }
+    }
+
+    // Nome de aba do Excel — a partir de cfg.nomeArquivo (sempre presente, já curto e
+    // único por cfg): tira o sufixo "_projudi", troca "_" por espaço, capitaliza. Nomes
+    // de aba do Excel têm limite de 31 caracteres, não podem repetir nem conter
+    // [ ] : * ? / \ — trunca e desambigua com "(2)", "(3)"... se precisar.
+    function nomeAbaExcel(nomeArquivo, jaUsados) {
+        let base = (nomeArquivo || 'dados').replace(/_projudi$/, '').replace(/_/g, ' ').trim();
+        base = base.charAt(0).toUpperCase() + base.slice(1);
+        base = base.replace(/[[\]:*?/\\]/g, '').slice(0, 31).trim() || 'Dados';
+        let candidato = base, i = 2;
+        while (jaUsados.has(candidato.toLowerCase())) {
+            const sufixo = ` (${i})`;
+            candidato = base.slice(0, 31 - sufixo.length) + sufixo;
+            i++;
+        }
+        jaUsados.add(candidato.toLowerCase());
+        return candidato;
+    }
+
+    // Excel conjunto — pedido do usuário: uma única planilha .xlsx com a tabela
+    // discriminada de CADA relatório já coletado, uma aba por relatório (hoje só existia
+    // exportação individual, um .xlsx por relatório — ver gerarEbaixarExcel). Reaproveita
+    // cfg.cabecalhos/cfg.larguras/cfg.linha, os mesmos usados pela exportação individual.
+    function gerarEbaixarExcelConjunto() {
+        const secoes = secoesColetadas();
+        if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
+        try {
+            const wb = XLSX.utils.book_new();
+            const abasUsadas = new Set();
+            const ignorados = [];
+            secoes.forEach(({ dados, cfg }) => {
+                // Relatórios de "resumo único" (Audiências Designadas/Realizadas, Outros
+                // Cumprimentos — dados = 1 objeto agregado, não uma lista por processo)
+                // não têm cfg.linha/cabecalhos/larguras (nunca tiveram exportação Excel
+                // própria, o botão individual deles nem oferece "Baixar planilha") — sem
+                // essa checagem, dados.map(cfg.linha) quebrava com "undefined is not a
+                // function" assim que o Excel conjunto incluía qualquer um dos três.
+                if (!cfg.linha || !cfg.cabecalhos) { ignorados.push(cfg.nomeArquivo); return; }
+                const linhas = dados.map(cfg.linha);
+                const ws = XLSX.utils.aoa_to_sheet([cfg.cabecalhos, ...linhas]);
+                ws['!cols'] = cfg.larguras;
+                XLSX.utils.book_append_sheet(wb, ws, nomeAbaExcel(cfg.nomeArquivo, abasUsadas));
+            });
+            if (ignorados.length) console.log(`[Projudi] Excel conjunto — ignorados (sem formato de linha por processo): ${ignorados.join(', ')}`);
+            if (!wb.SheetNames.length) { alert('Nenhum dos relatórios coletados tem uma tabela exportável em linhas (Audiências Designadas/Realizadas e Outros Cumprimentos não entram no Excel conjunto).'); return; }
+            const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+            const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.xlsx`);
+        }
+        catch (err) { alert('Erro ao gerar Excel conjunto: ' + err.message); console.error(err); }
     }
 
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
@@ -6657,11 +8192,14 @@
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
         const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + lerDadosDe(cfg.prefixo).length, 0) }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
-        const emCurso = estado !== 'inativo' && estado !== 'concluido';
-        const travado = estado.startsWith('travado_');
+        const emCurso = estado !== 'inativo' && estado !== 'concluido' && estado !== 'armazenamento_cheio';
+        const travado = estado.startsWith('travado_') || estado === 'armazenamento_cheio';
         const estadoTexto = (() => {
             if (estado === 'inativo') return 'Pronto para iniciar';
             if (estado === 'concluido') return 'Coleta concluída';
+            if (estado === 'armazenamento_cheio') {
+                return 'Armazenamento do navegador cheio — baixe/exporte os dados coletados e clique em "Limpar" antes de continuar.';
+            }
             if (estado === 'ir_fim') return 'Finalizando…';
             if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `Preenchendo filtros de <strong>${rel ? rel.rotulo : estado}</strong>…`; }
             if (estado.startsWith('coletando_')) {
@@ -6694,6 +8232,18 @@
                     const rotuloFase = ROTULOS_FASE_MANDADOS[fase];
                     if (rotuloFase) txt += ` — fase: <strong>${rotuloFase}</strong>`;
                 }
+                // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — sem
+                // indicar qual mês e quantos faltam, "Coletando Tempo Médio…" fica parado
+                // no mesmo texto por várias buscas seguidas, sem dar pra saber se está
+                // progredindo (pedido do usuário).
+                if (chave === 'tempomedio') {
+                    const mesAtual = desembrulharObjeto(store.getItem(CHAVE_MES_ATUAL_TM));
+                    const restantes = lerFilaMesesTempoMedio().length;
+                    if (mesAtual && mesAtual.rotulo) {
+                        txt += ` — mês <strong>${mesAtual.rotulo}</strong>`;
+                        txt += restantes > 0 ? ` (${restantes} mês(es) restante(s) depois deste)` : ' (último mês da fila)';
+                    }
+                }
                 return txt;
             }
             if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
@@ -6709,13 +8259,9 @@
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
-        painel.querySelectorAll('.pa-count').forEach(el => {
-            const c = contagens.find(c => c.r.key === el.dataset.key);
-            const n = el.querySelector('.n');
-            if (c && n) n.textContent = String(c.n);
-        });
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
+        painel.querySelector('#pa-excel').disabled = total === 0;
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
         // escape para quando a coleta trava (ver pularRelatorioAtual).
         const btnPular = painel.querySelector('#pa-pular');
@@ -6788,7 +8334,6 @@
         // (ver aplicarCategoria) — hoje só "Audiências Pendentes" em Crime.
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
-        const itensVisiveis = (catId) => itensCivel.concat(itensEspecificos(catId));
 
         // "Processos Ativos" não é um item de REPORTS_AUTOMACAO de verdade (não navega/
         // coleta paginado, é lido passivamente na página inicial — ver
@@ -6851,8 +8396,6 @@
                     ${itens}
                 </div>`;
         }).join('');
-        const montarContagem = (catId) => itensVisiveis(catId).map(r => `
-                    <div class="pa-count" data-key="${r.key}"><span class="l">${r.curto}</span><span class="n">0</span></div>`).join('');
         // Enquanto a categoria não tiver nenhum item próprio ainda definido, mostra um
         // espaço reservado em vez de uma seção vazia.
         const montarGrupoEspecifico = (cat) => {
@@ -6883,7 +8426,6 @@
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
                     <div class="pa-progress-lbl">—</div>
                 </div>
-                <div class="pa-counts">${montarContagem(categoriaInicial)}</div>
                 ${linhasGrupos}
                 <div class="pa-group pa-group-especifico" style="display:none;">
                     <p class="pa-group-lbl especifico"></p>
@@ -6903,6 +8445,7 @@
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
+                        <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Dados em planilha</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
@@ -6920,12 +8463,27 @@
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
             const periodoTM = periodoSelTM ? periodoSelTM.value : '1m';
+            // Pedido do usuário: desde que "Limpar" deixou de rodar sozinho depois do PDF
+            // (ver baixarPDFConjunto), reiniciar "Automatizar" por cima de dados já
+            // coletados dos relatórios marcados precisa de uma escolha explícita —
+            // continuar acumulando (comportamento padrão de iniciarAutomacao) ou apagar e
+            // recomeçar do zero. foiColetado cobre também "0 registros, mas já rodou"
+            // (ex.: Suspensos coletado e vazio), que lerDadosDe sozinho não pegaria.
+            const temDadosPrevios = fila.some(key => {
+                const rel = relatorioPorChave(key);
+                return rel && cfgsDoRelatorio(rel).some(cfg => lerDadosDe(cfg.prefixo).length > 0 || foiColetado(cfg));
+            });
+            if (temDadosPrevios) {
+                const apagar = confirm('Já existem dados coletados para um ou mais relatórios marcados.\n\nOK = apagar tudo e começar do zero.\nCancelar = continuar acumulando (padrão).');
+                if (apagar) limparTudoAutomacao();
+            }
             iniciarAutomacao(fila, periodoTM);
         };
         painel.querySelector('#pa-pdf').onclick = () => {
             const chk = painel.querySelector('#pa-somente-resumo');
             baixarPDFConjunto(!!(chk && chk.checked));
         };
+        painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
         painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
@@ -6971,9 +8529,8 @@
             grupoEspecifico.style.display = ehCivel ? 'none' : '';
             grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
             grupoEspecifico.querySelector('.pa-group-conteudo').innerHTML = montarGrupoEspecifico(cat);
-            painel.querySelector('.pa-counts').innerHTML = montarContagem(cat.id);
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
-            atualizarPainel(); // repopula os números da grade de contagem recém-trocada
+            atualizarPainel();
         }
         painel.querySelectorAll('.pa-tab').forEach(btn => {
             btn.onclick = () => aplicarCategoria(btn.dataset.categoria);
@@ -7128,17 +8685,6 @@
         #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
-        #painel-automacao .pa-counts {
-            display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 10px;
-            margin-bottom: 12px; padding: 8px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px;
-        }
-        #painel-automacao .pa-count { display: flex; justify-content: space-between; font-size: .7em; min-width: 0; }
-        #painel-automacao .pa-count .n { font-weight: 700; color: #1A1A1A; flex-shrink: 0; }
-        /* min-width:0 (no pai) + overflow/nowrap aqui — sem isso, um rótulo comprido
-           (ex.: "Aud. Termo Pendentes") quebrava linha dentro da célula do grid, jogando
-           o número pra fora da primeira linha em vez de truncar com "…" */
-        #painel-automacao .pa-count .l { color: #52514E; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
         #painel-automacao .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl {
             display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
@@ -7208,7 +8754,11 @@
         // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
         // página, uma falha na tentativa imediata (ex.: frame ainda carregando) deixava a
         // automação parada até uma ação manual do usuário.
-        setInterval(() => { chamarSeguro(atualizarPainel, 'atualizarPainel'); chamarSeguro(passoAutomacao, 'passoAutomacao'); }, 2000);
+        setInterval(() => {
+            chamarSeguro(atualizarPainel, 'atualizarPainel');
+            chamarSeguro(passoAutomacao, 'passoAutomacao');
+            chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
+        }, 2000);
     }
 
     if (document.readyState === 'loading') {
