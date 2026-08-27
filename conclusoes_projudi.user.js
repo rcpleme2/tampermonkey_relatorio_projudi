@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      20.44
+// @version      20.45
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7889,6 +7889,14 @@
         const key = (estado && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_') || estado.startsWith('travado_')))
             ? estado.slice(estado.indexOf('_') + 1) : null;
         if (!key) { store.removeItem(CHAVE_WATCHDOG); return; }
+        // Pedido do usuário: sem limite de tempo para Tempo Médio especificamente — é o
+        // relatório mais sujeito a buscas legitimamente longas (mês a mês, site lento com
+        // muito estado acumulado — ver STALE_MS/comentário no clique de Pesquisar), e o
+        // watchdog genérico já pulou meses em andamento por engano mesmo depois de o
+        // limite ter sido aumentado. Continua com o diagnóstico de 15s (reclica em
+        // Pesquisar) e com o botão "Pular" manual como únicas saídas de um travamento
+        // real nesse relatório específico.
+        if (key === 'tempomedio') { store.removeItem(CHAVE_WATCHDOG); return; }
 
         let vigia = null;
         try { vigia = JSON.parse(store.getItem(CHAVE_WATCHDOG) || 'null'); } catch (e) { vigia = null; }
