@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.5
+// @version      21.6
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7825,6 +7825,26 @@
     const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
     function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
 
+    // Unidades/atuações em que o botão "Automatizar" já foi de fato clicado — usado só
+    // pelo mostrador "Unidades coletadas" do painel (pedido do usuário: só entrar como
+    // coletada depois de apertar Automatizar, não só por ter passado pela página
+    // inicial). Diferente de lerMapaAtivos() (Processos Ativos): esse mapa é gravado
+    // passivamente sempre que a página inicial carrega (ver
+    // gravarProcessosAtivosSeDisponivel), então uma unidade em que o usuário só deu uma
+    // olhada — sem nunca ter clicado em Automatizar — aparecia como "coletada" no
+    // mostrador, o que não é verdade.
+    const CHAVE_UNIDADES_AUTOMATIZADAS = 'projudi_unidades_automatizadas';
+    function lerUnidadesAutomatizadas() {
+        try { return JSON.parse(store.getItem(CHAVE_UNIDADES_AUTOMATIZADAS) || '[]'); }
+        catch (e) { return []; }
+    }
+    function marcarUnidadeAutomatizada(atuacao) {
+        if (!atuacao) return;
+        const unidades = new Set(lerUnidadesAutomatizadas());
+        unidades.add(atuacao);
+        store.setItem(CHAVE_UNIDADES_AUTOMATIZADAS, JSON.stringify([...unidades]));
+    }
+
     // Checkboxes de relatório do painel (.pa-check) — pedido do usuário: as marcações
     // devem PERSISTIR entre atuações (o usuário troca de atuação/vara pra rodar a
     // automação de novo, e antes tinha que remarcar tudo do zero toda vez, já que o
@@ -8500,6 +8520,10 @@
     function iniciarAutomacao(fila, periodoTM) {
         fila = (fila || []).filter(k => relatorioPorChave(k));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
+        // Marca esta unidade/atuação como "coletada" pro mostrador do painel só AGORA,
+        // que o usuário de fato clicou em Automatizar — não antes (ver
+        // marcarUnidadeAutomatizada/CHAVE_UNIDADES_AUTOMATIZADAS).
+        marcarUnidadeAutomatizada(lerAtuacao());
         // Limpa a flag "erro" (marcada por um Pular manual ou pelo watchdog numa rodada
         // ANTERIOR) dos relatórios que voltam a entrar na fila — sem isso, uma nova
         // rodada bem-sucedida ainda constaria "interrompido por erro" no PDF por causa de
@@ -8546,6 +8570,7 @@
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
+        store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
         store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
         store.removeItem(CHAVE_MANDADOS_FASE);
@@ -8745,15 +8770,14 @@
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
 
-        // Unidades (atribuições/atuações) com dados já coletados na memória — pedido do
-        // usuário, pra saber de relance quantas/quais atuações já foram percorridas antes
-        // de decidir gerar o PDF (inclusive pra saber se vai cair no fluxo "resumo geral +
-        // por atribuição" — ver baixarPDFConjunto). Usa o mesmo mapa de Processos Ativos
-        // já usado pra essa decisão (gravado uma vez por atuação, a cada rodada da
-        // automação — ver gravarProcessosAtivosSeDisponivel).
+        // Unidades (atribuições/atuações) onde o botão "Automatizar" já foi de fato
+        // clicado — pedido do usuário: entrar na unidade sozinho (sem clicar em
+        // Automatizar) não deve marcá-la como "coletada" aqui, mesmo que a página inicial
+        // já tenha gravado o contador de Processos Ativos passivamente (ver
+        // gravarProcessosAtivosSeDisponivel/lerMapaAtivos, um dado DIFERENTE deste).
         const elUnidades = painel.querySelector('.pa-unidades');
         if (elUnidades) {
-            const unidades = Object.keys(lerMapaAtivos());
+            const unidades = lerUnidadesAutomatizadas();
             if (unidades.length) {
                 elUnidades.style.display = '';
                 const rotulo = unidades.length === 1 ? 'Unidade coletada' : `${unidades.length} unidades coletadas`;
@@ -8932,7 +8956,7 @@
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
                 </div>
-                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações com dados já coletados na memória (Processos Ativos e/ou algum relatório) — persistem até 'Limpar' ou até gerar o Relatório PDF"></div>
+                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações onde o botão Automatizar já foi clicado — persistem até 'Limpar'"></div>
                 <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
