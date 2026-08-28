@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.6
+// @version      21.7
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1304,11 +1304,6 @@
         pdfCustom: (dados) => gerarPDFAudienciasRealizadas(dados),
     };
 
-    // Quantidade mínima de audiências realizadas para um usuário aparecer no detalhamento
-    // (pedido do usuário) — os demais ainda contam para o total geral, só não entram na
-    // lista por usuário.
-    const MIN_AUDIENCIAS_POR_USUARIO_AR = 10;
-
     function formularioAudienciasRealizadas() {
         const form = document.getElementById('estatisticaAudienciaForm');
         return form && form.querySelector('#usuario') ? form : null;
@@ -1378,12 +1373,13 @@
     // serve tanto pra pesquisa geral quanto pra cada pesquisa por usuário.
     function lerTotalRealizadasAR() { return lerValorLinhaAR(/^total\s+realizadas$/i); }
 
-    // Canceladas/Não Realizadas/Redesignadas/Pessoas Ouvidas — lidas tanto na pesquisa
-    // geral (total do período) quanto em cada pesquisa por usuário (pedido do usuário:
-    // também por magistrado), sempre da mesma tabela de resultado.
+    // Canceladas/Negativas/Não Realizadas/Redesignadas/Pessoas Ouvidas — lidas tanto na
+    // pesquisa geral (total do período) quanto em cada pesquisa por usuário (pedido do
+    // usuário: também por magistrado), sempre da mesma tabela de resultado.
     function lerExtrasAR() {
         return {
             canceladas: lerValorLinhaAR(/^canceladas$/i),
+            negativas: lerValorLinhaAR(/^negativas$/i),
             naoRealizadas: lerValorLinhaAR(/^n[ãa]o\s+realizadas$/i),
             redesignadas: lerValorLinhaAR(/^redesignadas$/i),
             pessoasOuvidas: lerValorLinhaAR(/^total\s+de\s+pessoas\s+ouvidas$/i),
@@ -1476,84 +1472,46 @@
     // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
     // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
     // caso raro em que o valor novo coincide por acaso com o antigo).
-    // Reage a mudanças REAIS no DOM (MutationObserver) em vez de só um poll cego a cada
-    // 500ms — pedido do usuário: a extração de cada magistrado estava demorando mais do
-    // que o necessário (a soma dos polls de 500ms, um por usuário, ao longo de uma vara
-    // com muitos magistrados, é sensível). A validação de correção continua EXATAMENTE a
-    // mesma de antes (evita o bug original, "valor repetido mesmo a tela não mostrando
-    // valores idênticos"): só aceita como estável quando (a) o valor mudou em relação ao
-    // que estava na tela ANTES desta pesquisa (assinaturaAntes) e (b) duas leituras
-    // seguidas bateram — só a forma de decidir QUANDO reler mudou, de "esperar 500ms" para
-    // "reagir assim que o DOM realmente mudou" (com um debounce curto pra deixar o lote de
-    // mudanças do AJAX terminar de aplicar antes de ler). Mantém um poll de segurança mais
-    // espaçado (1s) e o mesmo teto de ~15s de antes, como rede de proteção — cobre tanto o
-    // caso raro de a mudança não passar por childList/subtree quanto navegadores/telas
-    // atípicas onde o MutationObserver não dispare.
-    function aguardarResultadoAREEstabilizarEProcessar() {
+    //
+    // Uma rodada anterior tentou acelerar isso com um MutationObserver (reagir assim que o
+    // DOM muda, em vez de só o poll) — voltou a falhar em produção, e o pedido do usuário
+    // foi por uma lógica simples e previsível: "verifique que a tabela apareceu e foi
+    // preenchida". Poll puro é isso — mais fácil de confiar do que depender de como o
+    // Projudi de fato atualiza o DOM (que não dá pra garantir em todo navegador/versão).
+    function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
+        tentativa = tentativa || 0;
         const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
-        const inicio = Date.now();
-        const TIMEOUT_MS = 15000;
-        let ultimaAssinaturaVista = null;
-        let terminou = false;
-        let debounceTimer = null;
-        let confirmTimer = null;
-        let pollTimer = null;
-        let observer = null;
-
-        function pararDeObservar() {
-            terminou = true;
-            if (observer) observer.disconnect();
-            clearTimeout(debounceTimer);
-            clearTimeout(confirmTimer);
-            clearInterval(pollTimer);
+        const temTabela = !!document.querySelector('table.resultTable');
+        if (!temTabela) {
+            if (tentativa >= 30) {
+                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+                const form = formularioAudienciasRealizadas();
+                if (form) submitAR(form);
+                return;
+            }
+            setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
+            return;
         }
-
-        function checar() {
-            if (terminou) return;
-            const esgotado = Date.now() - inicio >= TIMEOUT_MS;
-            const temTabela = !!document.querySelector('table.resultTable');
-            if (!temTabela) {
-                if (esgotado) {
-                    console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
-                    pararDeObservar();
-                    const form = formularioAudienciasRealizadas();
-                    if (form) submitAR(form);
-                }
-                return;
-            }
-            const assinaturaAtual = assinaturaResultadoAR();
-            const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
-            if (jaMudou && ultimaAssinaturaVista === assinaturaAtual) {
-                console.log('[Projudi Audiências Realizadas] resultado estável (mutação detectada) — processando');
-                pararDeObservar();
-                processarResultadoAudienciasRealizadas();
-                return;
-            }
-            if (esgotado) {
-                console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
-                pararDeObservar();
-                processarResultadoAudienciasRealizadas();
-                return;
-            }
-            ultimaAssinaturaVista = assinaturaAtual;
-            // Agenda uma confirmação rápida (não depende de outra mutação de verdade
-            // acontecer no DOM) — é isso que dá a "segunda leitura igual" rápido, sem
-            // depender do poll de segurança mais espaçado (1s) pra confirmar.
-            clearTimeout(confirmTimer);
-            confirmTimer = setTimeout(checar, 150);
+        const assinaturaAtual = assinaturaResultadoAR();
+        const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
+        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaVistaAR) {
+            console.log('[Projudi Audiências Realizadas] resultado estável — processando');
+            processarResultadoAudienciasRealizadas();
+            return;
         }
-
-        observer = new MutationObserver(() => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(checar, 120);
-        });
-        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-        // Poll de segurança — mais espaçado que antes (o caminho rápido agora é o
-        // MutationObserver); só existe pro caso raro do observer não disparar e pro teto
-        // de ~15s.
-        pollTimer = setInterval(checar, 1000);
-        checar(); // confere uma vez de imediato — cobre o caso raro do valor já ter mudado antes do observer ligar
+        if (tentativa >= 30) {
+            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+            processarResultadoAudienciasRealizadas();
+            return;
+        }
+        ultimaAssinaturaVistaAR = assinaturaAtual;
+        setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
     }
+    // Guarda a última assinatura vista entre chamadas de aguardarResultadoAREEstabilizarE
+    // Processar — precisa ser uma variável de módulo (não local à função) porque cada
+    // chamada é um novo setTimeout, não uma recursão de verdade. Resetada a cada nova
+    // pesquisa (ver submitAR) pra não confundir com o valor da pesquisa ANTERIOR.
+    let ultimaAssinaturaVistaAR = null;
 
     // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
     // significa (geral ou de qual usuário, ver CHAVE_AGUARDANDO_AR) e segue a fila.
@@ -1583,7 +1541,7 @@
                 return;
             }
             const usuarios = lerOpcoesUsuarioAR(form);
-            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas}) — ${usuarios.length} usuário(s) a percorrer`);
+            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} negativas=${extras.negativas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas} pessoasOuvidas=${extras.pessoasOuvidas}) — ${usuarios.length} usuário(s) a percorrer`);
             store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
             store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
             atualizarProgressoAR(0, usuarios.length);
@@ -1592,11 +1550,12 @@
         }
 
         const extrasUsuario = lerExtrasAR();
-        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s), ${extrasUsuario.pessoasOuvidas} pessoa(s) ouvida(s)`);
+        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.negativas} negativa(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s), ${extrasUsuario.pessoasOuvidas} pessoa(s) ouvida(s)`);
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         acumulado.push({
             usuario: aguardando.value, nome: aguardando.label, quantidade: total,
-            canceladas: extrasUsuario.canceladas, naoRealizadas: extrasUsuario.naoRealizadas, redesignadas: extrasUsuario.redesignadas,
+            canceladas: extrasUsuario.canceladas, negativas: extrasUsuario.negativas,
+            naoRealizadas: extrasUsuario.naoRealizadas, redesignadas: extrasUsuario.redesignadas,
             pessoasOuvidas: extrasUsuario.pessoasOuvidas,
         });
         store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify(acumulado));
@@ -1609,48 +1568,59 @@
             .forEach(k => store.removeItem(k));
     }
 
-    // Fila de usuários vazia: monta o resumo final (total geral + detalhamento por usuário,
-    // já filtrado pelo mínimo — ver MIN_AUDIENCIAS_POR_USUARIO_AR) e grava no mesmo formato
+    // Fila de usuários vazia: monta o resumo final (total geral + detalhamento por TODOS
+    // os usuários, sem filtro de mínimo — pedido do usuário) e grava no mesmo formato
     // usado por lerDadosDe/criarColetor (uma "página" com um array de 1 item).
     function finalizarAudienciasRealizadas() {
         const totalGeral = parseInt(store.getItem(CHAVE_TOTAL_GERAL_AR) || '0', 10);
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         let periodo = { dataInicio: '', dataFim: '' };
         try { periodo = JSON.parse(store.getItem('projudi_audienciasrealizadas_periodo') || 'null') || periodo; } catch (e) { /* ignore */ }
-        let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 };
+        let extrasGeral = { canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 };
         try { extrasGeral = JSON.parse(store.getItem(CHAVE_EXTRAS_GERAL_AR) || 'null') || extrasGeral; } catch (e) { /* ignore */ }
 
-        // O mínimo agora considera o TOTAL do usuário no período (realizadas + canceladas
-        // + não realizadas + redesignadas), não só "realizadas" — pedido do usuário: um
-        // magistrado com poucas realizadas mas muitas canceladas/redesignadas ainda teve
-        // atividade relevante na vara e não deve ficar fora da lista por esse motivo.
-        const totalUsuarioAR = (u) => u.quantidade + (u.canceladas || 0) + (u.naoRealizadas || 0) + (u.redesignadas || 0);
-        const porUsuario = acumulado
-            .filter(u => totalUsuarioAR(u) >= MIN_AUDIENCIAS_POR_USUARIO_AR)
-            .sort((a, b) => b.quantidade - a.quantidade);
-        // Magistrados abaixo do mínimo — relacionados de forma discreta no PDF (pedido do
-        // usuário, "para futura conferência"), não escondidos silenciosamente.
-        const usuariosAbaixoDoMinimo = acumulado
-            .filter(u => totalUsuarioAR(u) < MIN_AUDIENCIAS_POR_USUARIO_AR)
-            .map(u => ({ nome: u.nome, total: totalUsuarioAR(u) }))
-            .sort((a, b) => b.total - a.total);
-        const usuariosIgnorados = usuariosAbaixoDoMinimo.length;
+        // Pedido do usuário: TODOS os magistrados aparecem no detalhamento, mesmo com 0
+        // audiências — sem filtrar por um mínimo (o antigo MIN_AUDIENCIAS_POR_USUARIO_AR
+        // foi removido). Ordenados pelo total de realizadas, maior primeiro.
+        const porUsuario = acumulado.slice().sort((a, b) => b.quantidade - a.quantidade);
+
+        // Confere se a soma dos valores individuais bate com o total geral da vara (pedido
+        // do usuário) — cada pesquisa por magistrado é uma requisição independente ao
+        // Projudi, então um total que não fecha é sinal de coleta incompleta/inconsistente
+        // (ex.: pesquisa que não terminou de carregar antes de ler). Não trava o
+        // relatório — só avisa, no console e no próprio PDF, pra conferência.
+        const somar = (campo) => acumulado.reduce((s, u) => s + (u[campo] || 0), 0);
+        const somaIndividual = {
+            quantidade: somar('quantidade'), canceladas: somar('canceladas'), negativas: somar('negativas'),
+            naoRealizadas: somar('naoRealizadas'), redesignadas: somar('redesignadas'), pessoasOuvidas: somar('pessoasOuvidas'),
+        };
+        const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
+        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
+        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
+        const divergencias = camposConferidos
+            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
+            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
+        const somaConfere = divergencias.length === 0;
+        if (!somaConfere) {
+            console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral: ${divergencias.map(d => `${d.campo} (geral=${d.geral}, soma=${d.soma})`).join(', ')}`);
+        }
 
         const resumo = {
             geradoEm: new Date().toISOString(),
             totalGeral,
             canceladas: extrasGeral.canceladas,
+            negativas: extrasGeral.negativas || 0,
             naoRealizadas: extrasGeral.naoRealizadas,
             redesignadas: extrasGeral.redesignadas,
             pessoasOuvidas: extrasGeral.pessoasOuvidas || 0,
             periodo,
             porUsuario,
-            usuariosIgnorados,
-            usuariosAbaixoDoMinimo,
             totalUsuarios: acumulado.length,
+            somaConfere,
+            divergencias,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} pessoasOuvidas=${extrasGeral.pessoasOuvidas} usuarios=${acumulado.length} exibidos(total>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} negativas=${extrasGeral.negativas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} pessoasOuvidas=${extrasGeral.pessoasOuvidas} usuarios=${acumulado.length} somaConfere=${somaConfere}`);
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -5870,7 +5840,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, usuariosAbaixoDoMinimo: [], totalUsuarios: 0, competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], totalUsuarios: 0, somaConfere: true, divergencias: [], competencia: '' };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -5881,38 +5851,42 @@
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
         let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-        let obs = `Observação: o detalhamento por usuário mostra apenas quem teve, no total (realizadas + canceladas + não `
-            + `realizadas + redesignadas), ${MIN_AUDIENCIAS_POR_USUARIO_AR} ou mais audiências no período `
-            + `(${r.usuariosIgnorados} usuário(s) abaixo desse mínimo não aparecem na lista, mas contam no total geral).`;
-        if (r.usuariosAbaixoDoMinimo && r.usuariosAbaixoDoMinimo.length) {
-            obs += ` Abaixo do mínimo: ${r.usuariosAbaixoDoMinimo.map(u => `${u.nome} (${u.total})`).join(', ')}.`;
+        // Observação: só aparece quando a soma dos valores por magistrado NÃO bate com o
+        // total geral da vara (pedido do usuário — conferência antes de seguir no
+        // relatório) — sinal de coleta incompleta/inconsistente a checar manualmente.
+        // Quando bate, não polui a página com um aviso sem necessidade.
+        let yLinha = yObs;
+        if (!r.somaConfere && r.divergencias && r.divergencias.length) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.vermelho);
+            const obs = `Atenção: a soma dos valores por magistrado não bate com o total geral da vara — `
+                + r.divergencias.map(d => `${d.campo} (geral=${d.geral}, soma dos magistrados=${d.soma})`).join('; ')
+                + `. Possível coleta incompleta — confira antes de usar estes números.`;
+            const linhasObs = doc.splitTextToSize(obs, uw);
+            doc.text(linhasObs, m, yObs);
+            yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
         }
-        const linhasObs = doc.splitTextToSize(obs, uw);
-        doc.text(linhasObs, m, yObs);
-        const yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
         const kY = yLinha + 5;
-        // 3 cards agora (pedido do usuário: incluir o total de pessoas ouvidas, mesma
-        // tabela de totais da tela, linha "Total de Pessoas Ouvidas").
         const kW3top = (uw - 2 * gap) / 3;
         desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length), [], true, COR.aqua);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(r.porUsuario.length), [], true, COR.aqua);
         desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
 
-        // Canceladas/Não Realizadas/Redesignadas — extraídas só da pesquisa geral (pedido
-        // do usuário), lado a lado numa segunda linha de KPIs menores.
+        // Canceladas/Negativas/Não Realizadas/Redesignadas — extraídas só da pesquisa
+        // geral, lado a lado numa segunda linha de KPIs menores.
         const k2Y = kY + 28 + gap;
-        const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m,                  k2Y, kW3, 24, 'Canceladas', String(r.canceladas), [], true, COR.ambar);
-        desenharCard(doc, m + kW3 + gap,      k2Y, kW3, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
-        desenharCard(doc, m + 2 * (kW3 + gap), k2Y, kW3, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
+        const kW4 = (uw - 3 * gap) / 4;
+        desenharCard(doc, m,                   k2Y, kW4, 24, 'Canceladas', String(r.canceladas), [], true, COR.ambar);
+        desenharCard(doc, m + kW4 + gap,       k2Y, kW4, 24, 'Negativas', String(r.negativas), [], true, COR.muted);
+        desenharCard(doc, m + 2 * (kW4 + gap), k2Y, kW4, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
+        desenharCard(doc, m + 3 * (kW4 + gap), k2Y, kW4, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
 
         // Sem gráfico aqui — a mesma informação já está na tabela abaixo (pedido do
         // usuário), com o percentual de cada categoria sobre o total do magistrado(a)
-        // (realizadas + canceladas + não realizadas + redesignadas).
+        // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
+        // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
         const tY = k2Y + 24 + gap + 4;
         if (r.porUsuario.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
@@ -5922,17 +5896,19 @@
                     { header: 'Usuário', dataKey: 'nome' },
                     { header: 'Realizadas', dataKey: 'quantidade' },
                     { header: 'Canceladas', dataKey: 'canceladas' },
+                    { header: 'Negativas', dataKey: 'negativas' },
                     { header: 'Não Realizadas', dataKey: 'naoRealizadas' },
                     { header: 'Redesignadas', dataKey: 'redesignadas' },
                     { header: 'Pessoas Ouvidas', dataKey: 'pessoasOuvidas' },
                 ],
                 body: r.porUsuario.map(u => {
-                    const canceladas = u.canceladas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
-                    const totalUsuario = u.quantidade + canceladas + naoRealizadas + redesignadas;
+                    const canceladas = u.canceladas || 0, negativas = u.negativas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
+                    const totalUsuario = u.quantidade + canceladas + negativas + naoRealizadas + redesignadas;
                     return {
                         nome: u.nome,
                         quantidade: `${u.quantidade} (${fmtPct(u.quantidade, totalUsuario)})`,
                         canceladas: `${canceladas} (${fmtPct(canceladas, totalUsuario)})`,
+                        negativas: `${negativas} (${fmtPct(negativas, totalUsuario)})`,
                         naoRealizadas: `${naoRealizadas} (${fmtPct(naoRealizadas, totalUsuario)})`,
                         redesignadas: `${redesignadas} (${fmtPct(redesignadas, totalUsuario)})`,
                         pessoasOuvidas: String(u.pessoasOuvidas || 0),
@@ -5941,16 +5917,17 @@
                 startY: tY + 6,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
-                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 7.5 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: {
-                    nome: { cellWidth: uw * 0.26 },
-                    quantidade: { cellWidth: uw * 0.15, halign: 'right' },
-                    canceladas: { cellWidth: uw * 0.15, halign: 'right' },
-                    naoRealizadas: { cellWidth: uw * 0.15, halign: 'right' },
-                    redesignadas: { cellWidth: uw * 0.15, halign: 'right' },
-                    pessoasOuvidas: { cellWidth: uw * 0.14, halign: 'right' },
+                    nome: { cellWidth: uw * 0.22 },
+                    quantidade: { cellWidth: uw * 0.13, halign: 'right' },
+                    canceladas: { cellWidth: uw * 0.13, halign: 'right' },
+                    negativas: { cellWidth: uw * 0.13, halign: 'right' },
+                    naoRealizadas: { cellWidth: uw * 0.13, halign: 'right' },
+                    redesignadas: { cellWidth: uw * 0.13, halign: 'right' },
+                    pessoasOuvidas: { cellWidth: uw * 0.13, halign: 'right' },
                 },
                 didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
