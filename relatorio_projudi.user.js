@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.2
+// @version      21.3
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7755,6 +7755,25 @@
     const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
     function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
 
+    // Checkboxes de relatório do painel (.pa-check) — pedido do usuário: as marcações
+    // devem PERSISTIR entre atuações (o usuário troca de atuação/vara pra rodar a
+    // automação de novo, e antes tinha que remarcar tudo do zero toda vez, já que o
+    // painel é recriado a cada carregamento de página — ver injetarPainel). Guarda um
+    // snapshot {key: true/false} de TODOS os checkboxes a cada mudança; na próxima
+    // renderização, cada item usa o valor salvo se existir, senão o padrão (todos
+    // marcados, ver relatorioMarcadoPorPadrao).
+    const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
+    function lerSelecoesSalvasPainel() {
+        try { return JSON.parse(store.getItem(CHAVE_RELATORIOS_SELECIONADOS) || 'null') || {}; }
+        catch (e) { return {}; }
+    }
+    // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
+    // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
+    function relatorioMarcadoPorPadrao(key) {
+        const salvas = lerSelecoesSalvasPainel();
+        return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+    }
+
     function desembrulharArray(valor) {
         let v = valor, t = 0;
         while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { break; } t++; }
@@ -8658,6 +8677,32 @@
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
+
+        // Unidades (atribuições/atuações) com dados já coletados na memória — pedido do
+        // usuário, pra saber de relance quantas/quais atuações já foram percorridas antes
+        // de decidir gerar o PDF (inclusive pra saber se vai cair no fluxo "resumo geral +
+        // por atribuição" — ver baixarPDFConjunto). Usa o mesmo mapa de Processos Ativos
+        // já usado pra essa decisão (gravado uma vez por atuação, a cada rodada da
+        // automação — ver gravarProcessosAtivosSeDisponivel).
+        const elUnidades = painel.querySelector('.pa-unidades');
+        if (elUnidades) {
+            const unidades = Object.keys(lerMapaAtivos());
+            if (unidades.length) {
+                elUnidades.style.display = '';
+                const rotulo = unidades.length === 1 ? 'Unidade coletada' : `${unidades.length} unidades coletadas`;
+                // Monta via DOM (não innerHTML) — os nomes de atuação vêm da própria
+                // página do Projudi, mas não custa nada evitar interpretar qualquer coisa
+                // ali como marcação.
+                elUnidades.textContent = '';
+                const forte = document.createElement('strong');
+                forte.textContent = `${rotulo}: `;
+                elUnidades.appendChild(forte);
+                elUnidades.appendChild(document.createTextNode(unidades.join(' · ')));
+            } else {
+                elUnidades.style.display = 'none';
+            }
+        }
+
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
         painel.querySelector('#pa-excel').disabled = total === 0;
@@ -8744,8 +8789,8 @@
         // resto do código já espera (ver #pa-incluir-ativos/CHAVE_INCLUIR_ATIVOS abaixo).
         const ITEM_ATIVOS = { key: 'processosativos', rotuloChecklist: 'Ativos', subgrupo: 'Estatísticas Gerais', extra: true };
 
-        // Todos os relatórios vêm marcados por padrão, exceto Tempo Médio (precisa ser
-        // habilitado explicitamente — ver seletor de período ao lado).
+        // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
+        // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r) {
             if (r.extra) {
                 return `
@@ -8761,7 +8806,7 @@
             const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
             return `
                     <label class="${classeItem}">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -8820,6 +8865,7 @@
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
                 </div>
+                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações com dados já coletados na memória (Processos Ativos e/ou algum relatório) — persistem até 'Limpar' ou até gerar o Relatório PDF"></div>
                 <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
@@ -8894,6 +8940,18 @@
                 store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
             };
         }
+        // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
+        // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
+        // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
+        // (pedido do usuário: antes tinha que remarcar tudo do zero a cada troca de
+        // atuação, já que o painel é recriado a cada carregamento — ver injetarPainel).
+        function salvarSelecoesPainel() {
+            const obj = {};
+            painel.querySelectorAll('.pa-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
+            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        }
+        painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
+
         // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
         // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
         // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
@@ -8902,6 +8960,7 @@
         function marcarDesmarcarTudo(valor) {
             painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
             if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+            salvarSelecoesPainel();
         }
         painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
         painel.querySelector('#pa-desmarcar-tudo').onclick = () => marcarDesmarcarTudo(false);
@@ -8928,6 +8987,11 @@
             grupoEspecifico.style.display = ehCivel ? 'none' : '';
             grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
             grupoEspecifico.querySelector('.pa-group-conteudo').innerHTML = montarGrupoEspecifico(cat);
+            // innerHTML acima recria os .pa-check daquela categoria do zero — o listener
+            // de persistência (salvarSelecoesPainel, ver mais abaixo) precisa ser
+            // reanexado a esses elementos NOVOS a cada troca de aba, senão marcar/
+            // desmarcar um item específico de uma categoria não-Cível não persistia.
+            grupoEspecifico.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
             atualizarPainel();
         }
@@ -9074,6 +9138,8 @@
         #painel-automacao .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
         #painel-automacao .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
         #painel-automacao .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
+        #painel-automacao .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
 
         #painel-automacao .pa-progress { margin-bottom: 10px; }
         #painel-automacao .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
