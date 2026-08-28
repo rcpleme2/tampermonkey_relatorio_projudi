@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Exportar Conclusões Projudi para Excel
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.0
+// @version      21.1
 // @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -326,6 +326,14 @@
                         const dias = sub.filter(temPreAnalise).map(d => diasDesdePreAnalise(d, Date.now())).filter(v => v !== '').map(Number);
                         return { tipo: 'barras', itens: faixasDeDias(dias).filter(f => f.valor > 0) };
                     },
+                },
+                // Padrão de dias úteis das conclusões (pedido do usuário) — mesmo gráfico
+                // já existente para Audiências Designadas (concentração por dia da
+                // semana), aqui a partir da data de remessa para conclusão (dtRemessa),
+                // que já é coletada por todo processo — ver contarPorDiaUtil.
+                {
+                    titulo: 'Conclusões por Dia da Semana (dias úteis)',
+                    calc: (sub) => ({ tipo: 'barras', itens: contarPorDiaUtil(sub, 'dtRemessa') }),
                 },
             ],
             // Larguras somam 174mm — cabem na área útil (~186mm em A4 retrato com margem
@@ -1023,6 +1031,49 @@
         });
     }
 
+    // Detecta o caso "pesquisa já feita, mas zero audiências no período" — confirmado por
+    // captura real: quando não há nenhuma audiência designada, a tabela EXTERNA (cabeçalho
+    // Local da Audiência/Data/Audiências) aparece sozinha, sem NENHUMA tabela interna por
+    // dia (por isso pautaAudienciasTemResultados() acima dá false), e o corpo é só uma
+    // linha "Nenhum registro encontrado" (colspan). Sem essa distinção, esse cenário caía
+    // no mesmo caminho de "formulário ainda não pesquisado" — o botão "Preencher e
+    // Pesquisar" ficava sempre disponível e a automação nunca marcava o relatório como
+    // coletado (nem manualmente nem via automação), então "Audiências Designadas" sumia
+    // do relatório em vez de aparecer com 0 (relatado pelo usuário).
+    function pautaAudienciasSemResultados() {
+        return [...document.querySelectorAll('table.resultTable')].some(t => {
+            const thead = t.querySelector(':scope > thead');
+            const cab = thead ? thead.textContent : '';
+            if (!/local\s+da\s+audi[êe]ncia/i.test(cab) || !/data/i.test(cab)) return false;
+            const tbody = t.querySelector(':scope > tbody');
+            return !!tbody && /nenhum\s+registro\s+encontrado/i.test(tbody.textContent);
+        });
+    }
+
+    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
+    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
+    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha.
+    function salvarAudienciasDesignadasVazio() {
+        const resumo = {
+            geradoEm: new Date().toISOString(),
+            totalDesignadas: 0,
+            ultimaData: null,
+            processosUltimoDia: [],
+            totalProcessosUltimoDia: 0,
+            porTipo: [],
+            tabela: [],
+            concentracaoDiaSemana: concentracaoPorDiaSemana([]),
+            competencia: competenciaDe(lerAtuacao()),
+        };
+        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — salvando resumo com 0 audiências designadas');
+        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+        store.removeItem(CHAVE_PROGRESSO_AD);
+        avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
+
     // Lê todas as linhas (uma por horário/tipo) das tabelas internas de cada dia — a
     // "Pauta de Horários" agrupa por Local + Data (tabela externa) e, dentro de cada
     // grupo, uma tabela interna própria com colunas Horário/Modalidade/Criadas/Agendadas/
@@ -1404,7 +1455,6 @@
     function assinaturaResultadoAR() {
         return `${lerTotalRealizadasAR()}|${JSON.stringify(lerExtrasAR())}`;
     }
-    let ultimaAssinaturaAR = null;
 
     // A tabela de totais desta tela é preenchida via AJAX depois do HTML inicial da
     // página (mesma lição já aprendida em Outros Cumprimentos/Mandados) — processar o
@@ -1422,34 +1472,83 @@
     // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
     // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
     // caso raro em que o valor novo coincide por acaso com o antigo).
-    function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
-        tentativa = tentativa || 0;
-        const temTabela = !!document.querySelector('table.resultTable');
-        if (!temTabela) {
-            if (tentativa >= 30) {
-                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
-                const form = formularioAudienciasRealizadas();
-                if (form) submitAR(form);
+    // Reage a mudanças REAIS no DOM (MutationObserver) em vez de só um poll cego a cada
+    // 500ms — pedido do usuário: a extração de cada magistrado estava demorando mais do
+    // que o necessário (a soma dos polls de 500ms, um por usuário, ao longo de uma vara
+    // com muitos magistrados, é sensível). A validação de correção continua EXATAMENTE a
+    // mesma de antes (evita o bug original, "valor repetido mesmo a tela não mostrando
+    // valores idênticos"): só aceita como estável quando (a) o valor mudou em relação ao
+    // que estava na tela ANTES desta pesquisa (assinaturaAntes) e (b) duas leituras
+    // seguidas bateram — só a forma de decidir QUANDO reler mudou, de "esperar 500ms" para
+    // "reagir assim que o DOM realmente mudou" (com um debounce curto pra deixar o lote de
+    // mudanças do AJAX terminar de aplicar antes de ler). Mantém um poll de segurança mais
+    // espaçado (1s) e o mesmo teto de ~15s de antes, como rede de proteção — cobre tanto o
+    // caso raro de a mudança não passar por childList/subtree quanto navegadores/telas
+    // atípicas onde o MutationObserver não dispare.
+    function aguardarResultadoAREEstabilizarEProcessar() {
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
+        const inicio = Date.now();
+        const TIMEOUT_MS = 15000;
+        let ultimaAssinaturaVista = null;
+        let terminou = false;
+        let debounceTimer = null;
+        let confirmTimer = null;
+        let pollTimer = null;
+        let observer = null;
+
+        function pararDeObservar() {
+            terminou = true;
+            if (observer) observer.disconnect();
+            clearTimeout(debounceTimer);
+            clearTimeout(confirmTimer);
+            clearInterval(pollTimer);
+        }
+
+        function checar() {
+            if (terminou) return;
+            const esgotado = Date.now() - inicio >= TIMEOUT_MS;
+            const temTabela = !!document.querySelector('table.resultTable');
+            if (!temTabela) {
+                if (esgotado) {
+                    console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+                    pararDeObservar();
+                    const form = formularioAudienciasRealizadas();
+                    if (form) submitAR(form);
+                }
                 return;
             }
-            setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
-            return;
+            const assinaturaAtual = assinaturaResultadoAR();
+            const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
+            if (jaMudou && ultimaAssinaturaVista === assinaturaAtual) {
+                console.log('[Projudi Audiências Realizadas] resultado estável (mutação detectada) — processando');
+                pararDeObservar();
+                processarResultadoAudienciasRealizadas();
+                return;
+            }
+            if (esgotado) {
+                console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+                pararDeObservar();
+                processarResultadoAudienciasRealizadas();
+                return;
+            }
+            ultimaAssinaturaVista = assinaturaAtual;
+            // Agenda uma confirmação rápida (não depende de outra mutação de verdade
+            // acontecer no DOM) — é isso que dá a "segunda leitura igual" rápido, sem
+            // depender do poll de segurança mais espaçado (1s) pra confirmar.
+            clearTimeout(confirmTimer);
+            confirmTimer = setTimeout(checar, 150);
         }
-        const assinaturaAtual = assinaturaResultadoAR();
-        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
-        const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
-        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaAR) {
-            console.log(`[Projudi Audiências Realizadas] resultado estável na tentativa ${tentativa} — processando`);
-            processarResultadoAudienciasRealizadas();
-            return;
-        }
-        if (tentativa >= 30) {
-            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
-            processarResultadoAudienciasRealizadas();
-            return;
-        }
-        ultimaAssinaturaAR = assinaturaAtual;
-        setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
+
+        observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(checar, 120);
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+        // Poll de segurança — mais espaçado que antes (o caminho rápido agora é o
+        // MutationObserver); só existe pro caso raro do observer não disparar e pro teto
+        // de ~15s.
+        pollTimer = setInterval(checar, 1000);
+        checar(); // confere uma vez de imediato — cobre o caso raro do valor já ter mudado antes do observer ligar
     }
 
     // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
@@ -1465,11 +1564,24 @@
             store.setItem(CHAVE_TOTAL_GERAL_AR, String(total));
             const extras = lerExtrasAR();
             store.setItem(CHAVE_EXTRAS_GERAL_AR, JSON.stringify(extras));
+            store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
+            // Pedido do usuário: com 0 audiências realizadas no período (total geral), não
+            // há nenhum magistrado que possa ter mais que 0 — percorrer o combo de
+            // usuários um a um só repetiria a mesma pesquisa vazia dezenas de vezes.
+            // Finaliza direto, sem popular a fila (mesmo caminho de "fila vazia" que
+            // avancarUsuarioAR já usa quando termina de percorrer os usuários de verdade).
+            if (total === 0) {
+                console.log('[Projudi Audiências Realizadas] total geral do período = 0 — pulando a pesquisa individual por magistrado');
+                store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify([]));
+                store.setItem(CHAVE_TOTAL_USUARIOS_AR, '0');
+                atualizarProgressoAR(0, 0);
+                finalizarAudienciasRealizadas();
+                return;
+            }
             const usuarios = lerOpcoesUsuarioAR(form);
             console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas}) — ${usuarios.length} usuário(s) a percorrer`);
             store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
             store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
-            store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
             atualizarProgressoAR(0, usuarios.length);
             avancarUsuarioAR(form);
             return;
@@ -2904,6 +3016,25 @@
         return best;
     }
 
+    // Contagem por dia útil (Segunda a Sexta) a partir de um campo de data — mesma ideia
+    // de concentracaoPorDiaSemana (Audiências Designadas), generalizada para qualquer
+    // relatório com um campo de data simples (um registro = uma data, sem a estrutura de
+    // "linha com processos vinculados" da pauta de audiências). Sábados/domingos são
+    // descartados (o Judiciário não distribui/conclui nesses dias — uma data cadastrada
+    // num fim de semana seria erro de digitação/exceção, não padrão a mostrar num
+    // gráfico "por dia útil").
+    function contarPorDiaUtil(dados, campoData) {
+        const porDia = new Map(); // 1-5 -> quantidade
+        dados.forEach(d => {
+            const ts = parseDataBR(d[campoData]);
+            if (ts == null) return;
+            const dow = new Date(ts).getDay();
+            if (dow < 1 || dow > 5) return;
+            porDia.set(dow, (porDia.get(dow) || 0) + 1);
+        });
+        return [1, 2, 3, 4, 5].map(dow => ({ label: ROTULOS_DIA_UTIL[dow], valor: porDia.get(dow) || 0 }));
+    }
+
     // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
     // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
     function contarPorCampo(dados, campo, topN, limpar, semOutros, minValor) {
@@ -3146,8 +3277,23 @@
             let yy = y + (h - blocoH) / 2 + 4;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
             doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(valor.length <= 26 ? 15 : 11); doc.setTextColor(...COR.tinta);
-            doc.text(textoTruncadoParaLargura(doc, valor, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
+            // Escolhe a MAIOR fonte que caiba o valor por inteiro (medindo de verdade, não
+            // só por número de caracteres) — o número de um processo (~25 caracteres) caía
+            // no mesmo balde de fonte 15pt que valores bem mais curtos, estourava a largura
+            // do card (3 por linha, ~58mm) e saía cortado mesmo com a elipse de
+            // textoTruncadoParaLargura (relatado pelo usuário: número do processo ilegível
+            // no KPI "Fim de Suspensão Mais Distante"). Só cai pra elipse se nem a menor
+            // fonte da lista couber.
+            doc.setFont('PublicSans', 'bold');
+            const valorTexto = String(valor);
+            const TAMANHOS_VALOR_CARD = [15, 13, 11, 10, 9];
+            let fonteValor = TAMANHOS_VALOR_CARD[TAMANHOS_VALOR_CARD.length - 1];
+            for (const tam of TAMANHOS_VALOR_CARD) {
+                doc.setFontSize(tam);
+                if (doc.getTextWidth(valorTexto) <= w - 10) { fonteValor = tam; break; }
+            }
+            doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+            doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
             return;
@@ -4289,9 +4435,13 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
+        // Título do relatório (pedido do usuário): "Relatório para Correição Ordinária",
+        // centralizado na faixa azul do topo, com fonte menor que antes (20 -> 15) — o
+        // texto novo é bem mais longo que "Situação da Unidade" e em 20pt chegava a
+        // encostar nas bordas em telas/impressões mais estreitas.
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
-        doc.text('Situação da Unidade', m, 17);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
+        doc.text('Relatório para Correição Ordinária', pw / 2, 17, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
 
@@ -4308,6 +4458,15 @@
         });
 
         y += 8;
+
+        // Garante espaço pro CABEÇALHO do bloco Gabinete (faixa + observação) antes de
+        // desenhar — sem isso, quando o bloco do Cartório termina perto do fim da página,
+        // a faixa "Gabinete" era desenhada colada na borda inferior e a tabela pulava pra
+        // página seguinte sozinha (autoTable pagina, mas o cabeçalho acima dela não),
+        // cortando visualmente o título do bloco (relatado pelo usuário, com print).
+        const ph = doc.internal.pageSize.getHeight();
+        const ALTURA_MIN_CABECALHO_DOMINIO = 40; // faixa (15) + observação (~2 linhas) + folga
+        if (y > ph - ALTURA_MIN_CABECALHO_DOMINIO) { doc.addPage(); y = m; }
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
@@ -7261,7 +7420,14 @@
                 coletarAudienciasDesignadas();
                 return;
             }
-            if (!pautaAudienciasTemResultados()) {
+            if (estadoAtual === 'coletando_audienciasdesignadas' && pautaAudienciasSemResultados()) {
+                // Pesquisa já foi feita, mas não há nenhuma audiência no período ("Nenhum
+                // registro encontrado") — salva 0 direto, sem esperar um "Extrair" manual
+                // que nunca apareceria (ver pautaAudienciasSemResultados).
+                salvarAudienciasDesignadasVazio();
+                return;
+            }
+            if (!pautaAudienciasTemResultados() && !pautaAudienciasSemResultados()) {
                 if (!mostrarBotoesIndividuais()) return;
                 const bPreencher = document.createElement('button');
                 bPreencher.type = 'button';
@@ -7270,6 +7436,19 @@
                 bPreencher.textContent = 'Preencher e Pesquisar (Audiências Designadas)';
                 bPreencher.onclick = () => preencherEPesquisarPautaAudiencias();
                 buttonBar.appendChild(bPreencher);
+                return;
+            }
+            if (pautaAudienciasSemResultados()) {
+                // Fora do fluxo de automação (uso manual): mesma constatação de 0
+                // audiências — salva direto, sem exigir clique em "Extrair".
+                if (!mostrarBotoesIndividuais()) return;
+                const bExtrairVazio = document.createElement('button');
+                bExtrairVazio.type = 'button';
+                bExtrairVazio.className = 'projudi-btn';
+                bExtrairVazio.title = 'Nenhuma audiência encontrada no período — salva o resumo com 0 audiências designadas';
+                bExtrairVazio.textContent = 'Extrair Audiências Designadas (0 encontradas)';
+                bExtrairVazio.onclick = () => salvarAudienciasDesignadasVazio();
+                buttonBar.appendChild(bExtrairVazio);
                 return;
             }
             if (!mostrarBotoesIndividuais()) return;
@@ -7300,8 +7479,7 @@
                 return;
             }
             if (estadoAtual === 'coletando_audienciasrealizadas') {
-                ultimaAssinaturaAR = null;
-                aguardarResultadoAREEstabilizarEProcessar(0);
+                aguardarResultadoAREEstabilizarEProcessar();
                 return;
             }
             const temResultado = !!document.querySelector('table.resultTable');
