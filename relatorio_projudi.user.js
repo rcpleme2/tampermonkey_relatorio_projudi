@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.3
+// @version      21.5
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -596,7 +596,10 @@
         usaAtuacao: false,
         nomeArquivo: 'remessas_abertas_projudi',
         rotulos: { coletar: 'Extrair Remessas', coletarMais: 'Extrair mais (Remessas)', baixar: '⬇ Baixar Remessas' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Dias Paralisado', 'Último Movimento', 'Prioritário'],
+        // "Dias em Remessa", não "Dias Paralisado" (pedido do usuário: não confundir com
+        // o relatório de Processos Paralisados — são conceitos diferentes, mesmo vindo da
+        // mesma tela/coluna do Projudi).
+        cabecalhos: ['Processo', 'Classe Processual', 'Dias em Remessa', 'Último Movimento', 'Prioritário'],
         larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }, { wch: 50 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[2].querySelector('em');
@@ -1375,14 +1378,15 @@
     // serve tanto pra pesquisa geral quanto pra cada pesquisa por usuário.
     function lerTotalRealizadasAR() { return lerValorLinhaAR(/^total\s+realizadas$/i); }
 
-    // Canceladas/Não Realizadas/Redesignadas — lidas tanto na pesquisa geral (total do
-    // período) quanto em cada pesquisa por usuário (pedido do usuário: também por
-    // magistrado), sempre da mesma tabela de resultado.
+    // Canceladas/Não Realizadas/Redesignadas/Pessoas Ouvidas — lidas tanto na pesquisa
+    // geral (total do período) quanto em cada pesquisa por usuário (pedido do usuário:
+    // também por magistrado), sempre da mesma tabela de resultado.
     function lerExtrasAR() {
         return {
             canceladas: lerValorLinhaAR(/^canceladas$/i),
             naoRealizadas: lerValorLinhaAR(/^n[ãa]o\s+realizadas$/i),
             redesignadas: lerValorLinhaAR(/^redesignadas$/i),
+            pessoasOuvidas: lerValorLinhaAR(/^total\s+de\s+pessoas\s+ouvidas$/i),
         };
     }
 
@@ -1588,11 +1592,12 @@
         }
 
         const extrasUsuario = lerExtrasAR();
-        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s)`);
+        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s), ${extrasUsuario.pessoasOuvidas} pessoa(s) ouvida(s)`);
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         acumulado.push({
             usuario: aguardando.value, nome: aguardando.label, quantidade: total,
             canceladas: extrasUsuario.canceladas, naoRealizadas: extrasUsuario.naoRealizadas, redesignadas: extrasUsuario.redesignadas,
+            pessoasOuvidas: extrasUsuario.pessoasOuvidas,
         });
         store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify(acumulado));
         avancarUsuarioAR(form);
@@ -1612,7 +1617,7 @@
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         let periodo = { dataInicio: '', dataFim: '' };
         try { periodo = JSON.parse(store.getItem('projudi_audienciasrealizadas_periodo') || 'null') || periodo; } catch (e) { /* ignore */ }
-        let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0 };
+        let extrasGeral = { canceladas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 };
         try { extrasGeral = JSON.parse(store.getItem(CHAVE_EXTRAS_GERAL_AR) || 'null') || extrasGeral; } catch (e) { /* ignore */ }
 
         // O mínimo agora considera o TOTAL do usuário no período (realizadas + canceladas
@@ -1637,6 +1642,7 @@
             canceladas: extrasGeral.canceladas,
             naoRealizadas: extrasGeral.naoRealizadas,
             redesignadas: extrasGeral.redesignadas,
+            pessoasOuvidas: extrasGeral.pessoasOuvidas || 0,
             periodo,
             porUsuario,
             usuariosIgnorados,
@@ -1644,7 +1650,7 @@
             totalUsuarios: acumulado.length,
             competencia: competenciaDe(lerAtuacao()),
         };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} usuarios=${acumulado.length} exibidos(total>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
+        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} pessoasOuvidas=${extrasGeral.pessoasOuvidas} usuarios=${acumulado.length} exibidos(total>=${MIN_AUDIENCIAS_POR_USUARIO_AR})=${porUsuario.length} ignorados=${usuariosIgnorados}`);
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
@@ -4427,11 +4433,7 @@
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
     // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
     // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
-    // tituloAtribuicao (opcional): quando definido, este bloco é o relatório ESPECÍFICO de
-    // uma atribuição/atuação (ver "relatório por atribuição" em baixarPDFConjunto) — some
-    // no título, abaixo do título principal, deixando claro que os números daquela página
-    // em diante são só daquela atribuição, não do total geral.
-    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, tituloAtribuicao) {
+    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira) {
         if (!primeira) doc.addPage();
         const pw = doc.internal.pageSize.getWidth();
         const m = 16;
@@ -4442,16 +4444,15 @@
         // Título do relatório (pedido do usuário): "Relatório para Correição Ordinária",
         // centralizado na faixa azul do topo, com fonte menor que antes (20 -> 15) — o
         // texto novo é bem mais longo que "Situação da Unidade" e em 20pt chegava a
-        // encostar nas bordas em telas/impressões mais estreitas.
+        // encostar nas bordas em telas/impressões mais estreitas. Único pra todas as
+        // atribuições coletadas — sempre com os dados de TODAS elas somados (nunca
+        // filtrado), mesmo quando o relatório inclui blocos específicos por atribuição
+        // dentro de cada item (ver subBlocosPorAtribuicao em gerarPDFConjunto).
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
         doc.text('Relatório para Correição Ordinária', pw / 2, 17, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
-        if (tituloAtribuicao) {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.azul);
-            doc.text(`Atribuição: ${tituloAtribuicao}`, pw - m, 36, { align: 'right' });
-        }
 
         let y = 44;
 
@@ -4603,30 +4604,40 @@
         return paginaInicial;
     }
 
-    // opcoes (todas opcionais, pedido do usuário — relatório específico por atribuição
-    // quando mais de uma foi coletada, ver baixarPDFConjunto):
-    //   - doc: documento jsPDF já existente pra CONTINUAR desenhando nele (em vez de criar
-    //     um novo) — usado pra encadear o resumo geral + um bloco por atribuição no MESMO
-    //     arquivo .pdf, em vez de baixar um arquivo por atribuição.
-    //   - filtroAtuacao: quando definido, só entram nas seções os REGISTROS cujo
-    //     atuacao/competencia bate com esse valor — o resto da função funciona sem
-    //     nenhuma outra mudança, porque já opera genericamente sobre secoesEntrada/
-    //     s.dados (filtrar na entrada é suficiente pra "fatiar" o relatório inteiro por
-    //     atribuição sem duplicar toda a lógica de cartório/gabinete/capa).
-    //   - baixar: false só quando este NÃO é o último bloco de uma sequência (a chamada de
-    //     fora é quem decide quando de fato baixar o arquivo) — default true (comportamento
-    //     de sempre, preservado em todo chamador existente que não passa opcoes).
+    // Sub-blocos "por atribuição" de UM item (pedido do usuário): o relatório continua
+    // ÚNICO (uma capa "Situação da Unidade", uma seção Cartório, uma seção Gabinete) —
+    // não repete a estrutura inteira por atribuição (isso foi tentado numa rodada
+    // anterior e revertido: o usuário quer os dados diversos aparecendo separados DENTRO
+    // de cada item, exatamente como pedido). Quando `ativo` e o item tem registros de
+    // mais de uma atuação/competência, devolve [Resumo Geral (tudo), Competência: A,
+    // Competência: B, ...] — cada bloco vira sua própria página de resumo/tabela,
+    // encadeada na MESMA seção do item (bookmarks aninhados sob o item, ver PASSO 1/2).
+    // Com 0/1 atribuição no item (ou `ativo` falso), devolve só 1 bloco sem rótulo — o
+    // comportamento é idêntico ao de antes desse recurso existir.
+    function subBlocosPorAtribuicao(dados, ativo) {
+        if (!ativo) return [{ rotulo: null, dados }];
+        const atuacoes = [...new Set(dados.map(d => (d.competencia || d.atuacao || '').trim()).filter(Boolean))]
+            .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+        if (atuacoes.length <= 1) return [{ rotulo: null, dados }];
+        const blocos = [{ rotulo: 'Resumo Geral', dados }];
+        atuacoes.forEach(a => {
+            blocos.push({ rotulo: `Competência: ${a}`, dados: dados.filter(d => (d.competencia || d.atuacao || '').trim() === a) });
+        });
+        return blocos;
+    }
+
+    // opcoes.porAtribuicao (pedido do usuário): quando mais de uma atribuição/atuação foi
+    // coletada, cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...)
+    // ganha um bloco "Resumo Geral" (todas as atribuições somadas, igual sempre foi) mais
+    // um bloco por atribuição com só os dados daquela — ver subBlocosPorAtribuicao. A
+    // capa "Situação da Unidade" continua única, sempre com os dados de TODAS as
+    // atribuições somadas (nunca filtrada) — só os itens internos se subdividem.
     function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
         opcoes = opcoes || {};
-        const doc = opcoes.doc || novoDocPDF();
+        const porAtribuicao = !!opcoes.porAtribuicao;
+        const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
-        if (opcoes.filtroAtuacao) {
-            secoesEntrada = secoesEntrada.map(s => ({
-                ...s,
-                dados: s.dados.filter(d => (d.competencia || d.atuacao || '') === opcoes.filtroAtuacao),
-            }));
-        }
         const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg, somenteResumo)));
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
@@ -4702,12 +4713,7 @@
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
-        // Filtrado pra só a atribuição desta seção, quando for um relatório específico por
-        // atribuição — senão a linha "Processos Ativos" mostraria o total de TODAS as
-        // atribuições dentro do relatório de uma atribuição só.
-        const mapaAtivos = opcoes.filtroAtuacao
-            ? Object.fromEntries(Object.entries(lerMapaAtivos()).filter(([k]) => k === opcoes.filtroAtuacao))
-            : lerMapaAtivos();
+        const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
@@ -4977,25 +4983,15 @@
         }
 
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || atuacoesAtivas.length > 0;
-        // Quando opcoes.doc foi passado (continuando um PDF que já tem conteúdo — ver
-        // relatório por atribuição em baixarPDFConjunto), a página 1 do doc NÃO está mais
-        // "em branco" pra reaproveitar — força o próximo bloco a começar numa página nova
-        // (doc.addPage()) em vez de desenhar por cima do que já foi desenhado.
-        let usouPagina1 = !!opcoes.doc;
-
-        // Qualifica os marcadores (bookmarks) de nível superior com a atribuição, quando
-        // este é um relatório específico por atribuição — sem isso, um PDF com "resumo
-        // geral + por atribuição" teria vários bookmarks "Cartório"/"Gabinete" idênticos
-        // no sumário, impossíveis de distinguir.
-        const sufixoBookmark = opcoes.filtroAtuacao ? ` — ${opcoes.filtroAtuacao}` : '';
+        let usouPagina1 = false;
 
         // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
         // Gabinete. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, opcoes.filtroAtuacao);
-            doc.outline.add(null, `Situação da Unidade${sufixoBookmark}`, { pageNumber: pgCapa });
+            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
+            doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
             usouPagina1 = true;
         }
 
@@ -5018,28 +5014,57 @@
         // Zerado (0 pendências) não gera página de resumo própria — o número já consta na
         // tabela unificada da capa, e um resumo detalhado (gráficos vazios etc.) não
         // acrescenta nada (pedido do usuário).
+        //
+        // Cada item pode render MAIS de uma página de resumo quando porAtribuicao está
+        // ativo e o item tem dados de mais de uma atribuição (ver subBlocosPorAtribuicao):
+        // "Resumo Geral" (tudo somado, sempre o primeiro) seguido de um bloco por
+        // atribuição — tudo dentro da MESMA seção do item, sem repetir capa/Cartório/
+        // Gabinete (pedido do usuário: relatório único, não um relatório dentro do
+        // relatório). t.pgResumoInicio/pgResumoFim marcam o INÍCIO do 1º bloco e o FIM do
+        // ÚLTIMO — usados por PASSO 3/4 do mesmo jeito que antes (link "voltar"/"ver
+        // tabela" sempre aponta pro bloco geral, e a navegação fina fica a cargo dos
+        // bookmarks aninhados).
         let bmCartorio = null;
         itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-            const primeira = !usouPagina1;
-            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            usouPagina1 = true;
-            t.secao.montarResumo(doc, t.dados, primeira, false);
-            t.pgResumoInicio = pg;
+            const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+            let bmItem = null;
+            blocos.forEach((bloco, i) => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                t.secao.montarResumo(doc, bloco.dados, primeira, false);
+                if (i === 0) t.pgResumoInicio = pg;
+                if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: t.pgResumoInicio });
+                if (blocos.length === 1) {
+                    doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+                } else {
+                    if (!bmItem) bmItem = doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: t.pgResumoInicio });
+                    doc.outline.add(bmItem, bloco.rotulo, { pageNumber: pg });
+                }
+            });
             t.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmCartorio) bmCartorio = doc.outline.add(null, `Cartório${sufixoBookmark}`, { pageNumber: pg });
-            doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
         });
 
         let bmGabinete = null;
         gabinete.itens.forEach(info => {
-            const primeira = !usouPagina1;
-            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            usouPagina1 = true;
-            montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
-            info.pgResumoInicio = pg;
+            const blocos = subBlocosPorAtribuicao(info.dados, porAtribuicao);
+            let bmItem = null;
+            blocos.forEach((bloco, i) => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira);
+                if (i === 0) info.pgResumoInicio = pg;
+                if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
+                if (blocos.length === 1) {
+                    info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+                } else {
+                    if (!bmItem) bmItem = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: info.pgResumoInicio });
+                    doc.outline.add(bmItem, bloco.rotulo, { pageNumber: pg });
+                    info._bmJuiz = bmItem;
+                }
+            });
             info.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmGabinete) bmGabinete = doc.outline.add(null, `Gabinete${sufixoBookmark}`, { pageNumber: pg });
-            info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
         });
 
         // Mesma dispensa do Cartório para os relatórios "fora do esquema": zerado só
@@ -5050,34 +5075,77 @@
             return s.dados.length === 0;
         }
         outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
-            const primeira = !usouPagina1;
-            const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            usouPagina1 = true;
-            s.montarResumo(doc, s.dados, primeira, false);
-            s.pgResumoInicio = pg;
+            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+            let bmItem = null;
+            blocos.forEach((bloco, i) => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                s.montarResumo(doc, bloco.dados, primeira, false);
+                if (i === 0) s.pgResumoInicio = pg;
+                if (blocos.length === 1) {
+                    s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                } else {
+                    if (!bmItem) bmItem = doc.outline.add(null, s.rotulo, { pageNumber: s.pgResumoInicio });
+                    doc.outline.add(bmItem, bloco.rotulo, { pageNumber: pg });
+                    s._bmOutra = bmItem;
+                }
+            });
             s.pgResumoFim = doc.internal.getNumberOfPages();
-            s._bmOutra = doc.outline.add(null, `${s.rotulo}${sufixoBookmark}`, { pageNumber: pg });
         });
 
         // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
         // ao resumo" (a página do resumo já é conhecida, desenhada no passo 1) ═══
         if (!somenteResumo) {
+            // Mesmos sub-blocos por atribuição do resumo (ver PASSO 1) — "Ver tabela
+            // detalhada →" no resumo sempre aponta pro bloco geral (t.pgTabela = página do
+            // 1º bloco); a navegação pros blocos específicos fica pelos bookmarks.
             // Sem pendências, não há o que discriminar — dispensa a tabela (mas o resumo com
             // o KPI já foi desenhado no passo 1 de qualquer forma, ex.: Suspensos zerado).
             itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-                t.pgTabela = t.secao.montarTabela(doc, t.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
-                doc.outline.add(bmCartorio, `${t.rotulo} — tabela detalhada`, { pageNumber: t.pgTabela });
+                const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+                let bmTabelaItem = null;
+                blocos.forEach((bloco, i) => {
+                    const pg = t.secao.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
+                    if (i === 0) t.pgTabela = pg;
+                    if (blocos.length === 1) {
+                        doc.outline.add(bmCartorio, `${t.rotulo} — tabela detalhada`, { pageNumber: pg });
+                    } else {
+                        if (!bmTabelaItem) bmTabelaItem = doc.outline.add(bmCartorio, `${t.rotulo} — tabela detalhada`, { pageNumber: t.pgTabela });
+                        doc.outline.add(bmTabelaItem, bloco.rotulo, { pageNumber: pg });
+                    }
+                });
             });
             gabinete.itens.forEach(info => {
-                info.pgTabela = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now,
-                    { label: '← Voltar ao resumo', pageNumber: info.pgResumoInicio });
-                doc.outline.add(info._bmJuiz, 'Tabela detalhada', { pageNumber: info.pgTabela });
+                const blocos = subBlocosPorAtribuicao(info.dados, porAtribuicao);
+                let bmTabelaItem = null;
+                blocos.forEach((bloco, i) => {
+                    const pg = montarTabelaJuizConclusoes(doc, info.rotulo, bloco.dados, now,
+                        { label: '← Voltar ao resumo', pageNumber: info.pgResumoInicio });
+                    if (i === 0) info.pgTabela = pg;
+                    if (blocos.length === 1) {
+                        doc.outline.add(info._bmJuiz, 'Tabela detalhada', { pageNumber: pg });
+                    } else {
+                        if (!bmTabelaItem) bmTabelaItem = doc.outline.add(info._bmJuiz, 'Tabela detalhada', { pageNumber: info.pgTabela });
+                        doc.outline.add(bmTabelaItem, bloco.rotulo, { pageNumber: pg });
+                    }
+                });
             });
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
             // mostrar (ex.: Audiências Pendentes zerado).
             outrasSecoes.filter(secaoTemTabela).forEach(s => {
-                s.pgTabela = s.montarTabela(doc, s.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
-                doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: s.pgTabela });
+                const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+                let bmTabelaItem = null;
+                blocos.forEach((bloco, i) => {
+                    const pg = s.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
+                    if (i === 0) s.pgTabela = pg;
+                    if (blocos.length === 1) {
+                        doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: pg });
+                    } else {
+                        if (!bmTabelaItem) bmTabelaItem = doc.outline.add(s._bmOutra, 'Tabela detalhada', { pageNumber: s.pgTabela });
+                        doc.outline.add(bmTabelaItem, bloco.rotulo, { pageNumber: pg });
+                    }
+                });
             });
 
             // ═══ PASSO 3: volta a cada resumo e desenha "Ver tabela detalhada →" agora
@@ -5111,10 +5179,6 @@
             doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
         });
 
-        // baixar:false só quando este bloco faz parte de uma sequência (resumo geral +
-        // um bloco por atribuição, todos no MESMO doc) e não é o último — quem orquestra
-        // a sequência decide quando de fato baixar (ver baixarPDFConjunto).
-        if (opcoes.baixar === false) return doc;
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
         return doc;
@@ -5806,7 +5870,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, usuariosAbaixoDoMinimo: [], totalUsuarios: 0, competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], usuariosIgnorados: 0, usuariosAbaixoDoMinimo: [], totalUsuarios: 0, competencia: '' };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -5831,9 +5895,12 @@
 
         const gap = 6;
         const kY = yLinha + 5;
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length), [], true, COR.aqua);
+        // 3 cards agora (pedido do usuário: incluir o total de pessoas ouvidas, mesma
+        // tabela de totais da tela, linha "Total de Pessoas Ouvidas").
+        const kW3top = (uw - 2 * gap) / 3;
+        desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, `Usuários com ${MIN_AUDIENCIAS_POR_USUARIO_AR}+ audiências`, String(r.porUsuario.length), [], true, COR.aqua);
+        desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
 
         // Canceladas/Não Realizadas/Redesignadas — extraídas só da pesquisa geral (pedido
         // do usuário), lado a lado numa segunda linha de KPIs menores.
@@ -5857,6 +5924,7 @@
                     { header: 'Canceladas', dataKey: 'canceladas' },
                     { header: 'Não Realizadas', dataKey: 'naoRealizadas' },
                     { header: 'Redesignadas', dataKey: 'redesignadas' },
+                    { header: 'Pessoas Ouvidas', dataKey: 'pessoasOuvidas' },
                 ],
                 body: r.porUsuario.map(u => {
                     const canceladas = u.canceladas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
@@ -5867,6 +5935,7 @@
                         canceladas: `${canceladas} (${fmtPct(canceladas, totalUsuario)})`,
                         naoRealizadas: `${naoRealizadas} (${fmtPct(naoRealizadas, totalUsuario)})`,
                         redesignadas: `${redesignadas} (${fmtPct(redesignadas, totalUsuario)})`,
+                        pessoasOuvidas: String(u.pessoasOuvidas || 0),
                     };
                 }),
                 startY: tY + 6,
@@ -5876,11 +5945,12 @@
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: {
-                    nome: { cellWidth: uw * 0.32 },
-                    quantidade: { cellWidth: uw * 0.17, halign: 'right' },
-                    canceladas: { cellWidth: uw * 0.17, halign: 'right' },
-                    naoRealizadas: { cellWidth: uw * 0.17, halign: 'right' },
-                    redesignadas: { cellWidth: uw * 0.17, halign: 'right' },
+                    nome: { cellWidth: uw * 0.26 },
+                    quantidade: { cellWidth: uw * 0.15, halign: 'right' },
+                    canceladas: { cellWidth: uw * 0.15, halign: 'right' },
+                    naoRealizadas: { cellWidth: uw * 0.15, halign: 'right' },
+                    redesignadas: { cellWidth: uw * 0.15, halign: 'right' },
+                    pessoasOuvidas: { cellWidth: uw * 0.14, halign: 'right' },
                 },
                 didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
@@ -6355,21 +6425,21 @@
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaRemessas, pw - m, yLinhaRemessas);
 
         const gap = 6;
-        // Linha 1: 3 KPIs centralizados — em remessa / tempo médio paralisado / prioritários
+        // Linha 1: 3 KPIs centralizados — em remessa / tempo médio em remessa / prioritários
         const kY = yLinhaRemessas + 5;
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.aqua);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
-        // Linha 2: tempo médio paralisado prioritários vs não prioritários (centralizados)
+        // Linha 2: tempo médio em remessa prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio paralisado — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
-        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio paralisado — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
+        desenharCard(doc, m,           k2Y, kW2, 26, 'Tempo médio em remessa — Prioritários',     fmtDias(mediaPrio),    [`${prioritarios.length} processo(s)`], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 26, 'Tempo médio em remessa — Não prioritários', fmtDias(mediaNaoPrio), [`${naoPrioritarios.length} processo(s)`], true, COR.azul);
 
-        // Card largo: processo paralisado há mais tempo (centralizado)
+        // Card largo: processo em remessa há mais tempo (centralizado)
         const k3Y = k2Y + 26 + gap;
         let valMP = '—', subsMP = ['Nenhum registro com dados válidos'];
         if (maisParado) {
@@ -6379,7 +6449,7 @@
                 maisParado.classe || '',
             ];
         }
-        desenharCard(doc, m, k3Y, uw, 26, 'Processo paralisado há mais tempo', valMP, subsMP, true, COR.vermelho);
+        desenharCard(doc, m, k3Y, uw, 26, 'Processo em remessa há mais tempo', valMP, subsMP, true, COR.vermelho);
 
         // Gráficos 1 e 2 (largura total, empilhados): dividem o espaço vertical restante da
         // página de forma que a soma das duas alturas + o espaçamento sempre caiba.
@@ -6391,11 +6461,11 @@
         const chart1Desejado = Math.max(30, top10.length * 8 + 8);
         const chart1H = Math.min(chart1Desejado, Math.max(30, disponivel - chartGap - 40));
         const chart2H = Math.max(30, disponivel - chart1H - chartGap);
-        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos paralisados há mais tempo', top10);
+        desenharTopDemorados(doc, m, chartY, uw, chart1H, 'Processos em remessa há mais tempo', top10);
 
         const chart2Y = chartY + chart1H + chartGap;
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
-        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio paralisado por Classe Processual', porClasse, fmtDias, COR.aqua);
+        desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio em remessa por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
 
@@ -6414,7 +6484,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        // Do maior tempo paralisado para o menor (sem dados vai ao final)
+        // Do maior tempo em remessa para o menor (sem dados vai ao final)
         const ordenados = dados.slice().sort((a, b) => {
             const da = a.dias == null ? -Infinity : a.dias;
             const db = b.dias == null ? -Infinity : b.dias;
@@ -6428,7 +6498,7 @@
         const colunas = [
             { header: 'Processo', width: 32, get: (d) => d.processo },
             { header: 'Classe Processual', width: 60, get: (d) => d.classe },
-            { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            { header: 'Dias em Remessa', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
             { header: 'Último Movimento', width: 70, get: (d) => d.ultimoMovimento },
         ];
         const columnStyles = {};
@@ -8507,24 +8577,21 @@
             // Pedido do usuário: quando mais de uma atribuição/atuação foi coletada
             // (ver lerMapaAtivos — "Processos Ativos" é gravado por atuação a cada rodada
             // da automação), pergunta se quer só o resumo geral (todas somadas, como
-            // sempre foi) ou também um relatório específico por atribuição, no MESMO PDF.
-            // Com 0 ou 1 atribuição coletada, comportamento inalterado (resumo geral só).
+            // sempre foi) ou também um resumo específico por atribuição dentro de CADA
+            // item, no mesmo relatório único (ver subBlocosPorAtribuicao/gerarPDFConjunto
+            // — não repete capa/Cartório/Gabinete por atribuição, só cada item ganha
+            // blocos extras). Com 0 ou 1 atribuição coletada, comportamento inalterado.
             const atuacoes = Object.keys(lerMapaAtivos());
             let porAtribuicao = false;
             if (atuacoes.length > 1) {
                 porAtribuicao = confirm(
                     `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
-                    + 'Clique OK para gerar o resumo geral (todas as atribuições somadas) MAIS um relatório específico '
-                    + 'para cada atribuição, no mesmo PDF.\n\n'
-                    + 'Clique Cancelar para gerar só o resumo geral (todas as atribuições somadas), como de costume.'
+                    + 'Clique OK para que cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) traga '
+                    + 'um resumo geral (todas as atribuições somadas) MAIS um resumo específico para cada atribuição.\n\n'
+                    + 'Clique Cancelar para que cada item traga só o resumo geral (todas as atribuições somadas), como de costume.'
                 );
             }
-            const doc = gerarPDFConjunto(secoes, somenteResumo, { baixar: !porAtribuicao });
-            if (porAtribuicao) {
-                atuacoes.forEach((atuacao, i) => {
-                    gerarPDFConjunto(secoes, somenteResumo, { doc, filtroAtuacao: atuacao, baixar: i === atuacoes.length - 1 });
-                });
-            }
+            gerarPDFConjunto(secoes, somenteResumo, { porAtribuicao });
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
