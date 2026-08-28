@@ -30,7 +30,7 @@ Exige login de servidor ou Corregedoria, assim como vinculação à unidade judi
 
 1. Instale a extensão [Tampermonkey](https://www.tampermonkey.net/) no seu navegador
 2. Acesse o painel do Tampermonkey → **Criar novo script**
-3. Copie e cole o conteúdo de [`conclusoes_projudi.user.js`](./conclusoes_projudi.user.js)
+3. Copie e cole o conteúdo de [`relatorio_projudi.user.js`](./relatorio_projudi.user.js)
 4. Salve (Ctrl+S)
 
 Ou clique em **Raw** no arquivo `.user.js` — o Tampermonkey reconhece a extensão e oferece a instalação automaticamente.

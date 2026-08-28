@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         Exportar Conclusões Projudi para Excel
+// @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.1
-// @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
+// @version      21.2
+// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
-// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
-// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
+// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
+// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
@@ -4427,7 +4427,11 @@
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
     // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
     // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
-    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira) {
+    // tituloAtribuicao (opcional): quando definido, este bloco é o relatório ESPECÍFICO de
+    // uma atribuição/atuação (ver "relatório por atribuição" em baixarPDFConjunto) — some
+    // no título, abaixo do título principal, deixando claro que os números daquela página
+    // em diante são só daquela atribuição, não do total geral.
+    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, tituloAtribuicao) {
         if (!primeira) doc.addPage();
         const pw = doc.internal.pageSize.getWidth();
         const m = 16;
@@ -4444,6 +4448,10 @@
         doc.text('Relatório para Correição Ordinária', pw / 2, 17, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
+        if (tituloAtribuicao) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.azul);
+            doc.text(`Atribuição: ${tituloAtribuicao}`, pw - m, 36, { align: 'right' });
+        }
 
         let y = 44;
 
@@ -4595,10 +4603,30 @@
         return paginaInicial;
     }
 
-    function gerarPDFConjunto(secoesEntrada, somenteResumo) {
-        const doc = novoDocPDF();
+    // opcoes (todas opcionais, pedido do usuário — relatório específico por atribuição
+    // quando mais de uma foi coletada, ver baixarPDFConjunto):
+    //   - doc: documento jsPDF já existente pra CONTINUAR desenhando nele (em vez de criar
+    //     um novo) — usado pra encadear o resumo geral + um bloco por atribuição no MESMO
+    //     arquivo .pdf, em vez de baixar um arquivo por atribuição.
+    //   - filtroAtuacao: quando definido, só entram nas seções os REGISTROS cujo
+    //     atuacao/competencia bate com esse valor — o resto da função funciona sem
+    //     nenhuma outra mudança, porque já opera genericamente sobre secoesEntrada/
+    //     s.dados (filtrar na entrada é suficiente pra "fatiar" o relatório inteiro por
+    //     atribuição sem duplicar toda a lógica de cartório/gabinete/capa).
+    //   - baixar: false só quando este NÃO é o último bloco de uma sequência (a chamada de
+    //     fora é quem decide quando de fato baixar o arquivo) — default true (comportamento
+    //     de sempre, preservado em todo chamador existente que não passa opcoes).
+    function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
+        opcoes = opcoes || {};
+        const doc = opcoes.doc || novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
+        if (opcoes.filtroAtuacao) {
+            secoesEntrada = secoesEntrada.map(s => ({
+                ...s,
+                dados: s.dados.filter(d => (d.competencia || d.atuacao || '') === opcoes.filtroAtuacao),
+            }));
+        }
         const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg, somenteResumo)));
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
@@ -4674,7 +4702,12 @@
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
-        const mapaAtivos = lerMapaAtivos();
+        // Filtrado pra só a atribuição desta seção, quando for um relatório específico por
+        // atribuição — senão a linha "Processos Ativos" mostraria o total de TODAS as
+        // atribuições dentro do relatório de uma atribuição só.
+        const mapaAtivos = opcoes.filtroAtuacao
+            ? Object.fromEntries(Object.entries(lerMapaAtivos()).filter(([k]) => k === opcoes.filtroAtuacao))
+            : lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
@@ -4944,15 +4977,25 @@
         }
 
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || atuacoesAtivas.length > 0;
-        let usouPagina1 = false;
+        // Quando opcoes.doc foi passado (continuando um PDF que já tem conteúdo — ver
+        // relatório por atribuição em baixarPDFConjunto), a página 1 do doc NÃO está mais
+        // "em branco" pra reaproveitar — força o próximo bloco a começar numa página nova
+        // (doc.addPage()) em vez de desenhar por cima do que já foi desenhado.
+        let usouPagina1 = !!opcoes.doc;
+
+        // Qualifica os marcadores (bookmarks) de nível superior com a atribuição, quando
+        // este é um relatório específico por atribuição — sem isso, um PDF com "resumo
+        // geral + por atribuição" teria vários bookmarks "Cartório"/"Gabinete" idênticos
+        // no sumário, impossíveis de distinguir.
+        const sufixoBookmark = opcoes.filtroAtuacao ? ` — ${opcoes.filtroAtuacao}` : '';
 
         // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
         // Gabinete. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
-            doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
+            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, opcoes.filtroAtuacao);
+            doc.outline.add(null, `Situação da Unidade${sufixoBookmark}`, { pageNumber: pgCapa });
             usouPagina1 = true;
         }
 
@@ -4983,7 +5026,7 @@
             t.secao.montarResumo(doc, t.dados, primeira, false);
             t.pgResumoInicio = pg;
             t.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
+            if (!bmCartorio) bmCartorio = doc.outline.add(null, `Cartório${sufixoBookmark}`, { pageNumber: pg });
             doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
         });
 
@@ -4995,7 +5038,7 @@
             montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
             info.pgResumoInicio = pg;
             info.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
+            if (!bmGabinete) bmGabinete = doc.outline.add(null, `Gabinete${sufixoBookmark}`, { pageNumber: pg });
             info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
         });
 
@@ -5013,7 +5056,7 @@
             s.montarResumo(doc, s.dados, primeira, false);
             s.pgResumoInicio = pg;
             s.pgResumoFim = doc.internal.getNumberOfPages();
-            s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
+            s._bmOutra = doc.outline.add(null, `${s.rotulo}${sufixoBookmark}`, { pageNumber: pg });
         });
 
         // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
@@ -5068,8 +5111,13 @@
             doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
         });
 
+        // baixar:false só quando este bloco faz parte de uma sequência (resumo geral +
+        // um bloco por atribuição, todos no MESMO doc) e não é o último — quem orquestra
+        // a sequência decide quando de fato baixar (ver baixarPDFConjunto).
+        if (opcoes.baixar === false) return doc;
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
+        return doc;
     }
 
     // ── PDF do relatório de Tempo Médio de Cumprimento ──────────────────────────
@@ -8437,7 +8485,27 @@
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
-            gerarPDFConjunto(secoes, somenteResumo);
+            // Pedido do usuário: quando mais de uma atribuição/atuação foi coletada
+            // (ver lerMapaAtivos — "Processos Ativos" é gravado por atuação a cada rodada
+            // da automação), pergunta se quer só o resumo geral (todas somadas, como
+            // sempre foi) ou também um relatório específico por atribuição, no MESMO PDF.
+            // Com 0 ou 1 atribuição coletada, comportamento inalterado (resumo geral só).
+            const atuacoes = Object.keys(lerMapaAtivos());
+            let porAtribuicao = false;
+            if (atuacoes.length > 1) {
+                porAtribuicao = confirm(
+                    `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
+                    + 'Clique OK para gerar o resumo geral (todas as atribuições somadas) MAIS um relatório específico '
+                    + 'para cada atribuição, no mesmo PDF.\n\n'
+                    + 'Clique Cancelar para gerar só o resumo geral (todas as atribuições somadas), como de costume.'
+                );
+            }
+            const doc = gerarPDFConjunto(secoes, somenteResumo, { baixar: !porAtribuicao });
+            if (porAtribuicao) {
+                atuacoes.forEach((atuacao, i) => {
+                    gerarPDFConjunto(secoes, somenteResumo, { doc, filtroAtuacao: atuacao, baixar: i === atuacoes.length - 1 });
+                });
+            }
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
