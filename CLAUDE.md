@@ -6,7 +6,7 @@ seguindo os mesmos padrões.
 
 ## O que é o projeto
 
-Userscript Tampermonkey (`conclusoes_projudi.user.js`, arquivo único, ~5500+ linhas) que
+Userscript Tampermonkey (`relatorio_projudi.user.js`, arquivo único, ~5500+ linhas) que
 automatiza a extração de dados do sistema Projudi (TJPR) e gera relatórios em Excel
 (`.xlsx`, via SheetJS) e PDF (via jsPDF + jspdf-autotable). Cobre relatórios de Cartório
 (Conclusões, Retorno, Juntadas, Paralisados, Remessas, Suspensos, Tempo Médio, Audiências,
@@ -17,7 +17,7 @@ arquivo é sobre como **implementar** no código, não como usar o script.
 
 ## Estrutura do arquivo — ATENÇÃO a linhas gigantes
 
-`conclusoes_projudi.user.js` tem 3 linhas enormes (`FONTE_PUBLIC_SANS_REGULAR/BOLD/ITALIC`
+`relatorio_projudi.user.js` tem 3 linhas enormes (`FONTE_PUBLIC_SANS_REGULAR/BOLD/ITALIC`
 — fontes embutidas em base64, ~75 mil caracteres cada) perto da função `novoDocPDF()`.
 
 **Nunca leia essas linhas inteiras.** A ferramenta `Read` explode em tokens se o
@@ -25,10 +25,10 @@ offset/limit passar por elas (mesmo pedindo poucas linhas — o tokenizer proces
 conteúdo antes de aplicar o limite). Para ler qualquer trecho do arquivo:
 
 - Prefira `Grep` com contexto pequeno (`-A`/`-B`/`-C`) para achar funções por nome.
-- Para ler um trecho por número de linha, use `sed -n 'X,Yp' conclusoes_projudi.user.js`
+- Para ler um trecho por número de linha, use `sed -n 'X,Yp' relatorio_projudi.user.js`
   via Bash em vez de `Read` com offset/limit, e confira antes (`grep -n` ou `awk
   '{print length, NR}' | sort -rn | head`) que o intervalo não cruza essas 3 linhas.
-- `node --check conclusoes_projudi.user.js` funciona normalmente (não precisa ler o
+- `node --check relatorio_projudi.user.js` funciona normalmente (não precisa ler o
   arquivo pra isso).
 
 ## Arquitetura — como um relatório "normal" (paginado) funciona
@@ -141,7 +141,7 @@ e sem botão de pesquisar. Para casos assim:
 4. Implemente seguindo os pontos de integração da seção "Arquitetura" acima. Prefira
    reaproveitar o genérico; só desvie dele quando o formato dos dados genuinamente não
    servir (documente a decisão no comentário do código e na mensagem de commit).
-5. `node --check conclusoes_projudi.user.js` depois de qualquer edição.
+5. `node --check relatorio_projudi.user.js` depois de qualquer edição.
 6. Escreva/atualize um teste em `scratchpad/teste_<relatorio>.js` (ver seção Testes) e
    rode a suíte de regressão existente (pelo menos `verify_conclusoes.js`,
    `teste_cartorio_unificado.js`, `teste_zero_e_links.js`) para garantir que a mudança

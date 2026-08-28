@@ -1,12 +1,12 @@
 // ==UserScript==
-// @name         Exportar Conclusões Projudi para Excel
+// @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.0
-// @description  Coleta conclusões/retorno/juntadas/tempo médio/paralisados/remessas, exporta Excel ou PDF, e automatiza a extração conjunta a partir da página inicial
+// @version      21.3
+// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
-// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
-// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_conclusoes_projudi/main/conclusoes_projudi.user.js
+// @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
+// @downloadURL  https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
 // @require      https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
@@ -326,6 +326,14 @@
                         const dias = sub.filter(temPreAnalise).map(d => diasDesdePreAnalise(d, Date.now())).filter(v => v !== '').map(Number);
                         return { tipo: 'barras', itens: faixasDeDias(dias).filter(f => f.valor > 0) };
                     },
+                },
+                // Padrão de dias úteis das conclusões (pedido do usuário) — mesmo gráfico
+                // já existente para Audiências Designadas (concentração por dia da
+                // semana), aqui a partir da data de remessa para conclusão (dtRemessa),
+                // que já é coletada por todo processo — ver contarPorDiaUtil.
+                {
+                    titulo: 'Conclusões por Dia da Semana (dias úteis)',
+                    calc: (sub) => ({ tipo: 'barras', itens: contarPorDiaUtil(sub, 'dtRemessa') }),
                 },
             ],
             // Larguras somam 174mm — cabem na área útil (~186mm em A4 retrato com margem
@@ -1023,6 +1031,49 @@
         });
     }
 
+    // Detecta o caso "pesquisa já feita, mas zero audiências no período" — confirmado por
+    // captura real: quando não há nenhuma audiência designada, a tabela EXTERNA (cabeçalho
+    // Local da Audiência/Data/Audiências) aparece sozinha, sem NENHUMA tabela interna por
+    // dia (por isso pautaAudienciasTemResultados() acima dá false), e o corpo é só uma
+    // linha "Nenhum registro encontrado" (colspan). Sem essa distinção, esse cenário caía
+    // no mesmo caminho de "formulário ainda não pesquisado" — o botão "Preencher e
+    // Pesquisar" ficava sempre disponível e a automação nunca marcava o relatório como
+    // coletado (nem manualmente nem via automação), então "Audiências Designadas" sumia
+    // do relatório em vez de aparecer com 0 (relatado pelo usuário).
+    function pautaAudienciasSemResultados() {
+        return [...document.querySelectorAll('table.resultTable')].some(t => {
+            const thead = t.querySelector(':scope > thead');
+            const cab = thead ? thead.textContent : '';
+            if (!/local\s+da\s+audi[êe]ncia/i.test(cab) || !/data/i.test(cab)) return false;
+            const tbody = t.querySelector(':scope > tbody');
+            return !!tbody && /nenhum\s+registro\s+encontrado/i.test(tbody.textContent);
+        });
+    }
+
+    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
+    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
+    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha.
+    function salvarAudienciasDesignadasVazio() {
+        const resumo = {
+            geradoEm: new Date().toISOString(),
+            totalDesignadas: 0,
+            ultimaData: null,
+            processosUltimoDia: [],
+            totalProcessosUltimoDia: 0,
+            porTipo: [],
+            tabela: [],
+            concentracaoDiaSemana: concentracaoPorDiaSemana([]),
+            competencia: competenciaDe(lerAtuacao()),
+        };
+        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — salvando resumo com 0 audiências designadas');
+        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+        store.removeItem(CHAVE_PROGRESSO_AD);
+        avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
+
     // Lê todas as linhas (uma por horário/tipo) das tabelas internas de cada dia — a
     // "Pauta de Horários" agrupa por Local + Data (tabela externa) e, dentro de cada
     // grupo, uma tabela interna própria com colunas Horário/Modalidade/Criadas/Agendadas/
@@ -1404,7 +1455,6 @@
     function assinaturaResultadoAR() {
         return `${lerTotalRealizadasAR()}|${JSON.stringify(lerExtrasAR())}`;
     }
-    let ultimaAssinaturaAR = null;
 
     // A tabela de totais desta tela é preenchida via AJAX depois do HTML inicial da
     // página (mesma lição já aprendida em Outros Cumprimentos/Mandados) — processar o
@@ -1422,34 +1472,83 @@
     // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
     // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
     // caso raro em que o valor novo coincide por acaso com o antigo).
-    function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
-        tentativa = tentativa || 0;
-        const temTabela = !!document.querySelector('table.resultTable');
-        if (!temTabela) {
-            if (tentativa >= 30) {
-                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
-                const form = formularioAudienciasRealizadas();
-                if (form) submitAR(form);
+    // Reage a mudanças REAIS no DOM (MutationObserver) em vez de só um poll cego a cada
+    // 500ms — pedido do usuário: a extração de cada magistrado estava demorando mais do
+    // que o necessário (a soma dos polls de 500ms, um por usuário, ao longo de uma vara
+    // com muitos magistrados, é sensível). A validação de correção continua EXATAMENTE a
+    // mesma de antes (evita o bug original, "valor repetido mesmo a tela não mostrando
+    // valores idênticos"): só aceita como estável quando (a) o valor mudou em relação ao
+    // que estava na tela ANTES desta pesquisa (assinaturaAntes) e (b) duas leituras
+    // seguidas bateram — só a forma de decidir QUANDO reler mudou, de "esperar 500ms" para
+    // "reagir assim que o DOM realmente mudou" (com um debounce curto pra deixar o lote de
+    // mudanças do AJAX terminar de aplicar antes de ler). Mantém um poll de segurança mais
+    // espaçado (1s) e o mesmo teto de ~15s de antes, como rede de proteção — cobre tanto o
+    // caso raro de a mudança não passar por childList/subtree quanto navegadores/telas
+    // atípicas onde o MutationObserver não dispare.
+    function aguardarResultadoAREEstabilizarEProcessar() {
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
+        const inicio = Date.now();
+        const TIMEOUT_MS = 15000;
+        let ultimaAssinaturaVista = null;
+        let terminou = false;
+        let debounceTimer = null;
+        let confirmTimer = null;
+        let pollTimer = null;
+        let observer = null;
+
+        function pararDeObservar() {
+            terminou = true;
+            if (observer) observer.disconnect();
+            clearTimeout(debounceTimer);
+            clearTimeout(confirmTimer);
+            clearInterval(pollTimer);
+        }
+
+        function checar() {
+            if (terminou) return;
+            const esgotado = Date.now() - inicio >= TIMEOUT_MS;
+            const temTabela = !!document.querySelector('table.resultTable');
+            if (!temTabela) {
+                if (esgotado) {
+                    console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+                    pararDeObservar();
+                    const form = formularioAudienciasRealizadas();
+                    if (form) submitAR(form);
+                }
                 return;
             }
-            setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
-            return;
+            const assinaturaAtual = assinaturaResultadoAR();
+            const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
+            if (jaMudou && ultimaAssinaturaVista === assinaturaAtual) {
+                console.log('[Projudi Audiências Realizadas] resultado estável (mutação detectada) — processando');
+                pararDeObservar();
+                processarResultadoAudienciasRealizadas();
+                return;
+            }
+            if (esgotado) {
+                console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+                pararDeObservar();
+                processarResultadoAudienciasRealizadas();
+                return;
+            }
+            ultimaAssinaturaVista = assinaturaAtual;
+            // Agenda uma confirmação rápida (não depende de outra mutação de verdade
+            // acontecer no DOM) — é isso que dá a "segunda leitura igual" rápido, sem
+            // depender do poll de segurança mais espaçado (1s) pra confirmar.
+            clearTimeout(confirmTimer);
+            confirmTimer = setTimeout(checar, 150);
         }
-        const assinaturaAtual = assinaturaResultadoAR();
-        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
-        const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
-        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaAR) {
-            console.log(`[Projudi Audiências Realizadas] resultado estável na tentativa ${tentativa} — processando`);
-            processarResultadoAudienciasRealizadas();
-            return;
-        }
-        if (tentativa >= 30) {
-            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
-            processarResultadoAudienciasRealizadas();
-            return;
-        }
-        ultimaAssinaturaAR = assinaturaAtual;
-        setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
+
+        observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(checar, 120);
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+        // Poll de segurança — mais espaçado que antes (o caminho rápido agora é o
+        // MutationObserver); só existe pro caso raro do observer não disparar e pro teto
+        // de ~15s.
+        pollTimer = setInterval(checar, 1000);
+        checar(); // confere uma vez de imediato — cobre o caso raro do valor já ter mudado antes do observer ligar
     }
 
     // Chamado quando a tela recarrega já com resultado — decide o que aquele resultado
@@ -1465,11 +1564,24 @@
             store.setItem(CHAVE_TOTAL_GERAL_AR, String(total));
             const extras = lerExtrasAR();
             store.setItem(CHAVE_EXTRAS_GERAL_AR, JSON.stringify(extras));
+            store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
+            // Pedido do usuário: com 0 audiências realizadas no período (total geral), não
+            // há nenhum magistrado que possa ter mais que 0 — percorrer o combo de
+            // usuários um a um só repetiria a mesma pesquisa vazia dezenas de vezes.
+            // Finaliza direto, sem popular a fila (mesmo caminho de "fila vazia" que
+            // avancarUsuarioAR já usa quando termina de percorrer os usuários de verdade).
+            if (total === 0) {
+                console.log('[Projudi Audiências Realizadas] total geral do período = 0 — pulando a pesquisa individual por magistrado');
+                store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify([]));
+                store.setItem(CHAVE_TOTAL_USUARIOS_AR, '0');
+                atualizarProgressoAR(0, 0);
+                finalizarAudienciasRealizadas();
+                return;
+            }
             const usuarios = lerOpcoesUsuarioAR(form);
             console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas}) — ${usuarios.length} usuário(s) a percorrer`);
             store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
             store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
-            store.setItem(CHAVE_ACUMULADO_AR, JSON.stringify([]));
             atualizarProgressoAR(0, usuarios.length);
             avancarUsuarioAR(form);
             return;
@@ -2904,6 +3016,25 @@
         return best;
     }
 
+    // Contagem por dia útil (Segunda a Sexta) a partir de um campo de data — mesma ideia
+    // de concentracaoPorDiaSemana (Audiências Designadas), generalizada para qualquer
+    // relatório com um campo de data simples (um registro = uma data, sem a estrutura de
+    // "linha com processos vinculados" da pauta de audiências). Sábados/domingos são
+    // descartados (o Judiciário não distribui/conclui nesses dias — uma data cadastrada
+    // num fim de semana seria erro de digitação/exceção, não padrão a mostrar num
+    // gráfico "por dia útil").
+    function contarPorDiaUtil(dados, campoData) {
+        const porDia = new Map(); // 1-5 -> quantidade
+        dados.forEach(d => {
+            const ts = parseDataBR(d[campoData]);
+            if (ts == null) return;
+            const dow = new Date(ts).getDay();
+            if (dow < 1 || dow > 5) return;
+            porDia.set(dow, (porDia.get(dow) || 0) + 1);
+        });
+        return [1, 2, 3, 4, 5].map(dow => ({ label: ROTULOS_DIA_UTIL[dow], valor: porDia.get(dow) || 0 }));
+    }
+
     // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
     // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
     function contarPorCampo(dados, campo, topN, limpar, semOutros, minValor) {
@@ -3146,8 +3277,23 @@
             let yy = y + (h - blocoH) / 2 + 4;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
             doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(valor.length <= 26 ? 15 : 11); doc.setTextColor(...COR.tinta);
-            doc.text(textoTruncadoParaLargura(doc, valor, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
+            // Escolhe a MAIOR fonte que caiba o valor por inteiro (medindo de verdade, não
+            // só por número de caracteres) — o número de um processo (~25 caracteres) caía
+            // no mesmo balde de fonte 15pt que valores bem mais curtos, estourava a largura
+            // do card (3 por linha, ~58mm) e saía cortado mesmo com a elipse de
+            // textoTruncadoParaLargura (relatado pelo usuário: número do processo ilegível
+            // no KPI "Fim de Suspensão Mais Distante"). Só cai pra elipse se nem a menor
+            // fonte da lista couber.
+            doc.setFont('PublicSans', 'bold');
+            const valorTexto = String(valor);
+            const TAMANHOS_VALOR_CARD = [15, 13, 11, 10, 9];
+            let fonteValor = TAMANHOS_VALOR_CARD[TAMANHOS_VALOR_CARD.length - 1];
+            for (const tam of TAMANHOS_VALOR_CARD) {
+                doc.setFontSize(tam);
+                if (doc.getTextWidth(valorTexto) <= w - 10) { fonteValor = tam; break; }
+            }
+            doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+            doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
             return;
@@ -4281,7 +4427,11 @@
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
     // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
     // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
-    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira) {
+    // tituloAtribuicao (opcional): quando definido, este bloco é o relatório ESPECÍFICO de
+    // uma atribuição/atuação (ver "relatório por atribuição" em baixarPDFConjunto) — some
+    // no título, abaixo do título principal, deixando claro que os números daquela página
+    // em diante são só daquela atribuição, não do total geral.
+    function desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, tituloAtribuicao) {
         if (!primeira) doc.addPage();
         const pw = doc.internal.pageSize.getWidth();
         const m = 16;
@@ -4289,11 +4439,19 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
+        // Título do relatório (pedido do usuário): "Relatório para Correição Ordinária",
+        // centralizado na faixa azul do topo, com fonte menor que antes (20 -> 15) — o
+        // texto novo é bem mais longo que "Situação da Unidade" e em 20pt chegava a
+        // encostar nas bordas em telas/impressões mais estreitas.
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(20); doc.setTextColor(255, 255, 255);
-        doc.text('Situação da Unidade', m, 17);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
+        doc.text('Relatório para Correição Ordinária', pw / 2, 17, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
+        if (tituloAtribuicao) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.azul);
+            doc.text(`Atribuição: ${tituloAtribuicao}`, pw - m, 36, { align: 'right' });
+        }
 
         let y = 44;
 
@@ -4308,6 +4466,15 @@
         });
 
         y += 8;
+
+        // Garante espaço pro CABEÇALHO do bloco Gabinete (faixa + observação) antes de
+        // desenhar — sem isso, quando o bloco do Cartório termina perto do fim da página,
+        // a faixa "Gabinete" era desenhada colada na borda inferior e a tabela pulava pra
+        // página seguinte sozinha (autoTable pagina, mas o cabeçalho acima dela não),
+        // cortando visualmente o título do bloco (relatado pelo usuário, com print).
+        const ph = doc.internal.pageSize.getHeight();
+        const ALTURA_MIN_CABECALHO_DOMINIO = 40; // faixa (15) + observação (~2 linhas) + folga
+        if (y > ph - ALTURA_MIN_CABECALHO_DOMINIO) { doc.addPage(); y = m; }
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
@@ -4436,10 +4603,30 @@
         return paginaInicial;
     }
 
-    function gerarPDFConjunto(secoesEntrada, somenteResumo) {
-        const doc = novoDocPDF();
+    // opcoes (todas opcionais, pedido do usuário — relatório específico por atribuição
+    // quando mais de uma foi coletada, ver baixarPDFConjunto):
+    //   - doc: documento jsPDF já existente pra CONTINUAR desenhando nele (em vez de criar
+    //     um novo) — usado pra encadear o resumo geral + um bloco por atribuição no MESMO
+    //     arquivo .pdf, em vez de baixar um arquivo por atribuição.
+    //   - filtroAtuacao: quando definido, só entram nas seções os REGISTROS cujo
+    //     atuacao/competencia bate com esse valor — o resto da função funciona sem
+    //     nenhuma outra mudança, porque já opera genericamente sobre secoesEntrada/
+    //     s.dados (filtrar na entrada é suficiente pra "fatiar" o relatório inteiro por
+    //     atribuição sem duplicar toda a lógica de cartório/gabinete/capa).
+    //   - baixar: false só quando este NÃO é o último bloco de uma sequência (a chamada de
+    //     fora é quem decide quando de fato baixar o arquivo) — default true (comportamento
+    //     de sempre, preservado em todo chamador existente que não passa opcoes).
+    function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
+        opcoes = opcoes || {};
+        const doc = opcoes.doc || novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
+        if (opcoes.filtroAtuacao) {
+            secoesEntrada = secoesEntrada.map(s => ({
+                ...s,
+                dados: s.dados.filter(d => (d.competencia || d.atuacao || '') === opcoes.filtroAtuacao),
+            }));
+        }
         const secoes = secoesEntrada.map(s => Object.assign({ dados: s.dados, cfgOriginal: s.cfg }, descreverSecaoPDF(s.cfg, somenteResumo)));
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
@@ -4515,7 +4702,12 @@
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
-        const mapaAtivos = lerMapaAtivos();
+        // Filtrado pra só a atribuição desta seção, quando for um relatório específico por
+        // atribuição — senão a linha "Processos Ativos" mostraria o total de TODAS as
+        // atribuições dentro do relatório de uma atribuição só.
+        const mapaAtivos = opcoes.filtroAtuacao
+            ? Object.fromEntries(Object.entries(lerMapaAtivos()).filter(([k]) => k === opcoes.filtroAtuacao))
+            : lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
         // Linha "achatada" padrão de uma tarefa do Cartório — usada tanto pelos itens
@@ -4785,15 +4977,25 @@
         }
 
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || atuacoesAtivas.length > 0;
-        let usouPagina1 = false;
+        // Quando opcoes.doc foi passado (continuando um PDF que já tem conteúdo — ver
+        // relatório por atribuição em baixarPDFConjunto), a página 1 do doc NÃO está mais
+        // "em branco" pra reaproveitar — força o próximo bloco a começar numa página nova
+        // (doc.addPage()) em vez de desenhar por cima do que já foi desenhado.
+        let usouPagina1 = !!opcoes.doc;
+
+        // Qualifica os marcadores (bookmarks) de nível superior com a atribuição, quando
+        // este é um relatório específico por atribuição — sem isso, um PDF com "resumo
+        // geral + por atribuição" teria vários bookmarks "Cartório"/"Gabinete" idênticos
+        // no sumário, impossíveis de distinguir.
+        const sufixoBookmark = opcoes.filtroAtuacao ? ` — ${opcoes.filtroAtuacao}` : '';
 
         // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
         // Gabinete. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
-            doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
+            desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira, opcoes.filtroAtuacao);
+            doc.outline.add(null, `Situação da Unidade${sufixoBookmark}`, { pageNumber: pgCapa });
             usouPagina1 = true;
         }
 
@@ -4824,7 +5026,7 @@
             t.secao.montarResumo(doc, t.dados, primeira, false);
             t.pgResumoInicio = pg;
             t.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
+            if (!bmCartorio) bmCartorio = doc.outline.add(null, `Cartório${sufixoBookmark}`, { pageNumber: pg });
             doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
         });
 
@@ -4836,7 +5038,7 @@
             montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira);
             info.pgResumoInicio = pg;
             info.pgResumoFim = doc.internal.getNumberOfPages();
-            if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
+            if (!bmGabinete) bmGabinete = doc.outline.add(null, `Gabinete${sufixoBookmark}`, { pageNumber: pg });
             info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
         });
 
@@ -4854,7 +5056,7 @@
             s.montarResumo(doc, s.dados, primeira, false);
             s.pgResumoInicio = pg;
             s.pgResumoFim = doc.internal.getNumberOfPages();
-            s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
+            s._bmOutra = doc.outline.add(null, `${s.rotulo}${sufixoBookmark}`, { pageNumber: pg });
         });
 
         // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
@@ -4909,8 +5111,13 @@
             doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
         });
 
+        // baixar:false só quando este bloco faz parte de uma sequência (resumo geral +
+        // um bloco por atribuição, todos no MESMO doc) e não é o último — quem orquestra
+        // a sequência decide quando de fato baixar (ver baixarPDFConjunto).
+        if (opcoes.baixar === false) return doc;
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
+        return doc;
     }
 
     // ── PDF do relatório de Tempo Médio de Cumprimento ──────────────────────────
@@ -7261,7 +7468,14 @@
                 coletarAudienciasDesignadas();
                 return;
             }
-            if (!pautaAudienciasTemResultados()) {
+            if (estadoAtual === 'coletando_audienciasdesignadas' && pautaAudienciasSemResultados()) {
+                // Pesquisa já foi feita, mas não há nenhuma audiência no período ("Nenhum
+                // registro encontrado") — salva 0 direto, sem esperar um "Extrair" manual
+                // que nunca apareceria (ver pautaAudienciasSemResultados).
+                salvarAudienciasDesignadasVazio();
+                return;
+            }
+            if (!pautaAudienciasTemResultados() && !pautaAudienciasSemResultados()) {
                 if (!mostrarBotoesIndividuais()) return;
                 const bPreencher = document.createElement('button');
                 bPreencher.type = 'button';
@@ -7270,6 +7484,19 @@
                 bPreencher.textContent = 'Preencher e Pesquisar (Audiências Designadas)';
                 bPreencher.onclick = () => preencherEPesquisarPautaAudiencias();
                 buttonBar.appendChild(bPreencher);
+                return;
+            }
+            if (pautaAudienciasSemResultados()) {
+                // Fora do fluxo de automação (uso manual): mesma constatação de 0
+                // audiências — salva direto, sem exigir clique em "Extrair".
+                if (!mostrarBotoesIndividuais()) return;
+                const bExtrairVazio = document.createElement('button');
+                bExtrairVazio.type = 'button';
+                bExtrairVazio.className = 'projudi-btn';
+                bExtrairVazio.title = 'Nenhuma audiência encontrada no período — salva o resumo com 0 audiências designadas';
+                bExtrairVazio.textContent = 'Extrair Audiências Designadas (0 encontradas)';
+                bExtrairVazio.onclick = () => salvarAudienciasDesignadasVazio();
+                buttonBar.appendChild(bExtrairVazio);
                 return;
             }
             if (!mostrarBotoesIndividuais()) return;
@@ -7300,8 +7527,7 @@
                 return;
             }
             if (estadoAtual === 'coletando_audienciasrealizadas') {
-                ultimaAssinaturaAR = null;
-                aguardarResultadoAREEstabilizarEProcessar(0);
+                aguardarResultadoAREEstabilizarEProcessar();
                 return;
             }
             const temResultado = !!document.querySelector('table.resultTable');
@@ -7528,6 +7754,25 @@
     // mudar nada pra quem nunca abriu essa opção.
     const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
     function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
+
+    // Checkboxes de relatório do painel (.pa-check) — pedido do usuário: as marcações
+    // devem PERSISTIR entre atuações (o usuário troca de atuação/vara pra rodar a
+    // automação de novo, e antes tinha que remarcar tudo do zero toda vez, já que o
+    // painel é recriado a cada carregamento de página — ver injetarPainel). Guarda um
+    // snapshot {key: true/false} de TODOS os checkboxes a cada mudança; na próxima
+    // renderização, cada item usa o valor salvo se existir, senão o padrão (todos
+    // marcados, ver relatorioMarcadoPorPadrao).
+    const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
+    function lerSelecoesSalvasPainel() {
+        try { return JSON.parse(store.getItem(CHAVE_RELATORIOS_SELECIONADOS) || 'null') || {}; }
+        catch (e) { return {}; }
+    }
+    // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
+    // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
+    function relatorioMarcadoPorPadrao(key) {
+        const salvas = lerSelecoesSalvasPainel();
+        return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+    }
 
     function desembrulharArray(valor) {
         let v = valor, t = 0;
@@ -8259,7 +8504,27 @@
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
-            gerarPDFConjunto(secoes, somenteResumo);
+            // Pedido do usuário: quando mais de uma atribuição/atuação foi coletada
+            // (ver lerMapaAtivos — "Processos Ativos" é gravado por atuação a cada rodada
+            // da automação), pergunta se quer só o resumo geral (todas somadas, como
+            // sempre foi) ou também um relatório específico por atribuição, no MESMO PDF.
+            // Com 0 ou 1 atribuição coletada, comportamento inalterado (resumo geral só).
+            const atuacoes = Object.keys(lerMapaAtivos());
+            let porAtribuicao = false;
+            if (atuacoes.length > 1) {
+                porAtribuicao = confirm(
+                    `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
+                    + 'Clique OK para gerar o resumo geral (todas as atribuições somadas) MAIS um relatório específico '
+                    + 'para cada atribuição, no mesmo PDF.\n\n'
+                    + 'Clique Cancelar para gerar só o resumo geral (todas as atribuições somadas), como de costume.'
+                );
+            }
+            const doc = gerarPDFConjunto(secoes, somenteResumo, { baixar: !porAtribuicao });
+            if (porAtribuicao) {
+                atuacoes.forEach((atuacao, i) => {
+                    gerarPDFConjunto(secoes, somenteResumo, { doc, filtroAtuacao: atuacao, baixar: i === atuacoes.length - 1 });
+                });
+            }
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
@@ -8412,6 +8677,32 @@
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
+
+        // Unidades (atribuições/atuações) com dados já coletados na memória — pedido do
+        // usuário, pra saber de relance quantas/quais atuações já foram percorridas antes
+        // de decidir gerar o PDF (inclusive pra saber se vai cair no fluxo "resumo geral +
+        // por atribuição" — ver baixarPDFConjunto). Usa o mesmo mapa de Processos Ativos
+        // já usado pra essa decisão (gravado uma vez por atuação, a cada rodada da
+        // automação — ver gravarProcessosAtivosSeDisponivel).
+        const elUnidades = painel.querySelector('.pa-unidades');
+        if (elUnidades) {
+            const unidades = Object.keys(lerMapaAtivos());
+            if (unidades.length) {
+                elUnidades.style.display = '';
+                const rotulo = unidades.length === 1 ? 'Unidade coletada' : `${unidades.length} unidades coletadas`;
+                // Monta via DOM (não innerHTML) — os nomes de atuação vêm da própria
+                // página do Projudi, mas não custa nada evitar interpretar qualquer coisa
+                // ali como marcação.
+                elUnidades.textContent = '';
+                const forte = document.createElement('strong');
+                forte.textContent = `${rotulo}: `;
+                elUnidades.appendChild(forte);
+                elUnidades.appendChild(document.createTextNode(unidades.join(' · ')));
+            } else {
+                elUnidades.style.display = 'none';
+            }
+        }
+
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
         painel.querySelector('#pa-excel').disabled = total === 0;
@@ -8498,8 +8789,8 @@
         // resto do código já espera (ver #pa-incluir-ativos/CHAVE_INCLUIR_ATIVOS abaixo).
         const ITEM_ATIVOS = { key: 'processosativos', rotuloChecklist: 'Ativos', subgrupo: 'Estatísticas Gerais', extra: true };
 
-        // Todos os relatórios vêm marcados por padrão, exceto Tempo Médio (precisa ser
-        // habilitado explicitamente — ver seletor de período ao lado).
+        // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
+        // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r) {
             if (r.extra) {
                 return `
@@ -8515,7 +8806,7 @@
             const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
             return `
                     <label class="${classeItem}">
-                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${r.key === 'tempomedio' ? '' : 'checked'}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                        <input type="checkbox" class="pa-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -8574,6 +8865,7 @@
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
                 </div>
+                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações com dados já coletados na memória (Processos Ativos e/ou algum relatório) — persistem até 'Limpar' ou até gerar o Relatório PDF"></div>
                 <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
@@ -8648,6 +8940,18 @@
                 store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
             };
         }
+        // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
+        // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
+        // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
+        // (pedido do usuário: antes tinha que remarcar tudo do zero a cada troca de
+        // atuação, já que o painel é recriado a cada carregamento — ver injetarPainel).
+        function salvarSelecoesPainel() {
+            const obj = {};
+            painel.querySelectorAll('.pa-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
+            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        }
+        painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
+
         // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
         // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
         // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
@@ -8656,6 +8960,7 @@
         function marcarDesmarcarTudo(valor) {
             painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
             if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+            salvarSelecoesPainel();
         }
         painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
         painel.querySelector('#pa-desmarcar-tudo').onclick = () => marcarDesmarcarTudo(false);
@@ -8682,6 +8987,11 @@
             grupoEspecifico.style.display = ehCivel ? 'none' : '';
             grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
             grupoEspecifico.querySelector('.pa-group-conteudo').innerHTML = montarGrupoEspecifico(cat);
+            // innerHTML acima recria os .pa-check daquela categoria do zero — o listener
+            // de persistência (salvarSelecoesPainel, ver mais abaixo) precisa ser
+            // reanexado a esses elementos NOVOS a cada troca de aba, senão marcar/
+            // desmarcar um item específico de uma categoria não-Cível não persistia.
+            grupoEspecifico.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
             atualizarPainel();
         }
@@ -8828,6 +9138,8 @@
         #painel-automacao .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
         #painel-automacao .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
         #painel-automacao .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
+        #painel-automacao .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
 
         #painel-automacao .pa-progress { margin-bottom: 10px; }
         #painel-automacao .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
