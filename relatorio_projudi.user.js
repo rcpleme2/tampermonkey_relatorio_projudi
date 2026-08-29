@@ -8576,14 +8576,21 @@
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
-            // Pedido do usuário: quando mais de uma atribuição/atuação foi coletada
-            // (ver lerMapaAtivos — "Processos Ativos" é gravado por atuação a cada rodada
-            // da automação), pergunta se quer só o resumo geral (todas somadas, como
-            // sempre foi) ou também um resumo específico por atribuição dentro de CADA
-            // item, no mesmo relatório único (ver subBlocosPorAtribuicao/gerarPDFConjunto
-            // — não repete capa/Cartório/Gabinete por atribuição, só cada item ganha
-            // blocos extras). Com 0 ou 1 atribuição coletada, comportamento inalterado.
-            const atuacoes = Object.keys(lerMapaAtivos());
+            // Pedido do usuário: quando mais de uma atribuição/atuação foi coletada,
+            // pergunta se quer só o resumo geral (todas somadas, como sempre foi) ou
+            // também um resumo específico por atribuição dentro de CADA item, no mesmo
+            // relatório único (ver subBlocosPorAtribuicao/gerarPDFConjunto — não repete
+            // capa/Cartório/Gabinete por atribuição, só cada item ganha blocos extras).
+            // As atribuições são derivadas dos PRÓPRIOS DADOS coletados (campo
+            // competencia/atuacao de cada registro), e NÃO mais do mapa de Processos
+            // Ativos (lerMapaAtivos): aquele mapa só é gravado quando a opção "Ativos"
+            // está marcada e pode não refletir todas as atribuições realmente coletadas —
+            // era por isso que a pergunta (e, portanto, os blocos por atribuição) muitas
+            // vezes não aparecia mesmo tendo coletado várias competências. Com 0 ou 1
+            // atribuição presente nos dados, comportamento inalterado.
+            const atuacoes = [...new Set(
+                secoes.flatMap(s => (s.dados || []).map(d => (d && (d.competencia || d.atuacao) || '').trim()))
+            )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
             if (atuacoes.length > 1) {
                 porAtribuicao = confirm(
