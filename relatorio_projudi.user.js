@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.8
+// @version      21.9
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -268,6 +268,11 @@
         detecta: (cab) => /remessa/i.test(cab),
         minTds: 8,
         usaAtuacao: true,
+        // "Zero processos conclusos" é uma informação válida (pedido do usuário: avisar
+        // no resumo geral quando não houver nenhum) — sem isso, a coleta rodando até o
+        // fim sem achar nada seria indistinguível de "Conclusões nem foi selecionado" (ver
+        // secaoGabinete/gabinete.coletado em gerarPDFConjunto).
+        mostrarSeVazio: true,
         nomeArquivo: 'conclusoes_projudi',
         rotulos: { coletar: 'Coletar esta Atuação', coletarMais: 'Coletar mais uma Atuação', baixar: '⬇ Baixar planilha' },
         cabecalhos: ['Atuação', 'Dt. Conclusão', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Magistrado(a)', 'Pré-análise', 'Dt. Pré-análise', 'Agrupador', 'Prioritário'],
@@ -4286,7 +4291,14 @@
             yy += linhasObs.length * 3.4 + 5;
         }
 
-        if (!cfg.itens.length) return yy;
+        if (!cfg.itens.length) {
+            if (cfg.mensagemSemItens) {
+                doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+                doc.text(cfg.mensagemSemItens, x + 6, yy + 2);
+                yy += 10;
+            }
+            return yy;
+        }
         // colunaExtra (opcional): coluna adicional entre Prioritários e Mais antiga,
         // calculada a partir dos dados brutos do item (ex.: pré-analisados no Gabinete).
         const temExtra = !!cfg.colunaExtra;
@@ -4507,6 +4519,10 @@
             situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
+            // Pedido do usuário: se Conclusões foi coletado e não há NENHUM processo
+            // concluso, avisar isso no resumo geral em vez de simplesmente omitir a
+            // tabela (que ficaria indistinguível de "Conclusões nem foi selecionado").
+            mensagemSemItens: gabinete.coletado ? 'Não há processos conclusos aguardando decisão.' : null,
             colunaExtra: { header: 'Pré-analisados', get: (dados) => dados.filter(d => !!d.preAnalise).length },
         });
     }
@@ -4676,7 +4692,12 @@
         // foiColetado) — "zero pendências" é um dado, não um vazio a esconder.
         const secoesCartorio = secoes.filter(s => CFGS_CARTORIO.includes(s.cfgOriginal)
             && (s.dados.length || (s.cfgOriginal.mostrarSeVazio && foiColetado(s.cfgOriginal))));
-        const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES && s.dados.length);
+        // Inclui a seção mesmo com dados.length === 0, desde que já tenha sido coletada
+        // (mesmo critério de mostrarSeVazio usado em secoesCartorio acima) — permite
+        // distinguir "Conclusões coletado, zero processos" de "Conclusões nem selecionado"
+        // (ver gabinete.coletado abaixo, usado pela observação em desenharBlocoDominio).
+        const secaoGabinete = secoes.find(s => s.cfgOriginal === CFG_CONCLUSOES
+            && (s.dados.length || foiColetado(CFG_CONCLUSOES)));
         // Seções fora do esquema Cartório/Gabinete (Tempo Médio, Audiências Pendentes)
         // entram depois, sem capa/veredito dedicado — mantém o relatório funcional mesmo
         // nesse caso.
@@ -5002,10 +5023,11 @@
                 totalPendentes: secaoGabinete.dados.length,
                 totalPrioritarios: contarPrioritarios(secaoGabinete.dados),
                 situacao: piorSituacao(itensGabinete.map(it => it.status)),
+                coletado: true,
             };
         }
 
-        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || atuacoesAtivas.length > 0;
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
         // ═══ SITUAÇÃO DA UNIDADE — processos ativos por atuação, depois Cartório e
@@ -5904,10 +5926,26 @@
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
         let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
-        // Observação: só aparece quando a soma dos valores por magistrado NÃO bate com o
-        // total geral da vara (pedido do usuário — conferência antes de seguir no
-        // relatório) — sinal de coleta incompleta/inconsistente a checar manualmente.
-        // Quando bate, não polui a página com um aviso sem necessidade.
+        // Aviso permanente (pedido do usuário): o Projudi só permite pesquisar audiências
+        // por magistrado(a) entre quem está atualmente HABILITADO na unidade — um
+        // magistrado que saiu da vara no meio do período (substituição, promoção,
+        // remoção) simplesmente não aparece mais no combo de usuários, mas as audiências
+        // que ele realizou continuam contando no total geral da vara. Por isso o total
+        // pode legitimamente ser maior que a soma do detalhamento por magistrado, mesmo
+        // sem nenhum erro de coleta — aparece sempre, não só quando a soma diverge.
+        doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+        const avisoPermanente = 'O Projudi só lista, para pesquisa individual, os magistrados atualmente '
+            + 'habilitados na unidade — quem deixou de atuar nela durante o período pesquisado não aparece no '
+            + 'detalhamento por usuário abaixo, mas suas audiências continuam somadas no total geral da vara. Por '
+            + 'isso o total pode ser maior que a soma do detalhamento, mesmo sem erro de coleta.';
+        const linhasAvisoPermanente = doc.splitTextToSize(avisoPermanente, uw);
+        doc.text(linhasAvisoPermanente, m, yObs);
+        yObs += linhasAvisoPermanente.length * 3.4 + 2;
+        // Observação adicional: só aparece quando a soma dos valores por magistrado NÃO
+        // bate com o total geral da vara (pedido do usuário — conferência antes de
+        // seguir no relatório) — sinal de coleta incompleta/inconsistente a checar
+        // manualmente, ALÉM da explicação de magistrados desabilitados acima. Quando
+        // bate, não polui a página com um aviso extra sem necessidade.
         let yLinha = yObs;
         if (!r.somaConfere && r.divergencias && r.divergencias.length) {
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.vermelho);
