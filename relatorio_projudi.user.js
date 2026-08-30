@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.7
+// @version      21.8
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -94,6 +94,23 @@
     // limpa a flag `rodando` (limparFlags) em vez de retomar — automação trava pra
     // sempre em "coletando_tempomedio", sem nenhum sinal de erro.
     const STALE_MS = 6 * 60 * 1000; // 6 minutos sem atividade => coleta em andamento considerada obsoleta
+
+    // ── Modo de teste (depuração) — ativação disfarçada ────────────────────────────
+    // Limita a extração a poucas páginas por relatório, só para testar rapidamente se a
+    // ferramenta está rodando fim a fim (navegação, coleta, PDF) sem esperar uma coleta
+    // completa. Ativado/desativado clicando 5x seguidas (em até 2s) no título do painel
+    // de automação (ver o handler em '.pa-titulo') — de propósito sem nenhum indício
+    // visual permanente no painel, só um console.log ao alternar (visível apenas no
+    // DevTools). Persistido em localStorage para sobreviver a reloads de página.
+    const CHAVE_MODO_TESTE = 'projudi_modo_teste';
+    const LIMITE_PAGINAS_MODO_TESTE = 2;
+    function modoTesteAtivo() { return store.getItem(CHAVE_MODO_TESTE) === '1'; }
+    function alternarModoTeste() {
+        const ativo = !modoTesteAtivo();
+        if (ativo) store.setItem(CHAVE_MODO_TESTE, '1'); else store.removeItem(CHAVE_MODO_TESTE);
+        console.log(`[Projudi] modo de teste ${ativo ? 'ATIVADO' : 'desativado'} — coleta limitada a ${LIMITE_PAGINAS_MODO_TESTE} página(s)/item(ns) por relatório enquanto ativo.`);
+        return ativo;
+    }
 
     // ── Leitura da Atuação atual ────────────────────────────────────────────────
 
@@ -1406,6 +1423,12 @@
     const CHAVE_ACUMULADO_AR = 'projudi_audienciasrealizadas_acumulado';
     const CHAVE_PROGRESSO_AR = 'projudi_audienciasrealizadas_progresso';
     const CHAVE_TOTAL_USUARIOS_AR = 'projudi_audienciasrealizadas_total_usuarios';
+    // Fica FORA de limparEstadoTransitorioAR de propósito — precisa sobreviver à
+    // recoleta automática disparada por uma divergência de soma (ver
+    // finalizarAudienciasRealizadas) pra saber que já é a 2ª tentativa. Zerada só quando
+    // uma coleta de verdade começa do zero (ver o ponto que lê 'preenchendo_
+    // audienciasrealizadas') ou quando finalizarAudienciasRealizadas efetivamente termina.
+    const CHAVE_TENTATIVA_AR = 'projudi_audienciasrealizadas_tentativa';
 
     function atualizarProgressoAR(processados, total) {
         store.setItem(CHAVE_PROGRESSO_AR, JSON.stringify({ processados, total }));
@@ -1440,6 +1463,14 @@
         // isso, um JSON.parse único podia deixar "fila" como STRING, e fila.shift() quebrava.
         const fila = desembrulharArray(store.getItem(CHAVE_FILA_USUARIOS_AR)) || [];
         if (!fila.length) { finalizarAudienciasRealizadas(); return; }
+        // Modo de teste: só percorre os primeiros N usuários da fila, não todos — o
+        // objetivo é testar rápido a ferramenta fim a fim, não coletar dado real.
+        const acumuladoAtual = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
+        if (modoTesteAtivo() && acumuladoAtual.length >= LIMITE_PAGINAS_MODO_TESTE) {
+            console.log(`[Projudi Audiências Realizadas] modo de teste ativo — parando em ${acumuladoAtual.length} usuário(s), sem percorrer o restante da fila.`);
+            finalizarAudienciasRealizadas();
+            return;
+        }
         const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
         const prox = fila.shift();
         store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(fila));
@@ -1597,12 +1628,28 @@
         const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
         const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
         const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = camposConferidos
+        // Modo de teste: a fila é cortada de propósito (ver avancarUsuarioAR), então a
+        // soma NUNCA vai bater com o total geral — não é uma divergência real, então nem
+        // computa nem avisa/retenta nesse modo.
+        const divergencias = modoTesteAtivo() ? [] : camposConferidos
             .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
             .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
         const somaConfere = divergencias.length === 0;
         if (!somaConfere) {
-            console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral: ${divergencias.map(d => `${d.campo} (geral=${d.geral}, soma=${d.soma})`).join(', ')}`);
+            const detalhe = divergencias.map(d => `${d.campo} (geral=${d.geral}, soma=${d.soma})`).join(', ');
+            const tentativa = parseInt(store.getItem(CHAVE_TENTATIVA_AR) || '0', 10);
+            // Pedido do usuário: antes de lançar o aviso no PDF, refazer a coleta inteira
+            // uma vez (pode ter sido uma leitura ruim/instável, não necessariamente um dado
+            // real divergente) — só se for a 1ª divergência desta coleta (tentativa < 1). Se
+            // divergir de novo mesmo depois de recolher do zero, aí sim finaliza com o aviso.
+            if (tentativa < 1) {
+                console.warn(`[Projudi Audiências Realizadas] soma não bate (${detalhe}) — refazendo a coleta do zero para conferir antes de avisar no relatório`);
+                store.setItem(CHAVE_TENTATIVA_AR, String(tentativa + 1));
+                limparEstadoTransitorioAR();
+                iniciarBuscaAudienciasRealizadas();
+                return;
+            }
+            console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral mesmo após recoleta: ${detalhe}`);
         }
 
         const resumo = {
@@ -1627,6 +1674,7 @@
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
         limparEstadoTransitorioAR();
+        store.removeItem(CHAVE_TENTATIVA_AR);
 
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
     }
@@ -2776,7 +2824,12 @@
 
             atualizarStatus(`Coletando ${ctx}página ${pagina} de ${totPag} — ${total} no total acumulado...`);
 
-            if (temProximaPagina()) {
+            const paginasColetadas = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
+            const limiteModoTesteAtingido = modoTesteAtivo() && paginasColetadas >= LIMITE_PAGINAS_MODO_TESTE;
+            if (limiteModoTesteAtingido) {
+                console.log(`[Projudi] modo de teste ativo — parando em ${paginasColetadas} página(s) para "${cfg.prefixo}" mesmo havendo mais resultado.`);
+            }
+            if (temProximaPagina() && !limiteModoTesteAtingido) {
                 document.querySelector('a.arrowNextOn').click();
             } else {
                 store.removeItem(KEY_RODANDO);
@@ -7570,6 +7623,9 @@
             // aguardarResultadoAREEstabilizarEProcessar) — checar só "existe tabela"
             // pegava valores da pesquisa ANTERIOR, ainda não substituídos pelo AJAX.
             if (estadoAtual === 'preenchendo_audienciasrealizadas') {
+                // Início de verdade de uma coleta (não uma recoleta por divergência de
+                // soma) — zera o contador de tentativa aqui, ponto único de entrada.
+                store.setItem(CHAVE_TENTATIVA_AR, '0');
                 iniciarBuscaAudienciasRealizadas();
                 return;
             }
@@ -9048,6 +9104,21 @@
             btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
+
+        // Ativação disfarçada do modo de teste (ver alternarModoTeste): 5 cliques
+        // seguidos no título do painel, dentro de 2s — sem nenhum botão/indicador visível
+        // que denuncie a existência do modo.
+        let cliquesTitulo = 0;
+        let ultimoCliqueTitulo = 0;
+        painel.querySelector('.pa-titulo').onclick = () => {
+            const agora = Date.now();
+            cliquesTitulo = (agora - ultimoCliqueTitulo <= 2000) ? cliquesTitulo + 1 : 1;
+            ultimoCliqueTitulo = agora;
+            if (cliquesTitulo >= 5) {
+                cliquesTitulo = 0;
+                alternarModoTeste();
+            }
+        };
 
         // Troca de categoria: mostra a seção de itens específicos (checkboxes de verdade
         // quando já existem, senão o espaço reservado) e refaz a grade de contagens para
