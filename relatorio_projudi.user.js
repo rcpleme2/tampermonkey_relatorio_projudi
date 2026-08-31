@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.1
+// @version      22.2
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1669,24 +1669,30 @@
             console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral mesmo após recoleta: ${detalhe}`);
         }
 
-        const resumo = {
-            geradoEm: new Date().toISOString(),
-            totalGeral,
-            canceladas: extrasGeral.canceladas,
-            negativas: extrasGeral.negativas || 0,
-            naoRealizadas: extrasGeral.naoRealizadas,
-            redesignadas: extrasGeral.redesignadas,
-            pessoasOuvidas: extrasGeral.pessoasOuvidas || 0,
-            periodo,
-            porUsuario,
-            totalUsuarios: acumulado.length,
-            somaConfere,
-            divergencias,
-            competencia: competenciaDe(lerAtuacao()),
-        };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} negativas=${extrasGeral.negativas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} pessoasOuvidas=${extrasGeral.pessoasOuvidas} usuarios=${acumulado.length} somaConfere=${somaConfere}`);
+        // A partir daqui, a checagem de consistência acima (somaConfere/divergencias) já
+        // validou/refez ESTA coleta (uma vara). Agora mescla com as demais atribuições já
+        // coletadas antes — bug relatado pelo usuário: coletar numa 2ª vara sobrescrevia
+        // o resumo da 1ª. Mesmo padrão de Audiências Designadas
+        // (calcularResumoAudienciasDesignadasDeTabela/salvarResumoAudienciasDesignadas):
+        // guarda os dados BRUTOS tagueados por atribuição (porUsuario e porAtribuicao,
+        // este último com os totais/extras "gerais" desta vara) e recalcula todos os
+        // agregados do resumo final a partir do conjunto mesclado.
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const porUsuarioDestaAtribuicao = acumulado.map(u => ({ ...u, atuacao, competencia }));
+        const totaisDestaAtribuicao = { atuacao, competencia, totalGeral, ...extrasGeral, negativas: extrasGeral.negativas || 0, pessoasOuvidas: extrasGeral.pessoasOuvidas || 0 };
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
+        const anterior = desembrulharArray(store.getItem(prefixo + 'pagina_0'));
+        const anteriorResumo = anterior && anterior[0];
+        const porUsuarioAnterior = (anteriorResumo && Array.isArray(anteriorResumo.porUsuario)) ? anteriorResumo.porUsuario : [];
+        const porAtribuicaoAnterior = (anteriorResumo && Array.isArray(anteriorResumo.porAtribuicao)) ? anteriorResumo.porAtribuicao : [];
+        const porUsuarioMesclado = [...porUsuarioAnterior.filter(u => (u.atuacao || '') !== (atuacao || '')), ...porUsuarioDestaAtribuicao];
+        const porAtribuicaoMesclado = [...porAtribuicaoAnterior.filter(a => (a.atuacao || '') !== (atuacao || '')), totaisDestaAtribuicao];
+
+        const resumo = calcularResumoAudienciasRealizadasDeListas(porAtribuicaoMesclado, porUsuarioMesclado, periodo);
+        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length} somaConfere=${resumo.somaConfere}`);
+
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
@@ -1694,6 +1700,45 @@
         store.removeItem(CHAVE_TENTATIVA_AR);
 
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
+    }
+
+    // Recalcula os agregados do resumo final de Audiências Realizadas a partir de duas
+    // listas JÁ MESCLADAS entre todas as atribuições coletadas: `porAtribuicao` (1 item
+    // por atribuição, com os totais "gerais" daquela vara) e `porUsuario` (1 item por
+    // magistrado, tagueado com sua atribuição). Extraída de finalizarAudienciasRealizadas
+    // para poder ser reaplicada a cada nova mesclagem (mesmo padrão de
+    // calcularResumoAudienciasDesignadasDeTabela).
+    function calcularResumoAudienciasRealizadasDeListas(porAtribuicao, porUsuario, periodo) {
+        const somarCampo = (lista, campo) => lista.reduce((s, x) => s + (x[campo] || 0), 0);
+        const totalGeral = somarCampo(porAtribuicao, 'totalGeral');
+        const canceladas = somarCampo(porAtribuicao, 'canceladas');
+        const negativas = somarCampo(porAtribuicao, 'negativas');
+        const naoRealizadas = somarCampo(porAtribuicao, 'naoRealizadas');
+        const redesignadas = somarCampo(porAtribuicao, 'redesignadas');
+        const pessoasOuvidas = somarCampo(porAtribuicao, 'pessoasOuvidas');
+
+        const somaIndividual = {
+            quantidade: somarCampo(porUsuario, 'quantidade'), canceladas: somarCampo(porUsuario, 'canceladas'),
+            negativas: somarCampo(porUsuario, 'negativas'), naoRealizadas: somarCampo(porUsuario, 'naoRealizadas'),
+            redesignadas: somarCampo(porUsuario, 'redesignadas'), pessoasOuvidas: somarCampo(porUsuario, 'pessoasOuvidas'),
+        };
+        const totalIndividual = { quantidade: totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas };
+        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
+        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
+        const divergencias = modoTesteAtivo() ? [] : camposConferidos
+            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
+            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
+
+        return {
+            geradoEm: new Date().toISOString(),
+            totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas,
+            periodo,
+            porUsuario: porUsuario.slice().sort((a, b) => b.quantidade - a.quantidade),
+            porAtribuicao,
+            totalUsuarios: porUsuario.length,
+            somaConfere: divergencias.length === 0,
+            divergencias,
+        };
     }
 
     // ── Apreensões Pendentes (Crime) — processo/criminal/apreensao.do ───────────────
@@ -2160,9 +2205,17 @@
     // (contador zerado na tela de origem, ou tabela/buttonBar ausentes na tela de
     // resultados) — mesmo padrão de "0 registros" já usado para Juntadas/Retorno/Conclusões
     // (ver bloco "!buttonBar" em injetarBotoes).
+    // "Zero mandados nesta fase" — mas só grava pagina_0=[] quando NADA foi coletado
+    // ainda (num_paginas ausente). Bug relatado pelo usuário: esta função sempre
+    // sobrescrevia pagina_0/num_paginas incondicionalmente — coletar numa 2ª atribuição
+    // com esta fase vazia APAGAVA os mandados já acumulados de uma atribuição anterior
+    // (que podia ter dados de verdade nesta mesma fase). "Zero NESTA atribuição" não é
+    // "zero no total".
     function marcarColetaMandadosVazia(cfg) {
-        store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
-        store.setItem(cfg.prefixo + 'num_paginas', '1');
+        if (!store.getItem(cfg.prefixo + 'num_paginas')) {
+            store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
+            store.setItem(cfg.prefixo + 'num_paginas', '1');
+        }
         store.setItem(cfg.prefixo + 'coletado', '1');
     }
 
@@ -3254,24 +3307,37 @@
     // decisão do usuário: se Processos Ativos não foi coletado junto, mantém o
     // comportamento antigo (só os nomes, sem contagem) em vez de arriscar uma lista
     // incompleta/enganosa.
-    function fraseCompetenciasComContagem(dados) {
+    // Conta registros por competência, com zero-padding para atribuições visitadas (ver
+    // lerMapaAtivos) que não têm NENHUM registro nesta situação — base compartilhada por
+    // fraseCompetenciasComContagem (texto do subtítulo) e subLinhasAtribuicao (sub-linhas
+    // indentadas na tabela unificada da capa). Devolve [] quando há só 0 ou 1 competência
+    // (nada a detalhar por atribuição, mesmo comportamento de sempre).
+    function contagemPorCompetencia(dados) {
         const mapaAtivos = lerMapaAtivos();
         const chavesAtivos = Object.keys(mapaAtivos);
-        if (!chavesAtivos.length) return fraseCompetencias(dados);
         const contagem = new Map();
         dados.forEach(d => {
-            const c = (d.competencia || '').trim();
+            const c = (d.competencia || d.atuacao || '').trim();
             if (!c) return;
             contagem.set(c, (contagem.get(c) || 0) + 1);
         });
-        // Ordem: as atribuições visitadas (ordem do mapa de Ativos), seguidas de
+        // Ordem: as atribuições visitadas (ordem do mapa de Ativos, quando coletado —
+        // permite mostrar "(0)" para quem não tem nenhum registro aqui), seguidas de
         // qualquer competência presente nos dados mas ausente do mapa (não deveria
         // acontecer no uso normal, mas evita perder dado real silenciosamente).
         const ordem = [...chavesAtivos];
         contagem.forEach((_, c) => { if (!ordem.includes(c)) ordem.push(c); });
-        if (!ordem.length) return '';
-        const partes = ordem.map(c => `${c} (${contagem.get(c) || 0})`);
-        return `${ordem.length > 1 ? 'Competências' : 'Competência'}: ${partes.join(', ')}`;
+        if (ordem.length <= 1) return [];
+        return ordem.map(c => ({ competencia: c, contagem: contagem.get(c) || 0 }));
+    }
+
+    function fraseCompetenciasComContagem(dados) {
+        const mapaAtivos = lerMapaAtivos();
+        if (!Object.keys(mapaAtivos).length) return fraseCompetencias(dados);
+        const itens = contagemPorCompetencia(dados);
+        if (!itens.length) return fraseCompetencias(dados);
+        const partes = itens.map(it => `${it.competencia} (${it.contagem})`);
+        return `${itens.length > 1 ? 'Competências' : 'Competência'}: ${partes.join(', ')}`;
     }
 
     // Rótulo azul, em negrito, logo abaixo do título — usado pelas funções de resumo com
@@ -4296,7 +4362,7 @@
         if (cfg === CFG_TEMPOMEDIO) {
             return {
                 rotulo: 'Tempo médio de cumprimento de decisões / sentenças',
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoTempoMedio(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoTempoMedio(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
         }
@@ -4320,14 +4386,14 @@
                 // Resumo e tabela sempre juntos (pedido do usuário) — a tabela é desenhada
                 // dentro do próprio montarResumoAudiencias, então não há passo de tabela
                 // separado aqui (ver secaoTemTabela em gerarPDFConjunto).
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
                 montarTabela: null,
             };
         }
         if (cfg === CFG_AUDIENCIAS_DESIGNADAS) {
             return {
                 rotulo: TITULO_AUDIENCIAS_DESIGNADAS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaAudienciasDesignadas(doc, (dados && dados[0] && dados[0].tabela) || [], comIndice),
             };
         }
@@ -4336,7 +4402,7 @@
                 rotulo: TITULO_AUDIENCIAS_REALIZADAS,
                 // Só resumo — não há lista de processos a discriminar, apenas totais (geral
                 // e por usuário) — ver secaoTemTabela em gerarPDFConjunto.
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasRealizadas(doc, dados && dados[0], primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudienciasRealizadas(doc, dados && dados[0], primeira, comIndice, rotuloBloco),
                 montarTabela: null,
             };
         }
@@ -4495,10 +4561,13 @@
                 { header: 'Detalhamento', dataKey: 'detalhamento' },
                 { header: 'Situação', dataKey: 'situacao' },
             ],
-            // Filha de grupo (l.grupoPai): "nome" ganha um recuo visual (indentação por
-            // espaços) — a forma mais robusta no jspdf-autotable para uma indentação por
-            // LINHA (não por coluna inteira), já que columnStyles/didParseCell não têm um
-            // "padding-left por célula" nativo confiável entre versões.
+            // Filha de grupo (l.grupoPai) ou sub-linha de atribuição (l.subAtribuicao):
+            // "nome" ganha um recuo visual (indentação por espaços) — a forma mais
+            // robusta no jspdf-autotable para uma indentação por LINHA (não por coluna
+            // inteira), já que columnStyles/didParseCell não têm um "padding-left por
+            // célula" nativo confiável entre versões. subAtribuicao usa um recuo maior +
+            // um marcador "–" (pedido do usuário: cada atribuição como subitem indentado
+            // do item pai, em vez de texto corrido no Detalhamento).
             // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
             // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
             // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
@@ -4507,7 +4576,7 @@
             body: cfg.linhas.map(l => l.subgrupoCabecalho
                 ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
                 : {
-                    nome: (l.grupoPai ? '     ' : '') + l.nome,
+                    nome: (l.subAtribuicao ? '        – ' : (l.grupoPai ? '     ' : '')) + l.nome,
                     indicador: l.indicador,
                     detalhamento: l.detalhamento,
                     situacao: l.semSituacao ? '—' : l.situacaoLabel,
@@ -4545,6 +4614,15 @@
                     data.cell.styles.fillColor = COR.cartao;
                     data.cell.styles.fontStyle = 'bold';
                     data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.tinta : COR.tintaSec;
+                    return;
+                }
+                // Sub-linha de atribuição (l.subAtribuicao): texto menor, sem negrito, cor
+                // apagada — deixa claro que é um detalhamento do item logo acima, não uma
+                // tarefa própria (nunca vira link — sem cfgOriginal).
+                if (l.subAtribuicao) {
+                    data.cell.styles.fontStyle = 'normal';
+                    data.cell.styles.fontSize = 8;
+                    data.cell.styles.textColor = COR.muted;
                     return;
                 }
                 if (data.column.dataKey === 'situacao') {
@@ -4872,6 +4950,24 @@
         // enxuto (só a contagem básica, pedido do usuário — ficava populado/confuso com
         // prioritários e a taxa por 100 ativos junto); prioritários e "mais antiga" vão
         // para o detalhamento.
+        // Sub-linha indentada com a contagem de UMA atribuição — usada por
+        // comSubLinhasAtribuicao para detalhar um item da tabela (pedido do usuário: cada
+        // atribuição como um subitem com indentação, não mais um texto corrido dentro do
+        // "Detalhamento"). Sem cfgOriginal (nunca vira link) e sem situação própria — é só
+        // um detalhamento visual do item pai logo acima.
+        function linhaSubAtribuicao(nome, indicador) {
+            return { nome, indicador, detalhamento: '', situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null, subAtribuicao: true };
+        }
+        // Acrescenta, logo abaixo de `linhaPrincipal`, uma sub-linha indentada por
+        // atribuição (ver contagemPorCompetencia — só quando há 2+ atribuições
+        // distintas nos dados; com 0 ou 1, devolve só a linha principal, como sempre foi).
+        // `sufixo(contagem)` formata o texto do indicador de cada sub-linha (ex.: "60
+        // pendente(s)", "60 ativo(s)").
+        function comSubLinhasAtribuicao(linhaPrincipal, dados, sufixo) {
+            const porCompetencia = contagemPorCompetencia(dados);
+            if (!porCompetencia.length) return [linhaPrincipal];
+            return [linhaPrincipal, ...porCompetencia.map(it => linhaSubAtribuicao(it.competencia, sufixo(it.contagem)))];
+        }
         function linhaTarefa(t, nome) {
             const detalhes = [];
             if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
@@ -4908,7 +5004,7 @@
         // filhas indentadas) conta como 1 item, não 4, mesmo padrão do popup do painel.
         function empilharSubgrupo(nome, itens, unidade) {
             if (!itens.length) return;
-            const contagem = itens.filter(l => !l.grupoPai).length;
+            const contagem = itens.filter(l => !l.grupoPai && !l.subAtribuicao).length;
             linhasCartorio.push(linhaSubgrupo(nome, `${contagem} ${unidade || 'item(ns)'}`));
             linhasCartorio.push(...itens);
         }
@@ -4920,43 +5016,55 @@
         // não é mais um card à parte no topo da capa.
         if (atuacoesAtivas.length) {
             const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            itensEstatisticasGerais.push({
+            const linhaAtivos = {
                 nome: 'Processos Ativos',
                 indicador: `${totalAtivos} ativo(s)`,
-                detalhamento: atuacoesAtivas.length > 1
-                    ? atuacoesAtivas.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
-                    : atuacoesAtivas[0],
+                detalhamento: '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
-            });
+            };
+            // Pedido do usuário: cada atribuição como um SUBITEM indentado (não mais um
+            // texto corrido em "Detalhamento") — mapaAtivos já é por atribuição, então
+            // monta a sub-linha direto dele em vez de contagemPorCompetencia (que exige
+            // registros com campo .competencia).
+            itensEstatisticasGerais.push(linhaAtivos);
+            if (atuacoesAtivas.length > 1) {
+                atuacoesAtivas.forEach(a => itensEstatisticasGerais.push(linhaSubAtribuicao(a, `${mapaAtivos[a]} ativo(s)`)));
+            }
         }
         const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
-        if (itemSuspensos) itensEstatisticasGerais.push(linhaTarefa(itemSuspensos, itemSuspensos.rotulo));
+        if (itemSuspensos) {
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(
+                linhaTarefa(itemSuspensos, itemSuspensos.rotulo), itemSuspensos.dados, (n) => `${n} pendente(s)`,
+            ));
+        }
         // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
         // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de
         // fim de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
         if (secaoSuspensosPrazo) {
             const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
-            itensEstatisticasGerais.push({
+            const linhaSuspensosPrazo = {
                 nome: 'Suspensos com Prazo',
                 indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
                 detalhamento: fimMaisLongo
                     ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
                     : 'Nenhum processo suspenso por prazo determinado',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
-            });
+            };
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaSuspensosPrazo, secaoSuspensosPrazo.dados, (n) => `${n} processo(s)`));
         }
         // "Em Instância Recursal" — indicador: total em instância recursal.
         // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
         if (secaoInstanciaRecursal) {
             const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
-            itensEstatisticasGerais.push({
+            const linhaInstanciaRecursal = {
                 nome: 'Em Instância Recursal',
                 indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
                 detalhamento: maisDe2Anos.length
                     ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
                     : 'Nenhum processo enviado há mais de 2 anos',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
-            });
+            };
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaInstanciaRecursal, secaoInstanciaRecursal.dados, (n) => `${n} processo(s)`));
         }
         empilharSubgrupo('Estatísticas Gerais', itensEstatisticasGerais);
 
@@ -4970,9 +5078,16 @@
             [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
         ]);
         const itensMandados = CFGS_GRUPO_MANDADOS.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
+        // Pedido do usuário: cada item de Pendências ganha sub-linhas indentadas por
+        // atribuição (mesmo padrão de Estatísticas Gerais acima) — EXCETO os subitens de
+        // Mandados (Retorno/Cumprimento/Decurso), que já têm 1 nível de indentação
+        // (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do usuário.
         const itensPendencias = itensCartorio
             .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
-            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo));
+            .flatMap(t => comSubLinhasAtribuicao(
+                linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo),
+                t.dados, (n) => `${n} pendente(s)`,
+            ));
         if (itensMandados.length) {
             // Cabeçalho do grupo "Mandados" sem indicador/detalhamento (pedido do
             // usuário) — o resumo agregado ficava confuso ali; cada subitem (Retorno/
@@ -5442,7 +5557,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Tempo Médio, dentro de um doc
     // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoTempoMedio(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoTempoMedio(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5485,14 +5600,17 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_TEMPOMEDIO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
         if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
-        const fraseCompTM = fraseCompetenciasComContagem(dados);
-        if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompTM = fraseCompetenciasComContagem(dados);
+            if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        const yLinhaTM = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinhaTM = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaTM, pw - m, yLinhaTM);
 
         const gap = 6;
@@ -5694,7 +5812,7 @@
     // autoTable segue para quantas páginas forem precisas, normalmente. somenteResumo
     // omite a tabela (usado tanto no relatório individual quanto no Relatório PDF conjunto,
     // pela opção "Só resumo").
-    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo) {
+    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5709,13 +5827,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} audiência(s) pendente(s)`;
-        const fraseComp = fraseCompetenciasComContagem(dados);
-        if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseComp = fraseCompetenciasComContagem(dados);
+            if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        const yLinha = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -5845,7 +5966,7 @@
         return visiveis.join(', ') + (resto > 0 ? ` (+${resto})` : '');
     }
 
-    function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+    function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5855,21 +5976,24 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [], competencia: '' };
+        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [] };
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  Pauta de Horários (todos os tipos, 10 anos à frente)`;
         // Pedido do usuário: mesma contagem por atribuição usada nos demais relatórios
         // (ver fraseCompetenciasComContagem) — r.tabela já vem com todas as atribuições
         // coletadas mescladas (ver salvarResumoAudienciasDesignadas), cada linha marcada
         // com sua própria competência.
-        const fraseCompAD = fraseCompetenciasComContagem(r.tabela || []);
-        if (fraseCompAD) subtitulo += `  •  ${fraseCompAD}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompAD = fraseCompetenciasComContagem(r.tabela || []);
+            if (fraseCompAD) subtitulo += `  •  ${fraseCompAD}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         // Observação sobre a junção de tipos (pedido do usuário) — sempre presente, já que
         // a normalização (ver normalizarTipoAudiencia) vale para toda a pauta.
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
@@ -6047,7 +6171,7 @@
         baixarBlob(doc.output('blob'), `audiencias_realizadas_projudi_${dataArquivo()}.pdf`);
     }
 
-    function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+    function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6057,17 +6181,28 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], totalUsuarios: 0, somaConfere: true, divergencias: [], competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0, somaConfere: true, divergencias: [] };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_REALIZADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  Período: ${periodoTxt}`;
-        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        // Pedido do usuário: contagem por atribuição igual aos demais relatórios — aqui
+        // "contagem" é o total de audiências realizadas NAQUELA atribuição (r.porAtribuicao
+        // já vem com 1 item por atribuição mesclada, ver
+        // calcularResumoAudienciasRealizadasDeListas), não uma contagem de registros como
+        // em fraseCompetenciasComContagem (por isso não reaproveitamos aquele helper aqui).
+        if (!rotuloInfo.semFrase && r.porAtribuicao && r.porAtribuicao.length > 1) {
+            const partes = r.porAtribuicao.map(a => `${a.competencia || '(sem atuação)'} (${a.totalGeral})`);
+            subtitulo += `  •  Competências: ${partes.join(', ')}`;
+        } else if (!rotuloInfo.semFrase && r.porAtribuicao && r.porAtribuicao.length === 1 && r.porAtribuicao[0].competencia) {
+            subtitulo += `  •  Competência: ${r.porAtribuicao[0].competencia}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         // Aviso permanente (pedido do usuário): o Projudi só permite pesquisar audiências
         // por magistrado(a) entre quem está atualmente HABILITADO na unidade — um
         // magistrado que saiu da vara no meio do período (substituição, promoção,
