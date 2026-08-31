@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.0
+// @version      22.1
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1075,28 +1075,93 @@
         });
     }
 
-    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
-    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
-    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha.
-    function salvarAudienciasDesignadasVazio() {
+    // Recalcula TODOS os agregados do resumo (totalDesignadas, ultimaData, porTipo,
+    // concentracaoDiaSemana...) a partir de uma tabela JÁ ACHATADA (uma linha por
+    // processo/audiência — mesmo formato de `tabela` no resumo salvo). Extraída de
+    // coletarAudienciasDesignadas para ser reaproveitada tanto numa coleta nova quanto ao
+    // MESCLAR a tabela de uma atribuição com a de atribuições já coletadas antes (ver
+    // salvarResumoAudienciasDesignadas) — pedido do usuário: "somar as competências",
+    // igual aos demais relatórios, em vez de a atribuição mais recente sobrescrever as
+    // anteriores. concentracaoPorDiaSemana só precisa de .data/.tipoAudiencia/.processos
+    // (array) em cada item — um "processos: [processo]" de 1 elemento por linha já
+    // acumulada reproduz exatamente a mesma soma que o cálculo original fazia a partir
+    // das linhas da pauta (cada processo conta 1 vez).
+    function calcularResumoAudienciasDesignadasDeTabela(tabela) {
+        const totalDesignadas = tabela.length;
+
+        let ultimaData = null, ultimaDataTs = -Infinity;
+        tabela.forEach(t => {
+            const ts = parseDataBR(t.data);
+            if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = t.data; }
+        });
+
+        let processosUltimoDia = [];
+        if (ultimaData) {
+            const set = new Set();
+            tabela.filter(t => t.data === ultimaData).forEach(t => set.add(t.processo));
+            processosUltimoDia = [...set];
+        }
+        const totalProcessosUltimoDia = processosUltimoDia.length;
+
+        const maxTsPorTipo = new Map();
+        tabela.forEach(t => {
+            const ts = parseDataBR(t.data);
+            if (ts == null) return;
+            const atual = maxTsPorTipo.get(t.tipoAudiencia);
+            if (atual == null || ts > atual) maxTsPorTipo.set(t.tipoAudiencia, ts);
+        });
+        const porTipo = [...maxTsPorTipo.entries()].map(([tipo, ts]) => {
+            const linhasDoTipoNaData = tabela.filter(t => t.tipoAudiencia === tipo && parseDataBR(t.data) === ts);
+            const processos = [...new Set(linhasDoTipoNaData.map(t => t.processo))];
+            return { tipo, data: linhasDoTipoNaData[0].data, processos };
+        }).sort((a, b) => b.data.localeCompare(a.data));
+
+        const linhasPseudo = tabela.map(t => ({ data: t.data, tipoAudiencia: t.tipoAudiencia, processos: [t.processo] }));
+        const concentracaoDiaSemana = concentracaoPorDiaSemana(linhasPseudo);
+
+        return { totalDesignadas, ultimaData, processosUltimoDia, totalProcessosUltimoDia, porTipo, tabela, concentracaoDiaSemana };
+    }
+
+    // Mescla a tabela achatada DESTA atribuição com a de atribuições já coletadas antes
+    // (lidas do resumo salvo), descartando só as linhas da MESMA atribuição atual (evita
+    // duplicar se o usuário coletar de novo a mesma vara), recalcula todos os agregados a
+    // partir do resultado e grava. Mesmo padrão de acumulação já usado em Outros
+    // Cumprimentos/Audiências Realizadas — sem isso, coletar numa 2ª vara sobrescrevia o
+    // resumo da 1ª (bug relatado pelo usuário).
+    function salvarResumoAudienciasDesignadas(tabelaDestaAtribuicao) {
+        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const tabelaTagueada = tabelaDestaAtribuicao.map(t => ({ ...t, atuacao, competencia }));
+
+        const anterior = desembrulharArray(store.getItem(prefixo + 'pagina_0'));
+        const tabelaAnterior = (anterior && anterior[0] && Array.isArray(anterior[0].tabela)) ? anterior[0].tabela : [];
+        const semEstaAtribuicao = tabelaAnterior.filter(t => (t.atuacao || '') !== (atuacao || ''));
+        const tabelaMesclada = [...semEstaAtribuicao, ...tabelaTagueada];
+
         const resumo = {
             geradoEm: new Date().toISOString(),
-            totalDesignadas: 0,
-            ultimaData: null,
-            processosUltimoDia: [],
-            totalProcessosUltimoDia: 0,
-            porTipo: [],
-            tabela: [],
-            concentracaoDiaSemana: concentracaoPorDiaSemana([]),
-            competencia: competenciaDe(lerAtuacao()),
+            ...calcularResumoAudienciasDesignadasDeTabela(tabelaMesclada),
+            competencia,
         };
-        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — salvando resumo com 0 audiências designadas');
-        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        console.log(`[Projudi Audiências Designadas] "${atuacao || '(sem atuação)'}": ${tabelaDestaAtribuicao.length} audiência(s) nesta atribuição — resumo mesclado: totalDesignadas=${resumo.totalDesignadas} ultimaData=${resumo.ultimaData} totalProcessosUltimoDia=${resumo.totalProcessosUltimoDia} tipos=${resumo.porTipo.length}`);
+
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
         store.removeItem(CHAVE_PROGRESSO_AD);
         avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
+
+    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
+    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
+    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha. Ainda
+    // assim passa por salvarResumoAudienciasDesignadas (com tabela vazia PARA ESTA
+    // atribuição) — "zero nesta vara" não deve apagar as audiências já coletadas em
+    // outras atribuições.
+    function salvarAudienciasDesignadasVazio() {
+        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — 0 audiências designadas nesta atribuição');
+        salvarResumoAudienciasDesignadas([]);
     }
 
     // Lê todas as linhas (uma por horário/tipo) das tabelas internas de cada dia — a
@@ -1237,45 +1302,12 @@
         const ignoradas = todasAsLinhas.length - linhas.length;
         if (ignoradas > 0) console.log(`[Projudi Audiências Designadas] ${ignoradas} linha(s) sem processo vinculado foram ignoradas`);
 
-        // Total de audiências designadas = total de processos com audiência marcada (uma
-        // linha pode ter mais de um processo no mesmo horário) — não mais a soma da coluna
-        // "Agendadas", já que agora só contam linhas com processo de verdade vinculado.
-        const totalDesignadas = linhas.reduce((s, l) => s + l.processos.length, 0);
-
-        let ultimaData = null, ultimaDataTs = -Infinity;
-        linhas.forEach(l => {
-            const ts = parseDataBR(l.data);
-            if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = l.data; }
-        });
-
-        // Processos distintos no último dia — contados um a um a partir da expansão, não
-        // pela soma da coluna "Agendadas" (pedido do usuário).
-        let processosUltimoDia = [];
-        if (ultimaData) {
-            const set = new Set();
-            linhas.filter(l => l.data === ultimaData).forEach(l => l.processos.forEach(p => set.add(p)));
-            processosUltimoDia = [...set];
-        }
-        const totalProcessosUltimoDia = processosUltimoDia.length;
-
-        // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento" somada
-        // em "Audiência de Instrução" — ver normalizarTipoAudiencia), com o(s) número(s) de
-        // processo daquela audiência mais distante.
-        const maxTsPorTipo = new Map();
-        linhas.forEach(l => {
-            const ts = parseDataBR(l.data);
-            if (ts == null) return;
-            const atual = maxTsPorTipo.get(l.tipoAudiencia);
-            if (atual == null || ts > atual) maxTsPorTipo.set(l.tipoAudiencia, ts);
-        });
-        const porTipo = [...maxTsPorTipo.entries()].map(([tipo, ts]) => {
-            const linhasDoTipoNaData = linhas.filter(l => l.tipoAudiencia === tipo && parseDataBR(l.data) === ts);
-            const processos = [...new Set(linhasDoTipoNaData.flatMap(l => l.processos))];
-            return { tipo, data: linhasDoTipoNaData[0].data, processos };
-        }).sort((a, b) => b.data.localeCompare(a.data));
-
-        // Tabela discriminada completa: data/hora/processo/tipo, uma linha por processo
-        // (uma linha da pauta pode ter mais de um processo agendado no mesmo horário).
+        // Tabela discriminada DESTA atribuição: data/hora/processo/tipo, uma linha por
+        // processo (uma linha da pauta pode ter mais de um processo agendado no mesmo
+        // horário). Todos os demais agregados (totalDesignadas, ultimaData, porTipo,
+        // concentracaoDiaSemana...) são recalculados a partir dela — inclusive já
+        // mesclada com outras atribuições coletadas antes, ver
+        // salvarResumoAudienciasDesignadas/calcularResumoAudienciasDesignadasDeTabela.
         const tabela = [];
         linhas.forEach(l => {
             l.processos.forEach(p => tabela.push({ data: l.data, horario: l.horario, processo: p, tipoAudiencia: l.tipoAudiencia }));
@@ -1284,29 +1316,9 @@
             const ta = parseDataBR(a.data) || 0, tb = parseDataBR(b.data) || 0;
             return ta - tb || a.horario.localeCompare(b.horario);
         });
+        console.log(`[Projudi Audiências Designadas] ${tabela.length} audiência(s) nesta atribuição, ${ignoradas} linha(s) sem processo vinculado ignorada(s)`);
 
-        const concentracaoDiaSemana = concentracaoPorDiaSemana(linhas);
-
-        const resumo = {
-            geradoEm: new Date().toISOString(),
-            totalDesignadas,
-            ultimaData,
-            processosUltimoDia,
-            totalProcessosUltimoDia,
-            porTipo,
-            tabela,
-            concentracaoDiaSemana,
-            competencia: competenciaDe(lerAtuacao()),
-        };
-        console.log(`[Projudi Audiências Designadas] resumo calculado: totalDesignadas=${totalDesignadas} ultimaData=${ultimaData} totalProcessosUltimoDia=${totalProcessosUltimoDia} tipos=${porTipo.length} linhasTabela=${tabela.length} ignoradas(sem processo)=${ignoradas}`);
-
-        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
-        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
-        store.setItem(prefixo + 'num_paginas', '1');
-        store.setItem(prefixo + 'coletado', '1');
-        store.removeItem(CHAVE_PROGRESSO_AD);
-
-        avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+        salvarResumoAudienciasDesignadas(tabela);
     }
 
     // ── Audiências Realizadas (Crime) — audiencia/estatistica.do, "Audiências na
@@ -4025,7 +4037,7 @@
         return diasDecorridos(d.preAnaliseData, now);
     }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira) {
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -4045,7 +4057,13 @@
         doc.text(TITULO_CONCLUSOES_POR_JUIZ, m, hy);
         hy += 8;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
-        const linhasJuiz = doc.splitTextToSize('Juiz(a): ' + juiz, uw);
+        // rotuloBloco ('Resumo Geral' ou 'Competência: X', ver subBlocosPorAtribuicao em
+        // gerarPDFConjunto) some junto do nome do juiz — pedido do usuário: com 2+
+        // atribuições coletadas, cada magistrado(a) com processos em mais de uma delas
+        // gerava várias páginas IDÊNTICAS (mesmo título "Juiz(a): X"), sem indicar qual
+        // era o resumo geral e qual era de qual atribuição específica.
+        const textoJuiz = 'Juiz(a): ' + juiz + (rotuloBloco ? ` — ${rotuloBloco}` : '');
+        const linhasJuiz = doc.splitTextToSize(textoJuiz, uw);
         doc.text(linhasJuiz, m, hy);
         hy += linhasJuiz.length * 5.2 + 1.5;
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -4325,7 +4343,7 @@
         if (cfg === CFG_OUTROS_CUMPRIMENTOS) {
             return {
                 rotulo: TITULO_OUTROS_CUMPRIMENTOS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
@@ -5199,7 +5217,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira);
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5843,7 +5861,12 @@
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  Pauta de Horários (todos os tipos, 10 anos à frente)`;
-        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        // Pedido do usuário: mesma contagem por atribuição usada nos demais relatórios
+        // (ver fraseCompetenciasComContagem) — r.tabela já vem com todas as atribuições
+        // coletadas mescladas (ver salvarResumoAudienciasDesignadas), cada linha marcada
+        // com sua própria competência.
+        const fraseCompAD = fraseCompetenciasComContagem(r.tabela || []);
+        if (fraseCompAD) subtitulo += `  •  ${fraseCompAD}`;
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
         let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
@@ -5909,6 +5932,11 @@
         // gráfico com o total de processos por dia + detalhamento por tipo, numa página
         // própria dentro do resumo (a mesma seção do relatório, só que numa página a mais).
         const concentracao = r.concentracaoDiaSemana || [];
+        // yAposConcentracao: Y logo abaixo do último elemento desenhado nesta seção — usado
+        // pra decidir se a Pauta por Mês (abaixo) cabe na MESMA página (pedido do usuário:
+        // "juntar a Pauta de Audiências por Mês na mesma página do Concentração"), em vez
+        // de sempre abrir página nova pra ela.
+        let yAposConcentracao = null;
         if (concentracao.some(d => d.total > 0)) {
             doc.addPage();
             tituloSecao(doc, m, m + 4, uw, 'Concentração de Audiências por Dia da Semana (dias úteis)');
@@ -5936,8 +5964,10 @@
                     columnStyles: { dia: { cellWidth: uw * 0.25 }, tipo: { cellWidth: uw * 0.5 }, quantidade: { cellWidth: uw * 0.25, halign: 'right' } },
                     didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
                 });
+                yAposConcentracao = doc.lastAutoTable.finalY + 8;
             } else {
                 desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                yAposConcentracao = yTabela;
             }
         }
 
@@ -5948,9 +5978,20 @@
         // reaproveita agruparPorMes (mesmo agregador do Tempo Médio).
         const porMesAD = agruparPorMes(r.tabela || [], 'data');
         if (porMesAD.length > 1) {
-            doc.addPage();
-            tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
-            desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            // Pedido do usuário: juntar com a Concentração por Dia da Semana na MESMA
+            // página, em vez de sempre abrir uma nova — só abre página própria se não
+            // sobrar espaço suficiente para o gráfico de série mensal (ALTURA_MIN_PAUTA).
+            const ALTURA_MIN_PAUTA = 60;
+            const yTitulo = yAposConcentracao != null ? yAposConcentracao : m + 4;
+            const espacoDisponivel = ph - m - (yTitulo + 8) - 14;
+            if (yAposConcentracao != null && espacoDisponivel >= ALTURA_MIN_PAUTA) {
+                tituloSecao(doc, m, yTitulo, uw, 'Pauta de Audiências por Mês');
+                desenharSerieMensal(doc, m, yTitulo + 8, uw, espacoDisponivel, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            } else {
+                doc.addPage();
+                tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
+                desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            }
             desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
     }
@@ -6144,7 +6185,7 @@
         baixarBlob(doc.output('blob'), `outros_cumprimentos_projudi_${dataArquivo()}.pdf`);
     }
 
-    function montarResumoOutrosCumprimentos(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoOutrosCumprimentos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6160,10 +6201,14 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_OUTROS_CUMPRIMENTOS, m, m + 2);
+        // Pedido do usuário: identificar melhor qual bloco é o resumo geral (todas as
+        // atribuições somadas) e qual é de uma atribuição específica — mesmo padrão já
+        // usado em Paralisados/Suspensos com Prazo/Instância Recursal (desenharRotuloBloco).
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         const subtitulo = `Extraído em ${hoje} às ${hora}  •  Mesa do Magistrado — painel de contadores por tipo de cumprimento`;
-        doc.text(subtitulo, m, m + 8);
-        let yObs = m + 8 + 4.2;
+        doc.text(subtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + 4.2;
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
         const obs = 'Observação: tipos com numeração zerada não constam desta tabela. "Com Urgência" é um marcador '
             + 'sobre os demais campos (não somado no total pendente) e "pessoais" (Para Assinar) não é somado '
