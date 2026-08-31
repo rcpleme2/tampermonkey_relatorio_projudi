@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.3
+// @version      22.4
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -95,22 +95,15 @@
     // sempre em "coletando_tempomedio", sem nenhum sinal de erro.
     const STALE_MS = 6 * 60 * 1000; // 6 minutos sem atividade => coleta em andamento considerada obsoleta
 
-    // ── Modo de teste (depuração) — ativação disfarçada ────────────────────────────
-    // Limita a extração a poucas páginas por relatório, só para testar rapidamente se a
-    // ferramenta está rodando fim a fim (navegação, coleta, PDF) sem esperar uma coleta
-    // completa. Ativado/desativado clicando 5x seguidas (em até 2s) no título do painel
-    // de automação (ver o handler em '.pa-titulo') — de propósito sem nenhum indício
-    // visual permanente no painel, só um console.log ao alternar (visível apenas no
-    // DevTools). Persistido em localStorage para sobreviver a reloads de página.
-    const CHAVE_MODO_TESTE = 'projudi_modo_teste';
-    const LIMITE_PAGINAS_MODO_TESTE = 2;
-    function modoTesteAtivo() { return store.getItem(CHAVE_MODO_TESTE) === '1'; }
-    function alternarModoTeste() {
-        const ativo = !modoTesteAtivo();
-        if (ativo) store.setItem(CHAVE_MODO_TESTE, '1'); else store.removeItem(CHAVE_MODO_TESTE);
-        console.log(`[Projudi] modo de teste ${ativo ? 'ATIVADO' : 'desativado'} — coleta limitada a ${LIMITE_PAGINAS_MODO_TESTE} página(s)/item(ns) por relatório enquanto ativo.`);
-        return ativo;
-    }
+    // Removido a pedido do usuário: existia aqui um "modo de teste" disfarçado (5 cliques
+    // no título do painel) que limitava a coleta a 2 páginas por relatório. Causou um bug
+    // real em produção — se ficasse ativado sem o usuário perceber (persistia em
+    // localStorage entre reloads), a partir do 2º mês do Tempo Médio (e em Conclusões)
+    // a coleta parava de virar página assim que o total acumulado de páginas atingia 2,
+    // mesmo havendo mais resultado (relatado como "só pega os 100 primeiros resultados a
+    // partir do 2º mês"). store.removeItem('projudi_modo_teste') roda no bootstrap (ver
+    // final do arquivo) para limpar a flag de qualquer sessão anterior que a tivesse
+    // deixado ligada.
 
     // ── Leitura da Atuação atual ────────────────────────────────────────────────
 
@@ -1480,14 +1473,6 @@
         // isso, um JSON.parse único podia deixar "fila" como STRING, e fila.shift() quebrava.
         const fila = desembrulharArray(store.getItem(CHAVE_FILA_USUARIOS_AR)) || [];
         if (!fila.length) { finalizarAudienciasRealizadas(); return; }
-        // Modo de teste: só percorre os primeiros N usuários da fila, não todos — o
-        // objetivo é testar rápido a ferramenta fim a fim, não coletar dado real.
-        const acumuladoAtual = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
-        if (modoTesteAtivo() && acumuladoAtual.length >= LIMITE_PAGINAS_MODO_TESTE) {
-            console.log(`[Projudi Audiências Realizadas] modo de teste ativo — parando em ${acumuladoAtual.length} usuário(s), sem percorrer o restante da fila.`);
-            finalizarAudienciasRealizadas();
-            return;
-        }
         const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
         const prox = fila.shift();
         store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(fila));
@@ -1645,10 +1630,7 @@
         const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
         const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
         const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        // Modo de teste: a fila é cortada de propósito (ver avancarUsuarioAR), então a
-        // soma NUNCA vai bater com o total geral — não é uma divergência real, então nem
-        // computa nem avisa/retenta nesse modo.
-        const divergencias = modoTesteAtivo() ? [] : camposConferidos
+        const divergencias = camposConferidos
             .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
             .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
         const somaConfere = divergencias.length === 0;
@@ -1725,7 +1707,7 @@
         const totalIndividual = { quantidade: totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas };
         const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
         const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = modoTesteAtivo() ? [] : camposConferidos
+        const divergencias = camposConferidos
             .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
             .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
 
@@ -2927,12 +2909,7 @@
 
             atualizarStatus(`Coletando ${ctx}página ${pagina} de ${totPag} — ${total} no total acumulado...`);
 
-            const paginasColetadas = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
-            const limiteModoTesteAtingido = modoTesteAtivo() && paginasColetadas >= LIMITE_PAGINAS_MODO_TESTE;
-            if (limiteModoTesteAtingido) {
-                console.log(`[Projudi] modo de teste ativo — parando em ${paginasColetadas} página(s) para "${cfg.prefixo}" mesmo havendo mais resultado.`);
-            }
-            if (temProximaPagina() && !limiteModoTesteAtingido) {
+            if (temProximaPagina()) {
                 document.querySelector('a.arrowNextOn').click();
             } else {
                 store.removeItem(KEY_RODANDO);
@@ -6189,6 +6166,31 @@
         baixarBlob(doc.output('blob'), `audiencias_realizadas_projudi_${dataArquivo()}.pdf`);
     }
 
+    // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
+    // atribuição/vara aparece como UMA linha só, com os valores somados — não uma linha
+    // por atribuição (isso continua disponível, sem prejuízo, em porAtribuicao/porUsuario
+    // granular, usados internamente pra conferência de soma). Agrupa por `usuario`
+    // (login, mais estável que o nome) com fallback pro nome. Extraída pra ser
+    // reaproveitada tanto no PDF (montarResumoAudienciasRealizadas) quanto no Word
+    // conjunto (secaoWordAudienciasRealizadas).
+    function agruparAudienciasRealizadasPorUsuario(porUsuario) {
+        const porChave = new Map();
+        (porUsuario || []).forEach(u => {
+            const chave = u.usuario || u.nome;
+            if (!porChave.has(chave)) {
+                porChave.set(chave, { usuario: u.usuario, nome: u.nome, quantidade: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 });
+            }
+            const acc = porChave.get(chave);
+            acc.quantidade += u.quantidade || 0;
+            acc.canceladas += u.canceladas || 0;
+            acc.negativas += u.negativas || 0;
+            acc.naoRealizadas += u.naoRealizadas || 0;
+            acc.redesignadas += u.redesignadas || 0;
+            acc.pessoasOuvidas += u.pessoasOuvidas || 0;
+        });
+        return [...porChave.values()].sort((a, b) => b.quantidade - a.quantidade);
+    }
+
     function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
@@ -6258,23 +6260,7 @@
         // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
         // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
         // por `usuario` (login, mais estável que o nome) com fallback pro nome.
-        const porUsuarioAgrupado = (() => {
-            const porChave = new Map();
-            r.porUsuario.forEach(u => {
-                const chave = u.usuario || u.nome;
-                if (!porChave.has(chave)) {
-                    porChave.set(chave, { usuario: u.usuario, nome: u.nome, quantidade: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 });
-                }
-                const acc = porChave.get(chave);
-                acc.quantidade += u.quantidade || 0;
-                acc.canceladas += u.canceladas || 0;
-                acc.negativas += u.negativas || 0;
-                acc.naoRealizadas += u.naoRealizadas || 0;
-                acc.redesignadas += u.redesignadas || 0;
-                acc.pessoasOuvidas += u.pessoasOuvidas || 0;
-            });
-            return [...porChave.values()].sort((a, b) => b.quantidade - a.quantidade);
-        })();
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
 
         const gap = 6;
         const kY = yLinha + 5;
@@ -9137,6 +9123,195 @@
         catch (err) { alert('Erro ao gerar Excel conjunto: ' + err.message); console.error(err); }
     }
 
+    // ── Relatório conjunto em Word (editável) — pedido do usuário ───────────────────
+    // .doc no formato "Word HTML" (namespaces xmlns:o/xmlns:w — Word abre nativamente,
+    // sem precisar de nenhuma biblioteca .docx via @require): tabelas de verdade
+    // (editáveis célula a célula) com os mesmos dados de cfg.cabecalhos/cfg.linha já
+    // usados no PDF/Excel, e os gráficos de distribuição (cfg.pdf.distribuicoes) como
+    // IMAGEM (jsPDF desenha vetorialmente dentro do PDF, não dá pra "capturar" — em vez
+    // disso, desenha os mesmos dados num <canvas> oculto e embute o PNG resultante).
+
+    function escaparHTML(v) {
+        return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function tabelaHTMLWord(cabecalhos, linhas) {
+        const th = cabecalhos.map(c => `<th>${escaparHTML(c)}</th>`).join('');
+        const corpo = linhas.map(l => `<tr>${l.map(v => `<td>${escaparHTML(v)}</td>`).join('')}</tr>`).join('');
+        return `<table><thead><tr>${th}</tr></thead><tbody>${corpo}</tbody></table>`;
+    }
+
+    // Desenha um gráfico de barras simples (label + valor) num <canvas> oculto e devolve
+    // a imagem como data URL PNG — mesma forma dos dados usados por desenharBarras no
+    // PDF (contarPorCampo), só que renderizado em bitmap pra caber num documento Word.
+    function gerarImagemBarras(itens, largura, altura, corHex) {
+        const escala = 2; // retina — texto legível quando o Word/impressora redimensiona
+        const canvas = document.createElement('canvas');
+        canvas.width = largura * escala;
+        canvas.height = altura * escala;
+        const ctx = canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.scale(escala, escala);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, largura, altura);
+        if (itens.length) {
+            const max = Math.max(1, ...itens.map(i => i.valor));
+            const margemBaixo = 30, margemTopo = 14, margemLado = 6;
+            const areaAltura = altura - margemBaixo - margemTopo;
+            const larguraBarra = (largura - 2 * margemLado) / itens.length;
+            itens.forEach((it, i) => {
+                const h = Math.max(1, (it.valor / max) * areaAltura);
+                const x = margemLado + i * larguraBarra;
+                const y = margemTopo + (areaAltura - h);
+                ctx.fillStyle = corHex;
+                ctx.fillRect(x + larguraBarra * 0.15, y, larguraBarra * 0.7, h);
+                ctx.fillStyle = '#1A1A1A';
+                ctx.font = 'bold 10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(it.valor), x + larguraBarra / 2, y - 3);
+                ctx.fillStyle = '#82807A';
+                ctx.font = '8px Arial';
+                let rotulo = String(it.label || '');
+                if (rotulo.length > 16) rotulo = rotulo.slice(0, 15) + '…';
+                ctx.fillText(rotulo, x + larguraBarra / 2, altura - margemBaixo + 12);
+            });
+        }
+        return canvas.toDataURL('image/png');
+    }
+
+    // Seção padrão (relatórios "lista de processos", que têm cfg.cabecalhos/cfg.linha —
+    // a grande maioria): título (reaproveita descreverSecaoPDF, a mesma resolução de
+    // nome usada no PDF), contagem por atribuição, gráficos de distribuição como imagem,
+    // tabela completa e editável.
+    function secaoWordGenerica(cfg, dados) {
+        const info = descreverSecaoPDF(cfg, false);
+        let html = `<h2>${escaparHTML(info.rotulo)}</h2>`;
+        let subtitulo = `${dados.length} registro(s)`;
+        const frase = fraseCompetenciasComContagem(dados);
+        if (frase) subtitulo += ` • ${frase}`;
+        html += `<p class="subtitulo">${escaparHTML(subtitulo)}</p>`;
+        if (cfg.pdf && Array.isArray(cfg.pdf.distribuicoes)) {
+            cfg.pdf.distribuicoes.forEach(dist => {
+                // Só distribuições por CAMPO categórico simples (contarPorCampo) — as que
+                // usam calc() próprio (ex.: "aguardando decisão" em Conclusões) têm lógica
+                // demais pra reproduzir aqui sem duplicar; ficam de fora do Word.
+                if (!dist.campo || typeof dist.calc === 'function') return;
+                const itens = contarPorCampo(dados, dist.campo, dist.topN || 10);
+                if (!itens.length) return;
+                const img = gerarImagemBarras(itens, 460, 170, '#3A5A7D');
+                if (img) html += `<p><strong>${escaparHTML(dist.titulo)}</strong><br><img class="grafico" src="${img}"></p>`;
+            });
+        }
+        if (cfg.cabecalhos && cfg.linha) {
+            html += tabelaHTMLWord(cfg.cabecalhos, dados.map(cfg.linha));
+        }
+        return html;
+    }
+
+    // Três relatórios são "resumo único" (dados = 1 objeto agregado, não uma lista por
+    // processo — CFGS_SEM_PROCESSO_POR_LINHA) e não têm cfg.cabecalhos/cfg.linha: cada
+    // um ganha uma seção dedicada e mais simples (só os números principais + a tabela
+    // discriminada que existir), em vez do formato genérico acima.
+    function secaoWordAudienciasDesignadas(resumo) {
+        const r = resumo || {};
+        let html = '<h2>Audiências Designadas</h2>';
+        let subtitulo = `${r.totalDesignadas || 0} audiência(s) designada(s)`;
+        if (r.ultimaData) subtitulo += ` • Última: ${r.ultimaData}`;
+        html += `<p class="subtitulo">${escaparHTML(subtitulo)}</p>`;
+        if (r.tabela && r.tabela.length) {
+            const frase = fraseCompetenciasComContagem(r.tabela);
+            if (frase) html += `<p class="subtitulo">${escaparHTML(frase)}</p>`;
+            html += tabelaHTMLWord(['Data', 'Horário', 'Processo', 'Tipo de Audiência'],
+                r.tabela.map(t => [t.data, t.horario, t.processo, t.tipoAudiencia]));
+        }
+        return html;
+    }
+    function secaoWordAudienciasRealizadas(resumo) {
+        const r = resumo || {};
+        let html = '<h2>Audiências Realizadas</h2>';
+        html += `<p class="subtitulo">${r.totalGeral || 0} realizada(s) • ${r.canceladas || 0} cancelada(s) • `
+            + `${r.negativas || 0} negativa(s) • ${r.naoRealizadas || 0} não realizada(s) • ${r.redesignadas || 0} redesignada(s) • `
+            + `${r.pessoasOuvidas || 0} pessoa(s) ouvida(s)</p>`;
+        if (r.porAtribuicao && r.porAtribuicao.length > 1) {
+            const frase = r.porAtribuicao.map(a => `${a.competencia || '(sem atuação)'} (${a.totalGeral})`).join(', ');
+            html += `<p class="subtitulo">Competências: ${escaparHTML(frase)}</p>`;
+        }
+        // Mesmo agrupamento por usuário do PDF (item 6 do pedido do usuário) — magistrado
+        // em 2+ atribuições vira uma linha só, somada.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+        if (porUsuarioAgrupado.length) {
+            html += tabelaHTMLWord(
+                ['Usuário', 'Realizadas', 'Canceladas', 'Negativas', 'Não Realizadas', 'Redesignadas', 'Pessoas Ouvidas'],
+                porUsuarioAgrupado.map(u => [u.nome, u.quantidade, u.canceladas, u.negativas, u.naoRealizadas, u.redesignadas, u.pessoasOuvidas]),
+            );
+        }
+        return html;
+    }
+    function secaoWordOutrosCumprimentos(dados) {
+        const r = dados || [];
+        let html = '<h2>Outros Cumprimentos</h2>';
+        const totalPendentes = r.reduce((s, d) => s + (d.pendentes || 0), 0);
+        html += `<p class="subtitulo">${totalPendentes} pendência(s) no total, ${r.length} tipo(s)</p>`;
+        const frase = fraseCompetenciasComContagem(r);
+        if (frase) html += `<p class="subtitulo">${escaparHTML(frase)}</p>`;
+        html += tabelaHTMLWord(['Tipo', 'Pendentes', 'Com Urgência', 'Origem'],
+            r.map(d => [d.tipo, d.pendentes, d.urgentes, d.origem === 'bnmp' ? 'BNMP' : 'Cumprimento']));
+        return html;
+    }
+
+    const ESTILO_WORD = `
+        body { font-family: Calibri, Arial, sans-serif; color: #1A1A1A; font-size: 11pt; }
+        h1 { font-size: 20pt; margin: 0; }
+        h2 { color: #3A5A7D; font-size: 15pt; border-bottom: 1px solid #DEDDD6; padding-bottom: 4px; margin-top: 26px; }
+        .subtitulo { color: #52514E; font-size: 9.5pt; margin: 2px 0 8px 0; }
+        .capa-titulo { background: #3A5A7D; color: #FFFFFF; padding: 14px 16px; font-size: 16pt; font-weight: bold; }
+        table { border-collapse: collapse; width: 100%; margin: 8px 0 18px 0; }
+        th { background: #3A5A7D; color: #FFFFFF; font-size: 9pt; padding: 5px 6px; text-align: left; }
+        td { border: 1px solid #DEDDD6; font-size: 9pt; padding: 4px 6px; }
+        tr:nth-child(even) td { background: #F4F4F1; }
+        img.grafico { max-width: 460px; margin: 4px 12px 12px 0; }
+    `;
+
+    // secoesColetadas() já devolve na mesma ordem do popup de automação (REPORTS_AUTOMACAO
+    // — ver comentário lá), então o Word segue a mesma ordem do PDF/Excel sem precisar
+    // reordenar nada aqui.
+    async function baixarWordConjunto() {
+        const secoes = await secoesColetadas();
+        if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
+        try {
+            const agora = new Date();
+            const hoje = agora.toLocaleDateString('pt-BR');
+            const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+            let corpo = '<div class="capa-titulo">Relatório para Correição Ordinária</div>';
+            corpo += `<p class="subtitulo">Projudi — TJPR  •  Extraído em ${hoje} às ${hora}</p>`;
+
+            const linhasSumario = secoes.map(({ dados, cfg }) => {
+                const rotulo = descreverSecaoPDF(cfg, false).rotulo;
+                const total = (cfg.linha && cfg.cabecalhos) ? dados.length
+                    : (dados[0] && (dados[0].totalGeral ?? dados[0].totalDesignadas ?? dados.reduce((s, d) => s + (d.pendentes || 0), 0))) || 0;
+                return [rotulo, String(total)];
+            });
+            corpo += '<h2>Sumário</h2>' + tabelaHTMLWord(['Relatório', 'Total'], linhasSumario);
+
+            secoes.forEach(({ dados, cfg }) => {
+                if (cfg === CFG_AUDIENCIAS_DESIGNADAS) { corpo += secaoWordAudienciasDesignadas(dados[0]); return; }
+                if (cfg === CFG_AUDIENCIAS_REALIZADAS) { corpo += secaoWordAudienciasRealizadas(dados[0]); return; }
+                if (cfg === CFG_OUTROS_CUMPRIMENTOS) { corpo += secaoWordOutrosCumprimentos(dados); return; }
+                corpo += secaoWordGenerica(cfg, dados);
+            });
+
+            const html = '<!DOCTYPE html>'
+                + '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">'
+                + `<head><meta charset="utf-8"><title>Relatório Projudi</title><style>${ESTILO_WORD}</style></head>`
+                + `<body>${corpo}</body></html>`;
+            // BOM (﻿) garante acentuação correta ao abrir no Word.
+            const blob = new Blob(['﻿' + html], { type: 'application/msword' });
+            baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.doc`);
+        }
+        catch (err) { alert('Erro ao gerar relatório Word: ' + err.message); console.error(err); }
+    }
+
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
     // completo (concluidos) e a fração correspondente (0 a 1, com meio ponto de crédito
     // para o relatório em andamento no momento — só conta como completo quando termina).
@@ -9257,6 +9432,7 @@
 
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
+        painel.querySelector('#pa-word').disabled = total === 0;
         painel.querySelector('#pa-excel').disabled = total === 0;
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
         // escape para quando a coleta trava (ver pularRelatorioAtual).
@@ -9439,6 +9615,9 @@
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
+                        <button id="pa-word" class="pa-btn pa-btn-secondary" type="button" title="Gera um relatório único em Word (.doc), editável, com a mesma estrutura do PDF — gráficos como imagem, tabelas editáveis">⬇ Relatório Word</button>
+                    </div>
+                    <div class="pa-btn-row">
                         <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Dados em planilha</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
@@ -9468,10 +9647,17 @@
                 return rel && cfgsDoRelatorio(rel).some(cfg => contarRegistrosSync(cfg.prefixo) > 0 || foiColetado(cfg));
             });
             if (temDadosPrevios) {
-                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
-                // nativo do confirm() — ver confirmarComBotoes.
+                // Pedido do usuário: informar de qual(is) atuação(ões) são os dados já
+                // coletados (lerUnidadesAutomatizadas() — mesma lista usada no indicador
+                // "unidades com dados coletados" do painel), pra não apagar/continuar às
+                // cegas. Botões com texto próprio em vez do OK/Cancelar nativo do
+                // confirm() — ver confirmarComBotoes.
+                const unidades = lerUnidadesAutomatizadas();
+                const listaUnidades = unidades.length
+                    ? `\n\nAtuação(ões) com dados já coletados:\n${unidades.map(u => `• ${u}`).join('\n')}`
+                    : '';
                 const apagar = await confirmarComBotoes(
-                    'Já existem dados coletados para um ou mais relatórios marcados.',
+                    `Já existem dados coletados para um ou mais relatórios marcados.${listaUnidades}`,
                     'Começar relatório do zero', 'Continuar extração',
                 );
                 if (apagar) limparTudoAutomacao();
@@ -9483,6 +9669,7 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
+        painel.querySelector('#pa-word').onclick = () => baixarWordConjunto();
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
         const chkAtivos = painel.querySelector('#pa-incluir-ativos');
@@ -9524,21 +9711,6 @@
             btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
-
-        // Ativação disfarçada do modo de teste (ver alternarModoTeste): 5 cliques
-        // seguidos no título do painel, dentro de 2s — sem nenhum botão/indicador visível
-        // que denuncie a existência do modo.
-        let cliquesTitulo = 0;
-        let ultimoCliqueTitulo = 0;
-        painel.querySelector('.pa-titulo').onclick = () => {
-            const agora = Date.now();
-            cliquesTitulo = (agora - ultimoCliqueTitulo <= 2000) ? cliquesTitulo + 1 : 1;
-            ultimoCliqueTitulo = agora;
-            if (cliquesTitulo >= 5) {
-                cliquesTitulo = 0;
-                alternarModoTeste();
-            }
-        };
 
         // Troca de categoria: mostra a seção de itens específicos (checkboxes de verdade
         // quando já existem, senão o espaço reservado) e refaz a grade de contagens para
@@ -9833,6 +10005,14 @@
 
     function bootstrap() {
         console.log(`[Projudi] bootstrap — URL: ${location.href}`);
+        // Limpeza de uma versão anterior: existia um "modo de teste" disfarçado (5
+        // cliques no painel) que limitava a coleta a 2 páginas por relatório — causou um
+        // bug real (Tempo Médio/Conclusões parando de virar página a partir da 2ª). O
+        // recurso foi removido, mas se a flag ficou gravada no localStorage de uma sessão
+        // anterior (o toggle persistia entre reloads), ela ficaria "presa" ligada para
+        // sempre sem nenhum jeito de desligá-la (o gesto que a ativava/desativava também
+        // não existe mais) — remove aqui, todo carregamento, por segurança.
+        chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
         chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
