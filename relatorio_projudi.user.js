@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.9
+// @version      22.0
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2519,22 +2519,37 @@
         'DecursoDePrazo', 'AguardandoDeposito', 'InformarRetornoARDigital', 'AnaliseErroARDigital',
     ];
 
-    // Lê as duas tabelas da página e monta a lista final de registros (já filtrados por
-    // pendentes > 0), sem paginação. Salva no mesmo formato de armazenamento usado pelos
-    // demais relatórios (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF
-    // individual, capa unificada, foiColetado etc.) continuar funcionando igual, e avança
-    // a automação normalmente ao terminar.
+    // Lê as duas tabelas da página e monta a lista de registros DESTA atribuição (já
+    // filtrados por pendentes > 0), marcados com atuacao/competencia (mesmo campo usado
+    // por CFG_JUNTADAS e demais — é o que permite subBlocosPorAtribuicao/fraseCompetencias
+    // separarem por atribuição no PDF). Sem paginação de verdade (uma tela só, sem
+    // "próxima página" do Projudi), mas ACUMULA entre atribuições diferentes: bug
+    // relatado pelo usuário — extrair em uma 2ª vara SOBRESCREVIA os dados da 1ª (grava
+    // sempre em 'pagina_0'). Agora lê o que já tem, descarta só os registros da MESMA
+    // atribuição (evita duplicar se o usuário extrair de novo na mesma vara) e junta com
+    // os novos. Salva no mesmo formato de armazenamento usado pelos demais relatórios
+    // (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF individual, capa
+    // unificada, foiColetado etc.) continuar funcionando igual, e avança a automação
+    // normalmente ao terminar.
     function coletarOutrosCumprimentosAgora() {
         const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
         console.log(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
 
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
         const bnmp = extrairLinhasTabela(tabelaBnmp, 'bnmp', ['ParaExpedirBnmp'], 'ComUrgenciaBnmp');
         const principal = extrairLinhasTabela(tabelaPrincipal, 'principal', CAMPOS_PENDENTES_PRINCIPAL, 'ComUrgencia');
-        const registros = [...bnmp, ...principal];
+        const registrosDestaAtribuicao = [...bnmp, ...principal].map(r => ({ ...r, atuacao, competencia }));
 
-        console.log(`[Projudi Outros Cumprimentos] ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registros.length} no total)`);
+        console.log(`[Projudi Outros Cumprimentos] "${atuacao || '(sem atuação)'}" — ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registrosDestaAtribuicao.length} no total)`);
 
         const prefixo = CFG_OUTROS_CUMPRIMENTOS.prefixo;
+        // Legado: esta cfg sempre gravou direto em localStorage (nunca passou pelo
+        // IndexedDB via idbSet) — lerDadosDe já cai para esse formato quando idbGet falha,
+        // então basta ler/escrever do mesmo jeito de sempre, só que agora mesclando.
+        const anteriores = desembrulharArray(store.getItem(prefixo + 'pagina_0')) || [];
+        const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
+        const registros = [...semEstaAtribuicao, ...registrosDestaAtribuicao];
         store.setItem(prefixo + 'pagina_0', JSON.stringify(registros));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
@@ -3217,6 +3232,52 @@
         return `${comps.length > 1 ? 'Competências' : 'Competência'}: ${comps.join(', ')}`;
     }
 
+    // Mesma frase, mas com a CONTAGEM de registros ao lado de cada competência (pedido do
+    // usuário) — ex.: "Competências: Vara Cível da Lapa (60), Vara da Fazenda Pública da
+    // Lapa (9), Competência Delegada de Lapa (0)". O "(0)" só é possível porque usamos o
+    // mapa de Processos Ativos (lerMapaAtivos — populado quando a opção "Ativos" é
+    // marcada na coleta) como a lista AUTORITATIVA de quais atribuições foram
+    // efetivamente visitadas: sem isso não haveria como distinguir "esta atribuição não
+    // tem nenhum processo nesta situação" de "esta atribuição nunca foi visitada". Por
+    // decisão do usuário: se Processos Ativos não foi coletado junto, mantém o
+    // comportamento antigo (só os nomes, sem contagem) em vez de arriscar uma lista
+    // incompleta/enganosa.
+    function fraseCompetenciasComContagem(dados) {
+        const mapaAtivos = lerMapaAtivos();
+        const chavesAtivos = Object.keys(mapaAtivos);
+        if (!chavesAtivos.length) return fraseCompetencias(dados);
+        const contagem = new Map();
+        dados.forEach(d => {
+            const c = (d.competencia || '').trim();
+            if (!c) return;
+            contagem.set(c, (contagem.get(c) || 0) + 1);
+        });
+        // Ordem: as atribuições visitadas (ordem do mapa de Ativos), seguidas de
+        // qualquer competência presente nos dados mas ausente do mapa (não deveria
+        // acontecer no uso normal, mas evita perder dado real silenciosamente).
+        const ordem = [...chavesAtivos];
+        contagem.forEach((_, c) => { if (!ordem.includes(c)) ordem.push(c); });
+        if (!ordem.length) return '';
+        const partes = ordem.map(c => `${c} (${contagem.get(c) || 0})`);
+        return `${ordem.length > 1 ? 'Competências' : 'Competência'}: ${partes.join(', ')}`;
+    }
+
+    // Rótulo azul, em negrito, logo abaixo do título — usado pelas funções de resumo com
+    // formato PRÓPRIO (não passam por montarResumoGenerico) quando chamadas a partir do
+    // PDF conjunto com um bloco de subBlocosPorAtribuicao ('Resumo Geral' ou
+    // 'Competência: X'). Pedido do usuário: hoje esse rótulo não aparecia — todo bloco
+    // (geral ou de uma atribuição específica) tinha exatamente o mesmo título/subtítulo,
+    // então não dava pra saber, olhando só a página, se era o resumo GERAL ou o de UMA
+    // atribuição em particular. Retorna { y, semFrase } — y já ajustado para a próxima
+    // linha, semFrase indica se a linha de competências do subtítulo deve ser omitida
+    // (bloco já é de uma única competência — repetir seria redundante com o rótulo).
+    function desenharRotuloBloco(doc, m, y, rotuloBloco) {
+        if (!rotuloBloco) return { y, semFrase: false };
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
+        doc.text(rotuloBloco, m, y);
+        return { y: y + 7, semFrase: rotuloBloco !== 'Resumo Geral' };
+    }
+
     // Média de registros por dia (com base nos dias distintos presentes nas datas)
     function mediaPorDia(dados, campoData) {
         const dias = new Set();
@@ -3584,7 +3645,7 @@
     // Monta as páginas de RESUMO (geral + por competência) de um relatório genérico
     // (Retorno/Juntadas) dentro de um documento jsPDF já criado. ehPrimeiraSecao=false
     // começa em página nova (uso no conjunto). comIndice ativa o link de rodapé.
-    function montarResumoGenerico(doc, dados, cfg, ehPrimeiraSecao, comIndice) {
+    function montarResumoGenerico(doc, dados, cfg, ehPrimeiraSecao, comIndice, rotuloBloco) {
         const p = cfg.pdf;
         const now = Date.now();
         const agora = new Date();
@@ -3618,8 +3679,11 @@
             }
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
             let linhaInfo = `Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`;
-            if (!contexto.competencia) {
-                const fraseComp = fraseCompetencias(sub);
+            // semFrase: bloco já é de UMA competência específica (rotuloBloco tipo
+            // "Competência: X" vindo de subBlocosPorAtribuicao) — repetir a mesma
+            // competência na linha de info seria redundante com o rótulo azul acima.
+            if (!contexto.competencia && !contexto.semFrase) {
+                const fraseComp = fraseCompetenciasComContagem(sub);
                 if (fraseComp) linhaInfo += `  •  ${fraseComp}`;
             }
             // Quebra em várias linhas quando a lista de competências não cabe numa só —
@@ -3747,6 +3811,25 @@
             if (!porComp.has(c)) porComp.set(c, []);
             porComp.get(c).push(d);
         });
+
+        // Chamado a partir do PDF conjunto com um bloco JÁ recortado por atribuição (ver
+        // subBlocosPorAtribuicao/gerarPDFConjunto) — rotuloBloco vem preenchido ('Resumo
+        // Geral' ou 'Competência: X'). Desenha SÓ essa página, sem repetir aqui dentro o
+        // split por competência abaixo: bug relatado pelo usuário — as duas subdivisões
+        // independentes (subBlocosPorAtribuicao lá fora + porComp aqui dentro) combinadas
+        // geravam um 3º grupo de páginas "Resumo geral" fantasma, uma por atribuição, além
+        // do geral e do por-competência esperados. Chamadas diretas (fora do PDF conjunto,
+        // ex.: download individual de um relatório, que não passa por
+        // subBlocosPorAtribuicao) continuam com o split completo de sempre, abaixo.
+        if (rotuloBloco) {
+            const ehGeral = rotuloBloco === 'Resumo Geral';
+            const contexto = { rotulo: rotuloBloco, semFrase: !ehGeral };
+            if (ehGeral && porComp.size > 1) {
+                contexto.mediaSoma = [...porComp.values()].reduce((soma, sub) => soma + mediaPorDia(sub, p.dataCampo), 0);
+            }
+            desenharPaginaResumo(dados, contexto, ehPrimeiraSecao);
+            return;
+        }
 
         // ═══ RESUMO GERAL ═══
         const contextoGeral = { rotulo: 'Resumo geral' };
@@ -4081,8 +4164,8 @@
     // (KPIs, faixas de urgência — via montarResumoGenerico, sem gráfico de distribuição por
     // oficial, ver CFG_MANDADOS_CUMPRIMENTO.pdf.distribuicoes vazio) e depois acrescenta
     // esta tabela numa página própria, ordenada por Total decrescente (pedido do usuário).
-    function montarResumoMandadosCumprimento(doc, dados, primeira, comIndice) {
-        montarResumoGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, primeira, comIndice);
+    function montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco) {
+        montarResumoGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, primeira, comIndice, rotuloBloco);
         const p = CFG_MANDADOS_CUMPRIMENTO.pdf;
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -4188,7 +4271,7 @@
         if (cfg === CFG_MANDADOS_CUMPRIMENTO) {
             return {
                 rotulo: cfg.pdf.titulo,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoMandadosCumprimento(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
@@ -4202,14 +4285,14 @@
         if (cfg === CFG_PARALISADOS) {
             return {
                 rotulo: TITULO_PARALISADOS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoParalisados(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoParalisados(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaParalisados(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_REMESSAS) {
             return {
                 rotulo: TITULO_REMESSAS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoRemessas(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoRemessas(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaRemessas(doc, dados, comIndice),
             };
         }
@@ -4249,20 +4332,20 @@
         if (cfg === CFG_SUSPENSOS_PRAZO) {
             return {
                 rotulo: TITULO_SUSPENSOS_PRAZO,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_INSTANCIA_RECURSAL) {
             return {
                 rotulo: TITULO_INSTANCIA_RECURSAL,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
             };
         }
         return {
             rotulo: cfg.pdf.titulo,
-            montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
+            montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
             montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
         };
     }
@@ -4700,8 +4783,14 @@
             && (s.dados.length || foiColetado(CFG_CONCLUSOES)));
         // Seções fora do esquema Cartório/Gabinete (Tempo Médio, Audiências Pendentes)
         // entram depois, sem capa/veredito dedicado — mantém o relatório funcional mesmo
-        // nesse caso.
-        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES];
+        // nesse caso. CFG_SUSPENSOS_PRAZO/CFG_INSTANCIA_RECURSAL também ficam de fora
+        // daqui (mesmo não sendo "fora do esquema" — têm sim capa/veredito, na faixa
+        // "Estatísticas Gerais") porque são tratadas junto com itensCartorio mais abaixo
+        // (ver itensExtrasEstatisticas), não pelo loop de outrasSecoes — eram renderizadas
+        // ali antes e ficavam com bookmark de TOPO NÍVEL fora de "Cartório", sempre DEPOIS
+        // de todo o resto do Cartório (inclusive Mandados), independente da posição real
+        // na capa — bug relatado pelo usuário (ordem do PDF divergindo da ordem do popup).
+        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL];
         const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal)
             && (s.dados.length || (s.cfgOriginal.mostrarSeVazio && foiColetado(s.cfgOriginal))));
 
@@ -4711,7 +4800,7 @@
         const LIMITES_CARTORIO = { atencao: 30, critico: 90 };
         const LIMITES_GABINETE = { atencao: 30, critico: 120 };
 
-        const itensCartorio = secoesCartorio.map(s => {
+        let itensCartorio = secoesCartorio.map(s => {
             const itens = itensParaClassificacao(s.dados, s.cfgOriginal, now);
             const maisAntiga = maiorDias(itens);
             return {
@@ -4996,6 +5085,18 @@
         const ordemNaCapa = new Map();
         linhasCartorio.forEach((l, i) => { if (l.cfgOriginal && !ordemNaCapa.has(l.cfgOriginal)) ordemNaCapa.set(l.cfgOriginal, i); });
         const posNaCapa = (cfgOriginal) => ordemNaCapa.has(cfgOriginal) ? ordemNaCapa.get(cfgOriginal) : Infinity;
+        // Junta Suspensos com Prazo/Instância Recursal a itensCartorio AQUI (não antes) —
+        // depois que itensPendencias/itensEstatisticasGerais já leram itensCartorio (ver
+        // comentário em CFGS_FORA_DO_ESQUEMA), pra não duplicá-las na mini-tabela da capa.
+        // A partir daqui elas passam pelo MESMO Passo 1/Passo 2 (resumo/tabela) e pelo
+        // MESMO bookmark "Cartório" de itensCartorio, ordenadas junto com o resto por
+        // posNaCapa — que já sabe a posição certa de cada uma (dentro de "Estatísticas
+        // Gerais", logo após Suspensos por Prazo Indeterminado), porque linhasCartorio já
+        // as inclui na posição certa desde sempre.
+        const itensExtrasEstatisticas = [secaoSuspensosPrazo, secaoInstanciaRecursal]
+            .filter(Boolean)
+            .map(s => ({ rotulo: s.rotulo, dados: s.dados, secao: s, pendentes: s.dados.length }));
+        itensCartorio = itensCartorio.concat(itensExtrasEstatisticas);
         itensCartorio.sort((a, b) => posNaCapa(a.secao.cfgOriginal) - posNaCapa(b.secao.cfgOriginal));
         outrasSecoes.sort((a, b) => posNaCapa(a.cfgOriginal) - posNaCapa(b.cfgOriginal));
 
@@ -5077,7 +5178,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                t.secao.montarResumo(doc, bloco.dados, primeira, false);
+                t.secao.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
                 if (i === 0) t.pgResumoInicio = pg;
                 if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: t.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5126,7 +5227,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                s.montarResumo(doc, bloco.dados, primeira, false);
+                s.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
                 if (i === 0) s.pgResumoInicio = pg;
                 if (blocos.length === 1) {
                     s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
@@ -5369,7 +5470,7 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
         if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
-        const fraseCompTM = fraseCompetencias(dados);
+        const fraseCompTM = fraseCompetenciasComContagem(dados);
         if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
@@ -5592,7 +5693,7 @@
         doc.text(TITULO_AUDIENCIAS, m, m + 2);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} audiência(s) pendente(s)`;
-        const fraseComp = fraseCompetencias(dados);
+        const fraseComp = fraseCompetenciasComContagem(dados);
         if (fraseComp) subtitulo += `  •  ${fraseComp}`;
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
         doc.text(linhasSubtitulo, m, m + 8);
@@ -6306,7 +6407,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Paralisados, dentro de um doc
     // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoParalisados(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoParalisados(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6326,13 +6427,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_PARALISADOS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtituloParalisados = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) paralisado(s)`;
-        const fraseCompParalisados = fraseCompetencias(dados);
-        if (fraseCompParalisados) subtituloParalisados += `  •  ${fraseCompParalisados}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompParalisados = fraseCompetenciasComContagem(dados);
+            if (fraseCompParalisados) subtituloParalisados += `  •  ${fraseCompParalisados}`;
+        }
         const linhasSubtituloParalisados = doc.splitTextToSize(subtituloParalisados, uw);
-        doc.text(linhasSubtituloParalisados, m, m + 8);
-        const yLinhaParalisados = m + 8 + (linhasSubtituloParalisados.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtituloParalisados, m, rotuloInfo.y);
+        const yLinhaParalisados = rotuloInfo.y + (linhasSubtituloParalisados.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaParalisados, pw - m, yLinhaParalisados);
 
         const gap = 6;
@@ -6463,7 +6567,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Remessas em Aberto, dentro de um
     // doc jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoRemessas(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoRemessas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6483,13 +6587,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`;
-        const fraseCompRemessas = fraseCompetencias(dados);
-        if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompRemessas = fraseCompetenciasComContagem(dados);
+            if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
+        }
         const linhasSubtituloRemessas = doc.splitTextToSize(subtituloRemessas, uw);
-        doc.text(linhasSubtituloRemessas, m, m + 8);
-        const yLinhaRemessas = m + 8 + (linhasSubtituloRemessas.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtituloRemessas, m, rotuloInfo.y);
+        const yLinhaRemessas = rotuloInfo.y + (linhasSubtituloRemessas.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaRemessas, pw - m, yLinhaRemessas);
 
         const gap = 6;
@@ -6661,7 +6768,7 @@
     // com Prazo Determinado. Requisitos do usuário (b.2): quantidade de processos;
     // classe processual com mais processos suspensos; tempo médio de suspensão por
     // classe. E (b.1, também aqui) o processo com a data de fim de suspensão mais longa.
-    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6677,9 +6784,10 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, m + 8);
-        const yLinha = m + 8 + 4.2;
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -6838,7 +6946,7 @@
     // via mini-tabela — pode ser longa demais para um card sem apertar o layout, mesmo
     // racional de outras listas potencialmente grandes do script) e o gráfico de barras
     // "remetidos por faixa de tempo desde o envio" (item b do pedido do usuário).
-    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6852,9 +6960,10 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, m + 8);
-        const yLinha = m + 8 + 4.2;
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
