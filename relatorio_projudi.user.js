@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.2
+// @version      22.3
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1918,6 +1918,13 @@
             tipoUrgencia: textoCelula(tdCampo('tipoUrgencia')),
             prioritario: urgenteTexto === 'sim',
             lido,
+            // Bug relatado pelo usuário: a contagem por atribuição na capa/subtítulo
+            // aparecia zerada ("Vara X (0), Vara Y (0)") mesmo com o total certo — esta
+            // função recebia `atuacao` mas nunca gravava no registro, então
+            // contagemPorCompetencia (que lê d.competencia||d.atuacao) descartava TODOS
+            // os registros de Mandados.
+            atuacao,
+            competencia: competenciaDe(atuacao),
         };
     }
     const LINHA_MANDADO_XLSX = (d) => [d.processo, d.classe, d.natureza, d.oficial, d.dataOrdenacao,
@@ -2174,7 +2181,18 @@
     async function mesclarMandadosCumprimento() {
         const lidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_LIDO.prefixo);
         const naoLidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.prefixo);
-        const todos = [...lidos, ...naoLidos];
+        const desteLote = [...lidos, ...naoLidos];
+        // Bug relatado pelo usuário (mesma classe do já corrigido em
+        // marcarColetaMandadosVazia): LIDO/NAOLIDO são apagados logo abaixo ao final de
+        // CADA mesclagem, então na 2ª atribuição eles só têm os dados DESTA vez — sem
+        // reler o resumo final já salvo (CFG_MANDADOS_CUMPRIMENTO.prefixo+'pagina_0'),
+        // este setItem sobrescrevia (perdia) o resultado já mesclado da 1ª atribuição.
+        // Agora lê o que já existe, descarta só os registros da MESMA atribuição (evita
+        // duplicar se a mesma vara for coletada de novo) e junta com os novos.
+        const atuacaoDesteLote = desteLote.length ? (desteLote[0].atuacao || '') : (lerAtuacao() || '');
+        const anteriores = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO.prefixo);
+        const semEstaAtribuicao = anteriores.filter(d => (d.atuacao || '') !== atuacaoDesteLote);
+        const todos = [...semEstaAtribuicao, ...desteLote];
         // O resultado mesclado grava no formato "página única" — CFG_MANDADOS_CUMPRIMENTO
         // não passa pelo coletor paginado, então continua indo pro localStorage como
         // sempre (lerDadosDe cai pro localStorage quando não acha a chave no IndexedDB —
@@ -4561,13 +4579,13 @@
                 { header: 'Detalhamento', dataKey: 'detalhamento' },
                 { header: 'Situação', dataKey: 'situacao' },
             ],
-            // Filha de grupo (l.grupoPai) ou sub-linha de atribuição (l.subAtribuicao):
-            // "nome" ganha um recuo visual (indentação por espaços) — a forma mais
-            // robusta no jspdf-autotable para uma indentação por LINHA (não por coluna
-            // inteira), já que columnStyles/didParseCell não têm um "padding-left por
-            // célula" nativo confiável entre versões. subAtribuicao usa um recuo maior +
-            // um marcador "–" (pedido do usuário: cada atribuição como subitem indentado
-            // do item pai, em vez de texto corrido no Detalhamento).
+            // Filha de grupo (l.grupoPai, ex. subitens de "Mandados"): "nome" ganha um
+            // recuo visual (indentação por espaços) — a forma mais robusta no
+            // jspdf-autotable para uma indentação por LINHA (não por coluna inteira), já
+            // que columnStyles/didParseCell não têm um "padding-left por célula" nativo
+            // confiável entre versões. Sub-linha de atribuição (l.subAtribuicao): SEM
+            // indentação (pedido do usuário — "tire a indentação, mantenha alinhados"),
+            // só um marcador "– " antes do nome, texto começa na mesma coluna dos demais.
             // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
             // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
             // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
@@ -4576,7 +4594,7 @@
             body: cfg.linhas.map(l => l.subgrupoCabecalho
                 ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
                 : {
-                    nome: (l.subAtribuicao ? '        – ' : (l.grupoPai ? '     ' : '')) + l.nome,
+                    nome: (l.subAtribuicao ? '– ' : (l.grupoPai ? '     ' : '')) + l.nome,
                     indicador: l.indicador,
                     detalhamento: l.detalhamento,
                     situacao: l.semSituacao ? '—' : l.situacaoLabel,
@@ -6235,11 +6253,34 @@
         }
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
+        // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
+        // atribuição/vara aparece como UMA linha só, com os valores somados — não uma
+        // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
+        // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
+        // por `usuario` (login, mais estável que o nome) com fallback pro nome.
+        const porUsuarioAgrupado = (() => {
+            const porChave = new Map();
+            r.porUsuario.forEach(u => {
+                const chave = u.usuario || u.nome;
+                if (!porChave.has(chave)) {
+                    porChave.set(chave, { usuario: u.usuario, nome: u.nome, quantidade: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 });
+                }
+                const acc = porChave.get(chave);
+                acc.quantidade += u.quantidade || 0;
+                acc.canceladas += u.canceladas || 0;
+                acc.negativas += u.negativas || 0;
+                acc.naoRealizadas += u.naoRealizadas || 0;
+                acc.redesignadas += u.redesignadas || 0;
+                acc.pessoasOuvidas += u.pessoasOuvidas || 0;
+            });
+            return [...porChave.values()].sort((a, b) => b.quantidade - a.quantidade);
+        })();
+
         const gap = 6;
         const kY = yLinha + 5;
         const kW3top = (uw - 2 * gap) / 3;
         desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(r.porUsuario.length), [], true, COR.aqua);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.aqua);
         desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
 
         // Canceladas/Negativas/Não Realizadas/Redesignadas — extraídas só da pesquisa
@@ -6256,7 +6297,7 @@
         // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
         // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
         const tY = k2Y + 24 + gap + 4;
-        if (r.porUsuario.length) {
+        if (porUsuarioAgrupado.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
             const fmtPct = (n, total) => total > 0 ? `${Math.round(n / total * 100)}%` : '—';
             doc.autoTable({
@@ -6269,7 +6310,7 @@
                     { header: 'Redesignadas', dataKey: 'redesignadas' },
                     { header: 'Pessoas Ouvidas', dataKey: 'pessoasOuvidas' },
                 ],
-                body: r.porUsuario.map(u => {
+                body: porUsuarioAgrupado.map(u => {
                     const canceladas = u.canceladas || 0, negativas = u.negativas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
                     const totalUsuario = u.quantidade + canceladas + negativas + naoRealizadas + redesignadas;
                     return {
@@ -7384,6 +7425,7 @@
         // para não herdar por engano o "fim" de uma extração antiga.
         store.removeItem('projudi_tempomedio_periodo');
         store.removeItem(CHAVE_MES_ATUAL_TM);
+        store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         return fila;
     }
 
@@ -7397,6 +7439,45 @@
         // JSON.parse único deixava "fila" como STRING (não array), e fila[0] virava um
         // caractere solto em vez do objeto do mês, gerando datas "undefined" na pesquisa.
         return desembrulharArray(store.getItem(CHAVE_FILA_MESES_TM)) || [];
+    }
+
+    // "Assinatura" do resultado atualmente exibido — mesma técnica já usada em
+    // Audiências Realizadas/Outros Cumprimentos para detectar quando a tabela "parou de
+    // mudar" antes de ler de verdade. Bug relatado pelo usuário: o gráfico "Volume de
+    // cumprimentos por mês" saía com valores idênticos em vários meses seguidos —
+    // coletarPaginaAtual() rodava assim que table.resultTable existia no DOM, sem checar
+    // se o conteúdo já correspondia à pesquisa do mês recém-disparada (podia estar lendo
+    // o resultado da pesquisa do mês ANTERIOR, ainda não substituído).
+    function assinaturaResultadoTM() {
+        const linhas = [...document.querySelectorAll('table.resultTable tbody tr')];
+        return `${linhas.length}|${linhas.reduce((s, tr) => s + (tr.textContent || '').length, 0)}`;
+    }
+    const CHAVE_ASSINATURA_ANTERIOR_TM = 'projudi_tempomedio_assinatura_anterior';
+    let ultimaAssinaturaVistaTM = null;
+
+    // Espera a tabela de resultados estabilizar (mesmo critério de
+    // aguardarResultadoAREEstabilizarEProcessar: precisa ter MUDADO em relação ao que
+    // estava na tela antes desta pesquisa E duas leituras seguidas precisam bater) antes
+    // de chamar `iniciarCallback` (normalmente coletor.iniciar()). Teto de ~15s, depois
+    // do qual segue mesmo assim (com aviso), para não travar a automação pra sempre numa
+    // tela que por algum motivo nunca estabiliza.
+    function aguardarResultadoTMEstabilizarEIniciar(iniciarCallback, tentativa) {
+        tentativa = tentativa || 0;
+        const assinaturaAtual = assinaturaResultadoTM();
+        const assinaturaAnterior = store.getItem(CHAVE_ASSINATURA_ANTERIOR_TM);
+        const jaMudou = assinaturaAnterior == null || assinaturaAtual !== assinaturaAnterior;
+        if (tentativa > 0 && jaMudou && assinaturaAtual === ultimaAssinaturaVistaTM) {
+            console.log('[Projudi TM] resultado estável — iniciando coleta');
+            iniciarCallback();
+            return;
+        }
+        if (tentativa >= 30) {
+            console.warn('[Projudi TM] resultado não estabilizou em ~15s — coletando mesmo assim (valores podem estar desatualizados)');
+            iniciarCallback();
+            return;
+        }
+        ultimaAssinaturaVistaTM = assinaturaAtual;
+        setTimeout(() => aguardarResultadoTMEstabilizarEIniciar(iniciarCallback, tentativa + 1), 500);
     }
 
     // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial/final com o PRÓXIMO
@@ -7455,6 +7536,11 @@
         // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
         // automaticamente (sem esta flag a página de resultados só renderiza os botões).
         store.setItem('projudi_tempomedio_auto_iniciar', '1');
+        // Guarda o que está na tela ANTES de pesquisar (resultado do mês anterior, ou
+        // nada, se for o 1º mês da fila) — usado por aguardarResultadoTMEstabilizarE
+        // Iniciar pra exigir que o resultado MUDE em relação a isso antes de considerar
+        // "estabilizado" (ver comentário lá).
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
         console.log(`[Projudi TM] flag auto_iniciar definida; clicando em Pesquisar em 1,5s (btn encontrado=${!!btn})`);
@@ -8086,9 +8172,9 @@
             return b;
         };
 
-        // Os botões de extração individual ficam ocultos por padrão (ver
-        // CHAVE_MOSTRAR_BOTOES) — a extração automatizada não depende deles, chama
-        // coletor.iniciar()/pdf()/etc. diretamente. O usuário reabilita pelo painel.
+        // Os botões de extração individual ficam sempre ocultos (ver
+        // mostrarBotoesIndividuais) — a extração automatizada não depende deles, chama
+        // coletor.iniciar()/pdf()/etc. diretamente.
         const wrapExtracao = document.createElement('span');
         wrapExtracao.id = 'projudi-extracao-individual';
         if (!mostrarBotoesIndividuais()) wrapExtracao.style.display = 'none';
@@ -8138,8 +8224,11 @@
             coletor.iniciar();   // automação: inicia a coleta ao chegar no relatório
         } else if (autoIniciarTM) {
             store.removeItem('projudi_tempomedio_auto_iniciar');
-            console.log('[Projudi TM] flag auto_iniciar detectada — iniciando extração automaticamente');
-            coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
+            console.log('[Projudi TM] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            // Bug relatado pelo usuário: coletar direto aqui podia pegar o resultado
+            // ainda da pesquisa do mês ANTERIOR (não substituído a tempo) — espera
+            // estabilizar primeiro (ver aguardarResultadoTMEstabilizarEIniciar).
+            aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else if (autoIniciarParalisado) {
             store.removeItem('projudi_paralisado_auto_iniciar');
             console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
@@ -8173,10 +8262,11 @@
     }
 
     // Botões de extração individual (Extrair/Baixar/PDF/Limpar) em cada tela de relatório
-    // ficam OCULTOS por padrão — a extração normal é pelo painel de automação da página
-    // inicial. O usuário reabilita marcando a opção no próprio painel (ver injetarPainel).
-    const CHAVE_MOSTRAR_BOTOES = 'projudi_mostrar_botoes_individuais';
-    function mostrarBotoesIndividuais() { return store.getItem(CHAVE_MOSTRAR_BOTOES) === '1'; }
+    // ficam SEMPRE ocultos (pedido do usuário) — a extração só acontece pelo painel de
+    // automação da página inicial. Existia uma opção no painel pra reabilitá-los; foi
+    // removida a pedido do usuário ("não quero mais que a extração individual apareça
+    // nas páginas, apenas no popup").
+    function mostrarBotoesIndividuais() { return false; }
 
     // Checkbox "Processos Ativos" do painel (ver injetarPainel/gravarProcessosAtivosSeDisponivel
     // /gerarPDFConjunto) — default MARCADO (chave ausente = true) para preservar o
@@ -8702,7 +8792,7 @@
         // Limpa o estado transitório de relatórios com fila própria — senão a próxima
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
-        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); }
+        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
         if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
@@ -8927,6 +9017,7 @@
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem(CHAVE_FILA_MESES_TM);
         store.removeItem(CHAVE_MES_ATUAL_TM);
+        store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
@@ -8976,11 +9067,14 @@
             )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
             if (atuacoes.length > 1) {
-                porAtribuicao = confirm(
+                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
+                // nativo do confirm() (que não dá pra personalizar) — ver
+                // confirmarComBotoes.
+                porAtribuicao = await confirmarComBotoes(
                     `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
-                    + 'Clique OK para que cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) traga '
-                    + 'um resumo geral (todas as atribuições somadas) MAIS um resumo específico para cada atribuição.\n\n'
-                    + 'Clique Cancelar para que cada item traga só o resumo geral (todas as atribuições somadas), como de costume.'
+                    + 'Cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral '
+                    + '(todas as atribuições somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
+                    'Somar e detalhar por atribuição', 'Só resumo geral',
                 );
             }
             gerarPDFConjunto(secoes, somenteResumo, { porAtribuicao });
@@ -9341,9 +9435,6 @@
                 <label class="pa-resumo" title="Gera o Relatório PDF só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
                     <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
                 </label>
-                <label class="pa-resumo" title="Reexibe os botões de Extrair/Baixar/PDF/Limpar em cada tela de relatório (fora do painel de automação)">
-                    <input type="checkbox" id="pa-mostrar-botoes"${mostrarBotoesIndividuais() ? ' checked' : ''}> Mostrar botões individuais nos relatórios
-                </label>
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
@@ -9356,7 +9447,7 @@
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF.</div>
             </div>`;
         document.body.appendChild(painel);
-        painel.querySelector('#pa-iniciar').onclick = () => {
+        painel.querySelector('#pa-iniciar').onclick = async () => {
             // Itens de outra categoria ficam com o checkbox oculto (display:none no
             // .pa-group), não desmarcado — sem esse filtro, marcar um item específico,
             // trocar de aba e clicar Automatizar rodaria um relatório invisível na tela.
@@ -9377,7 +9468,12 @@
                 return rel && cfgsDoRelatorio(rel).some(cfg => contarRegistrosSync(cfg.prefixo) > 0 || foiColetado(cfg));
             });
             if (temDadosPrevios) {
-                const apagar = confirm('Já existem dados coletados para um ou mais relatórios marcados.\n\nOK = apagar tudo e começar do zero.\nCancelar = continuar acumulando (padrão).');
+                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
+                // nativo do confirm() — ver confirmarComBotoes.
+                const apagar = await confirmarComBotoes(
+                    'Já existem dados coletados para um ou mais relatórios marcados.',
+                    'Começar relatório do zero', 'Continuar extração',
+                );
                 if (apagar) limparTudoAutomacao();
             }
             iniciarAutomacao(fila, periodoTM);
@@ -9389,9 +9485,6 @@
         painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
-        painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
-            store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
-        };
         const chkAtivos = painel.querySelector('#pa-incluir-ativos');
         if (chkAtivos) {
             chkAtivos.onchange = (ev) => {
@@ -9671,7 +9764,64 @@
         #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
 
         #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+
+        /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
+           window.confirm() nativo não permite customizar o texto dos botões, então este
+           é um overlay próprio, fora de #painel-automacao (não deve ficar restrito à
+           largura/posição do painel). */
+        .projudi-confirm-overlay {
+            position: fixed; inset: 0; z-index: 1000000; background: rgba(26,26,26,.45);
+            display: flex; align-items: center; justify-content: center;
+            font-family: "Public Sans", Verdana, Arial, sans-serif;
+        }
+        .projudi-confirm-box {
+            background: #FFFFFF; border-radius: 8px; box-shadow: 0 10px 30px rgba(26,26,26,.3);
+            width: 360px; max-width: 90vw; padding: 18px;
+        }
+        .projudi-confirm-msg { font-size: .85em; color: #1A1A1A; line-height: 1.5; white-space: pre-line; margin-bottom: 14px; }
+        .projudi-confirm-botoes { display: flex; gap: 8px; justify-content: flex-end; }
+        .projudi-confirm-btn {
+            border-radius: 6px; padding: 8px 14px; font-size: .8em; font-weight: 600;
+            cursor: pointer; border: 1px solid transparent;
+        }
+        .projudi-confirm-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
+        .projudi-confirm-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
     `);
+
+    // Diálogo de confirmação com texto de botão PERSONALIZADO (pedido do usuário —
+    // window.confirm() nativo sempre mostra "OK"/"Cancelar", sem como mudar o texto).
+    // Devolve uma Promise<boolean>: true = clicou no botão principal (confirmar), false =
+    // clicou no secundário (cancelar) — mesma semântica de confirm() (true=OK).
+    function confirmarComBotoes(mensagem, textoConfirmar, textoCancelar) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'projudi-confirm-overlay';
+            const box = document.createElement('div');
+            box.className = 'projudi-confirm-box';
+            const msg = document.createElement('div');
+            msg.className = 'projudi-confirm-msg';
+            msg.textContent = mensagem;
+            const botoes = document.createElement('div');
+            botoes.className = 'projudi-confirm-botoes';
+            const btnCancelar = document.createElement('button');
+            btnCancelar.type = 'button';
+            btnCancelar.className = 'projudi-confirm-btn projudi-confirm-btn-secondary';
+            btnCancelar.textContent = textoCancelar;
+            const btnConfirmar = document.createElement('button');
+            btnConfirmar.type = 'button';
+            btnConfirmar.className = 'projudi-confirm-btn projudi-confirm-btn-primary';
+            btnConfirmar.textContent = textoConfirmar;
+            const finalizar = (resultado) => { overlay.remove(); resolve(resultado); };
+            btnCancelar.onclick = () => finalizar(false);
+            btnConfirmar.onclick = () => finalizar(true);
+            botoes.appendChild(btnCancelar);
+            botoes.appendChild(btnConfirmar);
+            box.appendChild(msg);
+            box.appendChild(botoes);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+        });
+    }
 
     // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
     // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
