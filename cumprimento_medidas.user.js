@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.5
+// @version      0.6
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -148,11 +148,15 @@
             doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
             doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
             // subs aceita string simples (estilo padrão) OU {texto, cor, negrito} pra dar
-            // destaque a uma linha específica — usado pelo aviso "Situação: Crítico".
+            // destaque a uma linha específica — usado pelo aviso "Situação: Crítico". Uma
+            // sub "custom" usa Helvetica (fonte padrão do jsPDF), não PublicSans: mesmo
+            // bug relatado de espaçamento estranho em texto acentuado apareceu na palavra
+            // isolada "Crítico" (sem nenhum truque de justificação envolvido) — ver
+            // comentário longo em gerarPDFCumprimentoMedidas sobre a Observação.
             subs.forEach(s => {
                 const custom = s && typeof s === 'object';
                 const textoSub = custom ? s.texto : s;
-                doc.setFont('PublicSans', custom && s.negrito ? 'bold' : 'normal');
+                doc.setFont(custom ? 'helvetica' : 'PublicSans', custom && s.negrito ? 'bold' : 'normal');
                 doc.setFontSize(8);
                 doc.setTextColor(...(custom && s.cor ? s.cor : COR.tintaSec));
                 doc.text(doc.splitTextToSize(String(textoSub), w - 10)[0], cx, yy, { align: 'center' });
@@ -205,15 +209,16 @@
         return doc;
     }
 
-    // Texto fixo da Observação (formato justificado), pedido pelo usuário — um parágrafo
-    // por sentença, todos justificados dentro da caixa. Se o texto precisar mudar no
-    // futuro, é só editar este array.
-    const PARAGRAFOS_OBSERVACAO = [
-        'Observação: A fiscalização do cumprimento das medidas impostas deverá ser realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir.',
-        'Os comprovantes individualizados de cumprimento deverão ser anexados ao Projudi.',
-        'Em caso de atraso no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da Comunidade informações atualizadas acerca de sua execução.',
-        'O controle rigoroso das medidas impostas deve constituir prática permanente da secretaria.',
-    ];
+    // Texto fixo da Observação (formato justificado), pedido pelo usuário — agrupado num
+    // parágrafo único (pedido do usuário, 3ª rodada de correção do espaçamento: "agrupe
+    // todos os parágrafos num só"). Se o texto precisar mudar no futuro, é só editar esta
+    // constante.
+    const TEXTO_OBSERVACAO = 'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
+        + 'realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir. Os '
+        + 'comprovantes individualizados de cumprimento deverão ser anexados ao Projudi. Em caso de atraso '
+        + 'no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da '
+        + 'Comunidade informações atualizadas acerca de sua execução. O controle rigoroso das medidas '
+        + 'impostas deve constituir prática permanente da secretaria.';
 
     // Altura ocupada por um parágrafo justificado, na fonte/tamanho já ativos no doc —
     // chamado ANTES de desenhar (mesmo espírito de medirAlturaCardLista no script
@@ -308,30 +313,38 @@
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(dados.semCumprimento), subsSemCumprimento, true, COR.ambar);
         desenharCard(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(dados.aVencer), [], true, COR.azul);
 
-        // Observação — caixa com fundo, texto justificado (pedido do usuário).
+        // Observação — caixa com fundo, texto justificado (pedido do usuário). Fonte
+        // HELVETICA (padrão do jsPDF), não PublicSans: 3ª rodada de bug relatado pelo
+        // usuário — mesmo sem NENHUM truque de espaçamento (nem align:'justify' nativo,
+        // nem posicionamento por coordenada, nem repetição de espaço), a palavra isolada
+        // "Crítico" (desenhada com um único doc.text() centralizado, sem manipulação
+        // nenhuma) TAMBÉM saiu com espaçamento estranho no visualizador do usuário.
+        // Descartada a hipótese de fonte corrompida (checksum bate byte a byte com o
+        // arquivo principal). Conclusão: o denominador comum de TODAS as ocorrências
+        // (nas 3 tentativas de correção + agora numa palavra isolada) é sempre texto
+        // acentuado renderizado com a fonte PublicSans EMBUTIDA (TTF customizado,
+        // Identity-H) no visualizador de PDF específico do usuário — não é algo que dê
+        // pra consertar ajustando COMO desenhamos o texto. Helvetica é uma das 14 fontes
+        // padrão do PDF (não embutida, codificação WinAnsi de 1 byte, cobre à/ç/í/ã como
+        // caractere padrão Latin-1) — suportada de forma idêntica por qualquer
+        // visualizador de PDF, sem depender de como aquele visualizador específico lida
+        // com fontes customizadas embutidas.
         let y = kY + kH + 10;
         tituloSecao(doc, m, y, uw, 'Observação', COR.azul);
         y += 5;
 
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9.5);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
         const entreLinhas = 4.6;
-        const espacoEntreParagrafos = 3;
         const padding = 5;
-        let alturaTexto = 0;
-        PARAGRAFOS_OBSERVACAO.forEach((p, i) => {
-            alturaTexto += alturaParagrafo(doc, p, uw - 2 * padding, entreLinhas);
-            if (i < PARAGRAFOS_OBSERVACAO.length - 1) alturaTexto += espacoEntreParagrafos;
-        });
+        const alturaTexto = alturaParagrafo(doc, TEXTO_OBSERVACAO, uw - 2 * padding, entreLinhas);
         const caixaH = alturaTexto + 2 * padding;
 
         doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
         doc.roundedRect(m, y, uw, caixaH, 2, 2, 'FD');
 
-        let ty = y + padding + 3.2;
+        const ty = y + padding + 3.2;
         doc.setTextColor(...COR.tintaSec);
-        PARAGRAFOS_OBSERVACAO.forEach(p => {
-            ty += desenharParagrafoJustificado(doc, p, m + padding, ty, uw - 2 * padding, entreLinhas) + espacoEntreParagrafos;
-        });
+        desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO, m + padding, ty, uw - 2 * padding, entreLinhas);
 
         desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m);
         doc.outline.add(null, TITULO_CUMPRIMENTO_MEDIDAS, { pageNumber: 1 });
