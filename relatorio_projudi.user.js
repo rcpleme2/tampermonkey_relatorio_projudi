@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.3
+// @version      24.4
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8468,22 +8468,52 @@
         return true;
     }
 
+    // Mesma ideia de lerAtuacao() (linha ~110), mas varrendo TODOS os frames acessíveis
+    // em vez de só document local — necessário porque, sob automação em várias
+    // unidades, o frame que está fazendo o poll de 'trocando_unidade' às vezes não é o
+    // mesmo frame que tem a table#userinfo com o bloco "Atuação:" (ver comentário grande
+    // em tentarAbrirPopupTrocaAtuacao logo abaixo — mesmo bug, mesma causa).
+    function lerAtuacaoEmQualquerFrame() {
+        for (const doc of todosDocumentosAcessiveis()) {
+            if (!doc.querySelectorAll) continue;
+            const grupos = doc.querySelectorAll('div.group');
+            for (const grupo of grupos) {
+                const label = grupo.querySelector('span.userinfo_label');
+                if (label && /atua[çc][ãa]o/i.test(label.textContent)) {
+                    const span = grupo.querySelector('span[title]');
+                    if (span && span.textContent.trim()) return span.textContent.trim();
+                }
+            }
+        }
+        return '';
+    }
+
     // #alterarAreaAtuacao (dentro de table#userinfo) existe em toda página autenticada —
     // abre o popup "Alterar Atuação" com o iframe da árvore de seleção. Guarda a atuação
     // ATUAL antes de clicar (ver CHAVE_MU_ATUACAO_ANTERIOR) — é a referência usada depois
     // pra saber se a troca de verdade já aconteceu, já que o popup é só uma sobreposição
     // e a página de baixo continua com a atuação antiga até a escolha ser feita.
+    // Log real do usuário mostrou #alterarAreaAtuacao "não encontrado" mesmo em páginas
+    // onde ele deveria existir (ex.: logo depois de Apreensões terminar) — porque
+    // document.getElementById só enxerga o DOM do FRAME que está executando esta função
+    // agora, e o Projudi roda em frameset (menu + conteúdo + cabecalho-oid.jsp...), com
+    // uma instância do userscript em CADA frame (sem @noframes). O elemento pode estar
+    // num frame IRMÃO/pai do que está fazendo o poll neste tick. Mesmo problema que
+    // acharLinkMenu/todosDocumentosAcessiveis já resolvem pra navegação — busca em TODOS
+    // os documentos acessíveis (sobe até o maior ancestral de mesma origem, desce por
+    // todos os frames), não só no document local.
     function tentarAbrirPopupTrocaAtuacao() {
-        const link = document.getElementById('alterarAreaAtuacao');
-        if (!link) {
-            console.warn('[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado nesta página — tentando de novo no próximo poll');
-            return false;
+        for (const doc of todosDocumentosAcessiveis()) {
+            const link = doc.getElementById && doc.getElementById('alterarAreaAtuacao');
+            if (!link) continue;
+            const atuacaoAtual = lerAtuacaoEmQualquerFrame();
+            store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, atuacaoAtual || '');
+            console.log(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (achado em ${doc === document ? 'frame local' : 'outro frame'}; atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
+            link.click();
+            return true;
         }
-        const atuacaoAtual = lerAtuacao();
-        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, atuacaoAtual || '');
-        console.log(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
-        link.click();
-        return true;
+        console.warn(`[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado em nenhum frame acessível (${todosDocumentosAcessiveis().length} documento(s) verificado(s)) — tentando de novo no próximo poll`);
+        return false;
     }
 
     // Assinatura simples do carregamento da árvore (só a contagem de unidades já
@@ -8528,11 +8558,11 @@
             return;
         }
         console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length} — procurando "${titulo}" na árvore`);
-        // A troca só é reconhecida quando lerAtuacao() mudar em relação a ESTA leitura
-        // (ver CHAVE_MU_ATUACAO_ANTERIOR/retomarAutomacaoNaProximaUnidade) — dentro do
-        // iframe do popup lerAtuacao() normalmente vem vazio (não é a página do app),
-        // então não custa nada regravar aqui também, por segurança.
-        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacao() || '');
+        // A troca só é reconhecida quando lerAtuacaoEmQualquerFrame() mudar em relação a
+        // ESTA leitura (ver CHAVE_MU_ATUACAO_ANTERIOR/retomarAutomacaoNaProximaUnidade) —
+        // dentro do iframe do popup normalmente vem vazio (não é a página do app), então
+        // não custa nada regravar aqui também, por segurança.
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
         const ok = clicarUnidadePorTitulo(titulo);
         store.setItem(CHAVE_MU_INDICE, String(idx + 1));
         if (ok) console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clique em "${titulo}" disparado — aguardando a página recarregar`);
@@ -8540,15 +8570,15 @@
     }
 
     // Só estamos de volta numa atuação normal quando: (1) não é mais a tela de seleção,
-    // (2) lerAtuacao() vem preenchido, E (3) é DIFERENTE da atuação registrada em
-    // CHAVE_MU_ATUACAO_ANTERIOR (ver tentarAbrirPopupTrocaAtuacao/
+    // (2) lerAtuacaoEmQualquerFrame() vem preenchido, E (3) é DIFERENTE da atuação
+    // registrada em CHAVE_MU_ATUACAO_ANTERIOR (ver tentarAbrirPopupTrocaAtuacao/
     // avancarParaProximaUnidadeSelecionada) — sem a condição (3), o popup ainda ABERTO
     // sobre a página antiga (aguardando o iframe carregar) já passava como "trocou",
     // porque a página de baixo continua reportando a atuação ANTIGA enquanto isso (bug
     // relatado pelo usuário). Retoma a MESMA fila de relatórios (persistida em
     // 'projudi_auto_fila' desde o início da rodada) pra essa nova unidade.
     function retomarAutomacaoNaProximaUnidade() {
-        const atuacaoAtual = lerAtuacao();
+        const atuacaoAtual = lerAtuacaoEmQualquerFrame();
         const atuacaoAnterior = store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || '';
         if (!atuacaoAtual || atuacaoAtual === atuacaoAnterior) {
             console.log(`[Projudi MultiUnidade] ainda na atuação anterior ("${atuacaoAnterior || '(vazia)'}") — popup/troca ainda em andamento, aguardando`);
@@ -8577,7 +8607,7 @@
         store.setItem(CHAVE_MU_TITULOS, JSON.stringify(titulos));
         store.setItem(CHAVE_MU_INDICE, '1'); // [0] é clicado agora mesmo, abaixo
         store.setItem(CHAVE_MU_ATIVO, '1');
-        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacao() || '');
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', store.getItem('projudi_auto_periodo_tm') || '1m');
         store.setItem(AUTO_ESTADO, 'trocando_unidade');
@@ -9294,7 +9324,7 @@
             store.setItem(CHAVE_AUTO_FIM, String(agora)); // marca o fim desta unidade (mostrador do painel)
             const idxAtual = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
             const totalUnidades = lerTitulosMultiUnidade().length;
-            console.log(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacao() || ''}") — abrindo popup pra trocar de atuação`);
+            console.log(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacaoEmQualquerFrame() || ''}") — abrindo popup pra trocar de atuação`);
             if (!tentarAbrirPopupTrocaAtuacao()) navegarMenu('inicio');
             return;
         }
@@ -9305,10 +9335,10 @@
         if (estado === 'trocando_unidade') {
             store.setItem('projudi_auto_lock', String(agora));
             const naArvore = paginaSelecaoAreaAtuacao();
-            console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacao()="${lerAtuacao() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
+            console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
             if (naArvore) {
                 avancarParaProximaUnidadeSelecionada();
-            } else if (lerAtuacao()) {
+            } else if (lerAtuacaoEmQualquerFrame()) {
                 retomarAutomacaoNaProximaUnidade();
             } else if (!tentarAbrirPopupTrocaAtuacao()) {
                 console.warn('[Projudi MultiUnidade] nem árvore de seleção nem atuação detectadas, e #alterarAreaAtuacao não encontrado — indo pra página inicial e tentando de novo no próximo poll');
