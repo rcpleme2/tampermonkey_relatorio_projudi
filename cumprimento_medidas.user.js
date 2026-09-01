@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.1
+// @version      0.2
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -394,23 +394,46 @@
         link.click();
     }
 
+    // Sobe a árvore a partir de "el" até achar um ancestral que satisfaça "pred" — usado
+    // para achar a <table> inteira da barra de abas (ver injetarBotao) sem depender de
+    // Element.prototype.closest (mais simples de replicar num DOM sintético de teste, e
+    // funciona igual em qualquer documento/frame).
+    function acharAncestral(el, pred) {
+        let cur = el;
+        while (cur) {
+            if (pred(cur)) return cur;
+            cur = cur.parentNode;
+        }
+        return null;
+    }
+
     function injetarBotao() {
         if (document.getElementById('btn-cumprimento-medidas')) return;
         const abaLink = acharAbaCumprimentoMedidas();
         if (!abaLink) return; // não é a tela "Mesa do Magistrado" — nada a fazer aqui
-        const tabHorz = abaLink.ownerDocument.getElementById('tabHorz');
-        const ancora = (tabHorz && tabHorz.parentNode && tabHorz.parentNode.parentNode) || abaLink.ownerDocument.body;
+        const doc = abaLink.ownerDocument;
 
-        const btn = document.createElement('button');
+        // BUG já corrigido: a âncora antiga era tabHorz.parentNode.parentNode, que no
+        // HTML real do Projudi é a própria <tr> da tabela de abas — inserir um <div>
+        // como filho direto de <tr> é HTML inválido (só aceita <td>/<th>) e quebrava o
+        // layout de TODA a tabela (relatado pelo usuário: abas empilhadas na vertical,
+        // página toda desconfigurada). Em vez disso, sobe até achar a <table> inteira e
+        // insere o botão ANTES dela, dentro do container que a envolve (o <form> da
+        // Mesa do Magistrado) — nesting válido.
+        const tabela = acharAncestral(abaLink, e => e.tagName === 'TABLE');
+        const ancora = (tabela && tabela.parentNode) || doc.body;
+
+        const btn = doc.createElement('button');
         btn.id = 'btn-cumprimento-medidas';
         btn.type = 'button';
         btn.title = 'Vai até a aba "Cumprimentos de Medidas" (se preciso) e gera um PDF de uma página com os 3 indicadores';
         btn.textContent = TEXTO_BOTAO;
         btn.onclick = onClickBotao;
 
-        const div = abaLink.ownerDocument.createElement('div');
+        const div = doc.createElement('div');
         div.appendChild(btn);
-        ancora.insertBefore(div, ancora.firstChild);
+        if (tabela) ancora.insertBefore(div, tabela);
+        else ancora.insertBefore(div, ancora.firstChild);
     }
 
     function bootstrap() {
