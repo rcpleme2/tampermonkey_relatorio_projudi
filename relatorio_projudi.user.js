@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.2
+// @version      24.3
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2745,8 +2745,12 @@
             const totalDepois = totalAntes + dadosPagina.length;
             store.setItem(KEY_TOTAL_REGISTROS, String(totalDepois));
             if (cfg.usaAtuacao) {
-                let atuacoes = [];
-                try { atuacoes = JSON.parse(store.getItem(KEY_ATUACOES) || '[]'); } catch (e) { /* ignore */ }
+                // desembrulharArray (não JSON.parse único) — mesma proteção usada em
+                // lerFilaAutomacao/lerUnidadesAutomatizadas (ver comentários lá): sem
+                // isso, um valor em camadas virava STRING e new Set(string) iterava
+                // CARACTERES soltos em vez das atuações, corrompendo a lista em silêncio
+                // (sem lançar erro — pior que travar, porque passava despercebido).
+                const atuacoes = desembrulharArray(store.getItem(KEY_ATUACOES)) || [];
                 const s = new Set(atuacoes);
                 dadosPagina.forEach(d => { if (d.atuacao) s.add(d.atuacao); });
                 store.setItem(KEY_ATUACOES, JSON.stringify([...s]));
@@ -2776,7 +2780,7 @@
         // ver comentário em KEY_TOTAL_REGISTROS/KEY_ATUACOES acima.
         function contarRegistros() { return parseInt(store.getItem(KEY_TOTAL_REGISTROS) || '0', 10); }
         function contarAtuacoes() {
-            try { return (JSON.parse(store.getItem(KEY_ATUACOES) || '[]')).length; } catch (e) { return 0; }
+            return (desembrulharArray(store.getItem(KEY_ATUACOES)) || []).length;
         }
 
         function coletarPaginaAtual() {
@@ -8314,8 +8318,12 @@
     // mostrador, o que não é verdade.
     const CHAVE_UNIDADES_AUTOMATIZADAS = 'projudi_unidades_automatizadas';
     function lerUnidadesAutomatizadas() {
-        try { return JSON.parse(store.getItem(CHAVE_UNIDADES_AUTOMATIZADAS) || '[]'); }
-        catch (e) { return []; }
+        // desembrulharArray (não JSON.parse único) — mesma proteção de lerFilaAutomacao
+        // (ver comentário lá): sob automação em várias unidades, esta chave é lida/escrita
+        // com muito mais frequência (uma vez por unidade) e mais frames concorrentes, o
+        // que expôs o mesmo bug de "JSON em camadas" aqui (erro real relatado pelo
+        // usuário: "TypeError: unidades.join is not a function" em atualizarPainel).
+        return desembrulharArray(store.getItem(CHAVE_UNIDADES_AUTOMATIZADAS)) || [];
     }
     function marcarUnidadeAutomatizada(atuacao) {
         if (!atuacao) return;
@@ -8333,8 +8341,12 @@
     // marcados, ver relatorioMarcadoPorPadrao).
     const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
     function lerSelecoesSalvasPainel() {
-        try { return JSON.parse(store.getItem(CHAVE_RELATORIOS_SELECIONADOS) || 'null') || {}; }
-        catch (e) { return {}; }
+        // desembrulharObjeto (não JSON.parse único) — mesma proteção de
+        // lerFilaAutomacao/lerUnidadesAutomatizadas: sob automação em várias unidades
+        // esta chave também é lida com muito mais frequência/concorrência entre frames,
+        // expondo o mesmo bug de "JSON em camadas" — sem isso, relatorioMarcadoPorPadrao
+        // podia devolver sempre o padrão (ou quebrar) mesmo com marcações salvas.
+        return desembrulharObjeto(store.getItem(CHAVE_RELATORIOS_SELECIONADOS)) || {};
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
@@ -9125,7 +9137,10 @@
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
-        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}"`);
+        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
+        if (!prox && multiUnidadeEmCurso()) {
+            console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
+        }
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         setTimeout(passoAutomacao, 900);
     }
