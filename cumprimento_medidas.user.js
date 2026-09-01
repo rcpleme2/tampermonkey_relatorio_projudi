@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.4
+// @version      0.5
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -147,8 +147,17 @@
             }
             doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
             doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
-            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
-            subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
+            // subs aceita string simples (estilo padrão) OU {texto, cor, negrito} pra dar
+            // destaque a uma linha específica — usado pelo aviso "Situação: Crítico".
+            subs.forEach(s => {
+                const custom = s && typeof s === 'object';
+                const textoSub = custom ? s.texto : s;
+                doc.setFont('PublicSans', custom && s.negrito ? 'bold' : 'normal');
+                doc.setFontSize(8);
+                doc.setTextColor(...(custom && s.cor ? s.cor : COR.tintaSec));
+                doc.text(doc.splitTextToSize(String(textoSub), w - 10)[0], cx, yy, { align: 'center' });
+                yy += 4.2;
+            });
             return;
         }
 
@@ -213,21 +222,28 @@
         return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
     }
 
-    // Justificação MANUAL — NÃO usar `doc.text(..., {align:'justify'})` com a fonte
-    // PublicSans embutida: reportado pelo usuário (PDF real) e reproduzido — o
-    // `align:'justify'` nativo do jsPDF, com uma fonte TTF customizada incorporada
-    // (codificação multi-byte/Identity-H), abre um espaço espúrio NO MEIO de certas
-    // palavras (ex.: "fiscaliz ação", "individualiz ados") em vez de só entre palavras, e
-    // o texto nem fica de fato encostado na margem direita. É uma limitação conhecida do
-    // jsPDF: o operador de espaçamento de palavra do PDF (Tw) não vale para texto
-    // multi-byte, e o fallback do jsPDF pra simular justificado com fonte custom não
-    // funciona direito. Aqui a gente mede cada PALAVRA com doc.getTextWidth (fonte já
-    // deve estar setada) e desenha uma por vez, com o espaço extra calculado à mão — nunca
-    // aciona o mecanismo de justify nativo, então o bug não tem como acontecer. Última
-    // linha de cada parágrafo fica alinhada à esquerda (convenção tipográfica padrão de
-    // texto justificado — só as linhas "cheias" esticam).
+    // Justificação MANUAL, por REPETIÇÃO DE ESPAÇOS — 2ª tentativa. A 1ª (não usar
+    // `align:'justify'` nativo do jsPDF, e sim desenhar cada palavra numa chamada
+    // `doc.text()` separada, posicionada por coordenada calculada à mão) reduziu o bug
+    // relatado mas não eliminou: o usuário ainda via palavras GRUDADAS sem espaço nenhum
+    // ("fiscalizaçãodo", "realizadaexclusivamente") em PDFs reais, mesmo com a largura de
+    // cada palavra medida corretamente (conferido com jsPDF real, inclusive o MESMO build
+    // UMD que o Tampermonkey carrega via @require — a medição bate). Ou seja o problema
+    // não é a conta, é o MECANISMO: várias chamadas `doc.text()` reposicionadas por
+    // coordenada, na prática, dependem de o leitor de PDF não reaplicar kerning entre uma
+    // chamada e a próxima — e isso parece variar por leitor/visualizador.
+    // Esta versão evita QUALQUER reposicionamento manual por coordenada: cada linha vira
+    // UMA ÚNICA STRING (com espaços de verdade, às vezes repetidos, entre as palavras) e é
+    // desenhada com UMA chamada `doc.text()` só — exatamente o mesmo mecanismo simples já
+    // usado sem problema em todo o resto do relatório (títulos, cabeçalhos etc.). Não fica
+    // matematicamente pixel-perfect na margem direita (a "largura do espaço" só multiplica
+    // em números inteiros), mas garante que NUNCA existe uma palavra grudada na outra —
+    // prioridade sobre precisão milimétrica. Última linha de cada parágrafo fica com
+    // espaço simples, alinhada à esquerda (convenção tipográfica padrão de texto
+    // justificado — só as linhas "cheias" esticam).
     function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
         const linhas = doc.splitTextToSize(texto, larguraMax);
+        const espacoLargura = doc.getTextWidth(' ') || 1;
         linhas.forEach((linha, i) => {
             const ultimaLinha = i === linhas.length - 1;
             const palavras = linha.split(' ').filter(Boolean);
@@ -235,13 +251,21 @@
                 doc.text(linha, x, y);
             } else {
                 const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
-                const espacoExtra = Math.max(0, larguraMax - larguraPalavras);
-                const gap = espacoExtra / (palavras.length - 1);
-                let cx = x;
-                palavras.forEach(p => {
-                    doc.text(p, cx, y);
-                    cx += doc.getTextWidth(p) + gap;
-                });
+                const numLacunas = palavras.length - 1;
+                // Quantos "espaços" (múltiplos inteiros da largura de 1 espaço) cabem no
+                // total disponível pra separar as palavras nesta linha — no mínimo 1 por
+                // lacuna, sempre (nunca gruda). Distribui o excedente nas primeiras
+                // lacunas (mesma convenção de justificação de texto tradicional).
+                const totalEspacos = Math.max(numLacunas, Math.round((larguraMax - larguraPalavras) / espacoLargura));
+                const base = Math.floor(totalEspacos / numLacunas);
+                let resto = totalEspacos - base * numLacunas;
+                let linhaJustificada = palavras[0];
+                for (let k = 1; k < palavras.length; k++) {
+                    let n = base;
+                    if (resto > 0) { n++; resto--; }
+                    linhaJustificada += ' '.repeat(Math.max(1, n)) + palavras[k];
+                }
+                doc.text(linhaJustificada, x, y);
             }
             y += entreLinhas;
         });
@@ -269,12 +293,19 @@
         // distintas de medidas (atrasadas / a vencer / sem cumprimento sequer gerado), não
         // uma fila só, então somá-las misturaria coisas diferentes (mesma cautela do
         // CLAUDE.md sobre não inventar regra de soma sem confirmar com o usuário).
+        // Limiares de "Situação: Crítico" — pedido explícito do usuário, valores exatos.
+        const LIMIAR_ATRASO_CRITICO = 100;
+        const LIMIAR_SEM_CUMPRIMENTO_CRITICO = 50;
+        const avisoCritico = { texto: 'Situação: Crítico', cor: COR.vermelho, negrito: true };
+        const subsAtraso = dados.atrasados > LIMIAR_ATRASO_CRITICO ? [avisoCritico] : [];
+        const subsSemCumprimento = dados.semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO ? [avisoCritico] : [];
+
         const gap = 6;
         const kY = yLinha + 7;
-        const kH = 30;
+        const kH = 34; // 30 não sobra espaço pra 2 linhas de título + linha de "Situação: Crítico"
         const kW = (uw - 2 * gap) / 3;
-        desenharCard(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(dados.atrasados), [], true, COR.vermelho);
-        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(dados.semCumprimento), [], true, COR.ambar);
+        desenharCard(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(dados.atrasados), subsAtraso, true, COR.vermelho);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(dados.semCumprimento), subsSemCumprimento, true, COR.ambar);
         desenharCard(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(dados.aVencer), [], true, COR.azul);
 
         // Observação — caixa com fundo, texto justificado (pedido do usuário).
@@ -376,19 +407,22 @@
 
     // Espera a tela "estabilizar" antes de extrair de verdade — mesma cautela do script
     // principal para painéis de contador carregados via AJAX depois do HTML inicial (ver
-    // aguardarOutrosCumprimentosProntoEExtrair lá). Reportado pelo usuário: "Cumprimentos
-    // em Atraso" saía certo mas "Medidas sem Cumprimentos Gerados" e "Cumprimentos a
-    // Vencer" saíam zerados — sinal de que esses 2 contadores são preenchidos por uma
-    // chamada assíncrona MAIS LENTA que a de "Atrasados" (a página nasce com "0" nesses
-    // spans, não com o span ausente), e o critério antigo (só 2 leituras iguais seguidas,
-    // 500ms) aceitava esse "0" inicial como se já fosse o valor final. Agora exige (a) um
-    // mínimo de ~2s decorridos antes de aceitar qualquer estabilidade — dá tempo do AJAX
-    // pelo menos começar — e (b) 3 leituras iguais seguidas (não 2), com teto de ~15s.
+    // aguardarOutrosCumprimentosProntoEExtrair lá). Reportado pelo usuário (2 rodadas):
+    // "Cumprimentos em Atraso" sai certo, mas ora "Medidas sem Cumprimentos Gerados" ora
+    // "Cumprimentos a Vencer" saem zerados — inconsistente entre execuções, e o usuário
+    // confirmou que o Projudi dele demora mesmo pra carregar. Sinal de que esses 2
+    // contadores são preenchidos por uma chamada assíncrona mais lenta (e de duração
+    // variável) que a de "Atrasados" — a página nasce com "0" nesses spans, não com o
+    // span ausente. Pedido explícito do usuário: esperar pelo menos ~5s antes de sequer
+    // considerar extrair, e não travar num teto curto numa rede/Projudi lento. Mínimo
+    // subiu de ~2s para ~5s (10 tentativas) e o teto de segurança de ~15s para ~40s (80
+    // tentativas) — ainda com 3 leituras iguais seguidas exigidas antes de aceitar como
+    // estável, pra não repetir o erro de aceitar um "0" que só parece estável por sorte.
     let ultimaAssinaturaCM = null;
     let leiturasEstaveisCM = 0;
-    const CM_TENTATIVAS_MINIMAS = 4;   // ~2s antes de aceitar "estável"
+    const CM_TENTATIVAS_MINIMAS = 10;  // ~5s antes de aceitar "estável"
     const CM_LEITURAS_ESTAVEIS_NECESSARIAS = 3;
-    const CM_TENTATIVAS_MAXIMAS = 30;  // ~15s de teto
+    const CM_TENTATIVAS_MAXIMAS = 80;  // ~40s de teto (Projudi lento, por pedido do usuário)
     function aguardarEstabilizarEExtrair(tentativa, callback) {
         const atual = assinaturaContadores();
         if (atual === ultimaAssinaturaCM) {
