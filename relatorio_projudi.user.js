@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.5
+// @version      23.0
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -251,15 +251,36 @@
         return resultado;
     }
 
-    // ── Configurações dos dois relatórios ───────────────────────────────────────
-    // Ambos ficam em conclusao.do; distinguem-se pelo cabeçalho da tabela:
-    //   "Dt. Remessa"  => relatório de Conclusões (remessa)      — 9 colunas
-    //   "Dt. Retorno"  => relatório de Retorno de Conclusos       — 10 colunas (1ª = semáforo)
+    // ── Conclusões e Tempo Médio: MESMA tela/URL (conclusao/estatistica.do,
+    // "Estatísticas de Conclusões") ──────────────────────────────────────────────
+    // Substituiu a tela antiga "Para Realizar" (conclusao.do — só refletia a fila do
+    // cartório, incompleta: não pegava conclusões já enviadas ao magistrado sem terem
+    // sido "recebidas" nessa fila). A tela nova é a mesma pesquisa de estatísticas já
+    // usada por Tempo Médio, só muda o filtro "Situação" marcado no formulário:
+    //   Situação=Pendentes  => CFG_CONCLUSOES (este relatório)
+    //   Situação=Analisadas => CFG_TEMPOMEDIO
+    // Cabeçalho da tabela é IDÊNTICO nos dois casos (sempre as mesmas 7 colunas, mesmo
+    // com "Dt. Análise"/"Dt. Análise Cartório" vazias em Pendentes) — não dá pra
+    // distinguir só pelo cab, por isso o detecta() de cada um também confere o rádio
+    // "situacao" marcado no formulário (mesmo padrão de opcaoBuscaParalisadoSelecionada/
+    // prazoIndeterminadoMarcado, ver comentários lá).
+    function situacaoConclusaoSelecionada() {
+        const el = document.querySelector('input[name="situacao"]:checked');
+        return el ? el.value : null;
+    }
 
+    // Colunas da tela em Analítico: [0] checkbox (vazio) [1] Processo [2] Dt. Envio
+    // [3] Dt. Análise [4] Dt. Análise Cartório [5] Tipo de conclusão (+ "Dr(a). Nome" em
+    // <strong> + "Pré-análise: Nome" em <i>, cada um numa linha após <br>) [6] Classe
+    // Processual (+ "(Assunto Principal)" numa linha após <br>).
+    //
+    // A tela antiga tinha Seq./Privativa/Agrupador e a data da pré-análise entre
+    // parênteses — nenhum desses campos existe nesta tela nova, então saíram do
+    // relatório (não tem como coletar o que a tela não mostra).
     const CFG_CONCLUSOES = {
         prefixo: 'projudi_export_',            // mantém as chaves já usadas (dados existentes preservados)
-        detecta: (cab) => /remessa/i.test(cab),
-        minTds: 8,
+        detecta: (cab) => /an[áa]lise\s+cart[óo]rio/i.test(cab) && situacaoConclusaoSelecionada() === 'P',
+        minTds: 7,
         usaAtuacao: true,
         // "Zero processos conclusos" é uma informação válida (pedido do usuário: avisar
         // no resumo geral quando não houver nenhum) — sem isso, a coleta rodando até o
@@ -268,35 +289,28 @@
         mostrarSeVazio: true,
         nomeArquivo: 'conclusoes_projudi',
         rotulos: { coletar: 'Coletar esta Atuação', coletarMais: 'Coletar mais uma Atuação', baixar: '⬇ Baixar planilha' },
-        cabecalhos: ['Atuação', 'Dt. Conclusão', 'Processo', 'Classe', 'Seq.', 'Tipo de Conclusão', 'Privativa', 'Magistrado(a)', 'Pré-análise', 'Dt. Pré-análise', 'Agrupador', 'Prioritário'],
-        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 6 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 14 }, { wch: 14 }, { wch: 20 }, { wch: 11 }],
+        cabecalhos: ['Atuação', 'Dt. Conclusão', 'Processo', 'Classe', 'Tipo de Conclusão', 'Magistrado(a)', 'Pré-análise', 'Prioritário'],
+        larguras: [{ wch: 24 }, { wch: 18 }, { wch: 26 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 30 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
-            const pc = processoEclasse(tds[2]);
-            const preAnaliseTexto = textoCelula(tds[7]);
-            // A célula de Pré-análise traz "<matrícula>.asr - <nome do assessor>
-            // (dd/mm/aaaa)" — a data de realização fica sempre entre parênteses, logo
-            // após o nome. Extraímos separadamente para calcular há quanto tempo a
-            // pré-análise ocorreu. Se não houver essa data entre parênteses (célula
-            // vazia ou formato inesperado), preAnaliseData fica vazio e o tempo
-            // decorrido é exibido como "—" no PDF (sem quebrar nada).
-            const mData = /\((\d{2}\/\d{2}\/\d{4})\)/.exec(preAnaliseTexto);
+            const emProc = tds[1].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
+            const classeCompleta = textoAteBr(tds[6]) || textoCelula(tds[6]);
+            const classe = classeCompleta.split(' (')[0].trim(); // classe sem o "(Assunto Principal)"
+            const strongEl = tds[5].querySelector('strong');
+            const iEl = tds[5].querySelector('i');
             return {
                 atuacao,
                 competencia: competenciaDe(atuacao),
-                dtRemessa: textoCelula(tds[1]),
-                processo: pc.processo,
-                classe: pc.classe,
-                seq: textoCelula(tds[3]),
-                tipoConclusao: textoCelula(tds[4]),
-                privativa: textoCelula(tds[5]),
-                responsavel: textoCelula(tds[6]),
-                preAnalise: preAnaliseTexto,
-                preAnaliseData: mData ? mData[1] : '',
-                agrupador: textoCelula(tds[8]),
-                prioritario: emPrioritario(tds[2].querySelector('em')),
+                dtRemessa: textoCelula(tds[2]), // "Dt. Envio" nesta tela — mesma semântica de remessa p/ conclusão
+                processo,
+                classe,
+                tipoConclusao: textoAteBr(tds[5]),
+                responsavel: strongEl ? strongEl.textContent.replace(/^Dr\(a\)\.\s*/i, '').trim() : '',
+                preAnalise: iEl ? iEl.textContent.trim() : '',
+                prioritario: emPrioritario(emProc),
             };
         },
-        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.seq, d.tipoConclusao, d.privativa, d.responsavel, d.preAnalise, d.preAnaliseData, d.agrupador, d.prioritario ? 'Sim' : 'Não'],
+        linha: (d) => [d.atuacao, d.dtRemessa, d.processo, d.classe, d.tipoConclusao, d.responsavel, d.preAnalise, d.prioritario ? 'Sim' : 'Não'],
         pdf: {
             titulo: 'Conclusões',
             atosTitulo: 'Conclusões pendentes',
@@ -328,20 +342,7 @@
             ],
             distribuicoes: [
                 { titulo: 'Conclusões por Magistrado(a)', campo: 'responsavel', topN: 12 },
-                { titulo: 'Conclusões por Agrupador', campo: 'agrupador', topN: 12 },
                 { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
-                // "Aguardando decisão" (pedido da Corregedoria): tempo desde a PRÉ-ANÁLISE,
-                // não desde a remessa — um processo pré-analisado há 120 dias é um achado
-                // (está parado na mesa do magistrado); medido por dtRemessa isso não se
-                // distingue de "acabou de ser pré-analisado". Só entre quem tem
-                // pré-análise; usa calc() porque não é uma contagem por CAMPO categórico.
-                {
-                    titulo: 'Aguardando decisão (dias desde a pré-análise)',
-                    calc: (sub) => {
-                        const dias = sub.filter(temPreAnalise).map(d => diasDesdePreAnalise(d, Date.now())).filter(v => v !== '').map(Number);
-                        return { tipo: 'barras', itens: faixasDeDias(dias).filter(f => f.valor > 0) };
-                    },
-                },
                 // Padrão de dias úteis das conclusões (pedido do usuário) — mesmo gráfico
                 // já existente para Audiências Designadas (concentração por dia da
                 // semana), aqui a partir da data de remessa para conclusão (dtRemessa),
@@ -351,21 +352,14 @@
                     calc: (sub) => ({ tipo: 'barras', itens: contarPorDiaUtil(sub, 'dtRemessa') }),
                 },
             ],
-            // Larguras somam 174mm — cabem na área útil (~186mm em A4 retrato com margem
-            // de 12mm); antes somavam 206mm e a tabela vazava a borda direita da página.
             colunas: [
-                { header: 'Atuação', width: 22, get: (d) => d.atuacao },
-                { header: 'Processo', width: 26, get: (d) => d.processo },
-                { header: 'Classe', width: 16, get: (d) => d.classe },
-                { header: 'Tipo de Conclusão', width: 24, get: (d) => d.tipoConclusao },
-                { header: 'Magistrado(a)', width: 26, get: (d) => d.responsavel },
-                { header: 'Agrupador', width: 18, get: (d) => d.agrupador },
-                { header: 'Dt. Conclusão', width: 18, get: (d) => d.dtRemessa },
-                { header: 'Dias', width: 8, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
-                // Faltava no relatório geral (só existia no PDF por Juiz) — mesma lógica de
-                // diasDesdePreAnalise usada lá (data extraída entre parênteses na célula de
-                // Pré-análise).
-                { header: 'Dias desde pré-análise', width: 16, get: (d, ctx) => diasDesdePreAnalise(d, ctx.now) || '—' },
+                { header: 'Atuação', width: 24, get: (d) => d.atuacao },
+                { header: 'Processo', width: 28, get: (d) => d.processo },
+                { header: 'Classe', width: 18, get: (d) => d.classe },
+                { header: 'Tipo de Conclusão', width: 26, get: (d) => d.tipoConclusao },
+                { header: 'Magistrado(a)', width: 30, get: (d) => d.responsavel },
+                { header: 'Dt. Conclusão', width: 20, get: (d) => d.dtRemessa },
+                { header: 'Dias', width: 10, get: (d, ctx) => diasDecorridos(d.dtRemessa, ctx.now) },
             ],
             // Conclusões prioritárias primeiro; dentro de cada grupo (prioritárias/normais),
             // da data de conclusão mais antiga para a mais nova (ver montarTabelaGenerico).
@@ -505,7 +499,9 @@
     //                    [4]Dt.Análise Cartório [5]Tipo de conclusão [6]Classe Processual
     const CFG_TEMPOMEDIO = {
         prefixo: 'projudi_tempomedio_',
-        detecta: (cab) => /an[áa]lise\s+cart[óo]rio/i.test(cab),
+        // Mesma tela/URL de CFG_CONCLUSOES (Situação=Pendentes) — só o rádio "situacao"
+        // marcado distingue os dois, ver comentário em situacaoConclusaoSelecionada.
+        detecta: (cab) => /an[áa]lise\s+cart[óo]rio/i.test(cab) && situacaoConclusaoSelecionada() === 'A',
         // 500 travava o site do Projudi (tabela com 1000 <tr> — ver comentário original
         // em criarColetor/iniciar()); com a busca mês a mês, 100 é seguro.
         pageSizeSelect: { name: 'estatisticaPageSizeOptions', valor: '100' },
@@ -3831,11 +3827,10 @@
                 // vez de aparecer vazios.
                 // Cada entrada normalmente é {titulo, campo, topN, ...} e vira uma contagem
                 // categórica via contarPorCampo. Uma entrada com `calc(sub)` (ponto de
-                // extensão novo, hoje só usado por CFG_CONCLUSOES p/ o gráfico de "aguardando
-                // decisão" por faixa de dias desde a pré-análise, que não é uma contagem por
-                // CAMPO) pula contarPorCampo e usa o que `calc` devolver direto — precisa
-                // devolver {tipo:'faixas', faixas} ou {itens} (mesmo formato que os outros
-                // tipos já aceitam em desenharGradeGraficos).
+                // extensão usado por CFG_CONCLUSOES p/ o gráfico "por Dia da Semana", que
+                // não é uma contagem por CAMPO) pula contarPorCampo e usa o que `calc`
+                // devolver direto — precisa devolver {tipo:'faixas', faixas} ou {itens}
+                // (mesmo formato que os outros tipos já aceitam em desenharGradeGraficos).
                 ...p.distribuicoes
                     .map(g => {
                         if (typeof g.calc === 'function') {
@@ -4100,13 +4095,6 @@
     // "Sim"/"Não" a partir do texto bruto da célula de Pré-análise (não vazio = houve).
     function temPreAnalise(d) { return !!(d.preAnalise && d.preAnalise.trim()); }
 
-    // Dias entre hoje e a data extraída da pré-análise (preAnaliseData); '' quando essa
-    // data não pôde ser identificada no texto da célula (ver comentário em CFG_CONCLUSOES).
-    function diasDesdePreAnalise(d, now) {
-        if (!d.preAnaliseData) return '';
-        return diasDecorridos(d.preAnaliseData, now);
-    }
-
     function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco) {
         if (!primeira) doc.addPage();
         const agora = new Date();
@@ -4154,7 +4142,7 @@
         const gY0 = kY + 28 + gap + 2;
         const charts = [
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
-            { tipo: 'barras', span: 1, titulo: 'Pendentes por Agrupador', itens: contarPorCampo(sub, 'agrupador', 10) },
+            { tipo: 'barras', span: 1, titulo: 'Pendentes por Dia da Semana (dias úteis)', itens: contarPorDiaUtil(sub, 'dtRemessa') },
         ];
         desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, charts);
         desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false);
@@ -4183,23 +4171,19 @@
         const tabInicioY = m + 8;
 
         doc.autoTable({
-            // As duas últimas colunas são sempre Dt. Conclusão e Dias desde pré-análise.
             columns: [
                 { header: 'Processo', dataKey: 'processo' },
                 { header: 'Classe', dataKey: 'classe' },
                 { header: 'Tipo de Conclusão', dataKey: 'tipo' },
-                { header: 'Agrupador', dataKey: 'agrupador' },
                 { header: 'Pré-análise', dataKey: 'preAnalise' },
                 { header: 'Dias', dataKey: 'dias' },
                 { header: 'Dt. Conclusão', dataKey: 'dtRemessa' },
-                { header: 'Dias desde pré-análise', dataKey: 'diasPreAnalise' },
             ],
             body: ordenados.map(d => ({
-                processo: d.processo, classe: d.classe, tipo: d.tipoConclusao, agrupador: d.agrupador,
+                processo: d.processo, classe: d.classe, tipo: d.tipoConclusao,
                 preAnalise: temPreAnalise(d) ? 'Sim' : 'Não',
                 dias: diasDecorridos(d.dtRemessa, now),
                 dtRemessa: d.dtRemessa,
-                diasPreAnalise: diasDesdePreAnalise(d, now) || '—',
             })),
             startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
@@ -4209,9 +4193,8 @@
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles: {
-                processo: { cellWidth: 28 }, classe: { cellWidth: 20 }, tipo: { cellWidth: 26 },
-                agrupador: { cellWidth: 22 }, preAnalise: { cellWidth: 16 }, dias: { cellWidth: 12 },
-                dtRemessa: { cellWidth: 18 }, diasPreAnalise: { cellWidth: 20 },
+                processo: { cellWidth: 30 }, classe: { cellWidth: 24 }, tipo: { cellWidth: 30 },
+                preAnalise: { cellWidth: 18 }, dias: { cellWidth: 14 }, dtRemessa: { cellWidth: 20 },
             },
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'processo' && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
@@ -7366,7 +7349,10 @@
         return cfg;
     }
 
-    // Tela de filtros do relatório "Estatísticas de Conclusões" (tempo médio), antes da pesquisa.
+    // Tela de filtros de "Estatísticas de Conclusões" (conclusao/estatistica.do), antes
+    // da pesquisa — MESMA tela usada por Tempo Médio (Situação=Analisadas) e Conclusões
+    // (Situação=Pendentes, ver preencherEPesquisarConclusoes); o nome ficou do relatório
+    // que a usou primeiro, mas o helper serve aos dois.
     function formularioTempoMedio() {
         const form = document.getElementById('estatisticaConclusaoForm');
         return form && form.querySelector('input[name="situacao"]') ? form : null;
@@ -7568,6 +7554,45 @@
         }, 1500);
     }
 
+    // Marca Situação=Pendentes, Tipo=Analítico (mesma tela de Tempo Médio, ver
+    // formularioTempoMedio) e clica em Pesquisar — sem mexer no período: os campos de
+    // data vêm desabilitados nessa tela (não são enviados no submit de um form comum),
+    // então a pesquisa de Pendentes sempre traz TODAS as conclusões pendentes da
+    // atuação atual, não só as de um mês. Confirmado comparando o formulário antes/depois
+    // de uma pesquisa real: dataInicio/dataFim continuam "disabled" e os resultados
+    // trazem datas de meses anteriores ao período mostrado nesses campos.
+    function preencherEPesquisarConclusoes() {
+        const form = formularioTempoMedio();
+        if (!form) return;
+
+        const radioPendentes = form.querySelector('input[name="situacao"][value="P"]');
+        const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
+        console.log(`[Projudi Conclusões] radioPendentes encontrado=${!!radioPendentes} radioAnalitico encontrado=${!!radioAnalitico}`);
+        if (radioPendentes) radioPendentes.checked = true;
+        if (radioAnalitico) radioAnalitico.checked = true;
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Conclusões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+
+        setTimeout(() => {
+            console.log('[Projudi Conclusões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+            store.setItem(CFG_CONCLUSOES.prefixo + 'ts', String(Date.now()));
+
+            setTimeout(() => {
+                const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
+                const temResultado = !!document.querySelector('table.resultTable');
+                console.log(`[Projudi Conclusões] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                if (aindaNoFormulario && !temResultado) {
+                    console.warn('[Projudi Conclusões] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
+                    const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+                    if (btnRetry && !btnRetry.disabled) btnRetry.click();
+                    store.setItem(CFG_CONCLUSOES.prefixo + 'ts', String(Date.now()));
+                }
+            }, 15000);
+        }, 1500);
+    }
+
     // Tela de filtros de Processos Paralisados/Remessas (processoBuscaParalisado.do) —
     // as duas páginas de resultado são a MESMA tela, só muda o rádio "opcaoBusca"
     // marcado (ver opcaoBuscaParalisadoSelecionada) e o "Mínimo de dias paralisado".
@@ -7668,8 +7693,10 @@
         // (analisarJuntada.do), então usar essa URL aqui faria o fallback "sem buttonBar
         // = 0 registros" reagir também durante a fase 0 de Mandados — que tem seu próprio
         // gate (ver tratarFaseMandadosPendentes/gateFaseMandados em injetarBotoes).
-        if (navAlvo === 'retorno' || navAlvo === 'conclusoes') return /conclusao\.do/i;
-        if (navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
+        if (navAlvo === 'retorno') return /conclusao\.do/i;
+        // Conclusões migrou para a mesma URL de Tempo Médio (conclusao/estatistica.do,
+        // ver comentário acima de situacaoConclusaoSelecionada).
+        if (navAlvo === 'conclusoes' || navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
         if (navAlvo === 'suspensos' || navAlvo === 'suspensosprazo') return /processoBuscaSuspenso\.do/i;
         if (navAlvo === 'instanciarecursal') return /processoBuscaInstanciaSuperior\.do/i;
@@ -7853,7 +7880,27 @@
                 preencherEPesquisarTempoMedio();
                 return;
             }
+            // MESMA tela/formulário de Tempo Médio (estatisticaConclusaoForm) — Conclusões
+            // marca Situação=Pendentes (em vez de Analisadas) e não mexe no período (os
+            // campos de data ficam desabilitados nesta tela — não são enviados no submit —
+            // então "Pendentes" sempre traz TODAS as conclusões pendentes, sem filtro de
+            // data; ver preencherEPesquisarConclusoes).
+            if (store.getItem(AUTO_ESTADO) === 'preenchendo_conclusoes') {
+                console.log('[Projudi Conclusões] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_conclusoes');
+                preencherEPesquisarConclusoes();
+                return;
+            }
             if (!mostrarBotoesIndividuais()) return;
+            if (formularioTempoMedio().querySelector('input[name="situacao"][value="P"]')) {
+                const bConclusoes = document.createElement('button');
+                bConclusoes.type = 'button';
+                bConclusoes.className = 'projudi-btn';
+                bConclusoes.title = 'Marca Situação=Pendentes e Tipo=Analítico e clica em Pesquisar — não altera o período';
+                bConclusoes.textContent = 'Preencher e Pesquisar (Conclusões)';
+                bConclusoes.onclick = () => preencherEPesquisarConclusoes();
+                buttonBar.appendChild(bConclusoes);
+            }
 
             const sel = document.createElement('select');
             sel.id = 'sel-periodo-tm';
@@ -8147,15 +8194,18 @@
             }
         }
 
-        // Descobre o relatório atual; se não houver tabela reconhecível, assume Conclusões
-        // (mas ainda respeita uma coleta de Retorno em andamento, retomada após reload).
+        // Descobre o relatório atual; se não houver tabela reconhecível, assume Retorno
+        // (mas ainda respeita uma coleta de Retorno/Juntadas em andamento, retomada após
+        // reload). CFG_CONCLUSOES não vive mais em conclusao.do — migrou para
+        // conclusao/estatistica.do (ver comentário acima de situacaoConclusaoSelecionada),
+        // onde tem gate próprio mais acima (mesma tela de CFG_TEMPOMEDIO).
         let cfg = detectarConfig();
         if (!cfg) {
             // Página de conclusao.do sem resultados: respeita uma coleta em andamento;
-            // senão, assume o relatório de Conclusões.
-            const emAndamento = [CFG_RETORNO, CFG_JUNTADAS, CFG_CONCLUSOES]
+            // senão, assume o relatório de Retorno de Conclusos.
+            const emAndamento = [CFG_RETORNO, CFG_JUNTADAS]
                 .find(c => store.getItem(c.prefixo + 'rodando') === '1');
-            cfg = emAndamento || CFG_CONCLUSOES;
+            cfg = emAndamento || CFG_RETORNO;
         }
         const coletor = criarColetor(cfg);
 
@@ -8452,7 +8502,7 @@
         // (ver linhasCartorio em gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
         // ── Gabinete ────────────────────────────────────────────────────────────────
-        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: false },
+        { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: true },
         // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
@@ -8534,25 +8584,6 @@
         return null;
     }
 
-    // Variante de acharLinkMenu para o caso de Conclusões: o link fica na mesma
-    // conclusao.do do Retorno de Processos Conclusos (não há um texto fixo conhecido
-    // para "Conclusões" isoladamente), então em vez de exigir um rótulo específico,
-    // pega o primeiro link com URL compatível cujo texto NÃO menciona "retorno" — a
-    // mesma distinção já usada para separar os dois relatórios pelo cabeçalho da tabela.
-    function acharLinkMenuExcluindo(urlRe, excluirTextoRe) {
-        const docs = todosDocumentosAcessiveis();
-        for (const d of docs) {
-            for (const a of d.querySelectorAll('a[href]')) {
-                if (urlRe && !urlRe.test(a.href)) continue;
-                const texto = (a.textContent || '').trim();
-                if (!texto) continue;
-                if (excluirTextoRe && excluirTextoRe.test(texto)) continue;
-                return a;
-            }
-        }
-        return null;
-    }
-
     // Alguns cards da página inicial têm vários links com a MESMA URL na mesma célula,
     // cada um precedido de um rótulo em texto puro (não um <a> nem um elemento à parte) —
     // ex.: "Secretaria: <a>74</a> Em Remessa: <a>1221</a> ...". Nesses casos, o texto do
@@ -8626,7 +8657,11 @@
         // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
         // painel (ver tratarFaseMandadosPendentes).
         else if (alvo === 'mandados') return navegarAbaAnaliseJuntadas();
-        else if (alvo === 'conclusoes') link = acharLinkMenuExcluindo(/conclusao\.do/i, /retorno/i);
+        // Conclusões migrou para a tela "Estatísticas de Conclusões" (mesmo link de
+        // Tempo Médio) — a tela antiga "Para Realizar" (conclusao.do) ficava incompleta
+        // (só refletia a fila do cartório, não pegava tudo que estava pendente com o
+        // magistrado). Ver comentário acima de situacaoConclusaoSelecionada.
+        else if (alvo === 'conclusoes') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
         else if (alvo === 'paralisados') {
