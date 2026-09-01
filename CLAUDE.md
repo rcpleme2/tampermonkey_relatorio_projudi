@@ -150,6 +150,7 @@ e sem botão de pesquisar. Para casos assim:
    mesmo em ajustes pequenos — o Tampermonkey usa isso pra saber que há atualização).
 8. Commit em português, mensagem explicando o **porquê** da mudança (não só o quê),
    rodapé padrão do projeto (ver seção Git).
+   9. Sempre que for feito um merge, verifique para que nenhuma ferramenta, função ou relatório anterior se perca. Na dúvida pergunte sobre como administrar conflitos. 
 
 ## Testes
 
