@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      21.9
+// @version      22.5
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -95,22 +95,15 @@
     // sempre em "coletando_tempomedio", sem nenhum sinal de erro.
     const STALE_MS = 6 * 60 * 1000; // 6 minutos sem atividade => coleta em andamento considerada obsoleta
 
-    // ── Modo de teste (depuração) — ativação disfarçada ────────────────────────────
-    // Limita a extração a poucas páginas por relatório, só para testar rapidamente se a
-    // ferramenta está rodando fim a fim (navegação, coleta, PDF) sem esperar uma coleta
-    // completa. Ativado/desativado clicando 5x seguidas (em até 2s) no título do painel
-    // de automação (ver o handler em '.pa-titulo') — de propósito sem nenhum indício
-    // visual permanente no painel, só um console.log ao alternar (visível apenas no
-    // DevTools). Persistido em localStorage para sobreviver a reloads de página.
-    const CHAVE_MODO_TESTE = 'projudi_modo_teste';
-    const LIMITE_PAGINAS_MODO_TESTE = 2;
-    function modoTesteAtivo() { return store.getItem(CHAVE_MODO_TESTE) === '1'; }
-    function alternarModoTeste() {
-        const ativo = !modoTesteAtivo();
-        if (ativo) store.setItem(CHAVE_MODO_TESTE, '1'); else store.removeItem(CHAVE_MODO_TESTE);
-        console.log(`[Projudi] modo de teste ${ativo ? 'ATIVADO' : 'desativado'} — coleta limitada a ${LIMITE_PAGINAS_MODO_TESTE} página(s)/item(ns) por relatório enquanto ativo.`);
-        return ativo;
-    }
+    // Removido a pedido do usuário: existia aqui um "modo de teste" disfarçado (5 cliques
+    // no título do painel) que limitava a coleta a 2 páginas por relatório. Causou um bug
+    // real em produção — se ficasse ativado sem o usuário perceber (persistia em
+    // localStorage entre reloads), a partir do 2º mês do Tempo Médio (e em Conclusões)
+    // a coleta parava de virar página assim que o total acumulado de páginas atingia 2,
+    // mesmo havendo mais resultado (relatado como "só pega os 100 primeiros resultados a
+    // partir do 2º mês"). store.removeItem('projudi_modo_teste') roda no bootstrap (ver
+    // final do arquivo) para limpar a flag de qualquer sessão anterior que a tivesse
+    // deixado ligada.
 
     // ── Leitura da Atuação atual ────────────────────────────────────────────────
 
@@ -1075,28 +1068,93 @@
         });
     }
 
-    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
-    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
-    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha.
-    function salvarAudienciasDesignadasVazio() {
+    // Recalcula TODOS os agregados do resumo (totalDesignadas, ultimaData, porTipo,
+    // concentracaoDiaSemana...) a partir de uma tabela JÁ ACHATADA (uma linha por
+    // processo/audiência — mesmo formato de `tabela` no resumo salvo). Extraída de
+    // coletarAudienciasDesignadas para ser reaproveitada tanto numa coleta nova quanto ao
+    // MESCLAR a tabela de uma atribuição com a de atribuições já coletadas antes (ver
+    // salvarResumoAudienciasDesignadas) — pedido do usuário: "somar as competências",
+    // igual aos demais relatórios, em vez de a atribuição mais recente sobrescrever as
+    // anteriores. concentracaoPorDiaSemana só precisa de .data/.tipoAudiencia/.processos
+    // (array) em cada item — um "processos: [processo]" de 1 elemento por linha já
+    // acumulada reproduz exatamente a mesma soma que o cálculo original fazia a partir
+    // das linhas da pauta (cada processo conta 1 vez).
+    function calcularResumoAudienciasDesignadasDeTabela(tabela) {
+        const totalDesignadas = tabela.length;
+
+        let ultimaData = null, ultimaDataTs = -Infinity;
+        tabela.forEach(t => {
+            const ts = parseDataBR(t.data);
+            if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = t.data; }
+        });
+
+        let processosUltimoDia = [];
+        if (ultimaData) {
+            const set = new Set();
+            tabela.filter(t => t.data === ultimaData).forEach(t => set.add(t.processo));
+            processosUltimoDia = [...set];
+        }
+        const totalProcessosUltimoDia = processosUltimoDia.length;
+
+        const maxTsPorTipo = new Map();
+        tabela.forEach(t => {
+            const ts = parseDataBR(t.data);
+            if (ts == null) return;
+            const atual = maxTsPorTipo.get(t.tipoAudiencia);
+            if (atual == null || ts > atual) maxTsPorTipo.set(t.tipoAudiencia, ts);
+        });
+        const porTipo = [...maxTsPorTipo.entries()].map(([tipo, ts]) => {
+            const linhasDoTipoNaData = tabela.filter(t => t.tipoAudiencia === tipo && parseDataBR(t.data) === ts);
+            const processos = [...new Set(linhasDoTipoNaData.map(t => t.processo))];
+            return { tipo, data: linhasDoTipoNaData[0].data, processos };
+        }).sort((a, b) => b.data.localeCompare(a.data));
+
+        const linhasPseudo = tabela.map(t => ({ data: t.data, tipoAudiencia: t.tipoAudiencia, processos: [t.processo] }));
+        const concentracaoDiaSemana = concentracaoPorDiaSemana(linhasPseudo);
+
+        return { totalDesignadas, ultimaData, processosUltimoDia, totalProcessosUltimoDia, porTipo, tabela, concentracaoDiaSemana };
+    }
+
+    // Mescla a tabela achatada DESTA atribuição com a de atribuições já coletadas antes
+    // (lidas do resumo salvo), descartando só as linhas da MESMA atribuição atual (evita
+    // duplicar se o usuário coletar de novo a mesma vara), recalcula todos os agregados a
+    // partir do resultado e grava. Mesmo padrão de acumulação já usado em Outros
+    // Cumprimentos/Audiências Realizadas — sem isso, coletar numa 2ª vara sobrescrevia o
+    // resumo da 1ª (bug relatado pelo usuário).
+    function salvarResumoAudienciasDesignadas(tabelaDestaAtribuicao) {
+        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const tabelaTagueada = tabelaDestaAtribuicao.map(t => ({ ...t, atuacao, competencia }));
+
+        const anterior = desembrulharArray(store.getItem(prefixo + 'pagina_0'));
+        const tabelaAnterior = (anterior && anterior[0] && Array.isArray(anterior[0].tabela)) ? anterior[0].tabela : [];
+        const semEstaAtribuicao = tabelaAnterior.filter(t => (t.atuacao || '') !== (atuacao || ''));
+        const tabelaMesclada = [...semEstaAtribuicao, ...tabelaTagueada];
+
         const resumo = {
             geradoEm: new Date().toISOString(),
-            totalDesignadas: 0,
-            ultimaData: null,
-            processosUltimoDia: [],
-            totalProcessosUltimoDia: 0,
-            porTipo: [],
-            tabela: [],
-            concentracaoDiaSemana: concentracaoPorDiaSemana([]),
-            competencia: competenciaDe(lerAtuacao()),
+            ...calcularResumoAudienciasDesignadasDeTabela(tabelaMesclada),
+            competencia,
         };
-        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — salvando resumo com 0 audiências designadas');
-        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
+        console.log(`[Projudi Audiências Designadas] "${atuacao || '(sem atuação)'}": ${tabelaDestaAtribuicao.length} audiência(s) nesta atribuição — resumo mesclado: totalDesignadas=${resumo.totalDesignadas} ultimaData=${resumo.ultimaData} totalProcessosUltimoDia=${resumo.totalProcessosUltimoDia} tipos=${resumo.porTipo.length}`);
+
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
         store.removeItem(CHAVE_PROGRESSO_AD);
         avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+    }
+
+    // Salva o resumo de Audiências Designadas já sabendo que não há nenhuma audiência no
+    // período (ver pautaAudienciasSemResultados) — mesmo formato de dados gravado por
+    // coletarAudienciasDesignadas, só que sem precisar expandir nenhuma linha. Ainda
+    // assim passa por salvarResumoAudienciasDesignadas (com tabela vazia PARA ESTA
+    // atribuição) — "zero nesta vara" não deve apagar as audiências já coletadas em
+    // outras atribuições.
+    function salvarAudienciasDesignadasVazio() {
+        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — 0 audiências designadas nesta atribuição');
+        salvarResumoAudienciasDesignadas([]);
     }
 
     // Lê todas as linhas (uma por horário/tipo) das tabelas internas de cada dia — a
@@ -1237,45 +1295,12 @@
         const ignoradas = todasAsLinhas.length - linhas.length;
         if (ignoradas > 0) console.log(`[Projudi Audiências Designadas] ${ignoradas} linha(s) sem processo vinculado foram ignoradas`);
 
-        // Total de audiências designadas = total de processos com audiência marcada (uma
-        // linha pode ter mais de um processo no mesmo horário) — não mais a soma da coluna
-        // "Agendadas", já que agora só contam linhas com processo de verdade vinculado.
-        const totalDesignadas = linhas.reduce((s, l) => s + l.processos.length, 0);
-
-        let ultimaData = null, ultimaDataTs = -Infinity;
-        linhas.forEach(l => {
-            const ts = parseDataBR(l.data);
-            if (ts != null && ts > ultimaDataTs) { ultimaDataTs = ts; ultimaData = l.data; }
-        });
-
-        // Processos distintos no último dia — contados um a um a partir da expansão, não
-        // pela soma da coluna "Agendadas" (pedido do usuário).
-        let processosUltimoDia = [];
-        if (ultimaData) {
-            const set = new Set();
-            linhas.filter(l => l.data === ultimaData).forEach(l => l.processos.forEach(p => set.add(p)));
-            processosUltimoDia = [...set];
-        }
-        const totalProcessosUltimoDia = processosUltimoDia.length;
-
-        // Data mais distante por tipo (já com "Audiência de Instrução e Julgamento" somada
-        // em "Audiência de Instrução" — ver normalizarTipoAudiencia), com o(s) número(s) de
-        // processo daquela audiência mais distante.
-        const maxTsPorTipo = new Map();
-        linhas.forEach(l => {
-            const ts = parseDataBR(l.data);
-            if (ts == null) return;
-            const atual = maxTsPorTipo.get(l.tipoAudiencia);
-            if (atual == null || ts > atual) maxTsPorTipo.set(l.tipoAudiencia, ts);
-        });
-        const porTipo = [...maxTsPorTipo.entries()].map(([tipo, ts]) => {
-            const linhasDoTipoNaData = linhas.filter(l => l.tipoAudiencia === tipo && parseDataBR(l.data) === ts);
-            const processos = [...new Set(linhasDoTipoNaData.flatMap(l => l.processos))];
-            return { tipo, data: linhasDoTipoNaData[0].data, processos };
-        }).sort((a, b) => b.data.localeCompare(a.data));
-
-        // Tabela discriminada completa: data/hora/processo/tipo, uma linha por processo
-        // (uma linha da pauta pode ter mais de um processo agendado no mesmo horário).
+        // Tabela discriminada DESTA atribuição: data/hora/processo/tipo, uma linha por
+        // processo (uma linha da pauta pode ter mais de um processo agendado no mesmo
+        // horário). Todos os demais agregados (totalDesignadas, ultimaData, porTipo,
+        // concentracaoDiaSemana...) são recalculados a partir dela — inclusive já
+        // mesclada com outras atribuições coletadas antes, ver
+        // salvarResumoAudienciasDesignadas/calcularResumoAudienciasDesignadasDeTabela.
         const tabela = [];
         linhas.forEach(l => {
             l.processos.forEach(p => tabela.push({ data: l.data, horario: l.horario, processo: p, tipoAudiencia: l.tipoAudiencia }));
@@ -1284,29 +1309,9 @@
             const ta = parseDataBR(a.data) || 0, tb = parseDataBR(b.data) || 0;
             return ta - tb || a.horario.localeCompare(b.horario);
         });
+        console.log(`[Projudi Audiências Designadas] ${tabela.length} audiência(s) nesta atribuição, ${ignoradas} linha(s) sem processo vinculado ignorada(s)`);
 
-        const concentracaoDiaSemana = concentracaoPorDiaSemana(linhas);
-
-        const resumo = {
-            geradoEm: new Date().toISOString(),
-            totalDesignadas,
-            ultimaData,
-            processosUltimoDia,
-            totalProcessosUltimoDia,
-            porTipo,
-            tabela,
-            concentracaoDiaSemana,
-            competencia: competenciaDe(lerAtuacao()),
-        };
-        console.log(`[Projudi Audiências Designadas] resumo calculado: totalDesignadas=${totalDesignadas} ultimaData=${ultimaData} totalProcessosUltimoDia=${totalProcessosUltimoDia} tipos=${porTipo.length} linhasTabela=${tabela.length} ignoradas(sem processo)=${ignoradas}`);
-
-        const prefixo = CFG_AUDIENCIAS_DESIGNADAS.prefixo;
-        store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
-        store.setItem(prefixo + 'num_paginas', '1');
-        store.setItem(prefixo + 'coletado', '1');
-        store.removeItem(CHAVE_PROGRESSO_AD);
-
-        avancarAutomacao(CFG_AUDIENCIAS_DESIGNADAS);
+        salvarResumoAudienciasDesignadas(tabela);
     }
 
     // ── Audiências Realizadas (Crime) — audiencia/estatistica.do, "Audiências na
@@ -1468,14 +1473,6 @@
         // isso, um JSON.parse único podia deixar "fila" como STRING, e fila.shift() quebrava.
         const fila = desembrulharArray(store.getItem(CHAVE_FILA_USUARIOS_AR)) || [];
         if (!fila.length) { finalizarAudienciasRealizadas(); return; }
-        // Modo de teste: só percorre os primeiros N usuários da fila, não todos — o
-        // objetivo é testar rápido a ferramenta fim a fim, não coletar dado real.
-        const acumuladoAtual = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
-        if (modoTesteAtivo() && acumuladoAtual.length >= LIMITE_PAGINAS_MODO_TESTE) {
-            console.log(`[Projudi Audiências Realizadas] modo de teste ativo — parando em ${acumuladoAtual.length} usuário(s), sem percorrer o restante da fila.`);
-            finalizarAudienciasRealizadas();
-            return;
-        }
         const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
         const prox = fila.shift();
         store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(fila));
@@ -1499,28 +1496,29 @@
     // tinha lido e registrado o valor desatualizado — o sintoma relatado: "o script repete
     // valores, mesmo a tela não mostrando valores idênticos").
     //
-    // Só comparar duas leituras seguidas não basta: se o valor ANTIGO ficar parado na tela
-    // por duas checagens (poll de 500ms) antes do AJAX realmente atualizar, o algoritmo
-    // "estabiliza" cedo demais com o valor errado (bug encontrado escrevendo o teste desta
-    // correção — teste_ar_estabilizacao.js). Por isso exige TAMBÉM que o valor tenha
-    // MUDADO em relação ao que estava na tela antes desta pesquisa começar (ver
-    // CHAVE_ASSINATURA_ANTERIOR_AR/submitAR) — só depois disso passa a valer a checagem de
-    // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
-    // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
-    // caso raro em que o valor novo coincide por acaso com o antigo).
-    //
-    // Uma rodada anterior tentou acelerar isso com um MutationObserver (reagir assim que o
-    // DOM muda, em vez de só o poll) — voltou a falhar em produção, e o pedido do usuário
-    // foi por uma lógica simples e previsível: "verifique que a tabela apareceu e foi
-    // preenchida". Poll puro é isso — mais fácil de confiar do que depender de como o
-    // Projudi de fato atualiza o DOM (que não dá pra garantir em todo navegador/versão).
+    // Versão original exigia que o valor MUDASSE em relação à pesquisa anterior antes de
+    // sequer considerar "duas leituras iguais seguidas" — bug relatado pelo usuário: com
+    // TODOS os magistrados aparecendo (sem filtro de mínimo), é comum dois magistrados
+    // seguidos terem exatamente 0 audiências/extras — a assinatura NUNCA "muda" nesse
+    // caso, e o script sempre caía no teto de tempo, avisando "não estabilizou" à toa
+    // (era um caso "raro" tolerado antes, virou comum). Agora usa dois caminhos:
+    // (a) já mudou em relação à pesquisa anterior + 2 leituras iguais seguidas (~1s,
+    //     caso comum, rápido); ou
+    // (b) mesmo SEM mudar, 4 leituras iguais seguidas (~2s) — tempo suficiente pra
+    //     confiar que não é mais o valor antigo "parado" esperando o AJAX, e sim um
+    //     resultado novo que por coincidência bate com o anterior.
+    // Poll a cada 500ms, teto de ~5s (reduzido de 15s, pedido do usuário) — depois disso
+    // processa mesmo assim (com aviso), só como rede de segurança final.
+    const LEITURAS_ESTAVEIS_RAPIDO_AR = 2;
+    const LEITURAS_ESTAVEIS_DEVAGAR_AR = 4;
+    const TENTATIVAS_MAX_AR = 10; // 10 * 500ms = ~5s
+    let streakEstavelAR = 0;
     function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
         tentativa = tentativa || 0;
-        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
         const temTabela = !!document.querySelector('table.resultTable');
         if (!temTabela) {
-            if (tentativa >= 30) {
-                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+            if (tentativa >= TENTATIVAS_MAX_AR) {
+                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~5s — pesquisando de novo.');
                 const form = formularioAudienciasRealizadas();
                 if (form) submitAR(form);
                 return;
@@ -1528,19 +1526,23 @@
             setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
             return;
         }
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
         const assinaturaAtual = assinaturaResultadoAR();
         const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
-        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaVistaAR) {
+        streakEstavelAR = (assinaturaAtual === ultimaAssinaturaVistaAR) ? streakEstavelAR + 1 : 1;
+        ultimaAssinaturaVistaAR = assinaturaAtual;
+        const estabilizouRapido = jaMudou && streakEstavelAR >= LEITURAS_ESTAVEIS_RAPIDO_AR;
+        const estabilizouDevagar = streakEstavelAR >= LEITURAS_ESTAVEIS_DEVAGAR_AR;
+        if (tentativa > 0 && (estabilizouRapido || estabilizouDevagar)) {
             console.log('[Projudi Audiências Realizadas] resultado estável — processando');
             processarResultadoAudienciasRealizadas();
             return;
         }
-        if (tentativa >= 30) {
-            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+        if (tentativa >= TENTATIVAS_MAX_AR) {
+            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~5s — processando mesmo assim (valores podem estar desatualizados)');
             processarResultadoAudienciasRealizadas();
             return;
         }
-        ultimaAssinaturaVistaAR = assinaturaAtual;
         setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
     }
     // Guarda a última assinatura vista entre chamadas de aguardarResultadoAREEstabilizarE
@@ -1633,10 +1635,7 @@
         const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
         const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
         const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        // Modo de teste: a fila é cortada de propósito (ver avancarUsuarioAR), então a
-        // soma NUNCA vai bater com o total geral — não é uma divergência real, então nem
-        // computa nem avisa/retenta nesse modo.
-        const divergencias = modoTesteAtivo() ? [] : camposConferidos
+        const divergencias = camposConferidos
             .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
             .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
         const somaConfere = divergencias.length === 0;
@@ -1657,24 +1656,30 @@
             console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral mesmo após recoleta: ${detalhe}`);
         }
 
-        const resumo = {
-            geradoEm: new Date().toISOString(),
-            totalGeral,
-            canceladas: extrasGeral.canceladas,
-            negativas: extrasGeral.negativas || 0,
-            naoRealizadas: extrasGeral.naoRealizadas,
-            redesignadas: extrasGeral.redesignadas,
-            pessoasOuvidas: extrasGeral.pessoasOuvidas || 0,
-            periodo,
-            porUsuario,
-            totalUsuarios: acumulado.length,
-            somaConfere,
-            divergencias,
-            competencia: competenciaDe(lerAtuacao()),
-        };
-        console.log(`[Projudi Audiências Realizadas] resumo calculado: totalGeral=${totalGeral} canceladas=${extrasGeral.canceladas} negativas=${extrasGeral.negativas} naoRealizadas=${extrasGeral.naoRealizadas} redesignadas=${extrasGeral.redesignadas} pessoasOuvidas=${extrasGeral.pessoasOuvidas} usuarios=${acumulado.length} somaConfere=${somaConfere}`);
+        // A partir daqui, a checagem de consistência acima (somaConfere/divergencias) já
+        // validou/refez ESTA coleta (uma vara). Agora mescla com as demais atribuições já
+        // coletadas antes — bug relatado pelo usuário: coletar numa 2ª vara sobrescrevia
+        // o resumo da 1ª. Mesmo padrão de Audiências Designadas
+        // (calcularResumoAudienciasDesignadasDeTabela/salvarResumoAudienciasDesignadas):
+        // guarda os dados BRUTOS tagueados por atribuição (porUsuario e porAtribuicao,
+        // este último com os totais/extras "gerais" desta vara) e recalcula todos os
+        // agregados do resumo final a partir do conjunto mesclado.
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const porUsuarioDestaAtribuicao = acumulado.map(u => ({ ...u, atuacao, competencia }));
+        const totaisDestaAtribuicao = { atuacao, competencia, totalGeral, ...extrasGeral, negativas: extrasGeral.negativas || 0, pessoasOuvidas: extrasGeral.pessoasOuvidas || 0 };
 
         const prefixo = CFG_AUDIENCIAS_REALIZADAS.prefixo;
+        const anterior = desembrulharArray(store.getItem(prefixo + 'pagina_0'));
+        const anteriorResumo = anterior && anterior[0];
+        const porUsuarioAnterior = (anteriorResumo && Array.isArray(anteriorResumo.porUsuario)) ? anteriorResumo.porUsuario : [];
+        const porAtribuicaoAnterior = (anteriorResumo && Array.isArray(anteriorResumo.porAtribuicao)) ? anteriorResumo.porAtribuicao : [];
+        const porUsuarioMesclado = [...porUsuarioAnterior.filter(u => (u.atuacao || '') !== (atuacao || '')), ...porUsuarioDestaAtribuicao];
+        const porAtribuicaoMesclado = [...porAtribuicaoAnterior.filter(a => (a.atuacao || '') !== (atuacao || '')), totaisDestaAtribuicao];
+
+        const resumo = calcularResumoAudienciasRealizadasDeListas(porAtribuicaoMesclado, porUsuarioMesclado, periodo);
+        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length} somaConfere=${resumo.somaConfere}`);
+
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
@@ -1682,6 +1687,45 @@
         store.removeItem(CHAVE_TENTATIVA_AR);
 
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
+    }
+
+    // Recalcula os agregados do resumo final de Audiências Realizadas a partir de duas
+    // listas JÁ MESCLADAS entre todas as atribuições coletadas: `porAtribuicao` (1 item
+    // por atribuição, com os totais "gerais" daquela vara) e `porUsuario` (1 item por
+    // magistrado, tagueado com sua atribuição). Extraída de finalizarAudienciasRealizadas
+    // para poder ser reaplicada a cada nova mesclagem (mesmo padrão de
+    // calcularResumoAudienciasDesignadasDeTabela).
+    function calcularResumoAudienciasRealizadasDeListas(porAtribuicao, porUsuario, periodo) {
+        const somarCampo = (lista, campo) => lista.reduce((s, x) => s + (x[campo] || 0), 0);
+        const totalGeral = somarCampo(porAtribuicao, 'totalGeral');
+        const canceladas = somarCampo(porAtribuicao, 'canceladas');
+        const negativas = somarCampo(porAtribuicao, 'negativas');
+        const naoRealizadas = somarCampo(porAtribuicao, 'naoRealizadas');
+        const redesignadas = somarCampo(porAtribuicao, 'redesignadas');
+        const pessoasOuvidas = somarCampo(porAtribuicao, 'pessoasOuvidas');
+
+        const somaIndividual = {
+            quantidade: somarCampo(porUsuario, 'quantidade'), canceladas: somarCampo(porUsuario, 'canceladas'),
+            negativas: somarCampo(porUsuario, 'negativas'), naoRealizadas: somarCampo(porUsuario, 'naoRealizadas'),
+            redesignadas: somarCampo(porUsuario, 'redesignadas'), pessoasOuvidas: somarCampo(porUsuario, 'pessoasOuvidas'),
+        };
+        const totalIndividual = { quantidade: totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas };
+        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
+        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
+        const divergencias = camposConferidos
+            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
+            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
+
+        return {
+            geradoEm: new Date().toISOString(),
+            totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas,
+            periodo,
+            porUsuario: porUsuario.slice().sort((a, b) => b.quantidade - a.quantidade),
+            porAtribuicao,
+            totalUsuarios: porUsuario.length,
+            somaConfere: divergencias.length === 0,
+            divergencias,
+        };
     }
 
     // ── Apreensões Pendentes (Crime) — processo/criminal/apreensao.do ───────────────
@@ -1861,6 +1905,13 @@
             tipoUrgencia: textoCelula(tdCampo('tipoUrgencia')),
             prioritario: urgenteTexto === 'sim',
             lido,
+            // Bug relatado pelo usuário: a contagem por atribuição na capa/subtítulo
+            // aparecia zerada ("Vara X (0), Vara Y (0)") mesmo com o total certo — esta
+            // função recebia `atuacao` mas nunca gravava no registro, então
+            // contagemPorCompetencia (que lê d.competencia||d.atuacao) descartava TODOS
+            // os registros de Mandados.
+            atuacao,
+            competencia: competenciaDe(atuacao),
         };
     }
     const LINHA_MANDADO_XLSX = (d) => [d.processo, d.classe, d.natureza, d.oficial, d.dataOrdenacao,
@@ -2117,7 +2168,18 @@
     async function mesclarMandadosCumprimento() {
         const lidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_LIDO.prefixo);
         const naoLidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.prefixo);
-        const todos = [...lidos, ...naoLidos];
+        const desteLote = [...lidos, ...naoLidos];
+        // Bug relatado pelo usuário (mesma classe do já corrigido em
+        // marcarColetaMandadosVazia): LIDO/NAOLIDO são apagados logo abaixo ao final de
+        // CADA mesclagem, então na 2ª atribuição eles só têm os dados DESTA vez — sem
+        // reler o resumo final já salvo (CFG_MANDADOS_CUMPRIMENTO.prefixo+'pagina_0'),
+        // este setItem sobrescrevia (perdia) o resultado já mesclado da 1ª atribuição.
+        // Agora lê o que já existe, descarta só os registros da MESMA atribuição (evita
+        // duplicar se a mesma vara for coletada de novo) e junta com os novos.
+        const atuacaoDesteLote = desteLote.length ? (desteLote[0].atuacao || '') : (lerAtuacao() || '');
+        const anteriores = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO.prefixo);
+        const semEstaAtribuicao = anteriores.filter(d => (d.atuacao || '') !== atuacaoDesteLote);
+        const todos = [...semEstaAtribuicao, ...desteLote];
         // O resultado mesclado grava no formato "página única" — CFG_MANDADOS_CUMPRIMENTO
         // não passa pelo coletor paginado, então continua indo pro localStorage como
         // sempre (lerDadosDe cai pro localStorage quando não acha a chave no IndexedDB —
@@ -2148,9 +2210,17 @@
     // (contador zerado na tela de origem, ou tabela/buttonBar ausentes na tela de
     // resultados) — mesmo padrão de "0 registros" já usado para Juntadas/Retorno/Conclusões
     // (ver bloco "!buttonBar" em injetarBotoes).
+    // "Zero mandados nesta fase" — mas só grava pagina_0=[] quando NADA foi coletado
+    // ainda (num_paginas ausente). Bug relatado pelo usuário: esta função sempre
+    // sobrescrevia pagina_0/num_paginas incondicionalmente — coletar numa 2ª atribuição
+    // com esta fase vazia APAGAVA os mandados já acumulados de uma atribuição anterior
+    // (que podia ter dados de verdade nesta mesma fase). "Zero NESTA atribuição" não é
+    // "zero no total".
     function marcarColetaMandadosVazia(cfg) {
-        store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
-        store.setItem(cfg.prefixo + 'num_paginas', '1');
+        if (!store.getItem(cfg.prefixo + 'num_paginas')) {
+            store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
+            store.setItem(cfg.prefixo + 'num_paginas', '1');
+        }
         store.setItem(cfg.prefixo + 'coletado', '1');
     }
 
@@ -2519,22 +2589,37 @@
         'DecursoDePrazo', 'AguardandoDeposito', 'InformarRetornoARDigital', 'AnaliseErroARDigital',
     ];
 
-    // Lê as duas tabelas da página e monta a lista final de registros (já filtrados por
-    // pendentes > 0), sem paginação. Salva no mesmo formato de armazenamento usado pelos
-    // demais relatórios (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF
-    // individual, capa unificada, foiColetado etc.) continuar funcionando igual, e avança
-    // a automação normalmente ao terminar.
+    // Lê as duas tabelas da página e monta a lista de registros DESTA atribuição (já
+    // filtrados por pendentes > 0), marcados com atuacao/competencia (mesmo campo usado
+    // por CFG_JUNTADAS e demais — é o que permite subBlocosPorAtribuicao/fraseCompetencias
+    // separarem por atribuição no PDF). Sem paginação de verdade (uma tela só, sem
+    // "próxima página" do Projudi), mas ACUMULA entre atribuições diferentes: bug
+    // relatado pelo usuário — extrair em uma 2ª vara SOBRESCREVIA os dados da 1ª (grava
+    // sempre em 'pagina_0'). Agora lê o que já tem, descarta só os registros da MESMA
+    // atribuição (evita duplicar se o usuário extrair de novo na mesma vara) e junta com
+    // os novos. Salva no mesmo formato de armazenamento usado pelos demais relatórios
+    // (uma "página" só, ver lerDadosDe) para o resto do pipeline (PDF individual, capa
+    // unificada, foiColetado etc.) continuar funcionando igual, e avança a automação
+    // normalmente ao terminar.
     function coletarOutrosCumprimentosAgora() {
         const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
         console.log(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
 
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
         const bnmp = extrairLinhasTabela(tabelaBnmp, 'bnmp', ['ParaExpedirBnmp'], 'ComUrgenciaBnmp');
         const principal = extrairLinhasTabela(tabelaPrincipal, 'principal', CAMPOS_PENDENTES_PRINCIPAL, 'ComUrgencia');
-        const registros = [...bnmp, ...principal];
+        const registrosDestaAtribuicao = [...bnmp, ...principal].map(r => ({ ...r, atuacao, competencia }));
 
-        console.log(`[Projudi Outros Cumprimentos] ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registros.length} no total)`);
+        console.log(`[Projudi Outros Cumprimentos] "${atuacao || '(sem atuação)'}" — ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registrosDestaAtribuicao.length} no total)`);
 
         const prefixo = CFG_OUTROS_CUMPRIMENTOS.prefixo;
+        // Legado: esta cfg sempre gravou direto em localStorage (nunca passou pelo
+        // IndexedDB via idbSet) — lerDadosDe já cai para esse formato quando idbGet falha,
+        // então basta ler/escrever do mesmo jeito de sempre, só que agora mesclando.
+        const anteriores = desembrulharArray(store.getItem(prefixo + 'pagina_0')) || [];
+        const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
+        const registros = [...semEstaAtribuicao, ...registrosDestaAtribuicao];
         store.setItem(prefixo + 'pagina_0', JSON.stringify(registros));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
@@ -2829,12 +2914,7 @@
 
             atualizarStatus(`Coletando ${ctx}página ${pagina} de ${totPag} — ${total} no total acumulado...`);
 
-            const paginasColetadas = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
-            const limiteModoTesteAtingido = modoTesteAtivo() && paginasColetadas >= LIMITE_PAGINAS_MODO_TESTE;
-            if (limiteModoTesteAtingido) {
-                console.log(`[Projudi] modo de teste ativo — parando em ${paginasColetadas} página(s) para "${cfg.prefixo}" mesmo havendo mais resultado.`);
-            }
-            if (temProximaPagina() && !limiteModoTesteAtingido) {
+            if (temProximaPagina()) {
                 document.querySelector('a.arrowNextOn').click();
             } else {
                 store.removeItem(KEY_RODANDO);
@@ -3217,6 +3297,65 @@
         return `${comps.length > 1 ? 'Competências' : 'Competência'}: ${comps.join(', ')}`;
     }
 
+    // Mesma frase, mas com a CONTAGEM de registros ao lado de cada competência (pedido do
+    // usuário) — ex.: "Competências: Vara Cível da Lapa (60), Vara da Fazenda Pública da
+    // Lapa (9), Competência Delegada de Lapa (0)". O "(0)" só é possível porque usamos o
+    // mapa de Processos Ativos (lerMapaAtivos — populado quando a opção "Ativos" é
+    // marcada na coleta) como a lista AUTORITATIVA de quais atribuições foram
+    // efetivamente visitadas: sem isso não haveria como distinguir "esta atribuição não
+    // tem nenhum processo nesta situação" de "esta atribuição nunca foi visitada". Por
+    // decisão do usuário: se Processos Ativos não foi coletado junto, mantém o
+    // comportamento antigo (só os nomes, sem contagem) em vez de arriscar uma lista
+    // incompleta/enganosa.
+    // Conta registros por competência, com zero-padding para atribuições visitadas (ver
+    // lerMapaAtivos) que não têm NENHUM registro nesta situação — base compartilhada por
+    // fraseCompetenciasComContagem (texto do subtítulo) e subLinhasAtribuicao (sub-linhas
+    // indentadas na tabela unificada da capa). Devolve [] quando há só 0 ou 1 competência
+    // (nada a detalhar por atribuição, mesmo comportamento de sempre).
+    function contagemPorCompetencia(dados) {
+        const mapaAtivos = lerMapaAtivos();
+        const chavesAtivos = Object.keys(mapaAtivos);
+        const contagem = new Map();
+        dados.forEach(d => {
+            const c = (d.competencia || d.atuacao || '').trim();
+            if (!c) return;
+            contagem.set(c, (contagem.get(c) || 0) + 1);
+        });
+        // Ordem: as atribuições visitadas (ordem do mapa de Ativos, quando coletado —
+        // permite mostrar "(0)" para quem não tem nenhum registro aqui), seguidas de
+        // qualquer competência presente nos dados mas ausente do mapa (não deveria
+        // acontecer no uso normal, mas evita perder dado real silenciosamente).
+        const ordem = [...chavesAtivos];
+        contagem.forEach((_, c) => { if (!ordem.includes(c)) ordem.push(c); });
+        if (ordem.length <= 1) return [];
+        return ordem.map(c => ({ competencia: c, contagem: contagem.get(c) || 0 }));
+    }
+
+    function fraseCompetenciasComContagem(dados) {
+        const mapaAtivos = lerMapaAtivos();
+        if (!Object.keys(mapaAtivos).length) return fraseCompetencias(dados);
+        const itens = contagemPorCompetencia(dados);
+        if (!itens.length) return fraseCompetencias(dados);
+        const partes = itens.map(it => `${it.competencia} (${it.contagem})`);
+        return `${itens.length > 1 ? 'Competências' : 'Competência'}: ${partes.join(', ')}`;
+    }
+
+    // Rótulo azul, em negrito, logo abaixo do título — usado pelas funções de resumo com
+    // formato PRÓPRIO (não passam por montarResumoGenerico) quando chamadas a partir do
+    // PDF conjunto com um bloco de subBlocosPorAtribuicao ('Resumo Geral' ou
+    // 'Competência: X'). Pedido do usuário: hoje esse rótulo não aparecia — todo bloco
+    // (geral ou de uma atribuição específica) tinha exatamente o mesmo título/subtítulo,
+    // então não dava pra saber, olhando só a página, se era o resumo GERAL ou o de UMA
+    // atribuição em particular. Retorna { y, semFrase } — y já ajustado para a próxima
+    // linha, semFrase indica se a linha de competências do subtítulo deve ser omitida
+    // (bloco já é de uma única competência — repetir seria redundante com o rótulo).
+    function desenharRotuloBloco(doc, m, y, rotuloBloco) {
+        if (!rotuloBloco) return { y, semFrase: false };
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
+        doc.text(rotuloBloco, m, y);
+        return { y: y + 7, semFrase: rotuloBloco !== 'Resumo Geral' };
+    }
+
     // Média de registros por dia (com base nos dias distintos presentes nas datas)
     function mediaPorDia(dados, campoData) {
         const dias = new Set();
@@ -3584,7 +3723,7 @@
     // Monta as páginas de RESUMO (geral + por competência) de um relatório genérico
     // (Retorno/Juntadas) dentro de um documento jsPDF já criado. ehPrimeiraSecao=false
     // começa em página nova (uso no conjunto). comIndice ativa o link de rodapé.
-    function montarResumoGenerico(doc, dados, cfg, ehPrimeiraSecao, comIndice) {
+    function montarResumoGenerico(doc, dados, cfg, ehPrimeiraSecao, comIndice, rotuloBloco) {
         const p = cfg.pdf;
         const now = Date.now();
         const agora = new Date();
@@ -3618,8 +3757,11 @@
             }
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
             let linhaInfo = `Extraído em ${hoje} às ${hora}  •  ${sub.length} registro(s)`;
-            if (!contexto.competencia) {
-                const fraseComp = fraseCompetencias(sub);
+            // semFrase: bloco já é de UMA competência específica (rotuloBloco tipo
+            // "Competência: X" vindo de subBlocosPorAtribuicao) — repetir a mesma
+            // competência na linha de info seria redundante com o rótulo azul acima.
+            if (!contexto.competencia && !contexto.semFrase) {
+                const fraseComp = fraseCompetenciasComContagem(sub);
                 if (fraseComp) linhaInfo += `  •  ${fraseComp}`;
             }
             // Quebra em várias linhas quando a lista de competências não cabe numa só —
@@ -3747,6 +3889,25 @@
             if (!porComp.has(c)) porComp.set(c, []);
             porComp.get(c).push(d);
         });
+
+        // Chamado a partir do PDF conjunto com um bloco JÁ recortado por atribuição (ver
+        // subBlocosPorAtribuicao/gerarPDFConjunto) — rotuloBloco vem preenchido ('Resumo
+        // Geral' ou 'Competência: X'). Desenha SÓ essa página, sem repetir aqui dentro o
+        // split por competência abaixo: bug relatado pelo usuário — as duas subdivisões
+        // independentes (subBlocosPorAtribuicao lá fora + porComp aqui dentro) combinadas
+        // geravam um 3º grupo de páginas "Resumo geral" fantasma, uma por atribuição, além
+        // do geral e do por-competência esperados. Chamadas diretas (fora do PDF conjunto,
+        // ex.: download individual de um relatório, que não passa por
+        // subBlocosPorAtribuicao) continuam com o split completo de sempre, abaixo.
+        if (rotuloBloco) {
+            const ehGeral = rotuloBloco === 'Resumo Geral';
+            const contexto = { rotulo: rotuloBloco, semFrase: !ehGeral };
+            if (ehGeral && porComp.size > 1) {
+                contexto.mediaSoma = [...porComp.values()].reduce((soma, sub) => soma + mediaPorDia(sub, p.dataCampo), 0);
+            }
+            desenharPaginaResumo(dados, contexto, ehPrimeiraSecao);
+            return;
+        }
 
         // ═══ RESUMO GERAL ═══
         const contextoGeral = { rotulo: 'Resumo geral' };
@@ -3901,7 +4062,11 @@
     function novoDocPDF() {
         const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
         if (!ctor) throw new Error('biblioteca jsPDF não carregada');
-        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        // compress:true ativa a compressão Flate (deflate) já embutida no jsPDF 2.x —
+        // reduz bastante o tamanho do PDF final, sobretudo em relatórios com muitas
+        // páginas de tabela (texto repetitivo comprime muito bem). Testado sem regressão
+        // visual/funcional — só muda como o PDF é serializado internamente.
+        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
         if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
         doc.addFileToVFS('PublicSans-Regular.ttf', FONTE_PUBLIC_SANS_REGULAR);
         doc.addFont('PublicSans-Regular.ttf', 'PublicSans', 'normal');
@@ -3942,7 +4107,7 @@
         return diasDecorridos(d.preAnaliseData, now);
     }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira) {
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -3962,7 +4127,13 @@
         doc.text(TITULO_CONCLUSOES_POR_JUIZ, m, hy);
         hy += 8;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
-        const linhasJuiz = doc.splitTextToSize('Juiz(a): ' + juiz, uw);
+        // rotuloBloco ('Resumo Geral' ou 'Competência: X', ver subBlocosPorAtribuicao em
+        // gerarPDFConjunto) some junto do nome do juiz — pedido do usuário: com 2+
+        // atribuições coletadas, cada magistrado(a) com processos em mais de uma delas
+        // gerava várias páginas IDÊNTICAS (mesmo título "Juiz(a): X"), sem indicar qual
+        // era o resumo geral e qual era de qual atribuição específica.
+        const textoJuiz = 'Juiz(a): ' + juiz + (rotuloBloco ? ` — ${rotuloBloco}` : '');
+        const linhasJuiz = doc.splitTextToSize(textoJuiz, uw);
         doc.text(linhasJuiz, m, hy);
         hy += linhasJuiz.length * 5.2 + 1.5;
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -4081,8 +4252,8 @@
     // (KPIs, faixas de urgência — via montarResumoGenerico, sem gráfico de distribuição por
     // oficial, ver CFG_MANDADOS_CUMPRIMENTO.pdf.distribuicoes vazio) e depois acrescenta
     // esta tabela numa página própria, ordenada por Total decrescente (pedido do usuário).
-    function montarResumoMandadosCumprimento(doc, dados, primeira, comIndice) {
-        montarResumoGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, primeira, comIndice);
+    function montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco) {
+        montarResumoGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, primeira, comIndice, rotuloBloco);
         const p = CFG_MANDADOS_CUMPRIMENTO.pdf;
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -4188,28 +4359,28 @@
         if (cfg === CFG_MANDADOS_CUMPRIMENTO) {
             return {
                 rotulo: cfg.pdf.titulo,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoMandadosCumprimento(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
         if (cfg === CFG_TEMPOMEDIO) {
             return {
                 rotulo: 'Tempo médio de cumprimento de decisões / sentenças',
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoTempoMedio(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoTempoMedio(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_PARALISADOS) {
             return {
                 rotulo: TITULO_PARALISADOS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoParalisados(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoParalisados(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaParalisados(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_REMESSAS) {
             return {
                 rotulo: TITULO_REMESSAS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoRemessas(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoRemessas(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaRemessas(doc, dados, comIndice),
             };
         }
@@ -4219,14 +4390,14 @@
                 // Resumo e tabela sempre juntos (pedido do usuário) — a tabela é desenhada
                 // dentro do próprio montarResumoAudiencias, então não há passo de tabela
                 // separado aqui (ver secaoTemTabela em gerarPDFConjunto).
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
                 montarTabela: null,
             };
         }
         if (cfg === CFG_AUDIENCIAS_DESIGNADAS) {
             return {
                 rotulo: TITULO_AUDIENCIAS_DESIGNADAS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudienciasDesignadas(doc, dados && dados[0], primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaAudienciasDesignadas(doc, (dados && dados[0] && dados[0].tabela) || [], comIndice),
             };
         }
@@ -4235,34 +4406,34 @@
                 rotulo: TITULO_AUDIENCIAS_REALIZADAS,
                 // Só resumo — não há lista de processos a discriminar, apenas totais (geral
                 // e por usuário) — ver secaoTemTabela em gerarPDFConjunto.
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoAudienciasRealizadas(doc, dados && dados[0], primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudienciasRealizadas(doc, dados && dados[0], primeira, comIndice, rotuloBloco),
                 montarTabela: null,
             };
         }
         if (cfg === CFG_OUTROS_CUMPRIMENTOS) {
             return {
                 rotulo: TITULO_OUTROS_CUMPRIMENTOS,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_SUSPENSOS_PRAZO) {
             return {
                 rotulo: TITULO_SUSPENSOS_PRAZO,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_INSTANCIA_RECURSAL) {
             return {
                 rotulo: TITULO_INSTANCIA_RECURSAL,
-                montarResumo: (doc, dados, primeira, comIndice) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
             };
         }
         return {
             rotulo: cfg.pdf.titulo,
-            montarResumo: (doc, dados, primeira, comIndice) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice),
+            montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
             montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
         };
     }
@@ -4394,10 +4565,13 @@
                 { header: 'Detalhamento', dataKey: 'detalhamento' },
                 { header: 'Situação', dataKey: 'situacao' },
             ],
-            // Filha de grupo (l.grupoPai): "nome" ganha um recuo visual (indentação por
-            // espaços) — a forma mais robusta no jspdf-autotable para uma indentação por
-            // LINHA (não por coluna inteira), já que columnStyles/didParseCell não têm um
-            // "padding-left por célula" nativo confiável entre versões.
+            // Filha de grupo (l.grupoPai, ex. subitens de "Mandados"): "nome" ganha um
+            // recuo visual (indentação por espaços) — a forma mais robusta no
+            // jspdf-autotable para uma indentação por LINHA (não por coluna inteira), já
+            // que columnStyles/didParseCell não têm um "padding-left por célula" nativo
+            // confiável entre versões. Sub-linha de atribuição (l.subAtribuicao): SEM
+            // indentação (pedido do usuário — "tire a indentação, mantenha alinhados"),
+            // só um marcador "– " antes do nome, texto começa na mesma coluna dos demais.
             // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
             // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
             // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
@@ -4406,7 +4580,7 @@
             body: cfg.linhas.map(l => l.subgrupoCabecalho
                 ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
                 : {
-                    nome: (l.grupoPai ? '     ' : '') + l.nome,
+                    nome: (l.subAtribuicao ? '– ' : (l.grupoPai ? '     ' : '')) + l.nome,
                     indicador: l.indicador,
                     detalhamento: l.detalhamento,
                     situacao: l.semSituacao ? '—' : l.situacaoLabel,
@@ -4444,6 +4618,15 @@
                     data.cell.styles.fillColor = COR.cartao;
                     data.cell.styles.fontStyle = 'bold';
                     data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.tinta : COR.tintaSec;
+                    return;
+                }
+                // Sub-linha de atribuição (l.subAtribuicao): texto menor, sem negrito, cor
+                // apagada — deixa claro que é um detalhamento do item logo acima, não uma
+                // tarefa própria (nunca vira link — sem cfgOriginal).
+                if (l.subAtribuicao) {
+                    data.cell.styles.fontStyle = 'normal';
+                    data.cell.styles.fontSize = 8;
+                    data.cell.styles.textColor = COR.muted;
                     return;
                 }
                 if (data.column.dataKey === 'situacao') {
@@ -4700,8 +4883,14 @@
             && (s.dados.length || foiColetado(CFG_CONCLUSOES)));
         // Seções fora do esquema Cartório/Gabinete (Tempo Médio, Audiências Pendentes)
         // entram depois, sem capa/veredito dedicado — mantém o relatório funcional mesmo
-        // nesse caso.
-        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES];
+        // nesse caso. CFG_SUSPENSOS_PRAZO/CFG_INSTANCIA_RECURSAL também ficam de fora
+        // daqui (mesmo não sendo "fora do esquema" — têm sim capa/veredito, na faixa
+        // "Estatísticas Gerais") porque são tratadas junto com itensCartorio mais abaixo
+        // (ver itensExtrasEstatisticas), não pelo loop de outrasSecoes — eram renderizadas
+        // ali antes e ficavam com bookmark de TOPO NÍVEL fora de "Cartório", sempre DEPOIS
+        // de todo o resto do Cartório (inclusive Mandados), independente da posição real
+        // na capa — bug relatado pelo usuário (ordem do PDF divergindo da ordem do popup).
+        const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL];
         const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal)
             && (s.dados.length || (s.cfgOriginal.mostrarSeVazio && foiColetado(s.cfgOriginal))));
 
@@ -4711,7 +4900,7 @@
         const LIMITES_CARTORIO = { atencao: 30, critico: 90 };
         const LIMITES_GABINETE = { atencao: 30, critico: 120 };
 
-        const itensCartorio = secoesCartorio.map(s => {
+        let itensCartorio = secoesCartorio.map(s => {
             const itens = itensParaClassificacao(s.dados, s.cfgOriginal, now);
             const maisAntiga = maiorDias(itens);
             return {
@@ -4765,6 +4954,24 @@
         // enxuto (só a contagem básica, pedido do usuário — ficava populado/confuso com
         // prioritários e a taxa por 100 ativos junto); prioritários e "mais antiga" vão
         // para o detalhamento.
+        // Sub-linha indentada com a contagem de UMA atribuição — usada por
+        // comSubLinhasAtribuicao para detalhar um item da tabela (pedido do usuário: cada
+        // atribuição como um subitem com indentação, não mais um texto corrido dentro do
+        // "Detalhamento"). Sem cfgOriginal (nunca vira link) e sem situação própria — é só
+        // um detalhamento visual do item pai logo acima.
+        function linhaSubAtribuicao(nome, indicador) {
+            return { nome, indicador, detalhamento: '', situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null, subAtribuicao: true };
+        }
+        // Acrescenta, logo abaixo de `linhaPrincipal`, uma sub-linha indentada por
+        // atribuição (ver contagemPorCompetencia — só quando há 2+ atribuições
+        // distintas nos dados; com 0 ou 1, devolve só a linha principal, como sempre foi).
+        // `sufixo(contagem)` formata o texto do indicador de cada sub-linha (ex.: "60
+        // pendente(s)", "60 ativo(s)").
+        function comSubLinhasAtribuicao(linhaPrincipal, dados, sufixo) {
+            const porCompetencia = contagemPorCompetencia(dados);
+            if (!porCompetencia.length) return [linhaPrincipal];
+            return [linhaPrincipal, ...porCompetencia.map(it => linhaSubAtribuicao(it.competencia, sufixo(it.contagem)))];
+        }
         function linhaTarefa(t, nome) {
             const detalhes = [];
             if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
@@ -4801,7 +5008,7 @@
         // filhas indentadas) conta como 1 item, não 4, mesmo padrão do popup do painel.
         function empilharSubgrupo(nome, itens, unidade) {
             if (!itens.length) return;
-            const contagem = itens.filter(l => !l.grupoPai).length;
+            const contagem = itens.filter(l => !l.grupoPai && !l.subAtribuicao).length;
             linhasCartorio.push(linhaSubgrupo(nome, `${contagem} ${unidade || 'item(ns)'}`));
             linhasCartorio.push(...itens);
         }
@@ -4813,43 +5020,55 @@
         // não é mais um card à parte no topo da capa.
         if (atuacoesAtivas.length) {
             const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
-            itensEstatisticasGerais.push({
+            const linhaAtivos = {
                 nome: 'Processos Ativos',
                 indicador: `${totalAtivos} ativo(s)`,
-                detalhamento: atuacoesAtivas.length > 1
-                    ? atuacoesAtivas.map(a => `${a}: ${mapaAtivos[a]}`).join(' · ')
-                    : atuacoesAtivas[0],
+                detalhamento: '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
-            });
+            };
+            // Pedido do usuário: cada atribuição como um SUBITEM indentado (não mais um
+            // texto corrido em "Detalhamento") — mapaAtivos já é por atribuição, então
+            // monta a sub-linha direto dele em vez de contagemPorCompetencia (que exige
+            // registros com campo .competencia).
+            itensEstatisticasGerais.push(linhaAtivos);
+            if (atuacoesAtivas.length > 1) {
+                atuacoesAtivas.forEach(a => itensEstatisticasGerais.push(linhaSubAtribuicao(a, `${mapaAtivos[a]} ativo(s)`)));
+            }
         }
         const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
-        if (itemSuspensos) itensEstatisticasGerais.push(linhaTarefa(itemSuspensos, itemSuspensos.rotulo));
+        if (itemSuspensos) {
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(
+                linhaTarefa(itemSuspensos, itemSuspensos.rotulo), itemSuspensos.dados, (n) => `${n} pendente(s)`,
+            ));
+        }
         // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
         // determinado. Detalhamento (pedido do usuário, b.1): o processo com a data de
         // fim de suspensão MAIS LONGA (mais distante no futuro) — ver acharFimMaisLongo.
         if (secaoSuspensosPrazo) {
             const fimMaisLongo = acharFimMaisLongo(secaoSuspensosPrazo.dados);
-            itensEstatisticasGerais.push({
+            const linhaSuspensosPrazo = {
                 nome: 'Suspensos com Prazo',
                 indicador: `${secaoSuspensosPrazo.dados.length} processo(s)`,
                 detalhamento: fimMaisLongo
                     ? `Fim mais distante: ${fimMaisLongo.registro.processo} (${fimMaisLongo.dataStr})`
                     : 'Nenhum processo suspenso por prazo determinado',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_SUSPENSOS_PRAZO,
-            });
+            };
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaSuspensosPrazo, secaoSuspensosPrazo.dados, (n) => `${n} processo(s)`));
         }
         // "Em Instância Recursal" — indicador: total em instância recursal.
         // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
         if (secaoInstanciaRecursal) {
             const maisDe2Anos = processosEnviadosHaMaisDeXAnos(secaoInstanciaRecursal.dados, 2);
-            itensEstatisticasGerais.push({
+            const linhaInstanciaRecursal = {
                 nome: 'Em Instância Recursal',
                 indicador: `${secaoInstanciaRecursal.dados.length} processo(s)`,
                 detalhamento: maisDe2Anos.length
                     ? `${maisDe2Anos.length} processo(s) enviado(s) há mais de 2 anos`
                     : 'Nenhum processo enviado há mais de 2 anos',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_INSTANCIA_RECURSAL,
-            });
+            };
+            itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaInstanciaRecursal, secaoInstanciaRecursal.dados, (n) => `${n} processo(s)`));
         }
         empilharSubgrupo('Estatísticas Gerais', itensEstatisticasGerais);
 
@@ -4863,9 +5082,16 @@
             [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
         ]);
         const itensMandados = CFGS_GRUPO_MANDADOS.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
+        // Pedido do usuário: cada item de Pendências ganha sub-linhas indentadas por
+        // atribuição (mesmo padrão de Estatísticas Gerais acima) — EXCETO os subitens de
+        // Mandados (Retorno/Cumprimento/Decurso), que já têm 1 nível de indentação
+        // (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do usuário.
         const itensPendencias = itensCartorio
             .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
-            .map(t => linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo));
+            .flatMap(t => comSubLinhasAtribuicao(
+                linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo),
+                t.dados, (n) => `${n} pendente(s)`,
+            ));
         if (itensMandados.length) {
             // Cabeçalho do grupo "Mandados" sem indicador/detalhamento (pedido do
             // usuário) — o resumo agregado ficava confuso ali; cada subitem (Retorno/
@@ -4996,6 +5222,18 @@
         const ordemNaCapa = new Map();
         linhasCartorio.forEach((l, i) => { if (l.cfgOriginal && !ordemNaCapa.has(l.cfgOriginal)) ordemNaCapa.set(l.cfgOriginal, i); });
         const posNaCapa = (cfgOriginal) => ordemNaCapa.has(cfgOriginal) ? ordemNaCapa.get(cfgOriginal) : Infinity;
+        // Junta Suspensos com Prazo/Instância Recursal a itensCartorio AQUI (não antes) —
+        // depois que itensPendencias/itensEstatisticasGerais já leram itensCartorio (ver
+        // comentário em CFGS_FORA_DO_ESQUEMA), pra não duplicá-las na mini-tabela da capa.
+        // A partir daqui elas passam pelo MESMO Passo 1/Passo 2 (resumo/tabela) e pelo
+        // MESMO bookmark "Cartório" de itensCartorio, ordenadas junto com o resto por
+        // posNaCapa — que já sabe a posição certa de cada uma (dentro de "Estatísticas
+        // Gerais", logo após Suspensos por Prazo Indeterminado), porque linhasCartorio já
+        // as inclui na posição certa desde sempre.
+        const itensExtrasEstatisticas = [secaoSuspensosPrazo, secaoInstanciaRecursal]
+            .filter(Boolean)
+            .map(s => ({ rotulo: s.rotulo, dados: s.dados, secao: s, pendentes: s.dados.length }));
+        itensCartorio = itensCartorio.concat(itensExtrasEstatisticas);
         itensCartorio.sort((a, b) => posNaCapa(a.secao.cfgOriginal) - posNaCapa(b.secao.cfgOriginal));
         outrasSecoes.sort((a, b) => posNaCapa(a.cfgOriginal) - posNaCapa(b.cfgOriginal));
 
@@ -5077,7 +5315,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                t.secao.montarResumo(doc, bloco.dados, primeira, false);
+                t.secao.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
                 if (i === 0) t.pgResumoInicio = pg;
                 if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: t.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5098,7 +5336,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira);
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5126,7 +5364,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                s.montarResumo(doc, bloco.dados, primeira, false);
+                s.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
                 if (i === 0) s.pgResumoInicio = pg;
                 if (blocos.length === 1) {
                     s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
@@ -5323,7 +5561,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Tempo Médio, dentro de um doc
     // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoTempoMedio(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoTempoMedio(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5366,14 +5604,17 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_TEMPOMEDIO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} registro(s) analisado(s)`;
         if (periodoStr) subtitulo += `  •  Período: ${periodoStr}`;
-        const fraseCompTM = fraseCompetencias(dados);
-        if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompTM = fraseCompetenciasComContagem(dados);
+            if (fraseCompTM) subtitulo += `  •  ${fraseCompTM}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        const yLinhaTM = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinhaTM = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaTM, pw - m, yLinhaTM);
 
         const gap = 6;
@@ -5575,7 +5816,7 @@
     // autoTable segue para quantas páginas forem precisas, normalmente. somenteResumo
     // omite a tabela (usado tanto no relatório individual quanto no Relatório PDF conjunto,
     // pela opção "Só resumo").
-    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo) {
+    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5590,13 +5831,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} audiência(s) pendente(s)`;
-        const fraseComp = fraseCompetencias(dados);
-        if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseComp = fraseCompetenciasComContagem(dados);
+            if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        const yLinha = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -5726,7 +5970,7 @@
         return visiveis.join(', ') + (resto > 0 ? ` (+${resto})` : '');
     }
 
-    function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+    function montarResumoAudienciasDesignadas(doc, resumo, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5736,16 +5980,24 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [], competencia: '' };
+        const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [] };
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  Pauta de Horários (todos os tipos, 10 anos à frente)`;
-        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        // Pedido do usuário: mesma contagem por atribuição usada nos demais relatórios
+        // (ver fraseCompetenciasComContagem) — r.tabela já vem com todas as atribuições
+        // coletadas mescladas (ver salvarResumoAudienciasDesignadas), cada linha marcada
+        // com sua própria competência.
+        if (!rotuloInfo.semFrase) {
+            const fraseCompAD = fraseCompetenciasComContagem(r.tabela || []);
+            if (fraseCompAD) subtitulo += `  •  ${fraseCompAD}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         // Observação sobre a junção de tipos (pedido do usuário) — sempre presente, já que
         // a normalização (ver normalizarTipoAudiencia) vale para toda a pauta.
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
@@ -5808,6 +6060,11 @@
         // gráfico com o total de processos por dia + detalhamento por tipo, numa página
         // própria dentro do resumo (a mesma seção do relatório, só que numa página a mais).
         const concentracao = r.concentracaoDiaSemana || [];
+        // yAposConcentracao: Y logo abaixo do último elemento desenhado nesta seção — usado
+        // pra decidir se a Pauta por Mês (abaixo) cabe na MESMA página (pedido do usuário:
+        // "juntar a Pauta de Audiências por Mês na mesma página do Concentração"), em vez
+        // de sempre abrir página nova pra ela.
+        let yAposConcentracao = null;
         if (concentracao.some(d => d.total > 0)) {
             doc.addPage();
             tituloSecao(doc, m, m + 4, uw, 'Concentração de Audiências por Dia da Semana (dias úteis)');
@@ -5835,8 +6092,10 @@
                     columnStyles: { dia: { cellWidth: uw * 0.25 }, tipo: { cellWidth: uw * 0.5 }, quantidade: { cellWidth: uw * 0.25, halign: 'right' } },
                     didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
                 });
+                yAposConcentracao = doc.lastAutoTable.finalY + 8;
             } else {
                 desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                yAposConcentracao = yTabela;
             }
         }
 
@@ -5847,9 +6106,20 @@
         // reaproveita agruparPorMes (mesmo agregador do Tempo Médio).
         const porMesAD = agruparPorMes(r.tabela || [], 'data');
         if (porMesAD.length > 1) {
-            doc.addPage();
-            tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
-            desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            // Pedido do usuário: juntar com a Concentração por Dia da Semana na MESMA
+            // página, em vez de sempre abrir uma nova — só abre página própria se não
+            // sobrar espaço suficiente para o gráfico de série mensal (ALTURA_MIN_PAUTA).
+            const ALTURA_MIN_PAUTA = 60;
+            const yTitulo = yAposConcentracao != null ? yAposConcentracao : m + 4;
+            const espacoDisponivel = ph - m - (yTitulo + 8) - 14;
+            if (yAposConcentracao != null && espacoDisponivel >= ALTURA_MIN_PAUTA) {
+                tituloSecao(doc, m, yTitulo, uw, 'Pauta de Audiências por Mês');
+                desenharSerieMensal(doc, m, yTitulo + 8, uw, espacoDisponivel, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            } else {
+                doc.addPage();
+                tituloSecao(doc, m, m + 4, uw, 'Pauta de Audiências por Mês');
+                desenharSerieMensal(doc, m, m + 8, uw, ph - m - (m + 8) - 14, 'Audiências designadas por mês', porMesAD, 'n', (v) => String(v), COR.azul);
+            }
             desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
     }
@@ -5905,7 +6175,32 @@
         baixarBlob(doc.output('blob'), `audiencias_realizadas_projudi_${dataArquivo()}.pdf`);
     }
 
-    function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice) {
+    // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
+    // atribuição/vara aparece como UMA linha só, com os valores somados — não uma linha
+    // por atribuição (isso continua disponível, sem prejuízo, em porAtribuicao/porUsuario
+    // granular, usados internamente pra conferência de soma). Agrupa por `usuario`
+    // (login, mais estável que o nome) com fallback pro nome. Extraída pra ser
+    // reaproveitada tanto no PDF (montarResumoAudienciasRealizadas) quanto no Word
+    // conjunto (secaoWordAudienciasRealizadas).
+    function agruparAudienciasRealizadasPorUsuario(porUsuario) {
+        const porChave = new Map();
+        (porUsuario || []).forEach(u => {
+            const chave = u.usuario || u.nome;
+            if (!porChave.has(chave)) {
+                porChave.set(chave, { usuario: u.usuario, nome: u.nome, quantidade: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0 });
+            }
+            const acc = porChave.get(chave);
+            acc.quantidade += u.quantidade || 0;
+            acc.canceladas += u.canceladas || 0;
+            acc.negativas += u.negativas || 0;
+            acc.naoRealizadas += u.naoRealizadas || 0;
+            acc.redesignadas += u.redesignadas || 0;
+            acc.pessoasOuvidas += u.pessoasOuvidas || 0;
+        });
+        return [...porChave.values()].sort((a, b) => b.quantidade - a.quantidade);
+    }
+
+    function montarResumoAudienciasRealizadas(doc, resumo, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -5915,17 +6210,28 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], totalUsuarios: 0, somaConfere: true, divergencias: [], competencia: '' };
+        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0, somaConfere: true, divergencias: [] };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_REALIZADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  Período: ${periodoTxt}`;
-        if (r.competencia) subtitulo += `  •  Competência: ${r.competencia}`;
+        // Pedido do usuário: contagem por atribuição igual aos demais relatórios — aqui
+        // "contagem" é o total de audiências realizadas NAQUELA atribuição (r.porAtribuicao
+        // já vem com 1 item por atribuição mesclada, ver
+        // calcularResumoAudienciasRealizadasDeListas), não uma contagem de registros como
+        // em fraseCompetenciasComContagem (por isso não reaproveitamos aquele helper aqui).
+        if (!rotuloInfo.semFrase && r.porAtribuicao && r.porAtribuicao.length > 1) {
+            const partes = r.porAtribuicao.map(a => `${a.competencia || '(sem atuação)'} (${a.totalGeral})`);
+            subtitulo += `  •  Competências: ${partes.join(', ')}`;
+        } else if (!rotuloInfo.semFrase && r.porAtribuicao && r.porAtribuicao.length === 1 && r.porAtribuicao[0].competencia) {
+            subtitulo += `  •  Competência: ${r.porAtribuicao[0].competencia}`;
+        }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, m + 8);
-        let yObs = m + 8 + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 4.2;
         // Aviso permanente (pedido do usuário): o Projudi só permite pesquisar audiências
         // por magistrado(a) entre quem está atualmente HABILITADO na unidade — um
         // magistrado que saiu da vara no meio do período (substituição, promoção,
@@ -5958,11 +6264,18 @@
         }
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
+        // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
+        // atribuição/vara aparece como UMA linha só, com os valores somados — não uma
+        // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
+        // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
+        // por `usuario` (login, mais estável que o nome) com fallback pro nome.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+
         const gap = 6;
         const kY = yLinha + 5;
         const kW3top = (uw - 2 * gap) / 3;
         desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(r.porUsuario.length), [], true, COR.aqua);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.aqua);
         desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
 
         // Canceladas/Negativas/Não Realizadas/Redesignadas — extraídas só da pesquisa
@@ -5979,7 +6292,7 @@
         // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
         // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
         const tY = k2Y + 24 + gap + 4;
-        if (r.porUsuario.length) {
+        if (porUsuarioAgrupado.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
             const fmtPct = (n, total) => total > 0 ? `${Math.round(n / total * 100)}%` : '—';
             doc.autoTable({
@@ -5992,7 +6305,7 @@
                     { header: 'Redesignadas', dataKey: 'redesignadas' },
                     { header: 'Pessoas Ouvidas', dataKey: 'pessoasOuvidas' },
                 ],
-                body: r.porUsuario.map(u => {
+                body: porUsuarioAgrupado.map(u => {
                     const canceladas = u.canceladas || 0, negativas = u.negativas || 0, naoRealizadas = u.naoRealizadas || 0, redesignadas = u.redesignadas || 0;
                     const totalUsuario = u.quantidade + canceladas + negativas + naoRealizadas + redesignadas;
                     return {
@@ -6043,7 +6356,7 @@
         baixarBlob(doc.output('blob'), `outros_cumprimentos_projudi_${dataArquivo()}.pdf`);
     }
 
-    function montarResumoOutrosCumprimentos(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoOutrosCumprimentos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6059,10 +6372,14 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_OUTROS_CUMPRIMENTOS, m, m + 2);
+        // Pedido do usuário: identificar melhor qual bloco é o resumo geral (todas as
+        // atribuições somadas) e qual é de uma atribuição específica — mesmo padrão já
+        // usado em Paralisados/Suspensos com Prazo/Instância Recursal (desenharRotuloBloco).
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         const subtitulo = `Extraído em ${hoje} às ${hora}  •  Mesa do Magistrado — painel de contadores por tipo de cumprimento`;
-        doc.text(subtitulo, m, m + 8);
-        let yObs = m + 8 + 4.2;
+        doc.text(subtitulo, m, rotuloInfo.y);
+        let yObs = rotuloInfo.y + 4.2;
         doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
         const obs = 'Observação: tipos com numeração zerada não constam desta tabela. "Com Urgência" é um marcador '
             + 'sobre os demais campos (não somado no total pendente) e "pessoais" (Para Assinar) não é somado '
@@ -6306,7 +6623,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Paralisados, dentro de um doc
     // jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoParalisados(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoParalisados(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6326,13 +6643,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_PARALISADOS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtituloParalisados = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) paralisado(s)`;
-        const fraseCompParalisados = fraseCompetencias(dados);
-        if (fraseCompParalisados) subtituloParalisados += `  •  ${fraseCompParalisados}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompParalisados = fraseCompetenciasComContagem(dados);
+            if (fraseCompParalisados) subtituloParalisados += `  •  ${fraseCompParalisados}`;
+        }
         const linhasSubtituloParalisados = doc.splitTextToSize(subtituloParalisados, uw);
-        doc.text(linhasSubtituloParalisados, m, m + 8);
-        const yLinhaParalisados = m + 8 + (linhasSubtituloParalisados.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtituloParalisados, m, rotuloInfo.y);
+        const yLinhaParalisados = rotuloInfo.y + (linhasSubtituloParalisados.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaParalisados, pw - m, yLinhaParalisados);
 
         const gap = 6;
@@ -6463,7 +6783,7 @@
 
     // Página de RESUMO (KPIs + gráficos) do relatório de Remessas em Aberto, dentro de um
     // doc jsPDF já existente. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
-    function montarResumoRemessas(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoRemessas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6483,13 +6803,16 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`;
-        const fraseCompRemessas = fraseCompetencias(dados);
-        if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseCompRemessas = fraseCompetenciasComContagem(dados);
+            if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
+        }
         const linhasSubtituloRemessas = doc.splitTextToSize(subtituloRemessas, uw);
-        doc.text(linhasSubtituloRemessas, m, m + 8);
-        const yLinhaRemessas = m + 8 + (linhasSubtituloRemessas.length - 1) * 4.2 + 3;
+        doc.text(linhasSubtituloRemessas, m, rotuloInfo.y);
+        const yLinhaRemessas = rotuloInfo.y + (linhasSubtituloRemessas.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinhaRemessas, pw - m, yLinhaRemessas);
 
         const gap = 6;
@@ -6661,7 +6984,7 @@
     // com Prazo Determinado. Requisitos do usuário (b.2): quantidade de processos;
     // classe processual com mais processos suspensos; tempo médio de suspensão por
     // classe. E (b.1, também aqui) o processo com a data de fim de suspensão mais longa.
-    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6677,9 +7000,10 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, m + 8);
-        const yLinha = m + 8 + 4.2;
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -6838,7 +7162,7 @@
     // via mini-tabela — pode ser longa demais para um card sem apertar o layout, mesmo
     // racional de outras listas potencialmente grandes do script) e o gráfico de barras
     // "remetidos por faixa de tempo desde o envio" (item b do pedido do usuário).
-    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice) {
+    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -6852,9 +7176,10 @@
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, m + 8);
-        const yLinha = m + 8 + 4.2;
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
@@ -7095,6 +7420,7 @@
         // para não herdar por engano o "fim" de uma extração antiga.
         store.removeItem('projudi_tempomedio_periodo');
         store.removeItem(CHAVE_MES_ATUAL_TM);
+        store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         return fila;
     }
 
@@ -7108,6 +7434,45 @@
         // JSON.parse único deixava "fila" como STRING (não array), e fila[0] virava um
         // caractere solto em vez do objeto do mês, gerando datas "undefined" na pesquisa.
         return desembrulharArray(store.getItem(CHAVE_FILA_MESES_TM)) || [];
+    }
+
+    // "Assinatura" do resultado atualmente exibido — mesma técnica já usada em
+    // Audiências Realizadas/Outros Cumprimentos para detectar quando a tabela "parou de
+    // mudar" antes de ler de verdade. Bug relatado pelo usuário: o gráfico "Volume de
+    // cumprimentos por mês" saía com valores idênticos em vários meses seguidos —
+    // coletarPaginaAtual() rodava assim que table.resultTable existia no DOM, sem checar
+    // se o conteúdo já correspondia à pesquisa do mês recém-disparada (podia estar lendo
+    // o resultado da pesquisa do mês ANTERIOR, ainda não substituído).
+    function assinaturaResultadoTM() {
+        const linhas = [...document.querySelectorAll('table.resultTable tbody tr')];
+        return `${linhas.length}|${linhas.reduce((s, tr) => s + (tr.textContent || '').length, 0)}`;
+    }
+    const CHAVE_ASSINATURA_ANTERIOR_TM = 'projudi_tempomedio_assinatura_anterior';
+    let ultimaAssinaturaVistaTM = null;
+
+    // Espera a tabela de resultados estabilizar (mesmo critério de
+    // aguardarResultadoAREEstabilizarEProcessar: precisa ter MUDADO em relação ao que
+    // estava na tela antes desta pesquisa E duas leituras seguidas precisam bater) antes
+    // de chamar `iniciarCallback` (normalmente coletor.iniciar()). Teto de ~15s, depois
+    // do qual segue mesmo assim (com aviso), para não travar a automação pra sempre numa
+    // tela que por algum motivo nunca estabiliza.
+    function aguardarResultadoTMEstabilizarEIniciar(iniciarCallback, tentativa) {
+        tentativa = tentativa || 0;
+        const assinaturaAtual = assinaturaResultadoTM();
+        const assinaturaAnterior = store.getItem(CHAVE_ASSINATURA_ANTERIOR_TM);
+        const jaMudou = assinaturaAnterior == null || assinaturaAtual !== assinaturaAnterior;
+        if (tentativa > 0 && jaMudou && assinaturaAtual === ultimaAssinaturaVistaTM) {
+            console.log('[Projudi TM] resultado estável — iniciando coleta');
+            iniciarCallback();
+            return;
+        }
+        if (tentativa >= 30) {
+            console.warn('[Projudi TM] resultado não estabilizou em ~15s — coletando mesmo assim (valores podem estar desatualizados)');
+            iniciarCallback();
+            return;
+        }
+        ultimaAssinaturaVistaTM = assinaturaAtual;
+        setTimeout(() => aguardarResultadoTMEstabilizarEIniciar(iniciarCallback, tentativa + 1), 500);
     }
 
     // Marca Situação=Analisadas, Tipo=Analítico, define a data inicial/final com o PRÓXIMO
@@ -7166,6 +7531,11 @@
         // Sinaliza que, ao carregar a página de resultados, a extração deve iniciar
         // automaticamente (sem esta flag a página de resultados só renderiza os botões).
         store.setItem('projudi_tempomedio_auto_iniciar', '1');
+        // Guarda o que está na tela ANTES de pesquisar (resultado do mês anterior, ou
+        // nada, se for o 1º mês da fila) — usado por aguardarResultadoTMEstabilizarE
+        // Iniciar pra exigir que o resultado MUDE em relação a isso antes de considerar
+        // "estabilizado" (ver comentário lá).
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
         console.log(`[Projudi TM] flag auto_iniciar definida; clicando em Pesquisar em 1,5s (btn encontrado=${!!btn})`);
@@ -7797,9 +8167,9 @@
             return b;
         };
 
-        // Os botões de extração individual ficam ocultos por padrão (ver
-        // CHAVE_MOSTRAR_BOTOES) — a extração automatizada não depende deles, chama
-        // coletor.iniciar()/pdf()/etc. diretamente. O usuário reabilita pelo painel.
+        // Os botões de extração individual ficam sempre ocultos (ver
+        // mostrarBotoesIndividuais) — a extração automatizada não depende deles, chama
+        // coletor.iniciar()/pdf()/etc. diretamente.
         const wrapExtracao = document.createElement('span');
         wrapExtracao.id = 'projudi-extracao-individual';
         if (!mostrarBotoesIndividuais()) wrapExtracao.style.display = 'none';
@@ -7849,8 +8219,11 @@
             coletor.iniciar();   // automação: inicia a coleta ao chegar no relatório
         } else if (autoIniciarTM) {
             store.removeItem('projudi_tempomedio_auto_iniciar');
-            console.log('[Projudi TM] flag auto_iniciar detectada — iniciando extração automaticamente');
-            coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
+            console.log('[Projudi TM] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            // Bug relatado pelo usuário: coletar direto aqui podia pegar o resultado
+            // ainda da pesquisa do mês ANTERIOR (não substituído a tempo) — espera
+            // estabilizar primeiro (ver aguardarResultadoTMEstabilizarEIniciar).
+            aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else if (autoIniciarParalisado) {
             store.removeItem('projudi_paralisado_auto_iniciar');
             console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
@@ -7884,10 +8257,11 @@
     }
 
     // Botões de extração individual (Extrair/Baixar/PDF/Limpar) em cada tela de relatório
-    // ficam OCULTOS por padrão — a extração normal é pelo painel de automação da página
-    // inicial. O usuário reabilita marcando a opção no próprio painel (ver injetarPainel).
-    const CHAVE_MOSTRAR_BOTOES = 'projudi_mostrar_botoes_individuais';
-    function mostrarBotoesIndividuais() { return store.getItem(CHAVE_MOSTRAR_BOTOES) === '1'; }
+    // ficam SEMPRE ocultos (pedido do usuário) — a extração só acontece pelo painel de
+    // automação da página inicial. Existia uma opção no painel pra reabilitá-los; foi
+    // removida a pedido do usuário ("não quero mais que a extração individual apareça
+    // nas páginas, apenas no popup").
+    function mostrarBotoesIndividuais() { return false; }
 
     // Checkbox "Processos Ativos" do painel (ver injetarPainel/gravarProcessosAtivosSeDisponivel
     // /gerarPDFConjunto) — default MARCADO (chave ausente = true) para preservar o
@@ -8413,7 +8787,7 @@
         // Limpa o estado transitório de relatórios com fila própria — senão a próxima
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
-        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); }
+        if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
         if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
@@ -8638,6 +9012,7 @@
         store.removeItem('projudi_tempomedio_auto_iniciar');
         store.removeItem(CHAVE_FILA_MESES_TM);
         store.removeItem(CHAVE_MES_ATUAL_TM);
+        store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
@@ -8687,11 +9062,14 @@
             )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
             if (atuacoes.length > 1) {
-                porAtribuicao = confirm(
+                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
+                // nativo do confirm() (que não dá pra personalizar) — ver
+                // confirmarComBotoes.
+                porAtribuicao = await confirmarComBotoes(
                     `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
-                    + 'Clique OK para que cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) traga '
-                    + 'um resumo geral (todas as atribuições somadas) MAIS um resumo específico para cada atribuição.\n\n'
-                    + 'Clique Cancelar para que cada item traga só o resumo geral (todas as atribuições somadas), como de costume.'
+                    + 'Cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral '
+                    + '(todas as atribuições somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
+                    'Somar e detalhar por atribuição', 'Só resumo geral',
                 );
             }
             gerarPDFConjunto(secoes, somenteResumo, { porAtribuicao });
@@ -8752,6 +9130,195 @@
             baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.xlsx`);
         }
         catch (err) { alert('Erro ao gerar Excel conjunto: ' + err.message); console.error(err); }
+    }
+
+    // ── Relatório conjunto em Word (editável) — pedido do usuário ───────────────────
+    // .doc no formato "Word HTML" (namespaces xmlns:o/xmlns:w — Word abre nativamente,
+    // sem precisar de nenhuma biblioteca .docx via @require): tabelas de verdade
+    // (editáveis célula a célula) com os mesmos dados de cfg.cabecalhos/cfg.linha já
+    // usados no PDF/Excel, e os gráficos de distribuição (cfg.pdf.distribuicoes) como
+    // IMAGEM (jsPDF desenha vetorialmente dentro do PDF, não dá pra "capturar" — em vez
+    // disso, desenha os mesmos dados num <canvas> oculto e embute o PNG resultante).
+
+    function escaparHTML(v) {
+        return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function tabelaHTMLWord(cabecalhos, linhas) {
+        const th = cabecalhos.map(c => `<th>${escaparHTML(c)}</th>`).join('');
+        const corpo = linhas.map(l => `<tr>${l.map(v => `<td>${escaparHTML(v)}</td>`).join('')}</tr>`).join('');
+        return `<table><thead><tr>${th}</tr></thead><tbody>${corpo}</tbody></table>`;
+    }
+
+    // Desenha um gráfico de barras simples (label + valor) num <canvas> oculto e devolve
+    // a imagem como data URL PNG — mesma forma dos dados usados por desenharBarras no
+    // PDF (contarPorCampo), só que renderizado em bitmap pra caber num documento Word.
+    function gerarImagemBarras(itens, largura, altura, corHex) {
+        const escala = 2; // retina — texto legível quando o Word/impressora redimensiona
+        const canvas = document.createElement('canvas');
+        canvas.width = largura * escala;
+        canvas.height = altura * escala;
+        const ctx = canvas.getContext && canvas.getContext('2d');
+        if (!ctx) return null;
+        ctx.scale(escala, escala);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, largura, altura);
+        if (itens.length) {
+            const max = Math.max(1, ...itens.map(i => i.valor));
+            const margemBaixo = 30, margemTopo = 14, margemLado = 6;
+            const areaAltura = altura - margemBaixo - margemTopo;
+            const larguraBarra = (largura - 2 * margemLado) / itens.length;
+            itens.forEach((it, i) => {
+                const h = Math.max(1, (it.valor / max) * areaAltura);
+                const x = margemLado + i * larguraBarra;
+                const y = margemTopo + (areaAltura - h);
+                ctx.fillStyle = corHex;
+                ctx.fillRect(x + larguraBarra * 0.15, y, larguraBarra * 0.7, h);
+                ctx.fillStyle = '#1A1A1A';
+                ctx.font = 'bold 10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(it.valor), x + larguraBarra / 2, y - 3);
+                ctx.fillStyle = '#82807A';
+                ctx.font = '8px Arial';
+                let rotulo = String(it.label || '');
+                if (rotulo.length > 16) rotulo = rotulo.slice(0, 15) + '…';
+                ctx.fillText(rotulo, x + larguraBarra / 2, altura - margemBaixo + 12);
+            });
+        }
+        return canvas.toDataURL('image/png');
+    }
+
+    // Seção padrão (relatórios "lista de processos", que têm cfg.cabecalhos/cfg.linha —
+    // a grande maioria): título (reaproveita descreverSecaoPDF, a mesma resolução de
+    // nome usada no PDF), contagem por atribuição, gráficos de distribuição como imagem,
+    // tabela completa e editável.
+    function secaoWordGenerica(cfg, dados) {
+        const info = descreverSecaoPDF(cfg, false);
+        let html = `<h2>${escaparHTML(info.rotulo)}</h2>`;
+        let subtitulo = `${dados.length} registro(s)`;
+        const frase = fraseCompetenciasComContagem(dados);
+        if (frase) subtitulo += ` • ${frase}`;
+        html += `<p class="subtitulo">${escaparHTML(subtitulo)}</p>`;
+        if (cfg.pdf && Array.isArray(cfg.pdf.distribuicoes)) {
+            cfg.pdf.distribuicoes.forEach(dist => {
+                // Só distribuições por CAMPO categórico simples (contarPorCampo) — as que
+                // usam calc() próprio (ex.: "aguardando decisão" em Conclusões) têm lógica
+                // demais pra reproduzir aqui sem duplicar; ficam de fora do Word.
+                if (!dist.campo || typeof dist.calc === 'function') return;
+                const itens = contarPorCampo(dados, dist.campo, dist.topN || 10);
+                if (!itens.length) return;
+                const img = gerarImagemBarras(itens, 460, 170, '#3A5A7D');
+                if (img) html += `<p><strong>${escaparHTML(dist.titulo)}</strong><br><img class="grafico" src="${img}"></p>`;
+            });
+        }
+        if (cfg.cabecalhos && cfg.linha) {
+            html += tabelaHTMLWord(cfg.cabecalhos, dados.map(cfg.linha));
+        }
+        return html;
+    }
+
+    // Três relatórios são "resumo único" (dados = 1 objeto agregado, não uma lista por
+    // processo — CFGS_SEM_PROCESSO_POR_LINHA) e não têm cfg.cabecalhos/cfg.linha: cada
+    // um ganha uma seção dedicada e mais simples (só os números principais + a tabela
+    // discriminada que existir), em vez do formato genérico acima.
+    function secaoWordAudienciasDesignadas(resumo) {
+        const r = resumo || {};
+        let html = '<h2>Audiências Designadas</h2>';
+        let subtitulo = `${r.totalDesignadas || 0} audiência(s) designada(s)`;
+        if (r.ultimaData) subtitulo += ` • Última: ${r.ultimaData}`;
+        html += `<p class="subtitulo">${escaparHTML(subtitulo)}</p>`;
+        if (r.tabela && r.tabela.length) {
+            const frase = fraseCompetenciasComContagem(r.tabela);
+            if (frase) html += `<p class="subtitulo">${escaparHTML(frase)}</p>`;
+            html += tabelaHTMLWord(['Data', 'Horário', 'Processo', 'Tipo de Audiência'],
+                r.tabela.map(t => [t.data, t.horario, t.processo, t.tipoAudiencia]));
+        }
+        return html;
+    }
+    function secaoWordAudienciasRealizadas(resumo) {
+        const r = resumo || {};
+        let html = '<h2>Audiências Realizadas</h2>';
+        html += `<p class="subtitulo">${r.totalGeral || 0} realizada(s) • ${r.canceladas || 0} cancelada(s) • `
+            + `${r.negativas || 0} negativa(s) • ${r.naoRealizadas || 0} não realizada(s) • ${r.redesignadas || 0} redesignada(s) • `
+            + `${r.pessoasOuvidas || 0} pessoa(s) ouvida(s)</p>`;
+        if (r.porAtribuicao && r.porAtribuicao.length > 1) {
+            const frase = r.porAtribuicao.map(a => `${a.competencia || '(sem atuação)'} (${a.totalGeral})`).join(', ');
+            html += `<p class="subtitulo">Competências: ${escaparHTML(frase)}</p>`;
+        }
+        // Mesmo agrupamento por usuário do PDF (item 6 do pedido do usuário) — magistrado
+        // em 2+ atribuições vira uma linha só, somada.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+        if (porUsuarioAgrupado.length) {
+            html += tabelaHTMLWord(
+                ['Usuário', 'Realizadas', 'Canceladas', 'Negativas', 'Não Realizadas', 'Redesignadas', 'Pessoas Ouvidas'],
+                porUsuarioAgrupado.map(u => [u.nome, u.quantidade, u.canceladas, u.negativas, u.naoRealizadas, u.redesignadas, u.pessoasOuvidas]),
+            );
+        }
+        return html;
+    }
+    function secaoWordOutrosCumprimentos(dados) {
+        const r = dados || [];
+        let html = '<h2>Outros Cumprimentos</h2>';
+        const totalPendentes = r.reduce((s, d) => s + (d.pendentes || 0), 0);
+        html += `<p class="subtitulo">${totalPendentes} pendência(s) no total, ${r.length} tipo(s)</p>`;
+        const frase = fraseCompetenciasComContagem(r);
+        if (frase) html += `<p class="subtitulo">${escaparHTML(frase)}</p>`;
+        html += tabelaHTMLWord(['Tipo', 'Pendentes', 'Com Urgência', 'Origem'],
+            r.map(d => [d.tipo, d.pendentes, d.urgentes, d.origem === 'bnmp' ? 'BNMP' : 'Cumprimento']));
+        return html;
+    }
+
+    const ESTILO_WORD = `
+        body { font-family: Calibri, Arial, sans-serif; color: #1A1A1A; font-size: 11pt; }
+        h1 { font-size: 20pt; margin: 0; }
+        h2 { color: #3A5A7D; font-size: 15pt; border-bottom: 1px solid #DEDDD6; padding-bottom: 4px; margin-top: 26px; }
+        .subtitulo { color: #52514E; font-size: 9.5pt; margin: 2px 0 8px 0; }
+        .capa-titulo { background: #3A5A7D; color: #FFFFFF; padding: 14px 16px; font-size: 16pt; font-weight: bold; }
+        table { border-collapse: collapse; width: 100%; margin: 8px 0 18px 0; }
+        th { background: #3A5A7D; color: #FFFFFF; font-size: 9pt; padding: 5px 6px; text-align: left; }
+        td { border: 1px solid #DEDDD6; font-size: 9pt; padding: 4px 6px; }
+        tr:nth-child(even) td { background: #F4F4F1; }
+        img.grafico { max-width: 460px; margin: 4px 12px 12px 0; }
+    `;
+
+    // secoesColetadas() já devolve na mesma ordem do popup de automação (REPORTS_AUTOMACAO
+    // — ver comentário lá), então o Word segue a mesma ordem do PDF/Excel sem precisar
+    // reordenar nada aqui.
+    async function baixarWordConjunto() {
+        const secoes = await secoesColetadas();
+        if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
+        try {
+            const agora = new Date();
+            const hoje = agora.toLocaleDateString('pt-BR');
+            const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+            let corpo = '<div class="capa-titulo">Relatório para Correição Ordinária</div>';
+            corpo += `<p class="subtitulo">Projudi — TJPR  •  Extraído em ${hoje} às ${hora}</p>`;
+
+            const linhasSumario = secoes.map(({ dados, cfg }) => {
+                const rotulo = descreverSecaoPDF(cfg, false).rotulo;
+                const total = (cfg.linha && cfg.cabecalhos) ? dados.length
+                    : (dados[0] && (dados[0].totalGeral ?? dados[0].totalDesignadas ?? dados.reduce((s, d) => s + (d.pendentes || 0), 0))) || 0;
+                return [rotulo, String(total)];
+            });
+            corpo += '<h2>Sumário</h2>' + tabelaHTMLWord(['Relatório', 'Total'], linhasSumario);
+
+            secoes.forEach(({ dados, cfg }) => {
+                if (cfg === CFG_AUDIENCIAS_DESIGNADAS) { corpo += secaoWordAudienciasDesignadas(dados[0]); return; }
+                if (cfg === CFG_AUDIENCIAS_REALIZADAS) { corpo += secaoWordAudienciasRealizadas(dados[0]); return; }
+                if (cfg === CFG_OUTROS_CUMPRIMENTOS) { corpo += secaoWordOutrosCumprimentos(dados); return; }
+                corpo += secaoWordGenerica(cfg, dados);
+            });
+
+            const html = '<!DOCTYPE html>'
+                + '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">'
+                + `<head><meta charset="utf-8"><title>Relatório Projudi</title><style>${ESTILO_WORD}</style></head>`
+                + `<body>${corpo}</body></html>`;
+            // BOM (﻿) garante acentuação correta ao abrir no Word.
+            const blob = new Blob(['﻿' + html], { type: 'application/msword' });
+            baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.doc`);
+        }
+        catch (err) { alert('Erro ao gerar relatório Word: ' + err.message); console.error(err); }
     }
 
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
@@ -9052,9 +9619,6 @@
                 <label class="pa-resumo" title="Gera o Relatório PDF só com os resumos (KPIs e gráficos) de cada relatório, sem as tabelas discriminadas">
                     <input type="checkbox" id="pa-somente-resumo"> Só resumo (sem tabelas discriminadas)
                 </label>
-                <label class="pa-resumo" title="Reexibe os botões de Extrair/Baixar/PDF/Limpar em cada tela de relatório (fora do painel de automação)">
-                    <input type="checkbox" id="pa-mostrar-botoes"${mostrarBotoesIndividuais() ? ' checked' : ''}> Mostrar botões individuais nos relatórios
-                </label>
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
@@ -9067,7 +9631,7 @@
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF.</div>
             </div>`;
         document.body.appendChild(painel);
-        painel.querySelector('#pa-iniciar').onclick = () => {
+        painel.querySelector('#pa-iniciar').onclick = async () => {
             // Itens de outra categoria ficam com o checkbox oculto (display:none no
             // .pa-group), não desmarcado — sem esse filtro, marcar um item específico,
             // trocar de aba e clicar Automatizar rodaria um relatório invisível na tela.
@@ -9088,7 +9652,19 @@
                 return rel && cfgsDoRelatorio(rel).some(cfg => contarRegistrosSync(cfg.prefixo) > 0 || foiColetado(cfg));
             });
             if (temDadosPrevios) {
-                const apagar = confirm('Já existem dados coletados para um ou mais relatórios marcados.\n\nOK = apagar tudo e começar do zero.\nCancelar = continuar acumulando (padrão).');
+                // Pedido do usuário: informar de qual(is) atuação(ões) são os dados já
+                // coletados (lerUnidadesAutomatizadas() — mesma lista usada no indicador
+                // "unidades com dados coletados" do painel), pra não apagar/continuar às
+                // cegas. Botões com texto próprio em vez do OK/Cancelar nativo do
+                // confirm() — ver confirmarComBotoes.
+                const unidades = lerUnidadesAutomatizadas();
+                const listaUnidades = unidades.length
+                    ? `\n\nAtuação(ões) com dados já coletados:\n${unidades.map(u => `• ${u}`).join('\n')}`
+                    : '';
+                const apagar = await confirmarComBotoes(
+                    `Já existem dados coletados para um ou mais relatórios marcados.${listaUnidades}`,
+                    'Começar relatório do zero', 'Continuar extração',
+                );
                 if (apagar) limparTudoAutomacao();
             }
             iniciarAutomacao(fila, periodoTM);
@@ -9098,11 +9674,11 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
+        // Botão "Relatório Word" removido temporariamente do painel (pedido do usuário —
+        // "não estou satisfeito" com o resultado) — a função baixarWordConjunto() e todo
+        // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
-        painel.querySelector('#pa-mostrar-botoes').onchange = (ev) => {
-            store.setItem(CHAVE_MOSTRAR_BOTOES, ev.target.checked ? '1' : '0');
-        };
         const chkAtivos = painel.querySelector('#pa-incluir-ativos');
         if (chkAtivos) {
             chkAtivos.onchange = (ev) => {
@@ -9142,21 +9718,6 @@
             btn.title = recolhido ? 'Recolher' : 'Expandir';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
-
-        // Ativação disfarçada do modo de teste (ver alternarModoTeste): 5 cliques
-        // seguidos no título do painel, dentro de 2s — sem nenhum botão/indicador visível
-        // que denuncie a existência do modo.
-        let cliquesTitulo = 0;
-        let ultimoCliqueTitulo = 0;
-        painel.querySelector('.pa-titulo').onclick = () => {
-            const agora = Date.now();
-            cliquesTitulo = (agora - ultimoCliqueTitulo <= 2000) ? cliquesTitulo + 1 : 1;
-            ultimoCliqueTitulo = agora;
-            if (cliquesTitulo >= 5) {
-                cliquesTitulo = 0;
-                alternarModoTeste();
-            }
-        };
 
         // Troca de categoria: mostra a seção de itens específicos (checkboxes de verdade
         // quando já existem, senão o espaço reservado) e refaz a grade de contagens para
@@ -9382,7 +9943,64 @@
         #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
 
         #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+
+        /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
+           window.confirm() nativo não permite customizar o texto dos botões, então este
+           é um overlay próprio, fora de #painel-automacao (não deve ficar restrito à
+           largura/posição do painel). */
+        .projudi-confirm-overlay {
+            position: fixed; inset: 0; z-index: 1000000; background: rgba(26,26,26,.45);
+            display: flex; align-items: center; justify-content: center;
+            font-family: "Public Sans", Verdana, Arial, sans-serif;
+        }
+        .projudi-confirm-box {
+            background: #FFFFFF; border-radius: 8px; box-shadow: 0 10px 30px rgba(26,26,26,.3);
+            width: 360px; max-width: 90vw; padding: 18px;
+        }
+        .projudi-confirm-msg { font-size: .85em; color: #1A1A1A; line-height: 1.5; white-space: pre-line; margin-bottom: 14px; }
+        .projudi-confirm-botoes { display: flex; gap: 8px; justify-content: flex-end; }
+        .projudi-confirm-btn {
+            border-radius: 6px; padding: 8px 14px; font-size: .8em; font-weight: 600;
+            cursor: pointer; border: 1px solid transparent;
+        }
+        .projudi-confirm-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
+        .projudi-confirm-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
     `);
+
+    // Diálogo de confirmação com texto de botão PERSONALIZADO (pedido do usuário —
+    // window.confirm() nativo sempre mostra "OK"/"Cancelar", sem como mudar o texto).
+    // Devolve uma Promise<boolean>: true = clicou no botão principal (confirmar), false =
+    // clicou no secundário (cancelar) — mesma semântica de confirm() (true=OK).
+    function confirmarComBotoes(mensagem, textoConfirmar, textoCancelar) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'projudi-confirm-overlay';
+            const box = document.createElement('div');
+            box.className = 'projudi-confirm-box';
+            const msg = document.createElement('div');
+            msg.className = 'projudi-confirm-msg';
+            msg.textContent = mensagem;
+            const botoes = document.createElement('div');
+            botoes.className = 'projudi-confirm-botoes';
+            const btnCancelar = document.createElement('button');
+            btnCancelar.type = 'button';
+            btnCancelar.className = 'projudi-confirm-btn projudi-confirm-btn-secondary';
+            btnCancelar.textContent = textoCancelar;
+            const btnConfirmar = document.createElement('button');
+            btnConfirmar.type = 'button';
+            btnConfirmar.className = 'projudi-confirm-btn projudi-confirm-btn-primary';
+            btnConfirmar.textContent = textoConfirmar;
+            const finalizar = (resultado) => { overlay.remove(); resolve(resultado); };
+            btnCancelar.onclick = () => finalizar(false);
+            btnConfirmar.onclick = () => finalizar(true);
+            botoes.appendChild(btnCancelar);
+            botoes.appendChild(btnConfirmar);
+            box.appendChild(msg);
+            box.appendChild(botoes);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+        });
+    }
 
     // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
     // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
@@ -9394,6 +10012,14 @@
 
     function bootstrap() {
         console.log(`[Projudi] bootstrap — URL: ${location.href}`);
+        // Limpeza de uma versão anterior: existia um "modo de teste" disfarçado (5
+        // cliques no painel) que limitava a coleta a 2 páginas por relatório — causou um
+        // bug real (Tempo Médio/Conclusões parando de virar página a partir da 2ª). O
+        // recurso foi removido, mas se a flag ficou gravada no localStorage de uma sessão
+        // anterior (o toggle persistia entre reloads), ela ficaria "presa" ligada para
+        // sempre sem nenhum jeito de desligá-la (o gesto que a ativava/desativava também
+        // não existe mais) — remove aqui, todo carregamento, por segurança.
+        chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
         chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
