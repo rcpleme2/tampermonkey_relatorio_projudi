@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.5
+// @version      24.6
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1431,12 +1431,6 @@
     const CHAVE_ACUMULADO_AR = 'projudi_audienciasrealizadas_acumulado';
     const CHAVE_PROGRESSO_AR = 'projudi_audienciasrealizadas_progresso';
     const CHAVE_TOTAL_USUARIOS_AR = 'projudi_audienciasrealizadas_total_usuarios';
-    // Fica FORA de limparEstadoTransitorioAR de propósito — precisa sobreviver à
-    // recoleta automática disparada por uma divergência de soma (ver
-    // finalizarAudienciasRealizadas) pra saber que já é a 2ª tentativa. Zerada só quando
-    // uma coleta de verdade começa do zero (ver o ponto que lê 'preenchendo_
-    // audienciasrealizadas') ou quando finalizarAudienciasRealizadas efetivamente termina.
-    const CHAVE_TENTATIVA_AR = 'projudi_audienciasrealizadas_tentativa';
 
     function atualizarProgressoAR(processados, total) {
         store.setItem(CHAVE_PROGRESSO_AR, JSON.stringify({ processados, total }));
@@ -1620,44 +1614,9 @@
         // foi removido). Ordenados pelo total de realizadas, maior primeiro.
         const porUsuario = acumulado.slice().sort((a, b) => b.quantidade - a.quantidade);
 
-        // Confere se a soma dos valores individuais bate com o total geral da vara (pedido
-        // do usuário) — cada pesquisa por magistrado é uma requisição independente ao
-        // Projudi, então um total que não fecha é sinal de coleta incompleta/inconsistente
-        // (ex.: pesquisa que não terminou de carregar antes de ler). Não trava o
-        // relatório — só avisa, no console e no próprio PDF, pra conferência.
-        const somar = (campo) => acumulado.reduce((s, u) => s + (u[campo] || 0), 0);
-        const somaIndividual = {
-            quantidade: somar('quantidade'), canceladas: somar('canceladas'), negativas: somar('negativas'),
-            naoRealizadas: somar('naoRealizadas'), redesignadas: somar('redesignadas'), pessoasOuvidas: somar('pessoasOuvidas'),
-        };
-        const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
-        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
-        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = camposConferidos
-            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
-            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
-        const somaConfere = divergencias.length === 0;
-        if (!somaConfere) {
-            const detalhe = divergencias.map(d => `${d.campo} (geral=${d.geral}, soma=${d.soma})`).join(', ');
-            const tentativa = parseInt(store.getItem(CHAVE_TENTATIVA_AR) || '0', 10);
-            // Pedido do usuário: antes de lançar o aviso no PDF, refazer a coleta inteira
-            // uma vez (pode ter sido uma leitura ruim/instável, não necessariamente um dado
-            // real divergente) — só se for a 1ª divergência desta coleta (tentativa < 1). Se
-            // divergir de novo mesmo depois de recolher do zero, aí sim finaliza com o aviso.
-            if (tentativa < 1) {
-                console.warn(`[Projudi Audiências Realizadas] soma não bate (${detalhe}) — refazendo a coleta do zero para conferir antes de avisar no relatório`);
-                store.setItem(CHAVE_TENTATIVA_AR, String(tentativa + 1));
-                limparEstadoTransitorioAR();
-                iniciarBuscaAudienciasRealizadas();
-                return;
-            }
-            console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral mesmo após recoleta: ${detalhe}`);
-        }
-
-        // A partir daqui, a checagem de consistência acima (somaConfere/divergencias) já
-        // validou/refez ESTA coleta (uma vara). Agora mescla com as demais atribuições já
-        // coletadas antes — bug relatado pelo usuário: coletar numa 2ª vara sobrescrevia
-        // o resumo da 1ª. Mesmo padrão de Audiências Designadas
+        // Mescla com as demais atribuições já coletadas antes — bug relatado pelo
+        // usuário: coletar numa 2ª vara sobrescrevia o resumo da 1ª. Mesmo padrão de
+        // Audiências Designadas
         // (calcularResumoAudienciasDesignadasDeTabela/salvarResumoAudienciasDesignadas):
         // guarda os dados BRUTOS tagueados por atribuição (porUsuario e porAtribuicao,
         // este último com os totais/extras "gerais" desta vara) e recalcula todos os
@@ -1676,13 +1635,12 @@
         const porAtribuicaoMesclado = [...porAtribuicaoAnterior.filter(a => (a.atuacao || '') !== (atuacao || '')), totaisDestaAtribuicao];
 
         const resumo = calcularResumoAudienciasRealizadasDeListas(porAtribuicaoMesclado, porUsuarioMesclado, periodo);
-        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length} somaConfere=${resumo.somaConfere}`);
+        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length}`);
 
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
         limparEstadoTransitorioAR();
-        store.removeItem(CHAVE_TENTATIVA_AR);
 
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
     }
@@ -1702,18 +1660,6 @@
         const redesignadas = somarCampo(porAtribuicao, 'redesignadas');
         const pessoasOuvidas = somarCampo(porAtribuicao, 'pessoasOuvidas');
 
-        const somaIndividual = {
-            quantidade: somarCampo(porUsuario, 'quantidade'), canceladas: somarCampo(porUsuario, 'canceladas'),
-            negativas: somarCampo(porUsuario, 'negativas'), naoRealizadas: somarCampo(porUsuario, 'naoRealizadas'),
-            redesignadas: somarCampo(porUsuario, 'redesignadas'), pessoasOuvidas: somarCampo(porUsuario, 'pessoasOuvidas'),
-        };
-        const totalIndividual = { quantidade: totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas };
-        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
-        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = camposConferidos
-            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
-            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
-
         return {
             geradoEm: new Date().toISOString(),
             totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas,
@@ -1721,8 +1667,6 @@
             porUsuario: porUsuario.slice().sort((a, b) => b.quantidade - a.quantidade),
             porAtribuicao,
             totalUsuarios: porUsuario.length,
-            somaConfere: divergencias.length === 0,
-            divergencias,
         };
     }
 
@@ -4214,6 +4158,78 @@
         baixarBlob(doc.output('blob'), `conclusoes_por_juiz_projudi_${dataArquivo()}.pdf`);
     }
 
+    // Resumo do relatório GERAL de Conclusões (não confundir com "PDF por Juiz", um
+    // arquivo à parte) — pedido do usuário: mostrar a divisão de conclusos por
+    // atribuição (vara/unidade) NO MESMO relatório, sem gerar um PDF novo por
+    // atribuição. Só faz sentido quando há mais de uma atribuição nos dados (ex.: depois
+    // de rodar a automação em várias unidades, ver total_automatizacao) — com uma única
+    // atribuição a tabela seria só o total geral de novo, já mostrado nos KPIs pelo
+    // resumo genérico, então nem desenha a página extra.
+    function montarResumoConclusoes(doc, dados, primeira, comIndice, rotuloBloco) {
+        montarResumoGenerico(doc, dados, CFG_CONCLUSOES, primeira, comIndice, rotuloBloco);
+
+        const porAtribuicao = new Map();
+        dados.forEach(d => {
+            const chave = d.competencia || d.atuacao || '(sem atribuição)';
+            if (!porAtribuicao.has(chave)) porAtribuicao.set(chave, { total: 0, comPreAnalise: 0 });
+            const o = porAtribuicao.get(chave);
+            o.total += 1;
+            if (temPreAnalise(d)) o.comPreAnalise += 1;
+        });
+        if (porAtribuicao.size < 2) return;
+
+        const linhas = [...porAtribuicao.entries()]
+            .map(([atribuicao, o]) => ({ atribuicao, total: o.total, comPreAnalise: o.comPreAnalise, semPreAnalise: o.total - o.comPreAnalise }))
+            .sort((a, b) => b.total - a.total);
+
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const titulo = CFG_CONCLUSOES.pdf.titulo;
+
+        doc.addPage();
+        let hy = m + 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, hy); hy += 8;
+        tituloSecao(doc, m, hy, pw - 2 * m, 'Conclusões por Atribuição');
+        hy += 6;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`${dados.length} conclusão(ões) pendente(s) em ${linhas.length} atribuição(ões)`, m, hy);
+        hy += 4;
+
+        doc.autoTable({
+            columns: [
+                { header: 'Atribuição', dataKey: 'atribuicao' },
+                { header: 'Total de Conclusos', dataKey: 'total' },
+                { header: 'Com Pré-análise', dataKey: 'comPreAnalise' },
+                { header: 'Sem Pré-análise', dataKey: 'semPreAnalise' },
+            ],
+            body: linhas.map(l => ({
+                atribuicao: l.atribuicao, total: String(l.total),
+                comPreAnalise: String(l.comPreAnalise), semPreAnalise: String(l.semPreAnalise),
+            })),
+            foot: [{
+                atribuicao: 'Total geral', total: String(dados.length),
+                comPreAnalise: String(linhas.reduce((s, l) => s + l.comPreAnalise, 0)),
+                semPreAnalise: String(linhas.reduce((s, l) => s + l.semPreAnalise, 0)),
+            }],
+            startY: hy,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            footStyles: { fillColor: COR.cartao, textColor: COR.tinta, fontStyle: 'bold', fontSize: 8.5, lineColor: COR.grade, lineWidth: 0.1 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                atribuicao: { fontStyle: 'bold', textColor: COR.tinta },
+                total: { halign: 'right' }, comPreAnalise: { halign: 'right' }, semPreAnalise: { halign: 'right' },
+            },
+            didDrawPage: () => desenharRodape(doc, titulo, carimbo, pw, ph, m, comIndice),
+        });
+    }
+
     // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
     // relatório (genérico via cfg.pdf, ou o caso especial do Tempo Médio).
     // Resumo do relatório final "Mandados Pendentes de Cumprimento" — o mecanismo genérico
@@ -4386,6 +4402,13 @@
                 rotulo: TITULO_OUTROS_CUMPRIMENTOS,
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoOutrosCumprimentos(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
+            };
+        }
+        if (cfg === CFG_CONCLUSOES) {
+            return {
+                rotulo: cfg.pdf.titulo,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoConclusoes(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
         if (cfg === CFG_SUSPENSOS_PRAZO) {
@@ -6181,7 +6204,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0, somaConfere: true, divergencias: [] };
+        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0 };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -6218,21 +6241,11 @@
         const linhasAvisoPermanente = doc.splitTextToSize(avisoPermanente, uw);
         doc.text(linhasAvisoPermanente, m, yObs);
         yObs += linhasAvisoPermanente.length * 3.4 + 2;
-        // Observação adicional: só aparece quando a soma dos valores por magistrado NÃO
-        // bate com o total geral da vara (pedido do usuário — conferência antes de
-        // seguir no relatório) — sinal de coleta incompleta/inconsistente a checar
-        // manualmente, ALÉM da explicação de magistrados desabilitados acima. Quando
-        // bate, não polui a página com um aviso extra sem necessidade.
-        let yLinha = yObs;
-        if (!r.somaConfere && r.divergencias && r.divergencias.length) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.vermelho);
-            const obs = `Atenção: a soma dos valores por magistrado não bate com o total geral da vara — `
-                + r.divergencias.map(d => `${d.campo} (geral=${d.geral}, soma dos magistrados=${d.soma})`).join('; ')
-                + `. Possível coleta incompleta — confira antes de usar estes números.`;
-            const linhasObs = doc.splitTextToSize(obs, uw);
-            doc.text(linhasObs, m, yObs);
-            yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
-        }
+        // O aviso de divergência soma-vs-total (condicional, em vermelho) foi removido a
+        // pedido do usuário — o aviso permanente acima (magistrados desabilitados) já
+        // explica por que o total pode legitimamente ser maior que a soma do
+        // detalhamento, o que cobria a maior parte dos casos em que a soma "não batia".
+        const yLinha = yObs;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
@@ -8066,9 +8079,6 @@
             // aguardarResultadoAREEstabilizarEProcessar) — checar só "existe tabela"
             // pegava valores da pesquisa ANTERIOR, ainda não substituídos pelo AJAX.
             if (estadoAtual === 'preenchendo_audienciasrealizadas') {
-                // Início de verdade de uma coleta (não uma recoleta por divergência de
-                // soma) — zera o contador de tentativa aqui, ponto único de entrada.
-                store.setItem(CHAVE_TENTATIVA_AR, '0');
                 iniciarBuscaAudienciasRealizadas();
                 return;
             }
