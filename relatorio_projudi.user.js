@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      23.1
+// @version      23.2
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -352,14 +352,7 @@
             distribuicoes: [
                 { titulo: 'Conclusões por Magistrado(a)', campo: 'responsavel', topN: 12 },
                 { titulo: 'Conclusões por Tipo de Conclusão', campo: 'tipoConclusao', topN: 12 },
-                // Padrão de dias úteis das conclusões (pedido do usuário) — mesmo gráfico
-                // já existente para Audiências Designadas (concentração por dia da
-                // semana), aqui a partir da data de remessa para conclusão (dtRemessa),
-                // que já é coletada por todo processo — ver contarPorDiaUtil.
-                {
-                    titulo: 'Conclusões por Dia da Semana (dias úteis)',
-                    calc: (sub) => ({ tipo: 'barras', itens: contarPorDiaUtil(sub, 'dtRemessa') }),
-                },
+                { titulo: 'Conclusões por Classe Processual', campo: 'classe', topN: 12 },
             ],
             colunas: [
                 { header: 'Atuação', width: 24, get: (d) => d.atuacao },
@@ -3135,25 +3128,6 @@
         return best;
     }
 
-    // Contagem por dia útil (Segunda a Sexta) a partir de um campo de data — mesma ideia
-    // de concentracaoPorDiaSemana (Audiências Designadas), generalizada para qualquer
-    // relatório com um campo de data simples (um registro = uma data, sem a estrutura de
-    // "linha com processos vinculados" da pauta de audiências). Sábados/domingos são
-    // descartados (o Judiciário não distribui/conclui nesses dias — uma data cadastrada
-    // num fim de semana seria erro de digitação/exceção, não padrão a mostrar num
-    // gráfico "por dia útil").
-    function contarPorDiaUtil(dados, campoData) {
-        const porDia = new Map(); // 1-5 -> quantidade
-        dados.forEach(d => {
-            const ts = parseDataBR(d[campoData]);
-            if (ts == null) return;
-            const dow = new Date(ts).getDay();
-            if (dow < 1 || dow > 5) return;
-            porDia.set(dow, (porDia.get(dow) || 0) + 1);
-        });
-        return [1, 2, 3, 4, 5].map(dow => ({ label: ROTULOS_DIA_UTIL[dow], valor: porDia.get(dow) || 0 }));
-    }
-
     // semOutros: quando true, corta em topN sem somar o restante em "Outros" — usado em
     // rankings (ex.: top processos) onde o "Outros" agregado não faz sentido/domina o gráfico.
     function contarPorCampo(dados, campo, topN, limpar, semOutros, minValor) {
@@ -3836,10 +3810,11 @@
                 // vez de aparecer vazios.
                 // Cada entrada normalmente é {titulo, campo, topN, ...} e vira uma contagem
                 // categórica via contarPorCampo. Uma entrada com `calc(sub)` (ponto de
-                // extensão usado por CFG_CONCLUSOES p/ o gráfico "por Dia da Semana", que
-                // não é uma contagem por CAMPO) pula contarPorCampo e usa o que `calc`
-                // devolver direto — precisa devolver {tipo:'faixas', faixas} ou {itens}
-                // (mesmo formato que os outros tipos já aceitam em desenharGradeGraficos).
+                // extensão para distribuições que não são uma contagem por CAMPO — nenhum
+                // relatório usa hoje, mas o mecanismo continua disponível) pula
+                // contarPorCampo e usa o que `calc` devolver direto — precisa devolver
+                // {tipo:'faixas', faixas} ou {itens} (mesmo formato que os outros tipos já
+                // aceitam em desenharGradeGraficos).
                 ...p.distribuicoes
                     .map(g => {
                         if (typeof g.calc === 'function') {
@@ -4151,7 +4126,7 @@
         const gY0 = kY + 28 + gap + 2;
         const charts = [
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
-            { tipo: 'barras', span: 1, titulo: 'Pendentes por Dia da Semana (dias úteis)', itens: contarPorDiaUtil(sub, 'dtRemessa') },
+            { tipo: 'barras', span: 1, titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
         ];
         desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, charts);
         desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false);
