@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      22.4
+// @version      22.5
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1496,28 +1496,29 @@
     // tinha lido e registrado o valor desatualizado — o sintoma relatado: "o script repete
     // valores, mesmo a tela não mostrando valores idênticos").
     //
-    // Só comparar duas leituras seguidas não basta: se o valor ANTIGO ficar parado na tela
-    // por duas checagens (poll de 500ms) antes do AJAX realmente atualizar, o algoritmo
-    // "estabiliza" cedo demais com o valor errado (bug encontrado escrevendo o teste desta
-    // correção — teste_ar_estabilizacao.js). Por isso exige TAMBÉM que o valor tenha
-    // MUDADO em relação ao que estava na tela antes desta pesquisa começar (ver
-    // CHAVE_ASSINATURA_ANTERIOR_AR/submitAR) — só depois disso passa a valer a checagem de
-    // "duas leituras iguais seguidas". Poll a cada 500ms, teto de ~15s — depois disso
-    // processa mesmo assim (com aviso), pra não travar a automação pra sempre (cobre o
-    // caso raro em que o valor novo coincide por acaso com o antigo).
-    //
-    // Uma rodada anterior tentou acelerar isso com um MutationObserver (reagir assim que o
-    // DOM muda, em vez de só o poll) — voltou a falhar em produção, e o pedido do usuário
-    // foi por uma lógica simples e previsível: "verifique que a tabela apareceu e foi
-    // preenchida". Poll puro é isso — mais fácil de confiar do que depender de como o
-    // Projudi de fato atualiza o DOM (que não dá pra garantir em todo navegador/versão).
+    // Versão original exigia que o valor MUDASSE em relação à pesquisa anterior antes de
+    // sequer considerar "duas leituras iguais seguidas" — bug relatado pelo usuário: com
+    // TODOS os magistrados aparecendo (sem filtro de mínimo), é comum dois magistrados
+    // seguidos terem exatamente 0 audiências/extras — a assinatura NUNCA "muda" nesse
+    // caso, e o script sempre caía no teto de tempo, avisando "não estabilizou" à toa
+    // (era um caso "raro" tolerado antes, virou comum). Agora usa dois caminhos:
+    // (a) já mudou em relação à pesquisa anterior + 2 leituras iguais seguidas (~1s,
+    //     caso comum, rápido); ou
+    // (b) mesmo SEM mudar, 4 leituras iguais seguidas (~2s) — tempo suficiente pra
+    //     confiar que não é mais o valor antigo "parado" esperando o AJAX, e sim um
+    //     resultado novo que por coincidência bate com o anterior.
+    // Poll a cada 500ms, teto de ~5s (reduzido de 15s, pedido do usuário) — depois disso
+    // processa mesmo assim (com aviso), só como rede de segurança final.
+    const LEITURAS_ESTAVEIS_RAPIDO_AR = 2;
+    const LEITURAS_ESTAVEIS_DEVAGAR_AR = 4;
+    const TENTATIVAS_MAX_AR = 10; // 10 * 500ms = ~5s
+    let streakEstavelAR = 0;
     function aguardarResultadoAREEstabilizarEProcessar(tentativa) {
         tentativa = tentativa || 0;
-        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
         const temTabela = !!document.querySelector('table.resultTable');
         if (!temTabela) {
-            if (tentativa >= 30) {
-                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~15s — pesquisando de novo.');
+            if (tentativa >= TENTATIVAS_MAX_AR) {
+                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~5s — pesquisando de novo.');
                 const form = formularioAudienciasRealizadas();
                 if (form) submitAR(form);
                 return;
@@ -1525,19 +1526,23 @@
             setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
             return;
         }
+        const assinaturaAntes = store.getItem(CHAVE_ASSINATURA_ANTERIOR_AR);
         const assinaturaAtual = assinaturaResultadoAR();
         const jaMudou = assinaturaAntes == null || assinaturaAtual !== assinaturaAntes;
-        if (jaMudou && tentativa > 0 && assinaturaAtual === ultimaAssinaturaVistaAR) {
+        streakEstavelAR = (assinaturaAtual === ultimaAssinaturaVistaAR) ? streakEstavelAR + 1 : 1;
+        ultimaAssinaturaVistaAR = assinaturaAtual;
+        const estabilizouRapido = jaMudou && streakEstavelAR >= LEITURAS_ESTAVEIS_RAPIDO_AR;
+        const estabilizouDevagar = streakEstavelAR >= LEITURAS_ESTAVEIS_DEVAGAR_AR;
+        if (tentativa > 0 && (estabilizouRapido || estabilizouDevagar)) {
             console.log('[Projudi Audiências Realizadas] resultado estável — processando');
             processarResultadoAudienciasRealizadas();
             return;
         }
-        if (tentativa >= 30) {
-            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~15s — processando mesmo assim (valores podem estar desatualizados)');
+        if (tentativa >= TENTATIVAS_MAX_AR) {
+            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~5s — processando mesmo assim (valores podem estar desatualizados)');
             processarResultadoAudienciasRealizadas();
             return;
         }
-        ultimaAssinaturaVistaAR = assinaturaAtual;
         setTimeout(() => aguardarResultadoAREEstabilizarEProcessar(tentativa + 1), 500);
     }
     // Guarda a última assinatura vista entre chamadas de aguardarResultadoAREEstabilizarE
@@ -4057,7 +4062,11 @@
     function novoDocPDF() {
         const ctor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
         if (!ctor) throw new Error('biblioteca jsPDF não carregada');
-        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        // compress:true ativa a compressão Flate (deflate) já embutida no jsPDF 2.x —
+        // reduz bastante o tamanho do PDF final, sobretudo em relatórios com muitas
+        // páginas de tabela (texto repetitivo comprime muito bem). Testado sem regressão
+        // visual/funcional — só muda como o PDF é serializado internamente.
+        const doc = new ctor({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
         if (typeof doc.autoTable !== 'function') throw new Error('plugin autoTable não carregado');
         doc.addFileToVFS('PublicSans-Regular.ttf', FONTE_PUBLIC_SANS_REGULAR);
         doc.addFont('PublicSans-Regular.ttf', 'PublicSans', 'normal');
@@ -9432,7 +9441,6 @@
 
         painel.querySelector('#pa-iniciar').disabled = emCurso;
         painel.querySelector('#pa-pdf').disabled = total === 0;
-        painel.querySelector('#pa-word').disabled = total === 0;
         painel.querySelector('#pa-excel').disabled = total === 0;
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
         // escape para quando a coleta trava (ver pularRelatorioAtual).
@@ -9615,9 +9623,6 @@
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com os relatórios já coletados">⬇ Relatório PDF</button>
-                        <button id="pa-word" class="pa-btn pa-btn-secondary" type="button" title="Gera um relatório único em Word (.doc), editável, com a mesma estrutura do PDF — gráficos como imagem, tabelas editáveis">⬇ Relatório Word</button>
-                    </div>
-                    <div class="pa-btn-row">
                         <button id="pa-excel" class="pa-btn pa-btn-secondary" type="button" title="Gera uma planilha .xlsx única com a tabela discriminada de cada relatório já coletado, uma aba por relatório">⬇ Dados em planilha</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
@@ -9669,7 +9674,9 @@
             baixarPDFConjunto(!!(chk && chk.checked));
         };
         painel.querySelector('#pa-excel').onclick = () => gerarEbaixarExcelConjunto();
-        painel.querySelector('#pa-word').onclick = () => baixarWordConjunto();
+        // Botão "Relatório Word" removido temporariamente do painel (pedido do usuário —
+        // "não estou satisfeito" com o resultado) — a função baixarWordConjunto() e todo
+        // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
         const chkAtivos = painel.querySelector('#pa-incluir-ativos');
