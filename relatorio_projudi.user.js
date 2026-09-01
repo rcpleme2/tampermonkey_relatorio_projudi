@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.4
+// @version      24.5
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8656,24 +8656,45 @@
 
         function contarSelecionadas() { return document.querySelectorAll('.projudi-mu-chk:checked').length; }
 
+        function linhaRelatorio(r) {
+            const seletorPeriodo = r.key === 'tempomedio'
+                ? `<select id="projudi-mu-periodo-tm" style="margin-left:4px;">${
+                    PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                  }</select>`
+                : '';
+            return `<label style="display:block; margin:2px 0;">
+                    <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                </label>`;
+        }
         // Checklist de relatórios — mesma fonte/persistência de injetarPainel
-        // (relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS), só sem abas por
-        // categoria (a tela de seleção de unidade é um contexto mais enxuto).
-        const linhasRelatorios = GRUPOS_AUTOMACAO.map(g => {
-            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave);
-            if (!itens.length) return '';
-            const linhas = itens.map(r => {
-                const seletorPeriodo = r.key === 'tempomedio'
-                    ? `<select id="projudi-mu-periodo-tm" style="margin-left:4px;">${
-                        PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
-                      }</select>`
-                    : '';
-                return `<label style="display:block; margin:2px 0;">
-                        <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
-                    </label>`;
-            }).join('');
-            return `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">${g.rotulo}</div>${linhas}</div>`;
+        // (relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS). Duas categorias,
+        // igual ao painel da página inicial (CATEGORIAS_PAINEL/categoriaEspecifica) —
+        // pedido do usuário: antes só aparecia um grupo "geral" sem os relatórios de
+        // Crime visíveis (Apreensões), mas a automação incluía Apreensões mesmo assim
+        // (relatorioMarcadoPorPadrao volta `true` por padrão pra qualquer item que o
+        // usuário nunca viu/desmarcou) — sem aparecer no popup, não dava pra desmarcar.
+        // Aqui as duas ficam empilhadas e sempre visíveis (sem abas — contexto mais
+        // enxuto que o painel da página inicial), então nada fica escondido.
+        const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
+        const linhasCivel = GRUPOS_AUTOMACAO.map(g => {
+            const itens = itensCivel.filter(r => r.dominio === g.chave);
+            // "Processos Ativos" (pedido do usuário) — mesmo item do painel da página
+            // inicial (ITEM_ATIVOS/CHAVE_INCLUIR_ATIVOS), não é um REPORTS_AUTOMACAO de
+            // verdade (não navega/coleta paginado — é lido passivamente na página
+            // inicial, ver gravarProcessosAtivosSeDisponivel), por isso checkbox e chave
+            // de persistência próprias, fora de .projudi-mu-rel-check.
+            const linhaAtivos = g.chave === 'cartorio'
+                ? `<label style="display:block; margin:2px 0;" title="Inclui a contagem de Processos Ativos (lida na página inicial) como uma linha do Cartório na capa do PDF conjunto">
+                        <input type="checkbox" id="projudi-mu-ativos" ${incluirProcessosAtivos() ? 'checked' : ''}> Processos Ativos
+                    </label>`
+                : '';
+            if (!itens.length && !linhaAtivos) return '';
+            return `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">${g.rotulo}</div>${linhaAtivos}${itens.map(linhaRelatorio).join('')}</div>`;
         }).join('');
+        const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
+        const linhasCrime = itensCrime.length
+            ? `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">Crime</div>${itensCrime.map(linhaRelatorio).join('')}</div>`
+            : '';
 
         const painel = document.createElement('div');
         painel.id = 'projudi-mu-painel';
@@ -8686,10 +8707,17 @@
                 <button id="projudi-mu-rel-marcar" type="button" style="font-size:11px;">Marcar tudo</button>
                 <button id="projudi-mu-rel-desmarcar" type="button" style="font-size:11px;">Desmarcar tudo</button>
             </div>
-            ${linhasRelatorios}
+            <div style="font-weight:bold; color:#555; margin-bottom:2px;">Cível-Geral</div>
+            ${linhasCivel}
+            ${linhasCrime}
             <button id="projudi-mu-iniciar" type="button" style="width:100%; margin-top:8px;">▶ Rodar automação nas unidades marcadas</button>
         `;
         document.body.appendChild(painel);
+
+        const chkAtivos = painel.querySelector('#projudi-mu-ativos');
+        if (chkAtivos) chkAtivos.addEventListener('change', () => {
+            store.setItem(CHAVE_INCLUIR_ATIVOS, chkAtivos.checked ? '1' : '0');
+        });
 
         const contador = painel.querySelector('#projudi-mu-contador');
         function atualizarContador() {
