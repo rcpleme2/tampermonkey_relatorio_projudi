@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      23.0
+// @version      23.1
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -280,6 +280,15 @@
     const CFG_CONCLUSOES = {
         prefixo: 'projudi_export_',            // mantém as chaves já usadas (dados existentes preservados)
         detecta: (cab) => /an[áa]lise\s+cart[óo]rio/i.test(cab) && situacaoConclusaoSelecionada() === 'P',
+        // 500 por página (pedido do usuário) — criarColetor.iniciar() troca o seletor e
+        // aguarda o reload automaticamente antes de coletar (mesmo mecanismo de
+        // CFG_TEMPOMEDIO/Mandados, ver comentário em pageSizeSelect logo abaixo em
+        // criarColetor). Diferente de Tempo Médio (que soma meses inteiros de histórico,
+        // ver comentário no pageSizeSelect de CFG_TEMPOMEDIO), Pendentes é uma busca única
+        // sem acumular período — se o volume de pendentes for muito grande num vara/
+        // atuação específica, o Projudi pode ficar pesado para renderizar/paginar 500 de
+        // uma vez (mesmo risco já registrado ali).
+        pageSizeSelect: { name: 'estatisticaPageSizeOptions', valor: '500' },
         minTds: 7,
         usaAtuacao: true,
         // "Zero processos conclusos" é uma informação válida (pedido do usuário: avisar
