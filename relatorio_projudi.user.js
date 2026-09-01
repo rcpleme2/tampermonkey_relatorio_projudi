@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.1
+// @version      24.2
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8384,6 +8384,22 @@
     const CHAVE_MU_ATIVO = 'projudi_mu_ativo';
     const CHAVE_MU_TITULOS = 'projudi_mu_titulos';       // JSON: array de títulos (na ordem de execução)
     const CHAVE_MU_INDICE = 'projudi_mu_indice';         // índice da PRÓXIMA unidade a clicar
+    // Atuação de ONDE estávamos saindo quando a troca começou — necessário porque o
+    // popup "Alterar Atuação" é só uma SOBREPOSIÇÃO: a página de baixo (e o frame que
+    // clicou o ícone) continua com a atuação ANTIGA até o usuário escolher a nova dentro
+    // do iframe. Sem comparar com essa referência, "lerAtuacao() preenchido" (usado como
+    // sinal de "já trocou") ficava verdadeiro o tempo todo — inclusive com o popup ainda
+    // aberto, esperando o iframe carregar — e retomarAutomacaoNaProximaUnidade() disparava
+    // cedo demais, reiniciando a MESMA unidade em vez de esperar a troca de verdade (bug
+    // relatado pelo usuário: "não deu certo novamente").
+    const CHAVE_MU_ATUACAO_ANTERIOR = 'projudi_mu_atuacao_anterior';
+    // Nº de unidades encontradas na árvore na ÚLTIMA leitura — usado só pra esperar a
+    // árvore "parar de crescer" antes de clicar (mesma ideia de assinaturaResultadoTM/
+    // aguardarOutrosCumprimentosProntoEExtrair): a tela de seleção é uma página gigante
+    // (uma <li> por unidade do ESTADO INTEIRO, ver captura real usada no desenho deste
+    // recurso) e pode demorar mais que um poll de 2s pra terminar de carregar/renderizar
+    // (pedido do usuário, relatado ao vivo).
+    const CHAVE_MU_ASSINATURA_ARVORE = 'projudi_mu_assinatura_arvore';
 
     function multiUnidadeEmCurso() { return store.getItem(CHAVE_MU_ATIVO) === '1'; }
 
@@ -8398,9 +8414,12 @@
     }
 
     function finalizarMultiUnidade() {
+        console.log('[Projudi MultiUnidade] encerrando modo várias unidades — limpando estado');
         store.removeItem(CHAVE_MU_ATIVO);
         store.removeItem(CHAVE_MU_TITULOS);
         store.removeItem(CHAVE_MU_INDICE);
+        store.removeItem(CHAVE_MU_ATUACAO_ANTERIOR);
+        store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
     }
 
     // Reconhece a tela de seleção de área de atuação em QUALQUER contexto (página cheia
@@ -8438,11 +8457,46 @@
     }
 
     // #alterarAreaAtuacao (dentro de table#userinfo) existe em toda página autenticada —
-    // abre o popup "Alterar Atuação" com o iframe da árvore de seleção.
+    // abre o popup "Alterar Atuação" com o iframe da árvore de seleção. Guarda a atuação
+    // ATUAL antes de clicar (ver CHAVE_MU_ATUACAO_ANTERIOR) — é a referência usada depois
+    // pra saber se a troca de verdade já aconteceu, já que o popup é só uma sobreposição
+    // e a página de baixo continua com a atuação antiga até a escolha ser feita.
     function tentarAbrirPopupTrocaAtuacao() {
         const link = document.getElementById('alterarAreaAtuacao');
-        if (!link) return false;
+        if (!link) {
+            console.warn('[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado nesta página — tentando de novo no próximo poll');
+            return false;
+        }
+        const atuacaoAtual = lerAtuacao();
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, atuacaoAtual || '');
+        console.log(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
         link.click();
+        return true;
+    }
+
+    // Assinatura simples do carregamento da árvore (só a contagem de unidades já
+    // encontradas) — usada pra ESPERAR a árvore estabilizar antes de clicar (pedido do
+    // usuário: a tela de seleção é grande — uma <li> por unidade do estado inteiro — e
+    // pode não estar completamente carregada ainda no primeiro poll depois do popup
+    // abrir). Mesma ideia de assinaturaResultadoTM/aguardarOutrosCumprimentosProntoE
+    // Extrair: só age quando a contagem se repete IGUAL em duas leituras seguidas.
+    function arvoreUnidadesEstabilizada() {
+        const n = listarUnidadesAreaAtuacao().length;
+        const anterior = store.getItem(CHAVE_MU_ASSINATURA_ARVORE);
+        console.log(`[Projudi MultiUnidade] lendo árvore de unidades — ${n} unidade(s) encontrada(s) nesta leitura (leitura anterior: ${anterior === null ? '(nenhuma)' : anterior})`);
+        if (n === 0) {
+            // Árvore ainda nem começou a aparecer — não conta como "leitura anterior"
+            // válida, senão duas leituras vazias seguidas (ex.: script rodou antes do
+            // popup nem existir) passariam como "estável".
+            store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
+            return false;
+        }
+        if (anterior !== String(n)) {
+            store.setItem(CHAVE_MU_ASSINATURA_ARVORE, String(n));
+            console.log('[Projudi MultiUnidade] árvore ainda carregando (contagem mudou) — aguardando estabilizar no próximo poll');
+            return false;
+        }
+        console.log(`[Projudi MultiUnidade] árvore estabilizada em ${n} unidade(s) — prosseguindo`);
         return true;
     }
 
@@ -8450,6 +8504,8 @@
     // avança o índice. Sem unidade restante, encerra o modo várias-unidades e deixa a
     // automação seguir pro fim normal (concluido) no próximo passoAutomacao.
     function avancarParaProximaUnidadeSelecionada() {
+        if (!arvoreUnidadesEstabilizada()) return; // ainda carregando — tenta de novo no próximo poll
+        store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
         const idx = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
         const titulos = lerTitulosMultiUnidade();
         const titulo = titulos[idx];
@@ -8459,19 +8515,37 @@
             store.setItem(AUTO_ESTADO, 'ir_fim');
             return;
         }
+        console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length} — procurando "${titulo}" na árvore`);
+        // A troca só é reconhecida quando lerAtuacao() mudar em relação a ESTA leitura
+        // (ver CHAVE_MU_ATUACAO_ANTERIOR/retomarAutomacaoNaProximaUnidade) — dentro do
+        // iframe do popup lerAtuacao() normalmente vem vazio (não é a página do app),
+        // então não custa nada regravar aqui também, por segurança.
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacao() || '');
         const ok = clicarUnidadePorTitulo(titulo);
         store.setItem(CHAVE_MU_INDICE, String(idx + 1));
-        if (ok) console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clicando "${titulo}"`);
-        else console.warn(`[Projudi MultiUnidade] unidade "${titulo}" não encontrada na árvore desta tela — pulando`);
+        if (ok) console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clique em "${titulo}" disparado — aguardando a página recarregar`);
+        else console.warn(`[Projudi MultiUnidade] unidade "${titulo}" NÃO encontrada na árvore desta tela (${titulos.length} no total marcadas) — pulando pra próxima`);
     }
 
-    // Já estamos de volta numa atuação normal (fora da árvore de seleção, com
-    // lerAtuacao() preenchido) — retoma a MESMA fila de relatórios (persistida em
+    // Só estamos de volta numa atuação normal quando: (1) não é mais a tela de seleção,
+    // (2) lerAtuacao() vem preenchido, E (3) é DIFERENTE da atuação registrada em
+    // CHAVE_MU_ATUACAO_ANTERIOR (ver tentarAbrirPopupTrocaAtuacao/
+    // avancarParaProximaUnidadeSelecionada) — sem a condição (3), o popup ainda ABERTO
+    // sobre a página antiga (aguardando o iframe carregar) já passava como "trocou",
+    // porque a página de baixo continua reportando a atuação ANTIGA enquanto isso (bug
+    // relatado pelo usuário). Retoma a MESMA fila de relatórios (persistida em
     // 'projudi_auto_fila' desde o início da rodada) pra essa nova unidade.
     function retomarAutomacaoNaProximaUnidade() {
+        const atuacaoAtual = lerAtuacao();
+        const atuacaoAnterior = store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || '';
+        if (!atuacaoAtual || atuacaoAtual === atuacaoAnterior) {
+            console.log(`[Projudi MultiUnidade] ainda na atuação anterior ("${atuacaoAnterior || '(vazia)'}") — popup/troca ainda em andamento, aguardando`);
+            return;
+        }
+        store.removeItem(CHAVE_MU_ATUACAO_ANTERIOR);
         const fila = lerFilaAutomacao();
         const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1m';
-        console.log(`[Projudi MultiUnidade] nova atuação detectada ("${lerAtuacao()}") — retomando automação com ${fila.length} relatório(s)`);
+        console.log(`[Projudi MultiUnidade] nova atuação confirmada ("${atuacaoAnterior || '(vazia)'}" -> "${atuacaoAtual}") — retomando automação com ${fila.length} relatório(s): ${fila.join(', ')}`);
         iniciarAutomacao(fila, periodoTM);
     }
 
@@ -8483,21 +8557,27 @@
         if (!titulos || !titulos.length) { alert('Selecione ao menos uma unidade.'); return; }
         const fila = REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
         if (!fila.length) {
-            alert('Nenhum relatório está marcado. Abra a página inicial, marque ao menos um relatório no painel de automação e volte aqui.');
+            alert('Nenhum relatório está marcado. Marque ao menos um relatório no painel desta mesma tela.');
             return;
         }
+        console.log(`[Projudi MultiUnidade] === iniciando automação em ${titulos.length} unidade(s) === relatórios marcados: ${fila.join(', ')}`);
+        console.log(`[Projudi MultiUnidade] ordem das unidades: ${titulos.map((t, i) => `${i + 1}) ${t}`).join(' | ')}`);
         store.setItem(CHAVE_MU_TITULOS, JSON.stringify(titulos));
         store.setItem(CHAVE_MU_INDICE, '1'); // [0] é clicado agora mesmo, abaixo
         store.setItem(CHAVE_MU_ATIVO, '1');
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacao() || '');
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', store.getItem('projudi_auto_periodo_tm') || '1m');
         store.setItem(AUTO_ESTADO, 'trocando_unidade');
         store.setItem('projudi_auto_lock', String(Date.now()));
-        console.log(`[Projudi MultiUnidade] iniciando — ${titulos.length} unidade(s), ${fila.length} relatório(s) marcado(s)`);
+        console.log(`[Projudi MultiUnidade] unidade 1/${titulos.length}: procurando "${titulos[0]}" na árvore`);
         if (!clicarUnidadePorTitulo(titulos[0])) {
+            console.error(`[Projudi MultiUnidade] unidade "${titulos[0]}" NÃO encontrada nesta tela — abortando`);
             alert(`Não foi possível localizar a unidade "${titulos[0]}" nesta tela.`);
             finalizarMultiUnidade();
             store.removeItem(AUTO_ESTADO);
+        } else {
+            console.log(`[Projudi MultiUnidade] clique em "${titulos[0]}" disparado — aguardando a página recarregar`);
         }
     }
 
@@ -8512,10 +8592,14 @@
     function injetarSeletorUnidades() {
         if (!paginaSelecaoAreaAtuacao()) return;
         const unidades = listarUnidadesAreaAtuacao();
-        if (!unidades.length) return;
+        if (!unidades.length) {
+            console.log('[Projudi MultiUnidade] tela de seleção de área de atuação detectada, mas ainda sem unidades na árvore — aguardando carregar');
+            return;
+        }
 
         if (document.getElementById('projudi-mu-painel')) return; // já injetado nesta tela
 
+        console.log(`[Projudi MultiUnidade] injetando painel de seleção — ${unidades.length} unidade(s) encontrada(s) na árvore`);
         unidades.forEach(({ titulo, elemento }) => {
             if (elemento.dataset.muInjetado) return;
             elemento.dataset.muInjetado = '1';
@@ -9193,7 +9277,9 @@
             store.setItem('projudi_auto_lock', String(agora));
             store.setItem(AUTO_ESTADO, 'trocando_unidade');
             store.setItem(CHAVE_AUTO_FIM, String(agora)); // marca o fim desta unidade (mostrador do painel)
-            console.log('[Projudi MultiUnidade] unidade concluída — abrindo popup pra trocar de atuação');
+            const idxAtual = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
+            const totalUnidades = lerTitulosMultiUnidade().length;
+            console.log(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacao() || ''}") — abrindo popup pra trocar de atuação`);
             if (!tentarAbrirPopupTrocaAtuacao()) navegarMenu('inicio');
             return;
         }
@@ -9203,11 +9289,14 @@
         // por estado/localStorage entre frames independentes.
         if (estado === 'trocando_unidade') {
             store.setItem('projudi_auto_lock', String(agora));
-            if (paginaSelecaoAreaAtuacao()) {
+            const naArvore = paginaSelecaoAreaAtuacao();
+            console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacao()="${lerAtuacao() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
+            if (naArvore) {
                 avancarParaProximaUnidadeSelecionada();
             } else if (lerAtuacao()) {
                 retomarAutomacaoNaProximaUnidade();
             } else if (!tentarAbrirPopupTrocaAtuacao()) {
+                console.warn('[Projudi MultiUnidade] nem árvore de seleção nem atuação detectadas, e #alterarAreaAtuacao não encontrado — indo pra página inicial e tentando de novo no próximo poll');
                 navegarMenu('inicio'); // popup ainda não achou o link nesta página — tenta a partir da início
             }
             return;
