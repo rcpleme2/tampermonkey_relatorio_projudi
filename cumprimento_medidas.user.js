@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.3
+// @version      0.4
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
