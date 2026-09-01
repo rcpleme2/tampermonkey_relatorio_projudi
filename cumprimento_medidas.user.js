@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.2
+// @version      0.3
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -213,6 +213,41 @@
         return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
     }
 
+    // Justificação MANUAL — NÃO usar `doc.text(..., {align:'justify'})` com a fonte
+    // PublicSans embutida: reportado pelo usuário (PDF real) e reproduzido — o
+    // `align:'justify'` nativo do jsPDF, com uma fonte TTF customizada incorporada
+    // (codificação multi-byte/Identity-H), abre um espaço espúrio NO MEIO de certas
+    // palavras (ex.: "fiscaliz ação", "individualiz ados") em vez de só entre palavras, e
+    // o texto nem fica de fato encostado na margem direita. É uma limitação conhecida do
+    // jsPDF: o operador de espaçamento de palavra do PDF (Tw) não vale para texto
+    // multi-byte, e o fallback do jsPDF pra simular justificado com fonte custom não
+    // funciona direito. Aqui a gente mede cada PALAVRA com doc.getTextWidth (fonte já
+    // deve estar setada) e desenha uma por vez, com o espaço extra calculado à mão — nunca
+    // aciona o mecanismo de justify nativo, então o bug não tem como acontecer. Última
+    // linha de cada parágrafo fica alinhada à esquerda (convenção tipográfica padrão de
+    // texto justificado — só as linhas "cheias" esticam).
+    function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
+        const linhas = doc.splitTextToSize(texto, larguraMax);
+        linhas.forEach((linha, i) => {
+            const ultimaLinha = i === linhas.length - 1;
+            const palavras = linha.split(' ').filter(Boolean);
+            if (ultimaLinha || palavras.length <= 1) {
+                doc.text(linha, x, y);
+            } else {
+                const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
+                const espacoExtra = Math.max(0, larguraMax - larguraPalavras);
+                const gap = espacoExtra / (palavras.length - 1);
+                let cx = x;
+                palavras.forEach(p => {
+                    doc.text(p, cx, y);
+                    cx += doc.getTextWidth(p) + gap;
+                });
+            }
+            y += entreLinhas;
+        });
+        return linhas.length * entreLinhas;
+    }
+
     function gerarPDFCumprimentoMedidas(dados) {
         const doc = novoDocPDF();
         const pw = doc.internal.pageSize.getWidth();
@@ -264,8 +299,7 @@
         let ty = y + padding + 3.2;
         doc.setTextColor(...COR.tintaSec);
         PARAGRAFOS_OBSERVACAO.forEach(p => {
-            doc.text(p, m + padding, ty, { maxWidth: uw - 2 * padding, align: 'justify' });
-            ty += alturaParagrafo(doc, p, uw - 2 * padding, entreLinhas) + espacoEntreParagrafos;
+            ty += desenharParagrafoJustificado(doc, p, m + padding, ty, uw - 2 * padding, entreLinhas) + espacoEntreParagrafos;
         });
 
         desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m);
@@ -314,13 +348,25 @@
         return !!acharSpanContador(IDS_CONTADORES.atrasados);
     }
 
+    // achou:false diferencia "span nem existe no DOM" de "span existe mas contém 0" —
+    // sem essa distinção um bug de extração (id errado, span ainda não inserido) fica
+    // indistinguível de "realmente zero", que é uma leitura válida (ver CLAUDE.md).
+    function lerContador(id) {
+        const el = acharSpanContador(id);
+        const achou = !!el;
+        const valor = parseInt(((el && el.textContent) || '').trim(), 10) || 0;
+        return { achou, valor };
+    }
+
     function lerContadores() {
-        const num = el => parseInt(((el && el.textContent) || '').trim(), 10) || 0;
-        return {
-            atrasados: num(acharSpanContador(IDS_CONTADORES.atrasados)),
-            semCumprimento: num(acharSpanContador(IDS_CONTADORES.semCumprimento)),
-            aVencer: num(acharSpanContador(IDS_CONTADORES.aVencer)),
-        };
+        const atrasados = lerContador(IDS_CONTADORES.atrasados);
+        const semCumprimento = lerContador(IDS_CONTADORES.semCumprimento);
+        const aVencer = lerContador(IDS_CONTADORES.aVencer);
+        if (!atrasados.achou || !semCumprimento.achou || !aVencer.achou) {
+            console.warn('[Projudi Cumprimento de Medidas] algum contador não foi encontrado no DOM no momento da extração:',
+                { atrasadosAchou: atrasados.achou, semCumprimentoAchou: semCumprimento.achou, aVencerAchou: aVencer.achou });
+        }
+        return { atrasados: atrasados.valor, semCumprimento: semCumprimento.valor, aVencer: aVencer.valor };
     }
 
     function assinaturaContadores() {
@@ -328,25 +374,38 @@
         return `${c.atrasados}|${c.semCumprimento}|${c.aVencer}`;
     }
 
-    // Espera a tela "estabilizar" (duas leituras seguidas com a mesma assinatura, 500ms
-    // de intervalo) antes de extrair de verdade — mesma cautela do script principal para
-    // painéis de contador carregados via AJAX depois do HTML inicial (ver
-    // aguardarOutrosCumprimentosProntoEExtrair lá). Teto de ~10s, depois extrai mesmo
-    // assim para não travar o botão para sempre numa tela que por algum motivo nunca
-    // estabiliza.
+    // Espera a tela "estabilizar" antes de extrair de verdade — mesma cautela do script
+    // principal para painéis de contador carregados via AJAX depois do HTML inicial (ver
+    // aguardarOutrosCumprimentosProntoEExtrair lá). Reportado pelo usuário: "Cumprimentos
+    // em Atraso" saía certo mas "Medidas sem Cumprimentos Gerados" e "Cumprimentos a
+    // Vencer" saíam zerados — sinal de que esses 2 contadores são preenchidos por uma
+    // chamada assíncrona MAIS LENTA que a de "Atrasados" (a página nasce com "0" nesses
+    // spans, não com o span ausente), e o critério antigo (só 2 leituras iguais seguidas,
+    // 500ms) aceitava esse "0" inicial como se já fosse o valor final. Agora exige (a) um
+    // mínimo de ~2s decorridos antes de aceitar qualquer estabilidade — dá tempo do AJAX
+    // pelo menos começar — e (b) 3 leituras iguais seguidas (não 2), com teto de ~15s.
     let ultimaAssinaturaCM = null;
+    let leiturasEstaveisCM = 0;
+    const CM_TENTATIVAS_MINIMAS = 4;   // ~2s antes de aceitar "estável"
+    const CM_LEITURAS_ESTAVEIS_NECESSARIAS = 3;
+    const CM_TENTATIVAS_MAXIMAS = 30;  // ~15s de teto
     function aguardarEstabilizarEExtrair(tentativa, callback) {
         const atual = assinaturaContadores();
-        if (tentativa > 0 && atual === ultimaAssinaturaCM) {
+        if (atual === ultimaAssinaturaCM) {
+            leiturasEstaveisCM++;
+        } else {
+            leiturasEstaveisCM = 1;
+            ultimaAssinaturaCM = atual;
+        }
+        if (tentativa >= CM_TENTATIVAS_MINIMAS && leiturasEstaveisCM >= CM_LEITURAS_ESTAVEIS_NECESSARIAS) {
             callback(lerContadores());
             return;
         }
-        if (tentativa >= 20) {
-            console.warn('[Projudi Cumprimento de Medidas] tela não estabilizou em ~10s — extraindo mesmo assim.');
+        if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
+            console.warn('[Projudi Cumprimento de Medidas] tela não estabilizou em ~15s — extraindo mesmo assim.');
             callback(lerContadores());
             return;
         }
-        ultimaAssinaturaCM = atual;
         setTimeout(() => aguardarEstabilizarEExtrair(tentativa + 1, callback), 500);
     }
 
@@ -370,6 +429,7 @@
         if (extracaoEmAndamento) return;
         extracaoEmAndamento = true;
         ultimaAssinaturaCM = null;
+        leiturasEstaveisCM = 0;
         if (botao) { botao.disabled = true; botao.textContent = 'Extraindo…'; }
         aguardarEstabilizarEExtrair(0, dados => {
             console.log('[Projudi Cumprimento de Medidas] extraído:', dados);
