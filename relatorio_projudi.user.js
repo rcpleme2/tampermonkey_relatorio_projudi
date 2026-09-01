@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.0
+// @version      24.1
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8348,13 +8348,16 @@
     // do login quanto o POPUP "Alterar Atuação", que é um <iframe> com o MESMO HTML
     // carregado por cima da página atual): uma árvore de Comarcas > unidades, cada
     // unidade um <a href=".../areaAtuacao.do?...">. Injeta um checkbox ao lado de cada
-    // unidade + um dropdown de múltipla escolha (pedido do usuário: "duas opções"), e um
-    // botão que dispara a automação já configurada (mesmos relatórios marcados no painel
-    // da página inicial, ver CHAVE_RELATORIOS_SELECIONADOS) em CADA unidade marcada, uma
-    // atrás da outra — clicando a unidade, deixando a automação normal rodar até o fim
-    // (AUTO_ESTADO='ir_fim'), então clicando #alterarAreaAtuacao (presente em toda
-    // página autenticada, dentro de table#userinfo) pra abrir o popup, e clicando a
-    // PRÓXIMA unidade marcada de dentro do iframe do popup.
+    // unidade (ÚNICA forma de escolher — pedido do usuário: nada de dropdown/popup à
+    // parte) e um painel com o checklist de relatórios (mesmos REPORTS_AUTOMACAO/
+    // CHAVE_RELATORIOS_SELECIONADOS do painel da página inicial, ver injetarPainel) —
+    // unidades E relatórios já ficam decididos nesta primeira tela, sem precisar visitar
+    // a página inicial antes (ver injetarSeletorUnidades). O botão "Rodar automação"
+    // dispara a fila configurada em CADA unidade marcada, uma atrás da outra — clicando a
+    // unidade, deixando a automação normal rodar até o fim (AUTO_ESTADO='ir_fim'), então
+    // clicando #alterarAreaAtuacao (presente em toda página autenticada, dentro de
+    // table#userinfo) pra abrir o popup, e clicando a PRÓXIMA unidade marcada de dentro
+    // do iframe do popup.
     //
     // O iframe do popup é uma página https://projudi2.tjpr.jus.br/projudi/... própria —
     // como o userscript roda em @match .../projudi/* SEM @noframes, ele é injetado
@@ -8381,7 +8384,6 @@
     const CHAVE_MU_ATIVO = 'projudi_mu_ativo';
     const CHAVE_MU_TITULOS = 'projudi_mu_titulos';       // JSON: array de títulos (na ordem de execução)
     const CHAVE_MU_INDICE = 'projudi_mu_indice';         // índice da PRÓXIMA unidade a clicar
-    const CHAVE_MU_SELECAO_RASCUNHO = 'projudi_mu_rascunho'; // seleção ainda sendo montada (antes de "Rodar")
 
     function multiUnidadeEmCurso() { return store.getItem(CHAVE_MU_ATIVO) === '1'; }
 
@@ -8491,7 +8493,6 @@
         store.setItem('projudi_auto_periodo_tm', store.getItem('projudi_auto_periodo_tm') || '1m');
         store.setItem(AUTO_ESTADO, 'trocando_unidade');
         store.setItem('projudi_auto_lock', String(Date.now()));
-        store.removeItem(CHAVE_MU_SELECAO_RASCUNHO);
         console.log(`[Projudi MultiUnidade] iniciando — ${titulos.length} unidade(s), ${fila.length} relatório(s) marcado(s)`);
         if (!clicarUnidadePorTitulo(titulos[0])) {
             alert(`Não foi possível localizar a unidade "${titulos[0]}" nesta tela.`);
@@ -8501,91 +8502,106 @@
     }
 
     // Injeta, na tela de seleção de área de atuação (página cheia ou popup), um checkbox
-    // ao lado de cada unidade + um painel com dropdown de múltipla escolha sincronizado
-    // (pedido do usuário: "duas opções — marcar ao lado de cada unidade ou escolher
-    // várias dentro de um dropdown"). Idempotente — seguro chamar de novo a cada poll do
-    // bootstrap (verifica se já injetou antes de mexer no DOM).
+    // ao lado de cada unidade da árvore — ÚNICA forma de escolher unidades (pedido do
+    // usuário: nada de dropdown/popup separado, só os checkboxes na própria página) — e
+    // um painel com o checklist de relatórios (mesmos REPORTS_AUTOMACAO/
+    // CHAVE_RELATORIOS_SELECIONADOS do painel da página inicial — ver injetarPainel) pra
+    // decidir TUDO (unidades + relatórios) já nesta primeira tela, sem precisar visitar a
+    // página inicial antes. Idempotente — seguro chamar de novo a cada poll do bootstrap
+    // (verifica se já injetou antes de mexer no DOM).
     function injetarSeletorUnidades() {
         if (!paginaSelecaoAreaAtuacao()) return;
         const unidades = listarUnidadesAreaAtuacao();
         if (!unidades.length) return;
 
-        let rascunho;
-        try { rascunho = new Set(JSON.parse(store.getItem(CHAVE_MU_SELECAO_RASCUNHO) || '[]')); }
-        catch (e) { rascunho = new Set(); }
+        if (document.getElementById('projudi-mu-painel')) return; // já injetado nesta tela
 
-        const jaInjetado = document.getElementById('projudi-mu-painel');
-        if (!jaInjetado) {
-            unidades.forEach(({ titulo, elemento }) => {
-                if (elemento.dataset.muInjetado) return;
-                elemento.dataset.muInjetado = '1';
-                const chk = document.createElement('input');
-                chk.type = 'checkbox';
-                chk.className = 'projudi-mu-chk';
-                chk.dataset.tituloUnidade = titulo;
-                chk.style.marginRight = '4px';
-                chk.checked = rascunho.has(titulo);
-                chk.title = 'Incluir esta unidade na automação de várias unidades';
-                elemento.parentNode.insertBefore(chk, elemento);
-            });
+        unidades.forEach(({ titulo, elemento }) => {
+            if (elemento.dataset.muInjetado) return;
+            elemento.dataset.muInjetado = '1';
+            const chk = document.createElement('input');
+            chk.type = 'checkbox';
+            chk.className = 'projudi-mu-chk';
+            chk.dataset.tituloUnidade = titulo;
+            chk.style.marginRight = '4px';
+            chk.title = 'Incluir esta unidade na automação de várias unidades';
+            elemento.parentNode.insertBefore(chk, elemento);
+        });
 
-            const painel = document.createElement('div');
-            painel.id = 'projudi-mu-painel';
-            painel.style.cssText = 'position:fixed; top:10px; right:10px; z-index:99999; background:#fff; border:1px solid #999; border-radius:6px; padding:10px; width:280px; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:12px; font-family:sans-serif;';
-            painel.innerHTML = `
-                <div style="font-weight:bold; margin-bottom:6px;">Automação em várias unidades</div>
-                <div style="margin-bottom:6px; color:#555;">Marque as unidades ao lado na árvore, ou selecione várias aqui:</div>
-                <select id="projudi-mu-select" multiple size="8" style="width:100%; margin-bottom:6px;"></select>
-                <div id="projudi-mu-contador" style="margin-bottom:6px; color:#555;">0 unidade(s) selecionada(s)</div>
-                <button id="projudi-mu-iniciar" type="button" style="width:100%; margin-bottom:4px;">▶ Rodar automação nas selecionadas</button>
-                <button id="projudi-mu-limpar" type="button" style="width:100%;">Limpar seleção</button>
-            `;
-            document.body.appendChild(painel);
+        function contarSelecionadas() { return document.querySelectorAll('.projudi-mu-chk:checked').length; }
 
-            const select = painel.querySelector('#projudi-mu-select');
-            unidades.forEach(({ titulo }) => {
-                const opt = document.createElement('option');
-                opt.value = titulo;
-                opt.textContent = titulo;
-                opt.selected = rascunho.has(titulo);
-                select.appendChild(opt);
-            });
+        // Checklist de relatórios — mesma fonte/persistência de injetarPainel
+        // (relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS), só sem abas por
+        // categoria (a tela de seleção de unidade é um contexto mais enxuto).
+        const linhasRelatorios = GRUPOS_AUTOMACAO.map(g => {
+            const itens = REPORTS_AUTOMACAO.filter(r => r.dominio === g.chave);
+            if (!itens.length) return '';
+            const linhas = itens.map(r => {
+                const seletorPeriodo = r.key === 'tempomedio'
+                    ? `<select id="projudi-mu-periodo-tm" style="margin-left:4px;">${
+                        PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                      }</select>`
+                    : '';
+                return `<label style="display:block; margin:2px 0;">
+                        <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                    </label>`;
+            }).join('');
+            return `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">${g.rotulo}</div>${linhas}</div>`;
+        }).join('');
 
-            const contador = painel.querySelector('#projudi-mu-contador');
-            function selecaoAtual() {
-                return new Set([...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade));
-            }
-            function salvarRascunho(set) {
-                store.setItem(CHAVE_MU_SELECAO_RASCUNHO, JSON.stringify([...set]));
-                contador.textContent = `${set.size} unidade(s) selecionada(s)`;
-            }
-            // Checkbox na árvore -> reflete no <select> (e vice-versa) e persiste.
-            document.querySelectorAll('.projudi-mu-chk').forEach(chk => {
-                chk.addEventListener('change', () => {
-                    const opt = [...select.options].find(o => o.value === chk.dataset.tituloUnidade);
-                    if (opt) opt.selected = chk.checked;
-                    salvarRascunho(selecaoAtual());
-                });
-            });
-            select.addEventListener('change', () => {
-                const selecionados = new Set([...select.selectedOptions].map(o => o.value));
-                document.querySelectorAll('.projudi-mu-chk').forEach(chk => {
-                    chk.checked = selecionados.has(chk.dataset.tituloUnidade);
-                });
-                salvarRascunho(selecaoAtual());
-            });
-            salvarRascunho(selecaoAtual());
+        const painel = document.createElement('div');
+        painel.id = 'projudi-mu-painel';
+        painel.style.cssText = 'position:fixed; top:10px; right:10px; z-index:99999; background:#fff; border:1px solid #999; border-radius:6px; padding:10px; width:300px; max-height:90vh; overflow-y:auto; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:12px; font-family:sans-serif;';
+        painel.innerHTML = `
+            <div style="font-weight:bold; margin-bottom:6px;">Automação em várias unidades</div>
+            <div id="projudi-mu-contador" style="margin-bottom:8px; color:#555;">0 unidade(s) marcada(s) na árvore ao lado</div>
+            <div style="font-weight:bold; margin-bottom:4px; border-top:1px solid #ddd; padding-top:6px;">Relatórios a extrair</div>
+            <div style="margin-bottom:6px;">
+                <button id="projudi-mu-rel-marcar" type="button" style="font-size:11px;">Marcar tudo</button>
+                <button id="projudi-mu-rel-desmarcar" type="button" style="font-size:11px;">Desmarcar tudo</button>
+            </div>
+            ${linhasRelatorios}
+            <button id="projudi-mu-iniciar" type="button" style="width:100%; margin-top:8px;">▶ Rodar automação nas unidades marcadas</button>
+        `;
+        document.body.appendChild(painel);
 
-            painel.querySelector('#projudi-mu-iniciar').onclick = () => {
-                const titulos = [...selecaoAtual()];
-                iniciarAutomacaoMultiUnidade(titulos);
-            };
-            painel.querySelector('#projudi-mu-limpar').onclick = () => {
-                document.querySelectorAll('.projudi-mu-chk').forEach(c => { c.checked = false; });
-                [...select.options].forEach(o => { o.selected = false; });
-                salvarRascunho(new Set());
-            };
+        const contador = painel.querySelector('#projudi-mu-contador');
+        function atualizarContador() {
+            contador.textContent = `${contarSelecionadas()} unidade(s) marcada(s) na árvore ao lado`;
         }
+        document.querySelectorAll('.projudi-mu-chk').forEach(chk => {
+            chk.addEventListener('change', atualizarContador);
+        });
+        atualizarContador();
+
+        // Checkboxes de relatório persistem no MESMO snapshot que injetarPainel usa
+        // (relatorioMarcadoPorPadrao lê de lá) — marcar aqui ou na página inicial dá no
+        // mesmo, os dois ficam sincronizados via essa chave.
+        function salvarSelecoesRelatorios() {
+            const obj = lerSelecoesSalvasPainel();
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { obj[c.dataset.key] = c.checked; });
+            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        }
+        painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
+            c.addEventListener('change', salvarSelecoesRelatorios);
+        });
+        painel.querySelector('#projudi-mu-rel-marcar').onclick = () => {
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = true; });
+            salvarSelecoesRelatorios();
+        };
+        painel.querySelector('#projudi-mu-rel-desmarcar').onclick = () => {
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = false; });
+            salvarSelecoesRelatorios();
+        };
+        const periodoTmSel = painel.querySelector('#projudi-mu-periodo-tm');
+        if (periodoTmSel) periodoTmSel.addEventListener('change', () => {
+            store.setItem('projudi_auto_periodo_tm', periodoTmSel.value);
+        });
+
+        painel.querySelector('#projudi-mu-iniciar').onclick = () => {
+            const titulos = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
+            iniciarAutomacaoMultiUnidade(titulos);
+        };
 
         // Se chegamos aqui em modo automático (dentro do popup, no meio de uma rodada
         // multi-unidade já em curso — ver 'trocando_unidade' em passoAutomacao), o clique
@@ -8758,7 +8774,13 @@
     function cfgsDoRelatorio(r) { return r.cfgs || [r.cfg]; }
 
     function lerFilaAutomacao() {
-        try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
+        // Mesma proteção usada em lerFilaMesesTempoMedio/desembrulharArray: o valor às
+        // vezes volta JSON-codificado em camadas — sem isso, um JSON.parse único deixava
+        // "fila" como STRING (não array), e (fila || []).filter em iniciarAutomacao
+        // explodia com "filter is not a function" (bug relatado pelo usuário — só
+        // aparecia no fluxo novo de várias unidades, que é o único chamador que lê essa
+        // chave de volta do localStorage em vez de montar a fila direto dos checkboxes).
+        return desembrulharArray(store.getItem('projudi_auto_fila')) || [];
     }
 
     // Sobe por window.parent enquanto for a mesma origem, parando um passo antes de
