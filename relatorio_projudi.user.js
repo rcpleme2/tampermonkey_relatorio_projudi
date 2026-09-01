@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.6
+// @version      24.7
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8668,11 +8668,11 @@
 
         function linhaRelatorio(r) {
             const seletorPeriodo = r.key === 'tempomedio'
-                ? `<select id="projudi-mu-periodo-tm" style="margin-left:4px;">${
+                ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            return `<label style="display:block; margin:2px 0;">
+            return `<label class="pa-item">
                     <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                 </label>`;
         }
@@ -8694,35 +8694,61 @@
             // inicial, ver gravarProcessosAtivosSeDisponivel), por isso checkbox e chave
             // de persistência próprias, fora de .projudi-mu-rel-check.
             const linhaAtivos = g.chave === 'cartorio'
-                ? `<label style="display:block; margin:2px 0;" title="Inclui a contagem de Processos Ativos (lida na página inicial) como uma linha do Cartório na capa do PDF conjunto">
+                ? `<label class="pa-item" title="Inclui a contagem de Processos Ativos (lida na página inicial) como uma linha do Cartório na capa do PDF conjunto">
                         <input type="checkbox" id="projudi-mu-ativos" ${incluirProcessosAtivos() ? 'checked' : ''}> Processos Ativos
                     </label>`
                 : '';
             if (!itens.length && !linhaAtivos) return '';
-            return `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">${g.rotulo}</div>${linhaAtivos}${itens.map(linhaRelatorio).join('')}</div>`;
+            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhaAtivos}${itens.map(linhaRelatorio).join('')}</div>`;
         }).join('');
         const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
         const linhasCrime = itensCrime.length
-            ? `<div style="margin-bottom:6px;"><div style="font-weight:bold; color:#333;">Crime</div>${itensCrime.map(linhaRelatorio).join('')}</div>`
+            ? `<div class="pa-group"><p class="pa-group-lbl especifico">Crime</p>${itensCrime.map(linhaRelatorio).join('')}</div>`
             : '';
 
+        // Mesma estrutura/classes .pa-* do painel da página inicial (injetarPainel) —
+        // pedido do usuário: o visual deve corresponder ao popup já existente. A folha
+        // de estilo é a MESMA (ver GM_addStyle no final do arquivo — os seletores
+        // #painel-automacao ali também casam com #projudi-mu-painel).
         const painel = document.createElement('div');
         painel.id = 'projudi-mu-painel';
-        painel.style.cssText = 'position:fixed; top:10px; right:10px; z-index:99999; background:#fff; border:1px solid #999; border-radius:6px; padding:10px; width:300px; max-height:90vh; overflow-y:auto; box-shadow:0 2px 8px rgba(0,0,0,.25); font-size:12px; font-family:sans-serif;';
         painel.innerHTML = `
-            <div style="font-weight:bold; margin-bottom:6px;">Automação em várias unidades</div>
-            <div id="projudi-mu-contador" style="margin-bottom:8px; color:#555;">0 unidade(s) marcada(s) na árvore ao lado</div>
-            <div style="font-weight:bold; margin-bottom:4px; border-top:1px solid #ddd; padding-top:6px;">Relatórios a extrair</div>
-            <div style="margin-bottom:6px;">
-                <button id="projudi-mu-rel-marcar" type="button" style="font-size:11px;">Marcar tudo</button>
-                <button id="projudi-mu-rel-desmarcar" type="button" style="font-size:11px;">Desmarcar tudo</button>
+            <div class="pa-head">
+                <span class="pa-titulo">Automação em várias unidades</span>
+                <div class="pa-icons">
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
+                </div>
             </div>
-            <div style="font-weight:bold; color:#555; margin-bottom:2px;">Cível-Geral</div>
-            ${linhasCivel}
-            ${linhasCrime}
-            <button id="projudi-mu-iniciar" type="button" style="width:100%; margin-top:8px;">▶ Rodar automação nas unidades marcadas</button>
+            <div class="pa-body">
+                <div id="projudi-mu-contador" class="pa-unidades">0 unidade(s) marcada(s) na árvore ao lado</div>
+                <div class="pa-group">
+                    <p class="pa-group-lbl">Relatórios a extrair</p>
+                </div>
+                <div class="pa-links">
+                    <button id="projudi-mu-rel-marcar" class="pa-link" type="button">Marcar tudo</button>
+                    <button id="projudi-mu-rel-desmarcar" class="pa-link" type="button">Desmarcar tudo</button>
+                </div>
+                ${linhasCivel}
+                ${linhasCrime}
+                <div class="pa-actions">
+                    <button id="projudi-mu-iniciar" class="pa-btn pa-btn-primary" type="button">▶ Rodar automação nas unidades marcadas</button>
+                </div>
+                <div class="pa-dica">Marque as unidades desejadas na árvore ao lado e os relatórios acima, depois clique em "Rodar automação".</div>
+            </div>
         `;
         document.body.appendChild(painel);
+        habilitarArrastePainel(painel);
+
+        painel.querySelector('.pa-btn-colapsar').onclick = () => {
+            const body = painel.querySelector('.pa-body');
+            const btn = painel.querySelector('.pa-btn-colapsar');
+            const recolhido = body.style.display !== 'none';
+            body.style.display = recolhido ? 'none' : '';
+            btn.textContent = recolhido ? '▼' : '▲';
+            btn.title = recolhido ? 'Expandir' : 'Recolher';
+        };
+        painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
 
         const chkAtivos = painel.querySelector('#projudi-mu-ativos');
         if (chkAtivos) chkAtivos.addEventListener('change', () => {
@@ -10330,114 +10356,114 @@
     }
 
     GM_addStyle(`
-        #painel-automacao {
+        #painel-automacao , #projudi-mu-painel {
             position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
             box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
         }
-        #painel-automacao .pa-head {
+        #painel-automacao .pa-head , #projudi-mu-painel .pa-head {
             display: flex; align-items: center; justify-content: space-between;
             padding: 10px 11px; border-bottom: 1px solid #DEDDD6;
             border-left: 3px solid #3A5A7D; background: #F4F4F1;
             cursor: move;
         }
-        #painel-automacao .pa-head.pa-arrastando { cursor: grabbing; }
-        #painel-automacao .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
-        #painel-automacao .pa-icons { display: flex; gap: 4px; }
-        #painel-automacao .pa-icon-btn {
+        #painel-automacao .pa-head.pa-arrastando , #projudi-mu-painel .pa-head.pa-arrastando { cursor: grabbing; }
+        #painel-automacao .pa-titulo , #projudi-mu-painel .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
+        #painel-automacao .pa-icons , #projudi-mu-painel .pa-icons { display: flex; gap: 4px; }
+        #painel-automacao .pa-icon-btn , #projudi-mu-painel .pa-icon-btn {
             width: 20px; height: 20px; border: 1px solid #DEDDD6; border-radius: 5px;
             background: #FFFFFF; cursor: pointer; color: #52514E; font-size: .68em;
             line-height: 1; padding: 0;
         }
-        #painel-automacao .pa-icon-btn:hover { background: #F4F4F1; }
+        #painel-automacao .pa-icon-btn:hover , #projudi-mu-painel .pa-icon-btn:hover { background: #F4F4F1; }
 
-        #painel-automacao .pa-tabs {
+        #painel-automacao .pa-tabs , #projudi-mu-painel .pa-tabs {
             display: flex; gap: 2px; padding: 8px 11px 0; background: #F4F4F1; border-bottom: 1px solid #DEDDD6;
             /* .pa-tabs mora dentro de .pa-body (para sumir junto ao colapsar — ver
                pa-btn-colapsar) mas mantém a aparência de faixa colada nas bordas do painel,
                cancelando o padding do .pa-body com margem negativa. */
             margin: -11px -11px 8px;
         }
-        #painel-automacao .pa-tab {
+        #painel-automacao .pa-tab , #projudi-mu-painel .pa-tab {
             flex: 1; border: none; background: none; padding: 7px 4px 8px; font-size: .68em; font-weight: 600;
             color: #82807A; cursor: pointer; border-bottom: 2px solid transparent; text-align: center;
             font-family: inherit;
         }
-        #painel-automacao .pa-tab:hover { color: #52514E; }
-        #painel-automacao .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
+        #painel-automacao .pa-tab:hover , #projudi-mu-painel .pa-tab:hover { color: #52514E; }
+        #painel-automacao .pa-tab.active , #projudi-mu-painel .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
 
-        #painel-automacao .pa-body { padding: 11px; }
+        #painel-automacao .pa-body , #projudi-mu-painel .pa-body { padding: 11px; }
 
-        #painel-automacao .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
-        #painel-automacao .pa-dot {
+        #painel-automacao .pa-state-row , #projudi-mu-painel .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+        #painel-automacao .pa-dot , #projudi-mu-painel .pa-dot {
             width: 7px; height: 7px; border-radius: 50%; background: #C3C2B7; flex: none;
             box-shadow: 0 0 0 3px rgba(195,194,183,.2);
         }
-        #painel-automacao .pa-dot.on { background: #9C742E; box-shadow: 0 0 0 3px rgba(156,116,46,.16); }
-        #painel-automacao .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
-        #painel-automacao .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
-        #painel-automacao .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
-        #painel-automacao .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
-        #painel-automacao .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-dot.on , #projudi-mu-painel .pa-dot.on { background: #9C742E; box-shadow: 0 0 0 3px rgba(156,116,46,.16); }
+        #painel-automacao .pa-dot.alerta , #projudi-mu-painel .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
+        #painel-automacao .pa-state-txt , #projudi-mu-painel .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
+        #painel-automacao .pa-state-txt strong , #projudi-mu-painel .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-unidades , #projudi-mu-painel .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
+        #painel-automacao .pa-unidades strong , #projudi-mu-painel .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
 
-        #painel-automacao .pa-progress { margin-bottom: 10px; }
-        #painel-automacao .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
-        #painel-automacao .pa-progress-bar {
+        #painel-automacao .pa-progress , #projudi-mu-painel .pa-progress { margin-bottom: 10px; }
+        #painel-automacao .pa-progress-track , #projudi-mu-painel .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
+        #painel-automacao .pa-progress-bar , #projudi-mu-painel .pa-progress-bar {
             background: #3A5A7D; height: 100%; width: 0%; border-radius: 4px; transition: width .4s ease;
         }
-        #painel-automacao .pa-progress-bar.pa-progress-completo { background: #527467; }
-        #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
-        #painel-automacao .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
+        #painel-automacao .pa-progress-bar.pa-progress-completo , #projudi-mu-painel .pa-progress-bar.pa-progress-completo { background: #527467; }
+        #painel-automacao .pa-progress-lbl , #projudi-mu-painel .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
+        #painel-automacao .pa-tempo , #projudi-mu-painel .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
-        #painel-automacao .pa-group { margin-bottom: 10px; }
-        #painel-automacao .pa-group-lbl {
+        #painel-automacao .pa-group , #projudi-mu-painel .pa-group { margin-bottom: 10px; }
+        #painel-automacao .pa-group-lbl , #projudi-mu-painel .pa-group-lbl {
             display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
             letter-spacing: .05em; text-transform: uppercase; color: #82807A; margin: 0 0 5px;
         }
-        #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
-        #painel-automacao .pa-group-lbl.especifico { color: #3A5A7D; }
+        #painel-automacao .pa-group-lbl::after , #projudi-mu-painel .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
+        #painel-automacao .pa-group-lbl.especifico , #projudi-mu-painel .pa-group-lbl.especifico { color: #3A5A7D; }
         /* margin-left 0 (não 14px) + text-align:left explícito — o cabeçalho do subgrupo
            (ex.: "AUDIÊNCIAS") fica alinhado à mesma margem esquerda dos demais itens do
            grupo, não recuado/deslocado do resto da lista. */
-        #painel-automacao .pa-subgroup-lbl {
+        #painel-automacao .pa-subgroup-lbl , #projudi-mu-painel .pa-subgroup-lbl {
             font-size: .68em; font-weight: 600; color: #82807A; margin: 4px 0 2px 0; text-align: left;
             text-transform: uppercase; letter-spacing: .02em;
         }
-        #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-        #painel-automacao .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
-        #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
-        #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
-        #painel-automacao .pa-placeholder {
+        #painel-automacao .pa-item , #projudi-mu-painel .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+        #painel-automacao .pa-item-sub , #projudi-mu-painel .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item input[type="checkbox"] , #projudi-mu-painel .pa-item input[type="checkbox"] { margin: 0; }
+        #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select , #projudi-mu-painel .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
+        #painel-automacao .pa-placeholder , #projudi-mu-painel .pa-placeholder {
             display: flex; align-items: center; gap: 6px; padding: 8px 9px; background: #FAFAF8;
             border: 1px dashed #C3C2B7; border-radius: 6px; font-size: .7em; color: #82807A; font-style: italic;
         }
 
-        #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
-        #painel-automacao .pa-link {
+        #painel-automacao .pa-links , #projudi-mu-painel .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
+        #painel-automacao .pa-link , #projudi-mu-painel .pa-link {
             background: none; border: none; padding: 0; cursor: pointer;
             font-size: .68em; font-weight: 600; color: #3A5A7D;
         }
-        #painel-automacao .pa-link:disabled { color: #82807A; cursor: not-allowed; }
+        #painel-automacao .pa-link:disabled , #projudi-mu-painel .pa-link:disabled { color: #82807A; cursor: not-allowed; }
 
-        #painel-automacao .pa-resumo {
+        #painel-automacao .pa-resumo , #projudi-mu-painel .pa-resumo {
             display: flex; align-items: center; gap: 7px; font-size: .72em; color: #52514E;
             padding: 7px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px; margin-bottom: 10px;
         }
 
-        #painel-automacao .pa-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-        #painel-automacao .pa-btn {
+        #painel-automacao .pa-actions , #projudi-mu-painel .pa-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+        #painel-automacao .pa-btn , #projudi-mu-painel .pa-btn {
             border-radius: 6px; padding: 7px 10px; font-size: .78em; font-weight: 600;
             cursor: pointer; border: 1px solid transparent; flex: 1;
         }
-        #painel-automacao .pa-btn:disabled { opacity: .5; cursor: not-allowed; }
-        #painel-automacao .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
-        #painel-automacao .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
-        #painel-automacao .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
-        #painel-automacao .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
-        #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
+        #painel-automacao .pa-btn:disabled , #projudi-mu-painel .pa-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #painel-automacao .pa-btn-primary , #projudi-mu-painel .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
+        #painel-automacao .pa-btn-secondary , #projudi-mu-painel .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
+        #painel-automacao .pa-btn-ghost , #projudi-mu-painel .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
+        #painel-automacao .pa-btn-alerta , #projudi-mu-painel .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
+        #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; gap: 6px; }
 
-        #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
 
         /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
            window.confirm() nativo não permite customizar o texto dos botões, então este
