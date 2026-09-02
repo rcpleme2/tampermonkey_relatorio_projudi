@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.5
+// @version      5.6
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -48,6 +48,15 @@
 // do script, busca de links/formulário (achado ou não, quantos documentos checados),
 // tentativas de trava, campos serializados em corpoFormulario(), início/fim de cada
 // requisição (fetch e GM_xmlhttpRequest), cada tentativa de passo() e o PDF salvo.
+//
+// v5.6 — corrige uma lacuna real: corpoFormulario() serializa o formulário do jeito que
+// ele ESTÁ, e a tela vem com "PDF" marcado por padrão (confirmado em duas capturas reais
+// da tela — table.form > input[name="tipoExportacao"], valores PDF/Excel/HTML/"Excel
+// (Somente Planilha)"/"RTF..."/CSV). marcarCheckboxDoRelatorio() cuida de OUTRO checkbox
+// (tipo diferente de input, elemento diferente) — nada no código selecionava CSV de
+// verdade antes de enviar. Nova função selecionarFormatoCSV() clica de verdade no rádio
+// "Arquivo CSV" antes de montar o corpo, chamada tanto no fluxo normal (extrairAgora)
+// quanto no diagnóstico (diagnosticar) — sem isso a requisição saía pedindo PDF.
 //
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
@@ -357,13 +366,34 @@
         return { texto: null, tentativas };
     }
 
+    // Garante que o rádio "Arquivo CSV" esteja selecionado antes de enviar o
+    // formulário — a tela vem com "PDF" marcado por padrão (checked="checked" no HTML
+    // original, confirmado em duas capturas reais da tela: table.form > tr > td >
+    // input[name="tipoExportacao"], com valores PDF/Excel/HTML/"Excel (Somente
+    // Planilha)"/"RTF (Word, Writter etc...)"/CSV). Sem isso, corpoFormulario()
+    // serializaria o formulário exatamente como está — ou seja, pediria PDF, não CSV.
+    // Clique real (não checked=true + dispatchEvent — mesma lição já documentada no
+    // projeto principal: telas do Projudi só reagem a clique de verdade).
+    function selecionarFormatoCSV(form) {
+        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCSV && !radioCSV.checked) {
+            log('selecionarFormatoCSV — marcando "Arquivo CSV" (estava em outro formato, ex.: PDF)');
+            radioCSV.click();
+        } else if (radioCSV) {
+            log('selecionarFormatoCSV — "Arquivo CSV" já estava selecionado');
+        } else {
+            logAviso('selecionarFormatoCSV — rádio tipoExportacao=CSV não encontrado no formulário! A requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        }
+        return radioCSV;
+    }
+
     // Corrigido a partir do diagnóstico ao vivo (comando "🔍 Diagnosticar"): os campos
     // reais do formulário (idRelatorio=606, numeroColunas, descricaoUser, tipoUser,
     // tamanhoUser, e outros — nada a ver com os 3 campos chutados antes) explicam os
-    // "0 bytes" anteriores. Serializar o FormData real (depois de garantir o checkbox
-    // marcado, ver marcarCheckboxDoRelatorio) replica exatamente a requisição que — já
-    // confirmado no mesmo diagnóstico — baixa o CSV de verdade quando enviada por um
-    // clique real.
+    // "0 bytes" anteriores. Serializar o FormData real (depois de garantir o formato CSV
+    // selecionado — ver selecionarFormatoCSV — e o checkbox marcado — ver
+    // marcarCheckboxDoRelatorio) replica exatamente a requisição que — já confirmado no
+    // mesmo diagnóstico — baixa o CSV de verdade quando enviada por um clique real.
     function corpoFormulario(form) {
         const corpo = new URLSearchParams(new FormData(form));
         log('corpoFormulario — campos serializados:', Object.fromEntries(corpo.entries()));
@@ -624,6 +654,7 @@
     async function extrairAgora(form) {
         log('extrairAgora — formulário encontrado, solicitando os dados em segundo plano (sem clicar em "Gerar Relatório")');
         try {
+            selecionarFormatoCSV(form);
             marcarCheckboxDoRelatorio(form);
             const corpo = corpoFormulario(form);
             const texto = await coletarCSV(form.action, corpo);
@@ -681,6 +712,7 @@
         store.setItem(DIAG_ABA_KEY, String(Date.now()));
         log('[DIAG] DIAG_ABA_KEY marcado — a próxima aba/página que abrir vai logar o que recebeu');
 
+        selecionarFormatoCSV(form);
         marcarCheckboxDoRelatorio(form);
 
         const botao = form.querySelector('#editButton') || Array.from(form.querySelectorAll('a, input[type="submit"], button'))
