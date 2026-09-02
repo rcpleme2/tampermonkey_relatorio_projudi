@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.11
+// @version      24.12
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -140,8 +140,19 @@
         return null;
     }
 
-    function lerMapaAtivos() {
+    // Sobrescrita temporária de lerMapaAtivos(), setada só por gerarPDFConjunto quando o
+    // usuário filtrou atribuições no diálogo de checkboxes (escolherOpcoesPDFConjunto) —
+    // ver comentário grande lá. lerMapaAtivos() é usada em VÁRIOS lugares (a linha
+    // "Processos Ativos" da capa, contagemPorCompetencia/fraseCompetenciasComContagem
+    // usadas por quase todo resumo do Cartório) — sobrescrever aqui, na ÚNICA fonte,
+    // filtra todos eles de uma vez sem precisar passar um parâmetro extra por ~10 pontos
+    // de chamada diferentes.
+    let overrideMapaAtivos = null;
+    function lerMapaAtivosBruto() {
         try { return JSON.parse(store.getItem('projudi_estatisticas_ativos') || '{}'); } catch (e) { return {}; }
+    }
+    function lerMapaAtivos() {
+        return overrideMapaAtivos || lerMapaAtivosBruto();
     }
 
     // Grava/atualiza a contagem de processos ativos da atuação atual — acumulado entre
@@ -5090,6 +5101,14 @@
     // atribuições somadas (nunca filtrada) — só os itens internos se subdividem.
     function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
         opcoes = opcoes || {};
+        // Bug relatado pelo usuário: sem isso, lerMapaAtivos() (a linha "Processos
+        // Ativos" da capa e as contagens por competência dos demais resumos) ignorava a
+        // seleção do diálogo de checkboxes e sempre mostrava TODAS as atribuições já
+        // coletadas alguma vez — inclusive unidades desmarcadas e unidades de coletas
+        // antigas que nem apareciam mais no popup. Ver overrideMapaAtivos/lerMapaAtivos.
+        overrideMapaAtivos = opcoes.atribuicoesSelecionadas
+            ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
+            : null;
         const porAtribuicao = !!opcoes.porAtribuicao;
         // Instância Recursal fica de fora do split "Resumo Geral + 1 bloco por
         // atribuição" (pedido do usuário) — sempre um resumo único consolidado, com a
@@ -5186,6 +5205,10 @@
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
+        // overrideMapaAtivos (setado no topo desta função, ver comentário lá) já filtra
+        // esta chamada pelas atribuições escolhidas no diálogo de checkboxes — cobre não
+        // só a linha "Processos Ativos" abaixo, mas também contagemPorCompetencia/
+        // fraseCompetenciasComContagem usadas mais adiante pelos resumos do Cartório.
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
@@ -5735,6 +5758,7 @@
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
+        overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
         return doc;
     }
 
@@ -10240,6 +10264,13 @@
             )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
             let secoesFiltradas = secoes;
+            // atribuicoesSelecionadas vai para gerarPDFConjunto mesmo quando nada foi
+            // desmarcado (sem custo) — sem isso a linha "Processos Ativos" (lida à parte
+            // de lerMapaAtivos, não das seções filtradas por filtrarSecoesPorAtribuicoes)
+            // ignorava a escolha do usuário no diálogo de checkboxes e sempre mostrava
+            // TODAS as atribuições já coletadas alguma vez, inclusive as que nem
+            // apareciam mais no popup (bug relatado pelo usuário).
+            let atribuicoesSelecionadas = null;
             if (atuacoes.length > 1) {
                 // Pedido do usuário: além de "resumo geral" vs. "resumo geral + por
                 // atribuição", escolher com checkboxes QUAIS das atribuições coletadas
@@ -10252,13 +10283,14 @@
                     atuacoes,
                 );
                 porAtribuicao = escolha.porAtribuicao;
+                atribuicoesSelecionadas = escolha.atribuicoesSelecionadas;
                 // Só filtra de verdade quando o usuário desmarcou alguma — com todas
                 // marcadas (padrão), evita reprocessar à toa.
                 if (escolha.atribuicoesSelecionadas.size < atuacoes.length) {
                     secoesFiltradas = filtrarSecoesPorAtribuicoes(secoes, escolha.atribuicoesSelecionadas);
                 }
             }
-            gerarPDFConjunto(secoesFiltradas, somenteResumo, { porAtribuicao });
+            gerarPDFConjunto(secoesFiltradas, somenteResumo, { porAtribuicao, atribuicoesSelecionadas });
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
