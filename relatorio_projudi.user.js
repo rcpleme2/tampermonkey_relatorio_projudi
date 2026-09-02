@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.14
+// @version      24.15
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -125,21 +125,6 @@
     }
 
     // ── Estatísticas Gerais (processos ativos por atuação) ──────────────────────
-    // Lê "Processos Ativos > Eletrônicos: N" da página inicial. Só existe nessa página
-    // (fora dela retorna null, sem custo real — chamado sempre no bootstrap).
-    function lerProcessosAtivos() {
-        const labels = document.querySelectorAll('td.label label');
-        for (const label of labels) {
-            if (!/eletr[ôo]nicos\s*:/i.test(label.textContent)) continue;
-            const tr = label.closest('tr');
-            const tds = tr ? tr.querySelectorAll('td') : [];
-            const txt = tds[1] ? tds[1].textContent : '';
-            const m = /([\d.]+)/.exec(txt);
-            if (m) { const n = parseInt(m[1].replace(/\./g, ''), 10); if (!isNaN(n)) return n; }
-        }
-        return null;
-    }
-
     // Sobrescrita temporária de lerMapaAtivos(), setada só por gerarPDFConjunto quando o
     // usuário filtrou atribuições no diálogo de checkboxes (escolherOpcoesPDFConjunto) —
     // ver comentário grande lá. lerMapaAtivos() é usada em VÁRIOS lugares (a linha
@@ -153,22 +138,6 @@
     }
     function lerMapaAtivos() {
         return overrideMapaAtivos || lerMapaAtivosBruto();
-    }
-
-    // Grava/atualiza a contagem de processos ativos da atuação atual — acumulado entre
-    // rodadas da automação (uma por atuação), como os demais relatórios.
-    function gravarProcessosAtivosSeDisponivel() {
-        // Opção controlável pelo painel (ver CHAVE_INCLUIR_ATIVOS/injetarPainel) — default
-        // marcado (comportamento antigo: sempre coleta). Checar aqui, na COLETA, e não só
-        // na hora de montar a capa em gerarPDFConjunto, evita acumular dados obsoletos no
-        // mapa de atuações quando o usuário desmarcou a opção deliberadamente.
-        if (!incluirProcessosAtivos()) return;
-        const n = lerProcessosAtivos();
-        if (n == null) return;
-        const atuacao = lerAtuacao() || '(sem atuação)';
-        const mapa = lerMapaAtivos();
-        mapa[atuacao] = n;
-        store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
     }
 
     function norm(s) {
@@ -665,6 +634,75 @@
         },
         linha: (d) => [d.processo, d.classe, (d.dias == null ? '' : String(d.dias)), d.ultimoMovimento, d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados, somenteResumo),
+    };
+
+    // Relatório de Processos Ativos por Classe Processual (processo/movimentoForense.do,
+    // "Movimento Forense" — NÃO confundir com "Movimento Forense - Juiz",
+    // movimentoForenseJuiz.do, tela parecida mas outro relatório). Substitui a antiga
+    // leitura passiva de "Processos Ativos > Eletrônicos: N" da página inicial (ver
+    // lerMapaAtivos/CHAVE_INCLUIR_ATIVOS removida) — agora navega até a tela, preenche
+    // dataInicio/dataFim com a data de hoje (um "corte" no dia corrente, não um
+    // intervalo — mesmo dia nos dois campos) e pesquisa (ver
+    // preencherEPesquisarAtivosClasse). O total de "ativos" da unidade passa a ser a
+    // SOMA da coluna "Em andamento" de todas as classes processuais (ver
+    // CFG_ATIVOS_CLASSE.aoTerminarColeta, que grava em lerMapaAtivos() no mesmo formato
+    // de sempre — os ~10 pontos que dependem desse mapa continuam funcionando sem
+    // mudança).
+    //
+    // Tabela de resultado (result.html real): uma linha por classe processual, SEM
+    // paginação de verdade (o navegador de páginas vem comentado/vazio no HTML), mas
+    // usa criarColetor mesmo assim — o padrão genérico já lida com "só uma página, sem
+    // próxima" sem esforço extra. Colunas confirmadas (índices 0-7): [0] Classe
+    // Processual [1] Ações Novas Distribuídas [2] Em andamento [3] Suspensos
+    // [4] Deixaram Suspensão [5] Arquivados sem baixa [6] Arquivados com baixa
+    // [7] Desarquivados. Mantém TODAS as linhas, mesmo com "Em andamento"===0 — é dado
+    // de distribuição completo do acervo, não uma fila de pendências a esconder quando
+    // zerada (mostrarSeVazio: true, mesmo padrão de CFG_APREENSOES/
+    // CFG_OUTROS_CUMPRIMENTOS/CFG_CUMPRIMENTO_MEDIDAS).
+    const TITULO_ATIVOS_CLASSE = 'Processos Ativos por Classe Processual';
+    const CFG_ATIVOS_CLASSE = {
+        prefixo: 'projudi_ativosclasse_',
+        // Exige a combinação "Classe Processual" + "Em andamento" + "Ações Novas
+        // Distribuídas" no cabeçalho — a mesma tabela aparece (com cabeçalho parecido)
+        // em outras variações do relatório (ex. "Movimento Forense - Juiz"); a
+        // combinação das 3 evita colisão com essas outras telas.
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /em\s+andamento/i.test(cab) && /a[çc][õo]es\s+novas\s+distribu[íi]das/i.test(cab),
+        minTds: 8,
+        usaAtuacao: true,
+        mostrarSeVazio: true,
+        nomeArquivo: 'ativos_por_classe_projudi',
+        rotulos: { coletar: 'Extrair Ativos por Classe', coletarMais: 'Extrair mais (Ativos por Classe)', baixar: '⬇ Baixar Ativos por Classe' },
+        cabecalhos: ['Classe Processual', 'Ações Novas Distribuídas', 'Em andamento', 'Suspensos', 'Deixaram Suspensão', 'Arquivados sem baixa', 'Arquivados com baixa', 'Desarquivados'],
+        larguras: [{ wch: 50 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const numCel = (td) => { const n = parseInt(textoCelula(td), 10); return isNaN(n) ? 0 : n; };
+            return {
+                classe: textoCelula(tds[0]),
+                acoesNovas: numCel(tds[1]),
+                emAndamento: numCel(tds[2]),
+                suspensos: numCel(tds[3]),
+                deixaramSuspensao: numCel(tds[4]),
+                arquivadosSemBaixa: numCel(tds[5]),
+                arquivadosComBaixa: numCel(tds[6]),
+                desarquivados: numCel(tds[7]),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.classe, String(d.acoesNovas), String(d.emAndamento), String(d.suspensos), String(d.deixaramSuspensao), String(d.arquivadosSemBaixa), String(d.arquivadosComBaixa), String(d.desarquivados)],
+        pdf: {
+            titulo: TITULO_ATIVOS_CLASSE,
+            // "calc" próprio (soma de emAndamento por classe, não contagem de linhas) —
+            // secaoWordGenerica pula distribuições com calc() (ver comentário lá), então
+            // fica de fora do Word conjunto; o PDF usa a mesma função diretamente em
+            // montarResumoAtivosClasse, sem duplicar a lógica.
+            distribuicoes: [{ titulo: 'Ativos por Classe Processual', campo: 'classe', topN: 15, calc: (dados) => somarPorCampo(dados, 'classe', 'emAndamento', 15) }],
+        },
+        pdfCustom: (dados, somenteResumo) => gerarPDFAtivosClasse(dados, somenteResumo),
+        // Ao terminar a coleta desta unidade, calcula o total de ativos (soma de "Em
+        // andamento" de TODAS as classes desta atuação) e grava no mesmo mapa que
+        // lerMapaAtivos() já expõe — ver comentário grande na função abaixo.
+        aoTerminarColeta: () => gravarTotalAtivosClasseEAvancar(),
     };
 
     // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
@@ -2447,6 +2485,74 @@
         }, 1500);
     }
 
+    // Tela de filtros de "Movimento Forense" (processo/movimentoForense.do) — form +
+    // table.resultTable (com o resultado da pesquisa anterior/padrão do Projudi) juntos
+    // desde o primeiro carregamento, mesmo padrão de Suspensos com Prazo/Instância
+    // Recursal acima. "Por Juizado" (opcaoPorComarca=false) e a vara (codVara) já vêm
+    // preenchidos — não mexer; só dataInicio/dataFim precisam ser ajustados para hoje
+    // (ver preencherEPesquisarAtivosClasse).
+    function formularioAtivosClasse() {
+        const form = document.getElementById('movimentoForenseForm');
+        return form && form.querySelector('#dataInicio') && form.querySelector('#dataFim') ? form : null;
+    }
+
+    // Preenche dataInicio e dataFim com a data de HOJE (mesmo dia nos dois campos — um
+    // "corte" no dia corrente, não um intervalo, pedido do usuário) e clica em
+    // Pesquisar. Reaproveita preencherPeriodoAR/formatarDataBR (mesmo helper já usado
+    // por Audiências Realizadas para campos mask_date_br) e o mesmo padrão de
+    // clicar+aguardar+diagnosticar em 15s de preencherEPesquisarSuspensoPrazo/
+    // preencherEPesquisarInstanciaRecursal — botão aqui é #searchButton ("Pesquisar"),
+    // confirmado no HTML real da tela.
+    function preencherEPesquisarAtivosClasse() {
+        const form = formularioAtivosClasse();
+        if (!form) return;
+
+        const hojeBR = formatarDataBR(new Date());
+        preencherPeriodoAR(form, { dataInicio: hojeBR, dataFim: hojeBR });
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Ativos por Classe] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Ativos por Classe] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Ativos por Classe] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Ativos por Classe] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Chamado via CFG_ATIVOS_CLASSE.aoTerminarColeta ao final da coleta desta unidade —
+    // total de "ativos" = soma de "Em andamento" de TODAS as classes processuais
+    // coletadas NESTA atuação (não a contagem de linhas/classes, e não o acumulado de
+    // outras atuações já coletadas antes, já que CFG_ATIVOS_CLASSE.usaAtuacao acumula
+    // registros de várias atuações no mesmo array — precisa filtrar por d.atuacao antes
+    // de somar). Grava no MESMO mapa que lerMapaAtivos() já expõe
+    // ('projudi_estatisticas_ativos'), no formato {atuacao: total} — os ~10 pontos que
+    // dependem desse mapa (linha "Processos Ativos" da capa unificada, contagemPorCompetencia/
+    // fraseCompetenciasComContagem, filtro de atribuições do diálogo de checkboxes do PDF
+    // conjunto) continuam funcionando sem mudança.
+    async function gravarTotalAtivosClasseEAvancar() {
+        try {
+            const dados = await lerDadosDe(CFG_ATIVOS_CLASSE.prefixo);
+            const atuacao = lerAtuacao() || '(sem atuação)';
+            const total = dados
+                .filter(d => (d.atuacao || '(sem atuação)') === atuacao)
+                .reduce((s, d) => s + (d.emAndamento || 0), 0);
+            const mapa = lerMapaAtivos();
+            mapa[atuacao] = total;
+            store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
+            console.log(`[Projudi Ativos por Classe] total de ativos gravado para "${atuacao}": ${total}`);
+        } catch (e) {
+            console.error('[Projudi Ativos por Classe] erro ao calcular/gravar total de ativos', e);
+        }
+        avancarAutomacao(CFG_ATIVOS_CLASSE);
+    }
+
     // ── Outros Cumprimentos (Mesa do Magistrado) — mesaAnalista.do?actionType=
     // listaOutrosCumprimentos ───────────────────────────────────────────────────
     // Diferente de TODOS os demais relatórios: não é uma lista paginada de processos, é
@@ -3316,6 +3422,29 @@
                 arr = arr.slice(0, topN);
                 arr.push({ label: 'Outros', valor: resto });
             }
+        }
+        return arr;
+    }
+
+    // Variante de contarPorCampo que SOMA um campo numérico por chave, em vez de contar
+    // ocorrências — usada quando cada registro já é um agregado com uma contagem própria
+    // (ex.: CFG_ATIVOS_CLASSE — uma linha por classe processual, com "emAndamento" já
+    // somado pelo Projudi; contarPorCampo daria "1" pra cada classe, não o total de
+    // processos daquela classe). Mesma assinatura de topN/"Outros" de contarPorCampo,
+    // sem os parâmetros limpar/semOutros/minValor (não usados pelos chamadores atuais).
+    function somarPorCampo(dados, campo, campoValor, topN) {
+        const mapa = new Map();
+        dados.forEach(d => {
+            const k = (d[campo] || '').trim() || '(vazio)';
+            const v = d[campoValor];
+            if (typeof v !== 'number' || isNaN(v)) return;
+            mapa.set(k, (mapa.get(k) || 0) + v);
+        });
+        let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
+        if (arr.length > topN) {
+            const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
+            arr = arr.slice(0, topN);
+            arr.push({ label: 'Outros', valor: resto });
         }
         return arr;
     }
@@ -4759,6 +4888,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_ATIVOS_CLASSE) {
+            return {
+                rotulo: TITULO_ATIVOS_CLASSE,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAtivosClasse(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaAtivosClasse(doc, dados, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -5070,7 +5206,7 @@
     // `processo`; Designadas/Realizadas guardam um resumo agregado, ver
     // coletarAudienciasDesignadas/finalizarAudienciasRealizadas). Ficam de fora do
     // cruzamento de múltiplas pendências.
-    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS, CFG_CUMPRIMENTO_MEDIDAS];
+    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS, CFG_CUMPRIMENTO_MEDIDAS, CFG_ATIVOS_CLASSE];
 
     // Página "Processos com Múltiplas Pendências" — cruza o número do processo entre TODOS
     // os relatórios coletados nesta rodada (pedido da Corregedoria: hoje cada relatório é
@@ -5377,14 +5513,22 @@
         // Recursal) ──────────────────────────────────────────────────────────────────
         const itensEstatisticasGerais = [];
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
-        // não é mais um card à parte no topo da capa.
+        // não é mais um card à parte no topo da capa. cfgOriginal: CFG_ATIVOS_CLASSE
+        // (desde que o relatório de verdade tenha sido coletado — ver
+        // CFG_ATIVOS_CLASSE.aoTerminarColeta/gravarTotalAtivosClasseEAvancar, que grava
+        // mapaAtivos a partir da soma de "Em andamento") faz a linha virar link clicável
+        // pro resumo detalhado (PASSO 4 abaixo) — mesmo padrão de "Outros Cumprimentos"/
+        // "Cumprimento de Medidas" (ver itensOutros mais abaixo). Sem seção correspondente
+        // em outrasSecoes (ex.: mapa herdado de uma coleta antiga, sem CFG_ATIVOS_CLASSE
+        // coletado desta vez) o PASSO 4 simplesmente não encontra pgAlvo e a linha fica
+        // sem link, como qualquer outra linha "órfã" — sem quebrar nada.
         if (atuacoesAtivas.length) {
             const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
             const linhaAtivos = {
                 nome: 'Processos Ativos',
                 indicador: `${totalAtivos} ativo(s)`,
                 detalhamento: '—',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ATIVOS_CLASSE,
             };
             // Pedido do usuário: cada atribuição como um SUBITEM indentado (não mais um
             // texto corrido em "Detalhamento") — mapaAtivos já é por atribuição, então
@@ -7533,6 +7677,142 @@
         return paginaInicial;
     }
 
+    // ── PDF do relatório de Ativos por Classe Processual ────────────────────────────
+    // Cada registro já é um AGREGADO (uma linha por classe processual, com contadores
+    // prontos do Projudi) — não uma lista por processo/data. Mais parecido com Outros
+    // Cumprimentos/Cumprimento de Medidas do que com Paralisados/Remessas (que também
+    // são "lista simples", mas por PROCESSO individual) — por isso resumo e tabela são
+    // funções dedicadas (montarResumoAtivosClasse/montarTabelaAtivosClasse), não
+    // montarResumoGenerico/montarTabelaGenerico (que pressupõem dataCampo/processoCampo,
+    // sem sentido aqui). "Ativos" = soma de "Em andamento" (decisão de negócio do
+    // usuário — ver CFG_ATIVOS_CLASSE.aoTerminarColeta/gravarTotalAtivosClasseEAvancar).
+
+    function gerarPDFAtivosClasse(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoAtivosClasse(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaAtivosClasse(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_ATIVOS_CLASSE.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO (KPIs + distribuição por classe) do relatório de Ativos por
+    // Classe Processual. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
+    function montarResumoAtivosClasse(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = dados || [];
+        const totalAtivos = r.reduce((s, d) => s + (d.emAndamento || 0), 0);
+        const totalSuspensos = r.reduce((s, d) => s + (d.suspensos || 0), 0);
+        const totalAcoesNovas = r.reduce((s, d) => s + (d.acoesNovas || 0), 0);
+        const classeComMais = r.length ? [...r].sort((a, b) => b.emAndamento - a.emAndamento)[0] : null;
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_ATIVOS_CLASSE, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${r.length} classe(s) processual(is) — corte do dia`;
+        if (!rotuloInfo.semFrase) {
+            const frase = fraseCompetenciasComContagem(r);
+            if (frase) subtitulo += `  •  ${frase}`;
+        }
+        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        // Linha 1: 3 KPIs — total de ativos (Em andamento somado) / classes distintas /
+        // classe com mais ativos.
+        const kY = yLinha + 5;
+        const kW3 = (uw - 2 * gap) / 3;
+        desenharCard(doc, m,               kY, kW3, 28, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Classes Processuais', String(r.length), [], true, COR.aqua);
+        desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Classe com Mais Ativos',
+            classeComMais ? classeComMais.classe : '—',
+            classeComMais ? [`${classeComMais.emAndamento} ativo(s)`] : [], true, COR.ambar);
+
+        // Linha 2: suspensos / ações novas distribuídas (contexto do corte do dia).
+        const k2Y = kY + 28 + gap;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m,           k2Y, kW2, 24, 'Suspensos', String(totalSuspensos), [], true, COR.vermelho);
+        desenharCard(doc, m + kW2+gap, k2Y, kW2, 24, 'Ações Novas Distribuídas', String(totalAcoesNovas), [], true, COR.azul);
+
+        // Gráfico: distribuição do acervo (Em andamento) entre as classes — reaproveita
+        // o mesmo "calc" de cfg.pdf.distribuicoes (somarPorCampo), sem duplicar a lógica.
+        const chartY = k2Y + 24 + gap + 4;
+        const dist = CFG_ATIVOS_CLASSE.pdf.distribuicoes[0];
+        const itensBarras = dist.calc(r);
+        const disponivel = ph - m - chartY - 14;
+        desenharBarras(doc, m, chartY, uw, Math.max(40, disponivel), dist.titulo, itensBarras, undefined, COR.azul);
+
+        desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Tabela discriminada do relatório de Ativos por Classe Processual — uma linha por
+    // classe, ordenada da maior para a menor "Em andamento" (mesma leitura do gráfico).
+    function montarTabelaAtivosClasse(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = (dados || []).slice().sort((a, b) => b.emAndamento - a.emAndamento);
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_ATIVOS_CLASSE}`);
+
+        doc.autoTable({
+            columns: [
+                { header: 'Classe Processual', dataKey: 'classe' },
+                { header: 'Ações Novas', dataKey: 'acoesNovas' },
+                { header: 'Em Andamento', dataKey: 'emAndamento' },
+                { header: 'Suspensos', dataKey: 'suspensos' },
+                { header: 'Deixaram Suspensão', dataKey: 'deixaramSuspensao' },
+                { header: 'Arq. sem Baixa', dataKey: 'arquivadosSemBaixa' },
+                { header: 'Arq. com Baixa', dataKey: 'arquivadosComBaixa' },
+                { header: 'Desarquivados', dataKey: 'desarquivados' },
+            ],
+            body: ordenados.map(d => ({
+                classe: d.classe,
+                acoesNovas: String(d.acoesNovas),
+                emAndamento: String(d.emAndamento),
+                suspensos: String(d.suspensos),
+                deixaramSuspensao: String(d.deixaramSuspensao),
+                arquivadosSemBaixa: String(d.arquivadosSemBaixa),
+                arquivadosComBaixa: String(d.arquivadosComBaixa),
+                desarquivados: String(d.desarquivados),
+            })),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7, cellPadding: 1.5, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 7.5 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                classe: { cellWidth: 56 },
+                emAndamento: { fontStyle: 'bold', textColor: COR.tinta },
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     const TITULO_SUSPENSOS_PRAZO = 'Suspensos com Prazo Determinado';
 
     // Duração em dias (fim - início) de uma suspensão por prazo determinado. null se
@@ -7988,6 +8268,7 @@
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
+        else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
@@ -8940,6 +9221,31 @@
             }
         }
 
+        // Tela de filtros de "Movimento Forense"/Ativos por Classe Processual
+        // (processo/movimentoForense.do) — mesmo padrão de Suspensos com Prazo/Instância
+        // Recursal acima: decide pelo ESTADO da automação, não pela presença de
+        // resultados; botão de pesquisa é "Pesquisar" (#searchButton).
+        if (formularioAtivosClasse()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_ativosclasse') {
+                console.log('[Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_ativosclasse');
+                preencherEPesquisarAtivosClasse();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso que preenche dataInicio/
+            // dataFim com hoje e pesquisa.
+            if (estadoAtual !== 'coletando_ativosclasse' && mostrarBotoesIndividuais()) {
+                const bAtivosClasse = document.createElement('button');
+                bAtivosClasse.type = 'button';
+                bAtivosClasse.className = 'projudi-btn';
+                bAtivosClasse.title = 'Preenche dataInicio/dataFim com a data de hoje e pesquisa — não altera Por Juizado/Vara';
+                bAtivosClasse.textContent = 'Preencher e Pesquisar (Ativos por Classe)';
+                bAtivosClasse.onclick = () => preencherEPesquisarAtivosClasse();
+                buttonBar.appendChild(bAtivosClasse);
+            }
+        }
+
         // Descobre o relatório atual; se não houver tabela reconhecível, assume Retorno
         // (mas ainda respeita uma coleta de Retorno/Juntadas em andamento, retomada após
         // reload). CFG_CONCLUSOES não vive mais em conclusao.do — migrou para
@@ -9059,21 +9365,10 @@
     // nas páginas, apenas no popup").
     function mostrarBotoesIndividuais() { return false; }
 
-    // Checkbox "Processos Ativos" do painel (ver injetarPainel/gravarProcessosAtivosSeDisponivel
-    // /gerarPDFConjunto) — default MARCADO (chave ausente = true) para preservar o
-    // comportamento histórico (sempre incluído), já que este recurso é novo e não deve
-    // mudar nada pra quem nunca abriu essa opção.
-    const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
-    function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
-
     // Unidades/atuações em que o botão "Automatizar" já foi de fato clicado — usado só
     // pelo mostrador "Unidades coletadas" do painel (pedido do usuário: só entrar como
     // coletada depois de apertar Automatizar, não só por ter passado pela página
-    // inicial). Diferente de lerMapaAtivos() (Processos Ativos): esse mapa é gravado
-    // passivamente sempre que a página inicial carrega (ver
-    // gravarProcessosAtivosSeDisponivel), então uma unidade em que o usuário só deu uma
-    // olhada — sem nunca ter clicado em Automatizar — aparecia como "coletada" no
-    // mostrador, o que não é verdade.
+    // inicial).
     const CHAVE_UNIDADES_AUTOMATIZADAS = 'projudi_unidades_automatizadas';
     function lerUnidadesAutomatizadas() {
         // desembrulharArray (não JSON.parse único) — mesma proteção de lerFilaAutomacao
@@ -9453,18 +9748,11 @@
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const linhasCivel = GRUPOS_AUTOMACAO.map(g => {
             const itens = itensCivel.filter(r => r.dominio === g.chave);
-            // "Processos Ativos" (pedido do usuário) — mesmo item do painel da página
-            // inicial (ITEM_ATIVOS/CHAVE_INCLUIR_ATIVOS), não é um REPORTS_AUTOMACAO de
-            // verdade (não navega/coleta paginado — é lido passivamente na página
-            // inicial, ver gravarProcessosAtivosSeDisponivel), por isso checkbox e chave
-            // de persistência próprias, fora de .projudi-mu-rel-check.
-            const linhaAtivos = g.chave === 'cartorio'
-                ? `<label class="pa-item" title="Inclui a contagem de Processos Ativos (lida na página inicial) como uma linha do Cartório na capa do PDF conjunto">
-                        <input type="checkbox" id="projudi-mu-ativos" ${incluirProcessosAtivos() ? 'checked' : ''}> Processos Ativos
-                    </label>`
-                : '';
-            if (!itens.length && !linhaAtivos) return '';
-            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhaAtivos}${linhasComSubgruposMU(itens)}</div>`;
+            // "Processos Ativos" agora é um item comum de REPORTS_AUTOMACAO
+            // (CFG_ATIVOS_CLASSE/key 'ativosclasse') — entra em `itens` como qualquer
+            // outro, sem checkbox/chave de persistência própria.
+            if (!itens.length) return '';
+            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhasComSubgruposMU(itens)}</div>`;
         }).join('');
         const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
         const linhasCrime = itensCrime.length
@@ -9515,11 +9803,6 @@
             btn.title = recolhido ? 'Expandir' : 'Recolher';
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
-
-        const chkAtivos = painel.querySelector('#projudi-mu-ativos');
-        if (chkAtivos) chkAtivos.addEventListener('change', () => {
-            store.setItem(CHAVE_INCLUIR_ATIVOS, chkAtivos.checked ? '1' : '0');
-        });
 
         const contador = painel.querySelector('#projudi-mu-contador');
         function atualizarContador() {
@@ -9657,13 +9940,17 @@
     // Mandados) e "Audiências" (movida do Crime pro Cível-Geral — ver abaixo). A ORDEM no
     // array importa: linhasComSubgrupos() (ver injetarPainel) agrupa por adjacência, não
     // por nome — itens do mesmo "subgrupo" precisam ficar em sequência no array, senão o
-    // cabeçalho do subgrupo repete. "Processos Ativos" não é um item de REPORTS_AUTOMACAO
-    // de verdade (não navega/coleta nada — ver gravarProcessosAtivosSeDisponivel); entra
-    // na posição certa via um objeto avulso construído em injetarPainel (ver ITEM_ATIVOS).
+    // cabeçalho do subgrupo repete.
     const REPORTS_AUTOMACAO = [
-        // ── Estatísticas Gerais (Processos Ativos entra aqui via ITEM_ATIVOS, ver
-        // injetarPainel) — o link de Suspensos por Prazo Indeterminado abre a tabela de
-        // resultados direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
+        // ── Estatísticas Gerais — o link de Suspensos por Prazo Indeterminado abre a
+        // tabela de resultados direto (sem tela de filtros), igual Juntadas/Retorno/
+        // Conclusões.
+        // Ativos por Classe Processual — substitui a antiga leitura passiva "Processos
+        // Ativos" (ITEM_ATIVOS/CHAVE_INCLUIR_ATIVOS, removida): agora é um item de
+        // automação de verdade (navega, preenche as datas de hoje, pesquisa e coleta).
+        // Reaproveita o rótulo de checklist "Ativos" (rotuloChecklist) na mesma posição
+        // que o item especial ocupava, no topo de "Estatísticas Gerais".
+        { key: 'ativosclasse', cfg: CFG_ATIVOS_CLASSE, navAlvo: 'ativosclasse', rotulo: 'Ativos por Classe Processual', rotuloChecklist: 'Ativos', curto: 'Ativos', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Estatísticas Gerais' },
         // Suspensos com Prazo Determinado: passa por uma tela de filtros própria (por
         // isso precisaPreencher: true, mesmo padrão de Apreensões/Paralisados) antes de
@@ -9914,6 +10201,12 @@
         // (SEM "Busca"/"Instancia"/"Superior") — relatório diferente; a regex de URL abaixo
         // já é específica o bastante pra não confundir os dois.
         else if (alvo === 'instanciarecursal') link = acharLinkMenu(/processoBuscaInstanciaSuperior\.do/i, /^remetidos$/i);
+        // "Movimento Forense" — NÃO "Movimento Forense - Juiz" (href
+        // movimentoForenseJuiz.do, relatório diferente). A regex de URL já não casa com
+        // esse outro link (".do" precisa vir logo após "movimentoForense", sem "Juiz" no
+        // meio), e o texto exato do link ("Movimento Forense", sem mais nada) reforça a
+        // distinção.
+        else if (alvo === 'ativosclasse') link = acharLinkMenu(/processo\/movimentoForense\.do/i, /^movimento\s+forense$/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
@@ -10844,9 +11137,7 @@
 
         // Unidades (atribuições/atuações) onde o botão "Automatizar" já foi de fato
         // clicado — pedido do usuário: entrar na unidade sozinho (sem clicar em
-        // Automatizar) não deve marcá-la como "coletada" aqui, mesmo que a página inicial
-        // já tenha gravado o contador de Processos Ativos passivamente (ver
-        // gravarProcessosAtivosSeDisponivel/lerMapaAtivos, um dado DIFERENTE deste).
+        // Automatizar) não deve marcá-la como "coletada" aqui.
         const elUnidades = painel.querySelector('.pa-unidades');
         if (elUnidades) {
             const unidades = lerUnidadesAutomatizadas();
@@ -10893,7 +11184,7 @@
         }
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        painel.querySelectorAll('.pa-check, .pa-check-extra, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
             el.disabled = emCurso;
         });
 
@@ -10942,25 +11233,13 @@
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
 
-        // "Processos Ativos" não é um item de REPORTS_AUTOMACAO de verdade (não navega/
-        // coleta paginado, é lido passivamente na página inicial — ver
-        // gravarProcessosAtivosSeDisponivel) — é um objeto avulso, só pra entrar na
-        // posição certa (subgrupo "Estatísticas Gerais", antes de Suspensos) junto dos
-        // itens de verdade em linhasComSubgrupos. "extra: true" faz linhaChecklistItem()
-        // renderizar .pa-check-extra em vez de .pa-check (não entra na fila de automação
-        // de #pa-iniciar, que filtra só .pa-check:checked), com id/data-key fixos que o
-        // resto do código já espera (ver #pa-incluir-ativos/CHAVE_INCLUIR_ATIVOS abaixo).
-        const ITEM_ATIVOS = { key: 'processosativos', rotuloChecklist: 'Ativos', subgrupo: 'Estatísticas Gerais', extra: true };
+        // "Processos Ativos" agora é um item comum de REPORTS_AUTOMACAO
+        // (CFG_ATIVOS_CLASSE/key 'ativosclasse', subgrupo "Estatísticas Gerais") — entra
+        // no checklist como qualquer outro item (.pa-check), sem tratamento especial.
 
         // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r) {
-            if (r.extra) {
-                return `
-                    <label class="pa-item pa-item-sub" title="Inclui a contagem de Processos Ativos (lida na página inicial do Projudi) como uma linha do Cartório na capa do PDF conjunto">
-                        <input type="checkbox" class="pa-check-extra" id="pa-incluir-ativos" data-key="processosativos" ${incluirProcessosAtivos() ? 'checked' : ''}> ${r.rotuloChecklist}
-                    </label>`;
-            }
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
@@ -10992,10 +11271,6 @@
         }
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
             const itensGrupo = itensCivel.filter(r => r.dominio === g.chave);
-            // ITEM_ATIVOS entra no início do Cartório, mesmo subgrupo "Estatísticas
-            // Gerais" de Suspensos (que já vem logo em seguida) — linhasComSubgrupos()
-            // trata os dois como um bloco só, sem duplicar o cabeçalho do subgrupo.
-            if (g.chave === 'cartorio') itensGrupo.unshift(ITEM_ATIVOS);
             const itens = linhasComSubgrupos(itensGrupo);
             return `
                 <div class="pa-group">
@@ -11106,12 +11381,6 @@
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
-        const chkAtivos = painel.querySelector('#pa-incluir-ativos');
-        if (chkAtivos) {
-            chkAtivos.onchange = (ev) => {
-                store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
-            };
-        }
         // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
         // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
@@ -11124,14 +11393,8 @@
         }
         painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
 
-        // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
-        // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
-        // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
-        // marcar/desmarcar tudo precisa sincronizar o localStorage manualmente, senão o
-        // checkbox mostra um estado que não é o que fica salvo (some ao recarregar).
         function marcarDesmarcarTudo(valor) {
-            painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
-            if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+            painel.querySelectorAll('.pa-check').forEach(c => { c.checked = valor; });
             salvarSelecoesPainel();
         }
         painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
@@ -11516,7 +11779,6 @@
         // sempre sem nenhum jeito de desligá-la (o gesto que a ativava/desativava também
         // não existe mais) — remove aqui, todo carregamento, por segurança.
         chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
-        chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
