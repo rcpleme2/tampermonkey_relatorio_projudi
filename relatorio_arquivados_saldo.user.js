@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      1.0
-// @description  Na tela do Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, extrai o CSV do relatório e gera um PDF com resumo (total de processos/saldo total/saldo médio) e a tabela discriminada.
+// @version      2.0
+// @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, seleciona CSV, clica em Gerar Relatório e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_arquivados_saldo.user.js
@@ -10,32 +10,36 @@
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @connect      projudi2.tjpr.jus.br
 // ==/UserScript==
 
 // Userscript INDEPENDENTE do relatorio_projudi.user.js principal (pedido do usuário:
 // desenvolver este relatório desacoplado, sem entrar no pipeline de automação/capa
-// unificada do script grande). Cobre só a tela do Relatório Dinâmico "Processos
-// Arquivados com saldo (depósito eletrônico)" (Relatórios/Estatísticas > Relatórios
-// Dinâmicos > o link desse relatório — navegação manual, como qualquer outro relatório
-// dinâmico do Projudi): ao chegar nessa tela, injeta um botão que extrai o CSV e gera o
-// PDF, sem precisar clicar em "Gerar Relatório" de verdade.
+// unificada do script grande, e SEM injetar nenhum botão nas telas do Projudi).
 //
-// POR QUE NÃO CLICAR NO BOTÃO NATIVO "GERAR RELATÓRIO": o formulário tem
-// target="relatorio" e a tela não tem nenhum <iframe name="relatorio"> — clicar de
-// verdade abriria uma aba/janela NOVA pra exibir/baixar o CSV. Como esse clique
-// aconteceria via automação (sem gesto real do usuário), o navegador tende a bloquear
-// essa nova aba/janela como pop-up — e mesmo quando não bloqueia, não há como o
-// Tampermonkey ler de volta um arquivo baixado nativamente. A alternativa usada aqui é
-// pedir os MESMOS dados do formulário (tamanhoFonte/formato padrão da tela,
-// tipoExportacao forçado pra CSV) via GM_xmlhttpRequest direto pra form.action, na MESMA
-// aba, e ler a resposta como texto.
+// Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
+// com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
+// "Relatórios/Estatísticas" > "Relatórios Dinâmicos" > o link do relatório. Ao chegar no
+// formulário do relatório, o script marca o rádio "Arquivo CSV" e clica de verdade em
+// "Gerar Relatório" (pedido do usuário — mesmo fluxo que um clique manual). Como esse
+// clique abre uma aba/janela nova (target="relatorio", sem <iframe> com esse nome na
+// tela — o navegador PODE bloquear como pop-up, já que não é mais um gesto direto do
+// usuário depois de duas navegações de página), o script TAMBÉM pede os mesmos dados via
+// GM_xmlhttpRequest em paralelo, na mesma aba — é essa segunda via, mais confiável, que
+// alimenta o PDF; o clique real serve para o fluxo visual pedido e como registro nativo
+// (se a aba abrir).
 (function () {
     'use strict';
 
+    const store = window.localStorage;
+    const PREFIXO = 'projudi_arqsaldo_';
+    const ATIVO_KEY = PREFIXO + 'ativo';
+    const TENTATIVAS_KEY = PREFIXO + 'tentativas';
+    const MAX_TENTATIVAS = 20; // ~20 cargas de página / tentativas dentro da página — teto de segurança
+
     // ── Paleta e helpers visuais (mesmo estilo do relatorio_projudi.user.js principal,
-    // pra manter a identidade visual do PDF — ver COR/desenharCard/tituloSecao/
-    // desenharRodape lá) ─────────────────────────────────────────────────────────────
+    // pra manter a identidade visual do PDF) ────────────────────────────────────────
     const COR = {
         tinta:    [26, 26, 26],
         tintaSec: [82, 81, 78],
@@ -140,19 +144,85 @@
         });
     }
 
-    // ── Detecção da tela e coleta via GM_xmlhttpRequest ─────────────────────────────
-    // GM_xmlhttpRequest (em vez de fetch()) evita depender de como o sandbox do
-    // Tampermonkey expõe fetch/cookies nesta instalação — é a forma documentada e mais
-    // robusta de fazer uma requisição autenticada (mesma sessão) a partir de um
-    // userscript.
+    // ── Navegação por menu — MESMA lógica de todosDocumentosAcessiveis/acharLinkMenu do
+    // relatorio_projudi.user.js principal (busca o link em toda a árvore de frames
+    // acessível, parando um passo antes de cruzar de origem: o frameset mais externo do
+    // Projudi roda em projudi.tjpr.jus.br — SEM o "2" —, enquanto todo o conteúdo,
+    // inclusive o menu, fica em frames projudi2.tjpr.jus.br) ─────────────────────────
+    function maiorAncestralAcessivel() {
+        let w = window;
+        for (let i = 0; i < 10; i++) {
+            let pai;
+            try { pai = w.parent; } catch (e) { break; }
+            if (!pai || pai === w) break;
+            try { void pai.document; } catch (e) { break; }
+            w = pai;
+        }
+        return w;
+    }
+
+    function todosDocumentosAcessiveis() {
+        const vistos = new Set();
+        const docs = [];
+        function visitar(win) {
+            let doc;
+            try { doc = win.document; } catch (e) { return; }
+            if (!doc || vistos.has(doc)) return;
+            vistos.add(doc);
+            docs.push(doc);
+            let frames;
+            try { frames = win.frames; } catch (e) { return; }
+            if (!frames) return;
+            for (let i = 0; i < frames.length; i++) {
+                try { visitar(frames[i]); } catch (e) {}
+            }
+        }
+        visitar(maiorAncestralAcessivel());
+        if (!docs.length) docs.push(document);
+        return docs;
+    }
+
+    function acharLinkMenu(urlRe, textoRe) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (urlRe && !urlRe.test(a.href)) continue;
+                if (textoRe && !textoRe.test((a.textContent || '').trim())) continue;
+                return a;
+            }
+        }
+        return null;
+    }
+
+    // Acha o link do relatório na LISTAGEM de Relatórios Dinâmicos — a URL é a mesma
+    // base de administracao/relatorio.do usada por dezenas de outros relatórios
+    // dinâmicos nessa listagem, por isso a distinção é só pelo TEXTO do link.
+    function acharLinkArquivadosSaldoNaListagem() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (!/administracao\/relatorio\.do/i.test(a.href)) continue;
+                if (/processos\s+arquivados\s+com\s+saldo/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // Reconhece o FORMULÁRIO do relatório pelo conteúdo — o rótulo "Nome:" da tabela de
+    // configuração do relatório dinâmico bate com o nome exato deste relatório no
+    // Projudi. Busca em todos os frames acessíveis (o formulário pode estar num frame
+    // de conteúdo diferente do frame onde o script está rodando neste ciclo).
     function formularioArquivadosSaldo() {
-        const form = document.getElementById('relatorioForm');
-        if (!form) return null;
-        const labels = form.querySelectorAll('td.label');
-        for (const label of labels) {
-            if (!/^nome:?$/i.test(label.textContent.trim())) continue;
-            const valorTd = label.nextElementSibling;
-            if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) return form;
+        const docs = todosDocumentosAcessiveis();
+        for (const doc of docs) {
+            const form = doc.getElementById && doc.getElementById('relatorioForm');
+            if (!form) continue;
+            const labels = form.querySelectorAll('td.label');
+            for (const label of labels) {
+                if (!/^nome:?$/i.test(label.textContent.trim())) continue;
+                const valorTd = label.nextElementSibling;
+                if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) return form;
+            }
         }
         return null;
     }
@@ -322,55 +392,109 @@
         doc.save(`processos_arquivados_saldo_projudi_${dataArquivo}.pdf`);
     }
 
-    // ── Botão na tela do relatório ───────────────────────────────────────────────
-    function injetarBotao() {
-        const form = formularioArquivadosSaldo();
-        if (!form) return;
-        const buttonBar = document.querySelector('table.buttonBar td.buttons');
-        if (!buttonBar || document.getElementById('btn-arqsaldo-extrair')) return;
+    // ── Passo final: marca CSV, clica em Gerar Relatório de verdade (pedido do
+    // usuário) e, em paralelo, pede os mesmos dados via GM_xmlhttpRequest — é essa
+    // segunda via que alimenta o PDF (ver comentário no topo do arquivo sobre por que
+    // não dá pra confiar só no clique nativo). ──────────────────────────────────────
+    async function extrairAgora(form) {
+        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — marcando CSV e clicando em Gerar Relatório');
+        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCSV && !radioCSV.checked) radioCSV.click();
+        // getElementById no MESMO documento do form (não o "document" global do frame
+        // onde este ciclo de passo() rodou — o form pode estar num frame diferente).
+        const botaoGerar = form.ownerDocument.getElementById('editButton');
+        if (botaoGerar) {
+            try { botaoGerar.click(); } catch (e) { console.warn('[Projudi Arquivados c/ Saldo] clique em Gerar Relatório falhou (seguindo pela via de dados mesmo assim)', e); }
+        } else {
+            console.warn('[Projudi Arquivados c/ Saldo] botão #editButton não encontrado — só a via de dados (GM_xmlhttpRequest) será usada');
+        }
 
-        const status = document.createElement('span');
-        status.id = 'arqsaldo-status';
-        status.style.marginRight = '10px';
-        status.style.fontSize = '12px';
-        status.style.color = '#525252';
-
-        const botao = document.createElement('input');
-        botao.type = 'button';
-        botao.id = 'btn-arqsaldo-extrair';
-        botao.className = 'button';
-        botao.value = 'Extrair CSV e Gerar PDF';
-        botao.style.marginLeft = '8px';
-        botao.onclick = async () => {
-            botao.disabled = true;
-            status.textContent = 'Solicitando o relatório em CSV...';
-            // Marca visualmente o rádio CSV (não é o que dispara a extração — isso é
-            // feito via GM_xmlhttpRequest logo abaixo — mas deixa a tela consistente com
-            // o que o usuário pediu: "clicar em Arquivo CSV").
-            const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
-            if (radioCSV && !radioCSV.checked) radioCSV.click();
-            try {
-                const texto = await coletarCSV(form.action);
-                const dados = parseCSV(texto);
-                status.textContent = `${dados.length} processo(s) — gerando PDF...`;
-                gerarPDF(dados);
-                status.textContent = `✓ ${dados.length} processo(s) extraído(s). PDF baixado.`;
-            } catch (err) {
-                console.error('[Projudi Arquivados c/ Saldo]', err);
-                status.textContent = `Erro: ${err.message}`;
-                alert(`Não foi possível extrair o relatório:\n\n${err.message}`);
-            } finally {
-                botao.disabled = false;
-            }
-        };
-
-        buttonBar.insertBefore(status, buttonBar.firstChild);
-        buttonBar.appendChild(botao);
+        try {
+            const texto = await coletarCSV(form.action);
+            const dados = parseCSV(texto);
+            console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — gerando PDF`);
+            gerarPDF(dados);
+            store.removeItem(ATIVO_KEY);
+            store.removeItem(TENTATIVAS_KEY);
+        } catch (err) {
+            console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
+            store.removeItem(ATIVO_KEY);
+            store.removeItem(TENTATIVAS_KEY);
+            alert(`Não foi possível gerar o PDF de "Processos Arquivados com Saldo":\n\n${err.message}\n\nRode de novo pelo menu do Tampermonkey.`);
+        }
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', injetarBotao);
-    } else {
-        injetarBotao();
+    // ── Estado da extração (persistido em localStorage — sobrevive à navegação entre
+    // páginas, como o resto do site) — ver comentário no topo do arquivo. Sem sub-fases
+    // explícitas: a cada carregamento de página, passo() olha o que TEM na tela agora
+    // (formulário > link da listagem > link do menu) e age de acordo, na ordem mais
+    // específica primeiro — mais simples e com menos chance de ficar "preso" numa fase
+    // errada do que um estado com nomes de fase.
+    function passo(tentativa) {
+        tentativa = tentativa || 0;
+        if (store.getItem(ATIVO_KEY) !== '1') return;
+
+        const form = formularioArquivadosSaldo();
+        if (form) { extrairAgora(form); return; }
+
+        const linkListagem = acharLinkArquivadosSaldoNaListagem();
+        if (linkListagem) {
+            console.log('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
+            store.setItem(TENTATIVAS_KEY, '0');
+            linkListagem.click();
+            return;
+        }
+
+        const linkMenu = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
+        if (linkMenu) {
+            console.log('[Projudi Arquivados c/ Saldo] menu "Relatórios/Estatísticas" — clicando em "Relatórios Dinâmicos"');
+            store.setItem(TENTATIVAS_KEY, '0');
+            linkMenu.click();
+            return;
+        }
+
+        const total = tentativa + (parseInt(store.getItem(TENTATIVAS_KEY) || '0', 10));
+        if (total >= MAX_TENTATIVAS) {
+            console.warn('[Projudi Arquivados c/ Saldo] não achei nem o formulário, nem a listagem, nem o menu depois de várias tentativas — desistindo.');
+            store.removeItem(ATIVO_KEY);
+            store.removeItem(TENTATIVAS_KEY);
+            alert('Não consegui chegar até a tela de "Processos Arquivados com Saldo" automaticamente.\n\nNavegue manualmente (Relatórios/Estatísticas > Relatórios Dinâmicos) e rode o menu de novo já na tela do relatório.');
+            return;
+        }
+        // Ainda nesta carga de página: tenta mais algumas vezes (conteúdo pode estar
+        // carregando) antes de esperar a PRÓXIMA carga de página cuidar disso.
+        if (tentativa < 6) {
+            setTimeout(() => passo(tentativa + 1), 400);
+        } else {
+            store.setItem(TENTATIVAS_KEY, String(total));
+        }
+    }
+
+    function iniciar() {
+        store.setItem(ATIVO_KEY, '1');
+        store.setItem(TENTATIVAS_KEY, '0');
+        passo(0);
+    }
+
+    function cancelar() {
+        store.removeItem(ATIVO_KEY);
+        store.removeItem(TENTATIVAS_KEY);
+        console.log('[Projudi Arquivados c/ Saldo] extração cancelada pelo usuário');
+    }
+
+    // Registra o menu só no frame mais externo ACESSÍVEL (ver maiorAncestralAcessivel) —
+    // o Projudi roda o script em várias frames simultâneas (sem @noframes); registrar em
+    // todas duplicaria a entrada no menu do Tampermonkey uma vez por frame.
+    if (window === maiorAncestralAcessivel() && typeof GM_registerMenuCommand === 'function') {
+        GM_registerMenuCommand('▶ Extrair Processos Arquivados com Saldo', iniciar);
+        GM_registerMenuCommand('✖ Cancelar extração em andamento', cancelar);
+    }
+
+    if (store.getItem(ATIVO_KEY) === '1') {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => passo(0));
+        } else {
+            passo(0);
+        }
     }
 })();
