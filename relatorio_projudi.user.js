@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.10
+// @version      24.11
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9995,7 +9995,18 @@
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
-        if (agora - lock < 4000) return; // já houve tentativa recente em algum frame
+        // Pedido do usuário: troca de unidade demorando demais mesmo com a árvore já
+        // carregada na tela. Causa raiz: este lock (4000ms) era MAIOR que o próprio
+        // intervalo de poll (setInterval de 2000ms no bootstrap), então TODA tentativa
+        // par era descartada sem fazer nada — cadência real acabava em ~4s por passo, não
+        // ~2s — e também engolia os "empurrões" rápidos (setTimeout(passoAutomacao, 300/
+        // 900) logo após avancarAutomacao/iniciarAutomacao), que quase sempre caíam
+        // dentro da janela de 4s do lock recém-setado e nunca chegavam a rodar,
+        // obrigando a esperar o próximo tick do setInterval mesmo. 1200ms (abaixo do
+        // intervalo de 2000ms) deixa CADA tick do setInterval fazer progresso de verdade
+        // e permite os empurrões rápidos funcionarem, mantendo só o suficiente pra
+        // deduplicar corridas entre frames que leem o lock quase ao mesmo tempo.
+        if (agora - lock < 1200) return; // já houve tentativa recente em algum frame
 
         // Modo "várias unidades" (ver injetarSeletorUnidades/iniciarAutomacaoMultiUnidade):
         // em vez de ir direto pra 'concluido' quando a fila de relatórios termina, troca
