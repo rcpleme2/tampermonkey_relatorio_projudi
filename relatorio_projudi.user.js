@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      23.2
-// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
+// @version      23.3
+// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
@@ -2689,6 +2689,206 @@
         });
     }
 
+    // ── Processos Arquivados com Saldo (depósito eletrônico) — administracao/
+    // relatorio.do (um dos "Relatórios Dinâmicos") ──────────────────────────────
+    // Mais um relatório que foge do padrão genérico, mas por um motivo diferente de
+    // Outros Cumprimentos: aqui os dados SÃO um registro por processo (encaixariam em
+    // montarResumoGenerico/montarTabelaGenerico), mas a ORIGEM dos dados não é uma
+    // table.resultTable paginada — é um arquivo CSV gerado sob demanda pelo próprio
+    // Projudi (tela "Relatórios Dinâmicos" > "Processos Arquivados com saldo (depósito
+    // eletrônico)"), sem paginação nem conceito de atuação/prioridade/dias-em-aberto que
+    // o genérico pressupõe. Por isso: coleta e PDF dedicados (mesmo espírito de
+    // CFG_OUTROS_CUMPRIMENTOS), mas salvos no MESMO formato de armazenamento (uma única
+    // "página", ver lerDadosDe) para o resto do pipeline continuar funcionando.
+    //
+    // NAVEGAÇÃO (2 saltos, nenhum dos dois com resultado paginado):
+    //  1. Menu "Relatórios/Estatísticas" > "Relatórios Dinâmicos" (navAlvo, ver
+    //     navegarMenu) — leva a uma LISTAGEM com várias dezenas de relatórios dinâmicos.
+    //  2. Nessa listagem, o link de texto "Processos Arquivados com saldo (depósito
+    //     eletrônico)" — leva ao FORMULÁRIO do relatório (tamanhoFonte/formato/
+    //     tipoExportacao, ver relatorioForm).
+    // precisaPreencher:true cobre os dois saltos: a automação fica em
+    // "preenchendo_arquivadossaldo" até tratarPaginaArquivadosSaldo() achar o formulário.
+    //
+    // COLETA: em vez de marcar o rádio CSV e clicar em "Gerar Relatório" (que abre uma
+    // nova aba/janela — a tela não tem iframe "relatorio" — disparando o download nativo
+    // do navegador, que o Tampermonkey não consegue ler de volta), o script faz um
+    // fetch() com os MESMOS campos do formulário direto para form.action e lê a resposta
+    // como texto — sem nunca passar pelo diálogo de download nativo. Aprovado com o
+    // usuário durante o protótipo (ver histórico da conversa/commit).
+    const TITULO_ARQUIVADOS_SALDO = 'Processos Arquivados com Saldo (Depósito Eletrônico)';
+
+    const CFG_ARQUIVADOS_SALDO = {
+        prefixo: 'projudi_arquivadossaldo_',
+        // "Zero processos arquivados com saldo pendente" é uma informação válida (mesmo
+        // padrão de CFG_OUTROS_CUMPRIMENTOS/CFG_SUSPENSOS) — mostra a linha mesmo vazia.
+        mostrarSeVazio: true,
+        // Nunca é uma table.resultTable — detecção própria (ver formularioArquivadosSaldo/
+        // tratarPaginaArquivadosSaldo), fora do fluxo de detectarConfig/cab.
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'processos_arquivados_saldo_projudi',
+        rotulos: { coletar: 'Extrair Processos Arquivados com Saldo', baixar: '⬇ Baixar Processos Arquivados com Saldo' },
+        pdfCustom: (dados) => gerarPDFArquivadosSaldo(dados),
+        // Diferente de Outros Cumprimentos, os dados AQUI são planos (um processo por
+        // linha) — cabecalhos/larguras/linha habilitam esta seção também na exportação
+        // Excel CONJUNTA (gerarEbaixarExcelConjunto já pula cfgs sem esses 3 campos, ver
+        // seu comentário). Saldo fica como NÚMERO (não texto formatado), pra somar direto
+        // no Excel.
+        cabecalhos: ['Processo', 'Dt Arquivamento', 'Conta Judicial', 'Dt Última Atualização CEF', 'Saldo'],
+        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 14 }],
+        linha: (d) => [d.processo, d.dtArquivamento, d.contaJudicial, d.dtAtualizacaoCEF, d.saldo],
+    };
+
+    // Máscara CNJ (NNNNNNN-DD.AAAA.J.TR.OOOO) a partir dos 20 dígitos corridos que o CSV
+    // traz — o resto do relatório (capa unificada, cruzamento de múltiplas pendências)
+    // continua guardando o número CRU em d.processo; a máscara é só de exibição.
+    function mascararProcessoArquivadosSaldo(digitos) {
+        const d = String(digitos || '').replace(/\D/g, '');
+        if (d.length !== 20) return digitos;
+        return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16, 20)}`;
+    }
+
+    // "R$          1.446,21" → 1446.21. Sempre pt-BR (ponto de milhar, vírgula decimal) —
+    // mesmo formato em todo o CSV deste relatório, independente do tamanho do valor.
+    function parseSaldoBRArquivadosSaldo(str) {
+        const limpo = String(str || '').replace(/[^\d,.-]/g, '').trim();
+        if (!limpo) return 0;
+        return parseFloat(limpo.replace(/\./g, '').replace(',', '.')) || 0;
+    }
+
+    function fmtBRLArquivadosSaldo(v) {
+        return (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    }
+
+    // Todos os campos vêm entre aspas duplas, separados por ";" — sem aspas escapadas
+    // neste relatório (números de processo, datas e valores não contêm ';' nem '"').
+    function parseLinhaCSVArquivadosSaldo(linha) {
+        return linha.split(';').map(c => c.trim().replace(/^"|"$/g, ''));
+    }
+
+    // texto já vem decodificado (ver coletarArquivadosSaldoViaCSV — windows-1252, mesmo
+    // encoding do resto do Projudi). Colunas fixas do CSV: Processo; Dt Arquivamento;
+    // Conta Judicial; Dt Última Atualização CEF; Saldo.
+    function parseCSVArquivadosSaldo(texto) {
+        const linhas = String(texto || '').split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim().length);
+        const [, ...corpo] = linhas; // descarta a linha de cabeçalho
+        return corpo.map(linha => {
+            const [processoCru, dtArquivamento, contaJudicial, dtAtualizacaoCEF, saldoStr] = parseLinhaCSVArquivadosSaldo(linha);
+            // Máscara CNJ aplicada JÁ NA COLETA (não só na exibição): os demais
+            // relatórios guardam d.processo com o texto exibido em tela pelo Projudi
+            // (já mascarado, ver extrai() genérico — "em.textContent.trim()"), e a página
+            // "Processos com Múltiplas Pendências" cruza processos por igualdade exata
+            // desse campo entre relatórios — 20 dígitos crus aqui nunca bateriam com o
+            // mesmo processo mascarado vindo de outro relatório.
+            const processo = mascararProcessoArquivadosSaldo(processoCru);
+            return {
+                processo, dtArquivamento, contaJudicial, dtAtualizacaoCEF, saldoStr,
+                saldo: parseSaldoBRArquivadosSaldo(saldoStr),
+            };
+        });
+    }
+
+    // Reconhece o FORMULÁRIO do relatório (2º salto da navegação) pelo conteúdo — o
+    // rótulo "Nome:" da tabela de configuração do relatório dinâmico bate com o nome
+    // exato deste relatório no Projudi. Retorna o <form> (para form.action) ou null.
+    function formularioArquivadosSaldo() {
+        const form = document.getElementById('relatorioForm');
+        if (!form) return null;
+        const labels = form.querySelectorAll('td.label');
+        for (const label of labels) {
+            if (!/^nome:?$/i.test(label.textContent.trim())) continue;
+            const valorTd = label.nextElementSibling;
+            if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) return form;
+        }
+        return null;
+    }
+
+    // Acha o link do relatório na LISTAGEM de Relatórios Dinâmicos (1º salto já feito,
+    // ainda não chegamos no formulário) — a URL é a mesma base de administracao/
+    // relatorio.do usada por dezenas de outros relatórios dinâmicos nessa listagem, por
+    // isso a distinção é só pelo TEXTO do link.
+    function acharLinkArquivadosSaldoNaListagem() {
+        for (const a of document.querySelectorAll('a[href]')) {
+            if (!/administracao\/relatorio\.do/i.test(a.href)) continue;
+            if (/processos\s+arquivados\s+com\s+saldo/i.test((a.textContent || '').trim())) return a;
+        }
+        return null;
+    }
+
+    // fetch() com os mesmos campos do formulário (tamanhoFonte/formato padrão da tela,
+    // tipoExportacao forçado para CSV) direto para form.action — ver comentário no topo
+    // desta seção sobre por que não clicamos no botão nativo "Gerar Relatório".
+    async function coletarArquivadosSaldoViaCSV(form) {
+        console.log('[Projudi Arquivados c/ Saldo] solicitando CSV via fetch (sem download nativo do navegador)');
+        const body = new URLSearchParams();
+        body.set('tamanhoFonte', '10');
+        body.set('formato', 'R');
+        body.set('tipoExportacao', 'CSV');
+        try {
+            const resp = await fetch(form.action, { method: 'POST', body, credentials: 'same-origin' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const buf = await resp.arrayBuffer();
+            const texto = new TextDecoder('windows-1252').decode(buf);
+            // Sanidade: se a sessão expirou ou a tela mudou, a resposta pode ser uma
+            // página de erro/login em vez do CSV — evita gravar lixo como se fossem dados.
+            if (!/^"?Processo"?\s*;/i.test(texto.trim())) {
+                throw new Error('resposta não parece o CSV esperado (cabeçalho "Processo;..." ausente) — sessão expirada ou tela mudou?');
+            }
+            const dados = parseCSVArquivadosSaldo(texto);
+            console.log(`[Projudi Arquivados c/ Saldo] CSV interceptado — ${dados.length} processo(s)`);
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', JSON.stringify(dados));
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'num_paginas', '1');
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'coletado', '1');
+            avancarAutomacao(CFG_ARQUIVADOS_SALDO);
+        } catch (e) {
+            console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar o CSV — automação segue travada em "coletando_arquivadossaldo" (use "Pular", se necessário)', e);
+        }
+    }
+
+    // Conduz os dois saltos restantes da navegação (ver comentário no topo da seção) a
+    // cada carregamento de página enquanto a automação estiver esperando este relatório —
+    // chamado por injetarBotoes (ver estadoAutoNoInicio === 'preenchendo_arquivadossaldo').
+    // tentativa/teto de ~5s: mesma cautela defensiva de
+    // aguardarOutrosCumprimentosProntoEExtrair, para o caso (não esperado, as duas telas
+    // são HTML renderizado no servidor, não AJAX) de o script rodar antes do DOM assentar.
+    function tratarPaginaArquivadosSaldo(tentativa) {
+        tentativa = tentativa || 0;
+        const form = formularioArquivadosSaldo();
+        if (form) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_arquivadossaldo') {
+                // avancarAutomacao só reconhece o estado "coletando_" (ver seu guard) —
+                // precisa virar o estado ANTES de disparar a coleta, senão o avanço no
+                // fim de coletarArquivadosSaldoViaCSV é ignorado e a fila trava aqui.
+                console.log('[Projudi Arquivados c/ Saldo] automação: formulário encontrado — solicitando CSV');
+                store.setItem(AUTO_ESTADO, 'coletando_arquivadossaldo');
+                coletarArquivadosSaldoViaCSV(form);
+            }
+            return;
+        }
+        const linkListagem = acharLinkArquivadosSaldoNaListagem();
+        if (linkListagem) {
+            console.log('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
+            linkListagem.click();
+            return;
+        }
+        if (tentativa >= 10) {
+            console.warn('[Projudi Arquivados c/ Saldo] nem a listagem nem o formulário apareceram em ~5s — desistindo (tela pode ter mudado).');
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_arquivadossaldo') {
+                console.warn('[Projudi Arquivados c/ Saldo] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                store.setItem(AUTO_ESTADO, 'coletando_arquivadossaldo');
+                store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', '[]');
+                store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'num_paginas', '1');
+                store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'coletado', '1');
+                avancarAutomacao(CFG_ARQUIVADOS_SALDO);
+            }
+            return;
+        }
+        setTimeout(() => tratarPaginaArquivadosSaldo(tentativa + 1), 500);
+    }
+
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
     function criarColetor(cfg) {
@@ -4384,6 +4584,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_ARQUIVADOS_SALDO) {
+            return {
+                rotulo: TITULO_ARQUIVADOS_SALDO,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaArquivadosSaldo(doc, dados, comIndice),
+            };
+        }
         if (cfg === CFG_SUSPENSOS_PRAZO) {
             return {
                 rotulo: TITULO_SUSPENSOS_PRAZO,
@@ -4910,6 +5117,7 @@
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
+        const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
@@ -5164,6 +5372,18 @@
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
+            });
+        }
+        // "Processos Arquivados com Saldo" — o indicador é o saldo total esquecido (o
+        // número que importa numa correição), o detalhamento traz quantidade e média.
+        if (secaoArquivadosSaldo) {
+            const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
+            const qtd = secaoArquivadosSaldo.dados.length;
+            itensOutros.push({
+                nome: 'Processos Arquivados com Saldo',
+                indicador: fmtBRLArquivadosSaldo(saldoTotal),
+                detalhamento: `${qtd} processo(s) · saldo médio ${fmtBRLArquivadosSaldo(qtd ? saldoTotal / qtd : 0)}`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -6523,6 +6743,145 @@
         return pagina;
     }
 
+    // ── PDF de Processos Arquivados com Saldo (ver seção de coleta/CFG_ARQUIVADOS_SALDO,
+    // mais acima, para o porquê deste relatório não usar montarResumoGenerico/
+    // montarTabelaGenerico) ──────────────────────────────────────────────────────
+    function gerarPDFArquivadosSaldo(dados) {
+        const doc = novoDocPDF();
+        montarResumoArquivadosSaldo(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (dados && dados.length) {
+            const pgTabela = montarTabelaArquivadosSaldo(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        baixarBlob(doc.output('blob'), `${CFG_ARQUIVADOS_SALDO.nomeArquivo}_${dataArquivo()}.pdf`);
+    }
+
+    // Balões (KPIs) de total de processos/saldo total/saldo médio + card largo do
+    // arquivamento mais antigo ainda com saldo pendente — layout aprovado pelo usuário em
+    // protótipo antes desta integração (ver histórico da conversa). Sem gráficos de
+    // distribuição/faixa etária (não fazem sentido aqui: não há prioridade nem "dias em
+    // aberto" — o processo já está arquivado, o que importa é o saldo esquecido).
+    function montarResumoArquivadosSaldo(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+        const gap = 6;
+        const r = dados || [];
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${carimbo}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+        const saldoMedio = r.length ? saldoTotal / r.length : 0;
+
+        const kY = yLinha + 6;
+        const kpis = [
+            { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
+            { titulo: 'Saldo Total', valor: fmtBRLArquivadosSaldo(saldoTotal), acento: COR.aqua },
+            { titulo: 'Saldo Médio por Processo', valor: fmtBRLArquivadosSaldo(saldoMedio), acento: COR.ambar },
+        ];
+        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
+
+        // Card largo: arquivamento mais antigo que ainda carrega saldo pendente — a idade
+        // do problema, não só o total (mesma lógica do "processo mais atrasado" dos
+        // demais relatórios, ver p.dataTitulo em montarResumoGenerico).
+        const aY = kY + 28 + gap;
+        let maisAntigo = null;
+        r.forEach(d => {
+            const ts = parseDataBR(d.dtArquivamento);
+            if (ts == null) return;
+            if (!maisAntigo || ts < maisAntigo.ts) maisAntigo = { ts, d };
+        });
+        let valAntigo = '—', subsAntigo = ['Data não disponível'];
+        if (maisAntigo) {
+            const dias = Math.max(0, Math.floor((Date.now() - maisAntigo.ts) / DIA_MS));
+            valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
+            subsAntigo = [
+                `Processo ${maisAntigo.d.processo}`,
+                `Saldo: ${fmtBRLArquivadosSaldo(maisAntigo.d.saldo)}`,
+            ];
+        }
+        desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, true, COR.vermelho);
+
+        desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, carimbo, pw, ph, m, comIndice);
+    }
+
+    // Tabela discriminada — uma linha por processo, ordenada por Dt Arquivamento (mais
+    // antigo primeiro), com linha de TOTAL no rodapé somando o saldo (reforça o KPI do
+    // resumo na própria tabela, útil quando ela é impressa/consultada separadamente).
+    function montarTabelaArquivadosSaldo(doc, dados, comIndice) {
+        doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+        const pagina = doc.internal.getNumberOfPages();
+        const r = dados || [];
+
+        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
+        const tabInicioY = m + 10;
+
+        const colunas = [
+            { header: 'Processo', width: 26, get: d => d.processo },
+            { header: 'Dt Arquivamento', width: 12, get: d => d.dtArquivamento },
+            { header: 'Conta Judicial', width: 15, get: d => d.contaJudicial },
+            { header: 'Dt Últ. Atualização CEF', width: 13, get: d => d.dtAtualizacaoCEF },
+            { header: 'Saldo', width: 12, get: d => fmtBRLArquivadosSaldo(d.saldo) },
+        ];
+        const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
+        const fatorLargura = uw / somaLarguras;
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
+        const idxSaldo = colunas.findIndex(c => c.header === 'Saldo');
+        columnStyles['k' + idxSaldo] = { ...columnStyles['k' + idxSaldo], halign: 'right' };
+
+        const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
+        const corpo = ordenados.map(d => {
+            const o = {};
+            colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+            return o;
+        });
+        const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: corpo,
+            startY: tabInicioY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRLArquivadosSaldo(saldoTotal) }],
+            footStyles: { font: 'PublicSans', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
+            didParseCell: (data) => {
+                if (data.section === 'foot' && data.column.index === idxSaldo) data.cell.styles.halign = 'right';
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, carimbo, pw, ph, m, comIndice),
+        });
+
+        return pagina;
+    }
+
     // ── Gargalo por "Último Movimento" (Paralisados e Remessas) ────────────────
     // Paralisados e Remessas são a MESMA tela do Projudi com filtros diferentes, e seus
     // resumos são espelhos exatos um do outro — por isso a página complementar vive aqui,
@@ -7813,6 +8172,16 @@
             return;
         }
 
+        // Processos Arquivados com Saldo: cobre os dois saltos de navegação (listagem de
+        // Relatórios Dinâmicos -> formulário) e, ao achar o formulário, a coleta via CSV —
+        // tudo dentro de tratarPaginaArquivadosSaldo (ver comentário lá e no CFG). Igual a
+        // Outros Cumprimentos/Mandados fase 0: decide só pelo ESTADO da automação, sem
+        // depender de buttonBar (a listagem de Relatórios Dinâmicos não tem uma).
+        if (estadoAutoNoInicio === 'preenchendo_arquivadossaldo') {
+            tratarPaginaArquivadosSaldo();
+            return;
+        }
+
         // Tela de resultados de Mandados (as 3 fases, status 13/6/4): gateFaseMandados()
         // cuida dos casos que o fluxo genérico não trata sozinho (correção de filtro fora
         // de fase, zero resultados numa fase) — quando ela não tratou nada (uso manual, ou
@@ -8485,6 +8854,11 @@
         // painel, e como uma linha própria na tabela unificada do Cartório do PDF conjunto
         // (ver linhasCartorio em gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
+        // Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" —
+        // precisaPreencher:true cobre os DOIS saltos de navegação (listagem de
+        // Relatórios Dinâmicos -> formulário do relatório), não um formulário de filtros
+        // clássico — ver tratarPaginaArquivadosSaldo/CFG_ARQUIVADOS_SALDO.
+        { key: 'arquivadossaldo', cfg: CFG_ARQUIVADOS_SALDO, navAlvo: 'arquivadossaldo', rotulo: 'Processos Arquivados com Saldo', curto: 'Arquiv. c/ Saldo', dominio: 'cartorio', precisaPreencher: true },
         // ── Gabinete ────────────────────────────────────────────────────────────────
         { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: true },
         // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
@@ -8671,6 +9045,11 @@
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
+        // "Relatórios/Estatísticas" > "Relatórios Dinâmicos" — leva à LISTAGEM de
+        // relatórios dinâmicos, não direto ao relatório (2º salto tratado por
+        // tratarPaginaArquivadosSaldo, ver injetarBotoes). O link tem href de verdade
+        // (com token de sessão na query string, por isso sem regex de URL — só o texto).
+        else if (alvo === 'arquivadossaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
