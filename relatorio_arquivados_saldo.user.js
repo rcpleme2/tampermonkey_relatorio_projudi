@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.8
+// @version      5.9
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -79,6 +79,24 @@
 // usuário: uma página quando tudo couber, mais de uma só quando a tabela exigir, e
 // sempre começando imediatamente após a observação, nunca numa página em branco à
 // parte).
+//
+// v5.9 — dois ajustes (pedido do usuário, a partir do PDF de amostra da v5.8):
+// (1) CORRIGE um bug real de desenharCardObservacao(): o texto saía alinhado à
+// esquerda apesar de align:'justify', porque cada linha já vinha pré-quebrada
+// (splitTextToSize) e era desenhada numa chamada de doc.text() SEPARADA — o jsPDF só
+// aplica o espaçamento extra entre palavras (justificação de verdade) quando é ELE
+// MESMO que quebra o parágrafo em várias linhas via maxWidth; passando uma linha só por
+// chamada, cada chamada virava um "array de 1 linha" e a lógica de justify nunca
+// disparava (confirmado no código-fonte do jsPDF: a condição que insere o espaçamento
+// extra é `l < len - 1`, sempre falsa quando len=1). Corrigido: agora é uma única
+// chamada com o parágrafo inteiro (texto "cru") + maxWidth, deixando o próprio jsPDF
+// quebrar as linhas — só assim a justificação sai de verdade (confirmado inspecionando
+// o stream do PDF gerado: aparece o operador Tw de espaçamento entre palavras). Altura
+// da caixa recalculada com doc.getLineHeight()/scaleFactor (a métrica real de
+// espaçamento entre linhas do jsPDF) em vez de um valor fixo chutado, pra bater com o
+// texto desenhado.
+// (2) REMOVE o card "Saldo Médio por Processo" do resumo — sobram os cards "Total de
+// Processos" e "Saldo Total", que ocupam a largura toda dividida em 2 (antes 3).
 //
 // NOTA para uma futura integração ao relatorio_projudi.user.js principal (pedido do
 // usuário — NÃO fazer agora, só documentar aqui pra não esquecer): quando este
@@ -243,10 +261,15 @@
     // tipográfica padrão). Altura calculada e devolvida (não fixa) porque o texto varia
     // de tamanho; quem chama usa o retorno pra continuar o layout logo abaixo.
     function desenharCardObservacao(doc, x, y, w, texto) {
-        const padX = 6, padTop = 8, gapRotuloTexto = 5, alturaLinha = 4.2, padBottom = 4;
+        const padX = 6, padTop = 8, gapRotuloTexto = 5, padBottom = 4;
         const larguraTexto = w - 2 * padX;
         doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
         const linhas = doc.splitTextToSize(texto, larguraTexto);
+        // Mesma métrica de espaçamento entre linhas que o próprio jsPDF usa internamente
+        // (getLineHeight() vem em "unidade de texto" — pt — daí a divisão pelo
+        // scaleFactor pra converter pra mm, a unidade do documento) — precisa bater com
+        // o texto desenhado abaixo pra caixa não ficar alta/baixa demais.
+        const alturaLinha = doc.getLineHeight() / doc.internal.scaleFactor;
         const yRotulo = y + padTop;
         const yTexto = yRotulo + gapRotuloTexto;
         const h = padTop + gapRotuloTexto + (linhas.length - 1) * alturaLinha + padBottom;
@@ -259,11 +282,15 @@
         doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
         doc.text('OBSERVAÇÃO', x + padX, yRotulo);
 
+        // Importante: precisa ser UMA chamada só com o texto "cru" (não pré-quebrado em
+        // linhas) — o jsPDF só aplica o espaçamento extra entre palavras (justificação de
+        // verdade) quando ELE MESMO quebra o texto em várias linhas via maxWidth. Passando
+        // linha por linha (uma string por chamada) cada chamada vira um "array de 1
+        // linha" internamente, e a lógica de justify do jsPDF nunca dispara — foi assim
+        // que o texto saiu alinhado à esquerda na versão anterior, apesar do
+        // align:'justify'.
         doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
-        linhas.forEach((linha, i) => {
-            const ultima = i === linhas.length - 1;
-            doc.text(linha, x + padX, yTexto + i * alturaLinha, ultima ? {} : { align: 'justify', maxWidth: larguraTexto });
-        });
+        doc.text(texto, x + padX, yTexto, { align: 'justify', maxWidth: larguraTexto });
 
         return h;
     }
@@ -612,13 +639,12 @@
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
-        const saldoMedio = r.length ? saldoTotal / r.length : 0;
 
         const kY = yLinha + 6;
+        // Card "Saldo Médio por Processo" removido (pedido do usuário).
         const kpis = [
             { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
             { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
-            { titulo: 'Saldo Médio por Processo', valor: fmtBRL(saldoMedio), acento: COR.ambar },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], k.acento));
