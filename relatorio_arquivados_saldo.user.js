@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.2
-// @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
+// @version      5.3
+// @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_arquivados_saldo.user.js
@@ -16,7 +16,7 @@
 
 // Userscript INDEPENDENTE do relatorio_projudi.user.js principal (pedido do usuário:
 // desenvolver este relatório desacoplado, sem entrar no pipeline de automação/capa
-// unificada do script grande, e SEM injetar nenhum botão nas telas do Projudi).
+// unificada do script grande).
 //
 // v5.2 — adiciona um comando de menu "🔍 Diagnosticar" (ver diagnosticar()/
 // diagnosticarAbaNova() no fim do arquivo), separado do fluxo normal abaixo: ele CLICA
@@ -25,6 +25,12 @@
 // recebe) — instrumentação temporária pra descobrir por que o fluxo normal (que nunca
 // clica, só faz fetch/GM_xmlhttpRequest) está voltando 0 bytes. Não muda o
 // comportamento do fluxo normal.
+//
+// v5.3 — adiciona um painel flutuante injetado na própria tela do Projudi (ver
+// injetarPainelFlutuante() no fim do arquivo), com os mesmos três comandos ("▶
+// Extrair"/"🔍 Diagnosticar"/"✖ Cancelar") hoje só acessíveis pelo menu da extensão
+// Tampermonkey — revisão do pedido original de "sem botão na tela": o usuário não
+// achava o menu da extensão pra disparar o script.
 //
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
@@ -712,6 +718,86 @@
         GM_registerMenuCommand('🔍 Diagnosticar requisição real (clica de verdade)', iniciarDiagnostico);
         GM_registerMenuCommand('✖ Cancelar extração em andamento', cancelar);
     }
+
+    // ── Painel flutuante — o comando do menu da extensão Tampermonkey (ícone na barra
+    // do navegador) é difícil de achar pra quem não conhece a extensão, então além dele
+    // (mantido, não custa nada) o script injeta um pequeno painel FIXO na própria tela do
+    // Projudi com os mesmos três comandos. Reavaliado a cada carregamento de página (por
+    // isso lê ATIVO_KEY/MODO_KEY toda vez, em vez de guardar estado local) pra refletir
+    // se já tem uma extração/diagnóstico em andamento (mostra "Cancelar" nesse caso).
+    const PAINEL_ID = 'projudi-arqsaldo-painel';
+
+    function estiloBotao(cor) {
+        return `display:block;width:100%;margin:0 0 6px 0;padding:6px 10px;border:0;` +
+               `border-radius:4px;background:${cor};color:#fff;font:12px/1.3 sans-serif;` +
+               `cursor:pointer;text-align:left;white-space:nowrap;`;
+    }
+
+    function montarPainel(doc) {
+        const painel = doc.createElement('div');
+        painel.id = PAINEL_ID;
+        painel.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:2147483647;' +
+            'background:#fff;border:1px solid #ccc;border-radius:6px;padding:8px;' +
+            'box-shadow:0 2px 8px rgba(0,0,0,.25);font:12px/1.3 sans-serif;width:220px;';
+
+        const titulo = doc.createElement('div');
+        titulo.textContent = 'Arquivados com Saldo';
+        titulo.style.cssText = 'font-weight:bold;margin-bottom:6px;color:#333;';
+        painel.appendChild(titulo);
+
+        const ativo = store.getItem(ATIVO_KEY) === '1';
+        if (ativo) {
+            const modo = store.getItem(MODO_KEY) === 'diag' ? 'diagnóstico' : 'extração';
+            const status = doc.createElement('div');
+            status.textContent = `${modo} em andamento…`;
+            status.style.cssText = 'margin-bottom:6px;color:#555;';
+            painel.appendChild(status);
+
+            const btnCancelar = doc.createElement('button');
+            btnCancelar.textContent = '✖ Cancelar';
+            btnCancelar.style.cssText = estiloBotao('#a33');
+            btnCancelar.addEventListener('click', () => { cancelar(); painel.remove(); });
+            painel.appendChild(btnCancelar);
+        } else {
+            const btnExtrair = doc.createElement('button');
+            btnExtrair.textContent = '▶ Extrair PDF';
+            btnExtrair.style.cssText = estiloBotao('#2a6b3f');
+            btnExtrair.addEventListener('click', iniciar);
+            painel.appendChild(btnExtrair);
+
+            const btnDiag = doc.createElement('button');
+            btnDiag.textContent = '🔍 Diagnosticar';
+            btnDiag.style.cssText = estiloBotao('#555') + 'margin-bottom:0;';
+            btnDiag.addEventListener('click', iniciarDiagnostico);
+            painel.appendChild(btnDiag);
+        }
+        return painel;
+    }
+
+    // Injeta no frame mais externo acessível se ele tiver <body> de verdade; senão,
+    // procura entre todos os frames acessíveis um com body visível (tamanho > 0) — o
+    // frameset mais externo de apps Java antigos às vezes não tem <body> renderizável.
+    // Guardado por PAINEL_ID em cada documento pra não duplicar em recarregamentos.
+    function injetarPainelFlutuante() {
+        // todosDocumentosAcessiveis() já visita a partir de maiorAncestralAcessivel() e
+        // desce em ordem (documento mais externo primeiro) — dá preferência natural a ele.
+        for (const doc of todosDocumentosAcessiveis()) {
+            if (!doc || !doc.body || doc.getElementById(PAINEL_ID)) continue;
+            if (doc.body.clientWidth < 50 || doc.body.clientHeight < 50) continue;
+            doc.body.appendChild(montarPainel(doc));
+            console.log('[Projudi Arquivados c/ Saldo] painel flutuante injetado em', doc.location.href);
+            return;
+        }
+    }
+
+    function agendarInjecaoPainel() {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', injetarPainelFlutuante);
+        } else {
+            injetarPainelFlutuante();
+        }
+    }
+    agendarInjecaoPainel();
 
     if (store.getItem(ATIVO_KEY) === '1') {
         if (document.readyState === 'loading') {
