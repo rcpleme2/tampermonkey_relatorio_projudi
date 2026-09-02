@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.9
+// @version      24.10
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1795,6 +1795,30 @@
         },
     };
 
+    // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
+    // Categoria Crime, logo após Apreensões (pedido do usuário) — protótipo desenvolvido
+    // desacoplado (branch claude/cumprimento-medidas-extraction-0foe5f, arquivo próprio
+    // cumprimento_medidas.user.js) e integrado aqui seguindo o mesmo padrão de "resumo
+    // único" de CFG_OUTROS_CUMPRIMENTOS: uma tela só, sem paginação, 3 contadores
+    // agregados (Cumprimentos em Atraso / Medidas sem Cumprimentos Gerados / Cumprimentos
+    // a Vencer) em vez de uma lista de processos — ver detecção/coleta logo abaixo de
+    // CFG_OUTROS_CUMPRIMENTOS e geração de PDF perto de gerarPDFOutrosCumprimentos.
+    const CFG_CUMPRIMENTO_MEDIDAS = {
+        prefixo: 'projudi_cumprmedidas_',
+        // "Zero cumprimentos em atraso/pendentes" é uma informação válida (mesmo padrão
+        // de CFG_APREENSOES/CFG_OUTROS_CUMPRIMENTOS) — mostra a linha mesmo com os 3
+        // contadores zerados, desde que já coletado.
+        mostrarSeVazio: true,
+        // Nunca detectado pelo cabeçalho genérico de table.resultTable — não há tabela
+        // nenhuma nesta tela, só 3 contadores (spans); detecção própria em
+        // paginaCumprimentoMedidas()/detectarConfig (ver abaixo).
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'cumprimento_medidas_projudi',
+        rotulos: { coletar: 'Extrair Cumprimento de Medidas', baixar: '⬇ Baixar Cumprimento de Medidas' },
+        pdfCustom: (dados) => gerarPDFCumprimentoMedidas(dados),
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — TRÊS relatórios derivados
     // da MESMA tela de busca, distinguidos só pelo valor selecionado no
     // <select id="codStatusCumprimentoCartorio"> (13/6/4). A tela é alcançada clicando no
@@ -2658,6 +2682,142 @@
         ultimaAssinaturaOutrosCump = null;
         aguardarOutrosCumprimentosProntoEExtrair(0, () => {
             coletaOutrosCumprimentosEmAndamento = false;
+            if (callback) callback();
+        });
+    }
+
+    // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
+    // Mesma armadilha de Outros Cumprimentos: a aba é um <a> SEM href (só reage a clique
+    // real, não a eventos sintéticos) e fica restrita ao container da barra de abas
+    // (#tabHorz/.tabCenter) — buscar "a" solto no documento já causou falso positivo
+    // noutras telas. acharAbaCumprimentoMedidas/paginaCumprimentoMedidas usam
+    // todosDocumentosAcessiveis (definida mais abaixo, perto da automação em várias
+    // unidades) para cobrir o caso de a home "Mesa do Magistrado" estar num frame que não
+    // é o document local.
+    function acharAbaCumprimentoMedidas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
+            for (const a of candidatos) {
+                if (/^cumprimentos\s+de\s+medidas$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // Os 3 contadores só existem no DOM quando a aba "Cumprimentos de Medidas" está
+    // ativa E já carregada — servem tanto para detectar "estamos na aba certa" quanto
+    // para a extração propriamente dita.
+    const IDS_CONTADORES_CM = {
+        atrasados: 'numeroCumprimentosAtrasados',
+        semCumprimento: 'numeroMedidasSemCumpr',
+        aVencer: 'numeroCumprimentosAVencer',
+    };
+
+    function acharSpanCumprimentoMedidas(id) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const el = d.getElementById(id);
+            if (el) return el;
+        }
+        return null;
+    }
+
+    function paginaCumprimentoMedidas() {
+        return !!acharSpanCumprimentoMedidas(IDS_CONTADORES_CM.atrasados);
+    }
+
+    function lerContadorCumprimentoMedidas(id) {
+        const el = acharSpanCumprimentoMedidas(id);
+        return parseInt(((el && el.textContent) || '').trim(), 10) || 0;
+    }
+
+    function lerContadoresCumprimentoMedidas() {
+        return {
+            atrasados: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.atrasados),
+            semCumprimento: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.semCumprimento),
+            aVencer: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.aVencer),
+        };
+    }
+
+    function assinaturaCumprimentoMedidas() {
+        const c = lerContadoresCumprimentoMedidas();
+        return `${c.atrasados}|${c.semCumprimento}|${c.aVencer}`;
+    }
+
+    // Lê os 3 contadores e grava uma linha por atribuição/unidade (mesmo padrão de
+    // coletarOutrosCumprimentosAgora: acumula entre atribuições, descartando só o
+    // registro da MESMA atribuição antes de gravar de novo — permite multi-unidade e
+    // reextração manual sem duplicar). Ao ler de volta (montarResumoCumprimentoMedidas),
+    // os contadores são SOMADOS entre as linhas — são só 3 números agregados por unidade,
+    // não precisa de nenhuma lógica de mesclagem mais sofisticada.
+    function coletarCumprimentoMedidasAgora() {
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const contadores = lerContadoresCumprimentoMedidas();
+        const registro = { ...contadores, atuacao, competencia };
+
+        console.log(`[Projudi Cumprimento de Medidas] "${atuacao || '(sem atuação)'}" — atrasados=${contadores.atrasados} semCumprimento=${contadores.semCumprimento} aVencer=${contadores.aVencer}`);
+
+        const prefixo = CFG_CUMPRIMENTO_MEDIDAS.prefixo;
+        const anteriores = desembrulharArray(store.getItem(prefixo + 'pagina_0')) || [];
+        const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
+        const registros = [...semEstaAtribuicao, registro];
+        store.setItem(prefixo + 'pagina_0', JSON.stringify(registros));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+
+        avancarAutomacao(CFG_CUMPRIMENTO_MEDIDAS);
+    }
+
+    let ultimaAssinaturaCM = null;
+    let leiturasEstaveisCM = 0;
+    // "Cumprimentos em Atraso" carrega rápido, mas os outros 2 contadores vêm de uma
+    // chamada assíncrona mais lenta e de duração variável (a tela nasce com "0" nesses
+    // spans, não com o span ausente) — mínimo de ~5s (10 tentativas) antes de aceitar
+    // como estável, com 3 leituras iguais seguidas exigidas, e teto de ~40s (80
+    // tentativas) pra não travar a automação pra sempre num Projudi lento (mesmos valores
+    // do protótipo original, já ajustados por 2 rodadas de relato do usuário).
+    const CM_TENTATIVAS_MINIMAS = 10;
+    const CM_LEITURAS_ESTAVEIS_NECESSARIAS = 3;
+    const CM_TENTATIVAS_MAXIMAS = 80;
+    function aguardarCumprimentoMedidasProntoEExtrair(tentativa, callback) {
+        const atual = assinaturaCumprimentoMedidas();
+        if (atual === ultimaAssinaturaCM) {
+            leiturasEstaveisCM++;
+        } else {
+            leiturasEstaveisCM = 1;
+            ultimaAssinaturaCM = atual;
+        }
+        if (tentativa >= CM_TENTATIVAS_MINIMAS && leiturasEstaveisCM >= CM_LEITURAS_ESTAVEIS_NECESSARIAS) {
+            coletarCumprimentoMedidasAgora();
+            if (callback) callback();
+            return;
+        }
+        if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
+            console.warn('[Projudi Cumprimento de Medidas] tela não estabilizou em ~40s — extraindo mesmo assim (dados podem estar incompletos).');
+            coletarCumprimentoMedidasAgora();
+            if (callback) callback();
+            return;
+        }
+        setTimeout(() => aguardarCumprimentoMedidasProntoEExtrair(tentativa + 1, callback), 500);
+    }
+
+    let coletaCumprimentoMedidasEmAndamento = false;
+
+    // Ponto de entrada da coleta — chamado tanto pela automação quanto pelos botões
+    // manuais (mesmo formato de coletarOutrosCumprimentos, callback opcional pro botão
+    // "Baixar PDF"). Trava contra chamadas concorrentes.
+    function coletarCumprimentoMedidas(callback) {
+        if (coletaCumprimentoMedidasEmAndamento) {
+            console.log('[Projudi Cumprimento de Medidas] coleta já em andamento — ignorando novo disparo');
+            return;
+        }
+        coletaCumprimentoMedidasEmAndamento = true;
+        ultimaAssinaturaCM = null;
+        leiturasEstaveisCM = 0;
+        aguardarCumprimentoMedidasProntoEExtrair(0, () => {
+            coletaCumprimentoMedidasEmAndamento = false;
             if (callback) callback();
         });
     }
@@ -4472,6 +4632,15 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_CUMPRIMENTO_MEDIDAS) {
+            return {
+                rotulo: TITULO_CUMPRIMENTO_MEDIDAS,
+                // Só resumo — não há lista de processos a discriminar, apenas os 3
+                // totais (mesmo esquema de CFG_AUDIENCIAS_REALIZADAS).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoCumprimentoMedidas(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: null,
+            };
+        }
         if (cfg === CFG_CONCLUSOES) {
             return {
                 rotulo: cfg.pdf.titulo,
@@ -4789,6 +4958,9 @@
         // Audiências Realizadas é só totais (geral + por usuário) — nunca tem tabela
         // discriminada de processos.
         if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return false;
+        // Cumprimento de Medidas é só os 3 contadores agregados — nunca tem tabela
+        // discriminada de processos (ver montarTabela: null em descreverSecaoPDF).
+        if (s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -4801,7 +4973,7 @@
     // `processo`; Designadas/Realizadas guardam um resumo agregado, ver
     // coletarAudienciasDesignadas/finalizarAudienciasRealizadas). Ficam de fora do
     // cruzamento de múltiplas pendências.
-    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS];
+    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS, CFG_CUMPRIMENTO_MEDIDAS];
 
     // Página "Processos com Múltiplas Pendências" — cruza o número do processo entre TODOS
     // os relatórios coletados nesta rodada (pedido da Corregedoria: hoje cada relatório é
@@ -5009,6 +5181,7 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
+        const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
@@ -5267,6 +5440,21 @@
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
+            });
+        }
+        // "Cumprimento de Medidas" — logo após Bens Apreendidos (pedido do usuário: mesma
+        // ordem no menu e no relatório). Indicador: total em atraso (o mais urgente dos
+        // 3 contadores); detalhamento compacta os outros dois.
+        if (secaoCumprimentoMedidas) {
+            const r = secaoCumprimentoMedidas.dados;
+            const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
+            const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
+            const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
+            itensOutros.push({
+                nome: 'Cumprimento de Medidas',
+                indicador: `${atrasados} em atraso`,
+                detalhamento: `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
             });
         }
         // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
@@ -6413,6 +6601,170 @@
         }
     }
 
+    // ── PDF do relatório de Cumprimento de Medidas (Mesa do Magistrado) ────────────
+    // Painel de 3 contadores agregados — sem processo/data individual, então NÃO
+    // reaproveita montarResumoGenerico. Só resumo (sem tabela discriminada — não há lista
+    // de processos nesta tela, apenas os 3 totais).
+    const TITULO_CUMPRIMENTO_MEDIDAS = 'Cumprimento de Medidas';
+
+    // Texto fixo da Observação (parágrafo único, justificado), pedido pelo autor do
+    // protótipo original.
+    const TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS = 'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
+        + 'realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir. Os '
+        + 'comprovantes individualizados de cumprimento deverão ser anexados ao Projudi. Em caso de atraso '
+        + 'no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da '
+        + 'Comunidade informações atualizadas acerca de sua execução. O controle rigoroso das medidas '
+        + 'impostas deve constituir prática permanente da secretaria.';
+
+    // Altura ocupada por um parágrafo justificado, na fonte/tamanho já ativos no doc —
+    // chamado ANTES de desenhar (mesmo espírito de medirAlturaCardLista) para dimensionar
+    // a caixa de fundo da Observação com a altura certa.
+    function alturaParagrafoJustificado(doc, texto, larguraMax, entreLinhas) {
+        return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
+    }
+
+    // Justificação MANUAL, por repetição de espaços, em vez de doc.text(..., {align:
+    // 'justify'}) nativo do jsPDF ou de reposicionar cada palavra por coordenada própria
+    // — ambas as abordagens produziram palavras acentuadas GRUDADAS sem espaço nenhum em
+    // leitores de PDF reais (bug relatado pelo autor do protótipo original, mesmo com a
+    // largura de cada palavra medida corretamente — o problema é o MECANISMO de
+    // reposicionamento por coordenada entre chamadas de doc.text(), não a conta). Aqui
+    // cada linha vira UMA ÚNICA STRING (com espaços de verdade, às vezes repetidos) e é
+    // desenhada com UMA chamada doc.text() só — o mesmo mecanismo simples já usado em todo
+    // o resto do relatório. Última linha de cada parágrafo fica com espaço simples,
+    // alinhada à esquerda (convenção tipográfica de texto justificado).
+    function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
+        const linhas = doc.splitTextToSize(texto, larguraMax);
+        const espacoLargura = doc.getTextWidth(' ') || 1;
+        linhas.forEach((linha, i) => {
+            const ultimaLinha = i === linhas.length - 1;
+            const palavras = linha.split(' ').filter(Boolean);
+            if (ultimaLinha || palavras.length <= 1) {
+                doc.text(linha, x, y);
+            } else {
+                const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
+                const numLacunas = palavras.length - 1;
+                const totalEspacos = Math.max(numLacunas, Math.round((larguraMax - larguraPalavras) / espacoLargura));
+                const base = Math.floor(totalEspacos / numLacunas);
+                let resto = totalEspacos - base * numLacunas;
+                let linhaJustificada = palavras[0];
+                for (let k = 1; k < palavras.length; k++) {
+                    let n = base;
+                    if (resto > 0) { n++; resto--; }
+                    linhaJustificada += ' '.repeat(Math.max(1, n)) + palavras[k];
+                }
+                doc.text(linhaJustificada, x, y);
+            }
+            y += entreLinhas;
+        });
+        return linhas.length * entreLinhas;
+    }
+
+    // Card de KPI especializado: título pode quebrar em 2 linhas (ex. "Medidas sem
+    // Cumprimentos Gerados", mais longo que os títulos curtos que desenharCard assume) e
+    // aviso "Situação: Crítico" em destaque colorido — cenário específico o bastante
+    // (título multi-linha + aviso condicional) pra não valer a pena generalizar o
+    // desenharCard compartilhado, usado por ~20 outros relatórios sem essa necessidade.
+    function desenharCardCumprimentoMedidas(doc, x, y, w, h, titulo, valor, critico, acento) {
+        acento = acento || COR.azul;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        const cx = x + w / 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        const linhasTitulo = doc.splitTextToSize(String(titulo).toUpperCase(), w - 8);
+        const alturaLinhaTitulo = 3.3;
+        const blocoH = linhasTitulo.length * alturaLinhaTitulo + 8 + (critico ? 4.2 : 0);
+        let yy = y + (h - blocoH) / 2 + alturaLinhaTitulo;
+        linhasTitulo.forEach(l => { doc.text(l, cx, yy, { align: 'center' }); yy += alturaLinhaTitulo; });
+        yy += 4.5;
+        const valorTexto = String(valor);
+        const TAMANHOS_VALOR_CARD = [15, 13, 11, 10, 9];
+        let fonteValor = TAMANHOS_VALOR_CARD[TAMANHOS_VALOR_CARD.length - 1];
+        for (const tam of TAMANHOS_VALOR_CARD) {
+            doc.setFontSize(tam);
+            if (doc.getTextWidth(valorTexto) <= w - 10) { fonteValor = tam; break; }
+        }
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+        doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
+        if (critico) {
+            // Helvetica (não PublicSans embutida), mesma decisão do texto da Observação
+            // logo abaixo — ver comentário grande em desenharParagrafoJustificado sobre o
+            // bug de espaçamento em texto acentuado com a fonte TTF customizada.
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('Situação: Crítico', cx, yy, { align: 'center' });
+        }
+    }
+
+    function gerarPDFCumprimentoMedidas(dados) {
+        const doc = novoDocPDF();
+        montarResumoCumprimentoMedidas(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `cumprimento_medidas_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoCumprimentoMedidas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = dados || [];
+        // Soma os contadores entre todas as unidades já coletadas (mesmo espírito de
+        // Outros Cumprimentos) — cada linha de "dados" é uma unidade/atribuição distinta;
+        // são só 3 números agregados, então somar entre unidades é suficiente (sem
+        // precisar de nenhuma lógica de mesclagem mais sofisticada).
+        const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
+        const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
+        const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_CUMPRIMENTO_MEDIDAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  Mesa do Magistrado — aba "Cumprimentos de Medidas"`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        // Limiares de "Situação: Crítico" — mesmos valores do protótipo original (pedido
+        // explícito do usuário).
+        const LIMIAR_ATRASO_CRITICO = 100;
+        const LIMIAR_SEM_CUMPRIMENTO_CRITICO = 50;
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 34; // 2 linhas de título + valor + linha de "Situação: Crítico"
+        const kW = (uw - 2 * gap) / 3;
+        desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), atrasados > LIMIAR_ATRASO_CRITICO, COR.vermelho);
+        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.ambar);
+        desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
+
+        let y = kY + kH + 10;
+        tituloSecao(doc, m, y, uw, 'Observação', COR.azul);
+        y += 5;
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+        const entreLinhas = 4.6;
+        const padding = 5;
+        const alturaTexto = alturaParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, uw - 2 * padding, entreLinhas);
+        const caixaH = alturaTexto + 2 * padding;
+
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(m, y, uw, caixaH, 2, 2, 'FD');
+
+        const ty = y + padding + 3.2;
+        doc.setTextColor(...COR.tintaSec);
+        desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, m + padding, ty, uw - 2 * padding, entreLinhas);
+
+        desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
     // montarResumoGenerico/montarTabelaGenerico (dependem de p.dataCampo/p.processoCampo
@@ -7455,6 +7807,9 @@
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
         else if (paginaOutrosCumprimentos()) cfg = CFG_OUTROS_CUMPRIMENTOS;
+        // Cumprimento de Medidas tem o mesmo formato de detecção própria (sem cabeçalho
+        // de table.resultTable reconhecível — só 3 contadores, ver paginaCumprimentoMedidas).
+        else if (paginaCumprimentoMedidas()) cfg = CFG_CUMPRIMENTO_MEDIDAS;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaInstanciaSuperior\.do/i.test(location.pathname + location.search)) cfg = CFG_INSTANCIA_RECURSAL;
@@ -7897,6 +8252,85 @@
         }
     }
 
+    // Sobe a árvore a partir de "el" até achar um ancestral cuja tagName seja "tag" —
+    // usado para achar a <table> inteira da barra de abas (ver injetarBotaoCumprimentoMedidas
+    // abaixo), sem depender de Element.prototype.closest.
+    function acharAncestralTag(el, tag) {
+        let cur = el;
+        while (cur) {
+            if (cur.tagName === tag) return cur;
+            cur = cur.parentNode;
+        }
+        return null;
+    }
+
+    // Mesmo problema já corrigido em Outros Cumprimentos: inserir o botão como filho
+    // direto da <tr> da barra de abas é HTML inválido (só aceita <td>/<th>) e quebra o
+    // layout de toda a tabela. Sobe até achar a <table> inteira (#tabHorz) e insere o
+    // botão ANTES dela, dentro do container que a envolve — nesting válido, mesma
+    // âncora usada pelo protótipo original (já testado em produção).
+    function tratarPaginaCumprimentoMedidas(tentativa) {
+        tentativa = tentativa || 0;
+        if (!paginaCumprimentoMedidas()) {
+            if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
+                console.warn('[Projudi Cumprimento de Medidas] os contadores não apareceram em ~40s — desistindo (tela pode ter mudado ou carregamento travou).');
+                const estadoDesistencia = store.getItem(AUTO_ESTADO);
+                if (estadoDesistencia === 'coletando_cumprimentomedidas' || estadoDesistencia === 'preenchendo_cumprimentomedidas') {
+                    console.warn('[Projudi Cumprimento de Medidas] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    store.setItem(CFG_CUMPRIMENTO_MEDIDAS.prefixo + 'coletado', '1');
+                    avancarAutomacao(CFG_CUMPRIMENTO_MEDIDAS);
+                }
+                return;
+            }
+            setTimeout(() => tratarPaginaCumprimentoMedidas(tentativa + 1), 500);
+            return;
+        }
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        if (estadoAtual === 'coletando_cumprimentomedidas' || estadoAtual === 'preenchendo_cumprimentomedidas') {
+            console.log('[Projudi Cumprimento de Medidas] automação: extraindo os contadores (sem preencher/pesquisar — a tela já chega pronta)');
+            coletarCumprimentoMedidas();
+            return;
+        }
+        // Uso manual — injeta os botões (Extrair + Baixar PDF) perto da barra de abas,
+        // já que não há table.buttonBar nesta tela.
+        if (!mostrarBotoesIndividuais()) return;
+        if (!document.getElementById('btn-cumprmedidas-extrair')) {
+            const abaLink = acharAbaCumprimentoMedidas();
+            const tabela = abaLink && acharAncestralTag(abaLink, 'TABLE');
+            const doc = (abaLink && abaLink.ownerDocument) || document;
+            const ancora = (tabela && tabela.parentNode) || doc.body;
+
+            const div = doc.createElement('div');
+
+            const bExtrair = doc.createElement('button');
+            bExtrair.id = 'btn-cumprmedidas-extrair';
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê os 3 contadores exibidos e gera o resumo (sem paginação, sem pesquisa)';
+            bExtrair.textContent = CFG_CUMPRIMENTO_MEDIDAS.rotulos.coletar;
+            bExtrair.onclick = () => coletarCumprimentoMedidas();
+            div.appendChild(bExtrair);
+
+            const bBaixar = doc.createElement('button');
+            bBaixar.id = 'btn-cumprmedidas-baixar';
+            bBaixar.type = 'button';
+            bBaixar.className = 'projudi-btn';
+            bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
+            bBaixar.textContent = CFG_CUMPRIMENTO_MEDIDAS.rotulos.baixar;
+            bBaixar.onclick = () => {
+                coletarCumprimentoMedidas(async () => {
+                    const dados = await lerDadosDe(CFG_CUMPRIMENTO_MEDIDAS.prefixo);
+                    gerarPDFCumprimentoMedidas(dados);
+                });
+            };
+            div.appendChild(bBaixar);
+
+            if (tabela) ancora.insertBefore(div, tabela);
+            else ancora.appendChild(div);
+        }
+    }
+
     function injetarBotoes() {
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
         console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
@@ -7929,6 +8363,20 @@
             || estadoAutoNoInicio === 'preenchendo_outroscumprimentos';
         if (pareceTelaOutrosCumprimentos) {
             tratarPaginaOutrosCumprimentos();
+            return;
+        }
+
+        // Página de Cumprimento de Medidas — mesmo tratamento de Outros Cumprimentos
+        // acima (painel sem table.buttonBar, conteúdo carregado via AJAX). paginaCumprimen
+        // toMedidas() (span já no DOM) só cobre "já carregou"; a URL de destino do clique
+        // na aba (actionType=listaPendenciasCumprimentos) e o estado da automação cobrem
+        // a janela entre o clique e o AJAX terminar, igual ao caso de Outros Cumprimentos.
+        const pareceTelaCumprimentoMedidas = paginaCumprimentoMedidas()
+            || /actionType=listaPendenciasCumprimentos/i.test(location.href)
+            || estadoAutoNoInicio === 'coletando_cumprimentomedidas'
+            || estadoAutoNoInicio === 'preenchendo_cumprimentomedidas';
+        if (pareceTelaCumprimentoMedidas) {
+            tratarPaginaCumprimentoMedidas();
             return;
         }
 
@@ -9099,6 +9547,10 @@
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
+        // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
+        // Outros Cumprimentos.
+        { key: 'cumprimentomedidas', cfg: CFG_CUMPRIMENTO_MEDIDAS, navAlvo: 'cumprimentomedidas', rotulo: 'Cumprimento de Medidas', curto: 'Cumpr. Medidas', categoriaEspecifica: 'crime', precisaPreencher: false },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -9285,6 +9737,7 @@
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
+        else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
@@ -9329,6 +9782,19 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
+    function navegarAbaCumprimentoMedidas() {
+        const link = acharAbaCumprimentoMedidas();
+        if (!link) {
+            // Essa aba só existe em unidades com competência criminal (Mesa do
+            // Magistrado) — mesmo tratamento silencioso dos demais navegarMenu.
+            console.warn('[Auto Projudi] link de menu não encontrado: cumprimentomedidas (aba "Cumprimentos de Medidas" ausente — perfil sem Mesa do Magistrado/sem competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaCumprimentoMedidas — clicando na aba "Cumprimentos de Medidas" (clique real, sem href)');
         link.click();
         return true;
     }
