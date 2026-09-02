@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.1
+// @version      5.2
 // @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -17,6 +17,14 @@
 // Userscript INDEPENDENTE do relatorio_projudi.user.js principal (pedido do usuário:
 // desenvolver este relatório desacoplado, sem entrar no pipeline de automação/capa
 // unificada do script grande, e SEM injetar nenhum botão nas telas do Projudi).
+//
+// v5.2 — adiciona um comando de menu "🔍 Diagnosticar" (ver diagnosticar()/
+// diagnosticarAbaNova() no fim do arquivo), separado do fluxo normal abaixo: ele CLICA
+// DE VERDADE no checkbox e em "Gerar Relatório" só pra registrar no console a
+// requisição real que o Projudi dispara (campos do form, e o que a aba nova de fato
+// recebe) — instrumentação temporária pra descobrir por que o fluxo normal (que nunca
+// clica, só faz fetch/GM_xmlhttpRequest) está voltando 0 bytes. Não muda o
+// comportamento do fluxo normal.
 //
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
@@ -47,6 +55,18 @@
     const ATIVO_KEY = PREFIXO + 'ativo';
     const TENTATIVAS_KEY = PREFIXO + 'tentativas';
     const MAX_TENTATIVAS = 20; // ~20 cargas de página / tentativas dentro da página — teto de segurança
+
+    // ── Modo diagnóstico (Fase 1 da investigação do "0 bytes") ──────────────────────
+    // MODO_KEY diferencia o que passo() faz quando acha o formulário: 'extrair' (fluxo
+    // normal, nunca clica em nada, só faz fetch/GM_xmlhttpRequest em segundo plano — ver
+    // extrairAgora) ou 'diag' (clica de verdade no checkbox + "Gerar Relatório", só pra
+    // registrar no console qual é a requisição REAL que o Projudi dispara — nunca chamado
+    // automaticamente, só pelo comando de menu "Diagnosticar"). DIAG_ABA_KEY avisa a
+    // instância do script rodando na aba nova (aberta pelo clique real) que ela deve
+    // logar o que recebeu, com TTL pra não logar páginas não relacionadas depois.
+    const MODO_KEY = PREFIXO + 'modo';
+    const DIAG_ABA_KEY = PREFIXO + 'diag_aba_desde';
+    const DIAG_ABA_TTL_MS = 30000;
 
     // ── Trava entre frames — o Projudi carrega VÁRIAS frames de projudi2.tjpr.jus.br na
     // mesma página (ex.: o widget de área de atuação, além do conteúdo principal), e como
@@ -542,6 +562,64 @@
         }
     }
 
+    // ── Diagnóstico (Fase 1) — clica DE VERDADE no checkbox e em "Gerar Relatório",
+    // igual ao trace do puppeteer de referência, só pra registrar no console qual é a
+    // requisição REAL que o Projudi dispara (nomes/valores de TODOS os campos do form,
+    // action/method/target, e a URL que a aba nova efetivamente abre). Não decide nada
+    // sozinho e não tenta capturar o CSV — é só instrumentação temporária pra descobrir
+    // por que corpoFormulario()/coletarCSV() (o fluxo normal, que nunca clica) está
+    // voltando 0 bytes: ou o corpo enviado por corpoFormulario() está incompleto (falta o
+    // checkbox e/ou campos ocultos que um FormData(form) real incluiria), ou o CSV não
+    // sai do POST no form.action e sim de uma segunda requisição que só a aba nova faz —
+    // dá pra saber comparando os dois. Nunca chamado automaticamente por passo(); só pelo
+    // comando de menu "🔍 Diagnosticar".
+    function diagnosticar(form) {
+        console.log('[Projudi Arquivados c/ Saldo][DIAG] formulário encontrado — coletando estado real antes do clique');
+        console.log('[Projudi Arquivados c/ Saldo][DIAG] action=', form.action, 'method=', form.method, 'target=', form.target);
+        const campos = {};
+        new FormData(form).forEach((valor, nome) => {
+            campos[nome] = (campos[nome] === undefined) ? valor : [].concat(campos[nome], valor);
+        });
+        console.log('[Projudi Arquivados c/ Saldo][DIAG] campos do formulário (FormData real):', campos);
+
+        // Hooks temporários (só logam, nunca bloqueiam) pra capturar a URL de fato usada
+        // quando o Projudi abre a aba nova — cobre tanto window.open(...) quanto uma
+        // submissão de form nativa com target="relatorio" (que não passa por window.open).
+        const openOriginal = window.open;
+        window.open = function (url, alvo, params) {
+            console.log('[Projudi Arquivados c/ Saldo][DIAG] window.open() interceptado — url=', url, 'alvo=', alvo, 'params=', params);
+            return openOriginal.apply(this, arguments);
+        };
+        form.addEventListener('submit', () => {
+            console.log('[Projudi Arquivados c/ Saldo][DIAG] submit do formulário disparado — action=', form.action, 'method=', form.method, 'target=', form.target);
+        }, { capture: true });
+
+        // Avisa a aba nova (mesma origem, vai rodar esta mesma userscript) que ela deve
+        // logar o que recebeu — ver listener no fim do arquivo.
+        store.setItem(DIAG_ABA_KEY, String(Date.now()));
+
+        const checkbox = form.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) {
+            console.log('[Projudi Arquivados c/ Saldo][DIAG] marcando checkbox (equivalente ao passo 3 do trace puppeteer):', checkbox.name || checkbox.id || '(sem name/id)');
+            checkbox.click();
+        } else if (!checkbox) {
+            console.warn('[Projudi Arquivados c/ Saldo][DIAG] nenhum checkbox encontrado no formulário — o trace puppeteer clicava em um (table.form input:nth-of-type(6)); confira manualmente.');
+        }
+
+        const botao = form.querySelector('#editButton') || Array.from(form.querySelectorAll('a, input[type="submit"], button'))
+            .find(el => /gerar\s+relat[óo]rio/i.test((el.textContent || el.value || '').trim()));
+        if (!botao) {
+            console.error('[Projudi Arquivados c/ Saldo][DIAG] não achei o botão "Gerar Relatório" (#editButton) — abortando diagnóstico.');
+            store.removeItem(ATIVO_KEY);
+            store.removeItem(MODO_KEY);
+            return;
+        }
+        console.log('[Projudi Arquivados c/ Saldo][DIAG] clicando de verdade em "Gerar Relatório" — observe se abre aba nova, se ela mostra o CSV como texto ou dispara "Salvar arquivo" do navegador.');
+        store.removeItem(ATIVO_KEY);
+        store.removeItem(MODO_KEY);
+        botao.click();
+    }
+
     // ── Estado da extração (persistido em localStorage — sobrevive à navegação entre
     // páginas, como o resto do site) — ver comentário no topo do arquivo. Sem sub-fases
     // explícitas: a cada carregamento de página, passo() olha o que TEM na tela agora
@@ -560,6 +638,11 @@
             // travou já está cuidando disso).
             if (!tentarTravarExtracao()) {
                 console.log('[Projudi Arquivados c/ Saldo] outra frame já está extraindo agora — nada a fazer aqui');
+                return;
+            }
+            if (store.getItem(MODO_KEY) === 'diag') {
+                destravarExtracao(); // diagnosticar() clica de verdade — não é a extração em segundo plano que a trava protege
+                diagnosticar(form);
                 return;
             }
             extrairAgora(form);
@@ -600,15 +683,25 @@
     }
 
     function iniciar() {
+        store.setItem(MODO_KEY, 'extrair');
         store.setItem(ATIVO_KEY, '1');
         store.setItem(TENTATIVAS_KEY, '0');
+        passo(0);
+    }
+
+    function iniciarDiagnostico() {
+        store.setItem(MODO_KEY, 'diag');
+        store.setItem(ATIVO_KEY, '1');
+        store.setItem(TENTATIVAS_KEY, '0');
+        console.log('[Projudi Arquivados c/ Saldo][DIAG] modo diagnóstico iniciado — vai navegar até o formulário e CLICAR DE VERDADE (abre aba nova). Acompanhe o console E a aba nova.');
         passo(0);
     }
 
     function cancelar() {
         store.removeItem(ATIVO_KEY);
         store.removeItem(TENTATIVAS_KEY);
-        console.log('[Projudi Arquivados c/ Saldo] extração cancelada pelo usuário');
+        store.removeItem(MODO_KEY);
+        console.log('[Projudi Arquivados c/ Saldo] extração/diagnóstico cancelado pelo usuário');
     }
 
     // Registra o menu só no frame mais externo ACESSÍVEL (ver maiorAncestralAcessivel) —
@@ -616,6 +709,7 @@
     // todas duplicaria a entrada no menu do Tampermonkey uma vez por frame.
     if (window === maiorAncestralAcessivel() && typeof GM_registerMenuCommand === 'function') {
         GM_registerMenuCommand('▶ Extrair Processos Arquivados com Saldo', iniciar);
+        GM_registerMenuCommand('🔍 Diagnosticar requisição real (clica de verdade)', iniciarDiagnostico);
         GM_registerMenuCommand('✖ Cancelar extração em andamento', cancelar);
     }
 
@@ -626,4 +720,23 @@
             passo(0);
         }
     }
+
+    // ── Diagnóstico (Fase 1), parte 2 — roda em TODA página projudi2.tjpr.jus.br/projudi/*
+    // (pelo @match), incluindo a aba nova que diagnosticar() abre de verdade. Se
+    // DIAG_ABA_KEY foi setado há pouco (TTL), loga o que esta página É — é exatamente a
+    // resposta pra pergunta da Fase 1: se cai aqui com o CSV como texto no body, dá pra
+    // interceptar lendo o DOM; se esta página nunca carrega conteúdo nenhum (o navegador
+    // já desviou pra um download nativo antes de renderizar), não tem userscript que
+    // resolva — só replicando a requisição via fetch/GM_xmlhttpRequest em segundo plano.
+    (function diagnosticarAbaNova() {
+        const desde = parseInt(store.getItem(DIAG_ABA_KEY) || '0', 10);
+        if (!desde || (Date.now() - desde) > DIAG_ABA_TTL_MS) return;
+        const corpo = (document.body && document.body.textContent) || '';
+        console.log('[Projudi Arquivados c/ Saldo][DIAG][aba nova] esta página carregou —',
+            'href=', location.href,
+            'contentType=', document.contentType,
+            'title=', document.title,
+            'pareceCSV=', pareceCSV(corpo));
+        console.log('[Projudi Arquivados c/ Saldo][DIAG][aba nova] início do body (primeiros 500 caracteres):', corpo.slice(0, 500));
+    })();
 })();
