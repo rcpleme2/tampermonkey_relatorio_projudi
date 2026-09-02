@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      2.1
-// @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, seleciona CSV, clica em Gerar Relatório e gera um PDF consolidado (resumo + tabela).
+// @version      3.0
+// @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_arquivados_saldo.user.js
@@ -21,14 +21,13 @@
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
 // "Relatórios/Estatísticas" > "Relatórios Dinâmicos" > o link do relatório. Ao chegar no
-// formulário do relatório, o script marca o rádio "Arquivo CSV" e clica de verdade em
-// "Gerar Relatório" (pedido do usuário — mesmo fluxo que um clique manual). Como esse
-// clique abre uma aba/janela nova (target="relatorio", sem <iframe> com esse nome na
-// tela — o navegador PODE bloquear como pop-up, já que não é mais um gesto direto do
-// usuário depois de duas navegações de página), o script TAMBÉM pede os mesmos dados via
-// GM_xmlhttpRequest em paralelo, na mesma aba — é essa segunda via, mais confiável, que
-// alimenta o PDF; o clique real serve para o fluxo visual pedido e como registro nativo
-// (se a aba abrir).
+// formulário do relatório, o script NUNCA clica em "Gerar Relatório" nem em nenhum outro
+// botão nativo da tela (pedido explícito do usuário — o formulário tem
+// target="relatorio", sem <iframe> com esse nome na página; clicar de verdade abre uma
+// aba/janela nova em branco E dispara download nativo do CSV ao mesmo tempo, o que já
+// causou um bug real: o download nativo/aba nova interferiam na requisição em segundo
+// plano e o PDF não saía). Em vez disso, pede os MESMOS dados do formulário via
+// GM_xmlhttpRequest, na mesma aba, sem nenhum popup — essa é a ÚNICA via de dados.
 (function () {
     'use strict';
 
@@ -227,6 +226,33 @@
         return null;
     }
 
+    // Remove um BOM UTF-8 (﻿) do início do texto, se houver — TextDecoder não tira
+    // isso sozinho, e um BOM sobrando faria o teste de cabeçalho falhar mesmo com o CSV
+    // certo por trás dele.
+    function semBOM(texto) { return texto.replace(/^\uFEFF/, ''); }
+
+    function pareceCSV(texto) { return /^"?Processo"?\s*;/i.test(texto.trim()); }
+
+    // Decodifica tentando windows-1252 primeiro (encoding do resto do Projudi); se não
+    // bater com o cabeçalho esperado, tenta UTF-8 antes de desistir — não temos como
+    // saber de antemão qual encoding o servidor realmente usou nesta resposta específica
+    // (o CSV de exemplo que validamos era windows-1252, mas não custa checar as duas).
+    function decodificarResposta(buffer) {
+        const tentativas = [];
+        for (const encoding of ['windows-1252', 'utf-8']) {
+            let texto;
+            try {
+                texto = semBOM(new TextDecoder(encoding).decode(buffer));
+            } catch (e) {
+                tentativas.push(`${encoding}: falhou ao decodificar (${e.message})`);
+                continue;
+            }
+            if (pareceCSV(texto)) return { texto, encoding };
+            tentativas.push(`${encoding}: "${texto.slice(0, 150).replace(/\s+/g, ' ')}"`);
+        }
+        return { texto: null, tentativas };
+    }
+
     function coletarCSV(urlAction) {
         return new Promise((resolve, reject) => {
             const corpo = new URLSearchParams({ tamanhoFonte: '10', formato: 'R', tipoExportacao: 'CSV' }).toString();
@@ -237,24 +263,32 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 responseType: 'arraybuffer',
                 onload: (resp) => {
+                    // Diagnóstico completo no console SEMPRE (não só em erro) — se algo
+                    // der errado de novo, dá pra olhar o console do navegador (F12) e ver
+                    // exatamente o que voltou, em vez de só "não parece CSV".
+                    console.log('[Projudi Arquivados c/ Saldo] resposta recebida:', {
+                        status: resp.status,
+                        contentType: resp.responseHeaders && /content-type:\s*([^\r\n]+)/i.exec(resp.responseHeaders),
+                        tamanhoBytes: resp.response && resp.response.byteLength,
+                    });
                     if (resp.status < 200 || resp.status >= 300) {
                         reject(new Error(`HTTP ${resp.status} ao solicitar o relatório`));
                         return;
                     }
-                    let texto;
-                    try {
-                        texto = new TextDecoder('windows-1252').decode(resp.response);
-                    } catch (e) {
-                        reject(new Error('Não foi possível decodificar a resposta como texto: ' + e.message));
+                    if (!resp.response || resp.response.byteLength === 0) {
+                        reject(new Error('A resposta veio vazia (0 bytes) — sessão pode ter expirado.'));
                         return;
                     }
-                    if (!/^"?Processo"?\s*;/i.test(texto.trim())) {
-                        reject(new Error('A resposta não parece o CSV esperado (cabeçalho "Processo;..." ausente) — sessão pode ter expirado.'));
+                    const { texto, encoding, tentativas } = decodificarResposta(resp.response);
+                    if (!texto) {
+                        console.warn('[Projudi Arquivados c/ Saldo] nenhuma decodificação pareceu CSV:', tentativas);
+                        reject(new Error(`A resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`));
                         return;
                     }
+                    console.log(`[Projudi Arquivados c/ Saldo] CSV reconhecido (encoding ${encoding})`);
                     resolve(texto);
                 },
-                onerror: () => reject(new Error('Falha de rede ao solicitar o relatório (GM_xmlhttpRequest onerror).')),
+                onerror: (err) => reject(new Error('Falha de rede ao solicitar o relatório (GM_xmlhttpRequest onerror): ' + JSON.stringify(err))),
                 ontimeout: () => reject(new Error('Tempo esgotado ao solicitar o relatório.')),
             });
         });
@@ -392,38 +426,14 @@
         doc.save(`processos_arquivados_saldo_projudi_${dataArquivo}.pdf`);
     }
 
-    // ── Passo final: pede os dados via GM_xmlhttpRequest PRIMEIRO (é essa via que
-    // alimenta o PDF) e só DEPOIS de já ter o PDF em mãos clica em Gerar Relatório de
-    // verdade (pedido do usuário). ORDEM IMPORTA: clicar em "Gerar Relatório" ANTES
-    // (como a v2.0 fazia) mostrou-se arriscado em teste real — o clique dispara
-    // abrirRelatorio() (código do próprio Projudi, fora do nosso controle), que abriu uma
-    // aba nova em branco E disparou um download nativo do CSV ao mesmo tempo; se esse
-    // fluxo nativo mexer na aba/frame ATUAL de alguma forma (recarregar, navegar), o
-    // GM_xmlhttpRequest em andamento pode ser cancelado e o PDF nunca sai — e foi
-    // exatamente isso que aconteceu (usuário reportou: CSV baixado + aba em branco, sem
-    // PDF nenhum). Buscando os dados ANTES, o PDF já está gerado e baixado quando
-    // clicamos no botão nativo por último — o que acontecer com ele daí em diante
-    // (aba bloqueada, download nativo, etc.) não afeta mais o resultado.
+    // ── Passo final: pede os dados via GM_xmlhttpRequest — SÓ isso, sem tocar em
+    // nenhum botão nativo da tela. Pedido explícito do usuário: nada de clicar em "Gerar
+    // Relatório" de verdade — esse clique aciona abrirRelatorio() (código do próprio
+    // Projudi, fora do nosso controle), que abre uma aba nova em branco e dispara um
+    // download nativo do CSV ao mesmo tempo — exatamente o comportamento que não se quer
+    // mais aqui. GM_xmlhttpRequest, na mesma aba, sem popup nenhum, é a única via agora.
     async function extrairAgora(form) {
-        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados (GM_xmlhttpRequest)');
-        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
-        if (radioCSV && !radioCSV.checked) radioCSV.click();
-
-        // getElementById no MESMO documento do form (não o "document" global do frame
-        // onde este ciclo de passo() rodou — o form pode estar num frame diferente).
-        // Guardado agora porque, se abrirRelatorio() navegar/recarregar a página depois,
-        // pode não dar mais pra reencontrar o botão.
-        const botaoGerar = form.ownerDocument.getElementById('editButton');
-
-        function clicarGerarRelatorioPorUltimo() {
-            if (!botaoGerar) {
-                console.warn('[Projudi Arquivados c/ Saldo] botão #editButton não encontrado — só a via de dados (GM_xmlhttpRequest) foi usada');
-                return;
-            }
-            try { botaoGerar.click(); }
-            catch (e) { console.warn('[Projudi Arquivados c/ Saldo] clique em Gerar Relatório falhou (o PDF já tinha sido gerado antes, sem impacto)', e); }
-        }
-
+        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados (GM_xmlhttpRequest, sem tocar nos botões da tela)');
         try {
             const texto = await coletarCSV(form.action);
             const dados = parseCSV(texto);
@@ -431,7 +441,6 @@
             gerarPDF(dados);
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
-            clicarGerarRelatorioPorUltimo();
         } catch (err) {
             console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
             store.removeItem(ATIVO_KEY);
