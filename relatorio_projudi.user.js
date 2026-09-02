@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.8
+// @version      24.9
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8787,9 +8787,26 @@
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            return `<label class="pa-item">
+            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            return `<label class="${classeItem}">
                     <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
                 </label>`;
+        }
+        // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
+        // linhasComSubgrupos em injetarPainel) — pedido do usuário: reproduzir aqui os
+        // itens/subitens do popup secundário (ex.: cabeçalho "Audiências" agrupando
+        // Pendentes/Designadas/Realizadas, hoje só apareciam soltas sem o cabeçalho).
+        function linhasComSubgruposMU(itens) {
+            let html = '';
+            let subgrupoAberto = null;
+            itens.forEach(r => {
+                if (r.subgrupo !== subgrupoAberto) {
+                    subgrupoAberto = r.subgrupo || null;
+                    if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
+                }
+                html += linhaRelatorio(r);
+            });
+            return html;
         }
         // Checklist de relatórios — mesma fonte/persistência de injetarPainel
         // (relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS). Duas categorias,
@@ -8814,11 +8831,11 @@
                     </label>`
                 : '';
             if (!itens.length && !linhaAtivos) return '';
-            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhaAtivos}${itens.map(linhaRelatorio).join('')}</div>`;
+            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhaAtivos}${linhasComSubgruposMU(itens)}</div>`;
         }).join('');
         const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
         const linhasCrime = itensCrime.length
-            ? `<div class="pa-group"><p class="pa-group-lbl especifico">Crime</p>${itensCrime.map(linhaRelatorio).join('')}</div>`
+            ? `<div class="pa-group"><p class="pa-group-lbl especifico">Crime</p>${linhasComSubgruposMU(itensCrime)}</div>`
             : '';
 
         // Mesma estrutura/classes .pa-* do painel da página inicial (injetarPainel) —
@@ -8848,6 +8865,7 @@
                 ${linhasCrime}
                 <div class="pa-actions">
                     <button id="projudi-mu-iniciar" class="pa-btn pa-btn-primary" type="button">▶ Rodar automação nas unidades marcadas</button>
+                    <button id="projudi-mu-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                 </div>
                 <div class="pa-dica">Marque as unidades desejadas na árvore ao lado e os relatórios acima, depois clique em "Rodar automação".</div>
             </div>
@@ -8907,6 +8925,9 @@
             const titulos = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
             iniciarAutomacaoMultiUnidade(titulos);
         };
+        // Mesmo botão "Limpar" do painel da página inicial (#pa-limpar) — pedido do
+        // usuário: também precisa existir aqui, no popup secundário.
+        painel.querySelector('#projudi-mu-limpar').onclick = limparTudoAutomacao;
 
         // Se chegamos aqui em modo automático (dentro do popup, no meio de uma rodada
         // multi-unidade já em curso — ver 'trocando_unidade' em passoAutomacao), o clique
