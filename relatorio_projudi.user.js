@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.16
+// @version      24.17
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4440,28 +4440,6 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} conclusão(ões) pendente(s)`, m, hy);
         hy += 3;
-        // Pedido do usuário: quando Tempo Médio também foi incluído no mesmo PDF, mostra
-        // quantas conclusões ESTE magistrado(a) já analisou (dados do Tempo Médio, não
-        // das pendentes acima), o tempo médio de CONCLUSÃO DO JUIZ (Dt.Envio ->
-        // Dt.Análise) e quantas ele(a) mesmo fez diretamente x quantas passaram por
-        // pré-análise de outra pessoa — tudo já filtrado por este magistrado(a) E pela
-        // mesma atribuição/competência de `rotuloBloco` (ver calcularEstatisticasTMJuiz
-        // em gerarPDFConjunto). Bug corrigido: antes esses números eram os mesmos em
-        // TODOS os resumos (gerais e individuais, de qualquer competência) — não
-        // individualizados por atribuição.
-        if (estatisticasTM) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
-            let textoAnalise = `Conclusões já analisadas: ${estatisticasTM.total}`
-                + (estatisticasTM.periodo ? `  •  Período: ${estatisticasTM.periodo}` : '');
-            if (estatisticasTM.media != null) {
-                const mediaTxt = String(estatisticasTM.media).replace('.', ',');
-                textoAnalise += `  •  Tempo médio de conclusão (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
-            }
-            textoAnalise += `  •  ${estatisticasTM.peloMagistrado} diretamente pelo magistrado, ${estatisticasTM.porOutros} por outras pessoas`;
-            const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
-            doc.text(linhasAnalise, m, hy + 3);
-            hy += linhasAnalise.length * 3.4 + 4;
-        }
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
         const kY = hy + 6;
@@ -4471,10 +4449,38 @@
             { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
             { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
         ];
+        // Pedido do usuário: quantas conclusões ESTE magistrado(a) já analisou (dados do
+        // Tempo Médio, não das pendentes acima, quando Tempo Médio também foi incluído
+        // no mesmo PDF) e quantas ele(a) mesmo fez diretamente x quantas passaram por
+        // pré-análise de outra pessoa — tudo já filtrado por este magistrado(a) E pela
+        // mesma atribuição/competência de `rotuloBloco` (ver calcularEstatisticasTMJuiz
+        // em gerarPDFConjunto). Pedido do usuário (rodada seguinte): esta informação
+        // entra como um CARD a mais, junto dos demais KPIs — não mais misturada no
+        // subtítulo/cabeçalho da página. Período/tempo médio (texto mais longo, não cabe
+        // na 1ª linha do card) ganham uma legenda própria logo abaixo da fileira de cards.
+        if (estatisticasTM) {
+            kpis.push({
+                titulo: 'Já Analisadas', valor: String(estatisticasTM.total),
+                subs: [`Mag: ${estatisticasTM.peloMagistrado} · Ass: ${estatisticasTM.porOutros}`],
+                acento: COR.vinho,
+            });
+        }
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
-        const gY0 = kY + 28 + gap + 2;
+        let gY0 = kY + 28 + gap + 2;
+        if (estatisticasTM && (estatisticasTM.periodo || estatisticasTM.media != null)) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
+            let textoAnalise = 'Conclusões já analisadas (Tempo Médio)';
+            if (estatisticasTM.periodo) textoAnalise += `  •  Período: ${estatisticasTM.periodo}`;
+            if (estatisticasTM.media != null) {
+                const mediaTxt = String(estatisticasTM.media).replace('.', ',');
+                textoAnalise += `  •  Tempo médio de conclusão (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
+            }
+            const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
+            doc.text(linhasAnalise, m, gY0);
+            gY0 += linhasAnalise.length * 3.4 + 3;
+        }
         const charts = [
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -4990,6 +4996,17 @@
                     data.cell.styles.textColor = corpo[data.row.index]._cor;
                     data.cell.styles.fontStyle = 'bold';
                 }
+            },
+            // Pedido do usuário: atalho clicável no nome do magistrado, no resumo geral
+            // (esta tabela), direto para a página onde constam os dados dele — mesmo
+            // mecanismo _rect/PASSO 4 já usado pela tabela unificada do Cartório (ver
+            // didDrawCell logo acima, em desenharBlocoCartorioUnificado). Só chamada para
+            // Gabinete (cfg.itens = gabinete.itens) — a linha "Total" (índice fora de
+            // cfg.itens) fica sem link.
+            didDrawCell: (data) => {
+                if (data.section !== 'body' || data.column.dataKey !== 'rotulo') return;
+                const it = cfg.itens[data.row.index];
+                if (it) it._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
             },
         });
         return doc.lastAutoTable.finalY;
@@ -5728,6 +5745,26 @@
             if (!lista.length) return null;
             return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
+        // Pedido do usuário: a ordem da capa unificada precisa bater EXATAMENTE com a
+        // ordem do popup de automação (REPORTS_AUTOMACAO) — dentro deste subgrupo sem
+        // nome próprio, a ordem declarada lá é Tempo Médio (já empilhado acima), Outros
+        // Cumprimentos, Conclusões (vai para o Gabinete, não aqui), Apreensões,
+        // Cumprimento de Medidas. Estava fora de ordem (Apreensões/Cumprimento de
+        // Medidas empilhados ANTES de Outros Cumprimentos).
+        //
+        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
+        // indicador é o total pendente somado de todos os tipos com pendência > 0; o
+        // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
+        if (secaoOutrosCumprimentos) {
+            const totalPendentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.pendentes || 0), 0);
+            const totalUrgentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.urgentes || 0), 0);
+            itensOutros.push({
+                nome: 'Outros Cumprimentos',
+                indicador: `${totalPendentes} pendente(s)`,
+                detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
+            });
+        }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
         // "apenas o número de apreensões" no quadro); o detalhamento compacta a
@@ -5746,9 +5783,10 @@
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
             });
         }
-        // "Cumprimento de Medidas" — logo após Bens Apreendidos (pedido do usuário: mesma
-        // ordem no menu e no relatório). Indicador: total em atraso (o mais urgente dos
-        // 3 contadores); detalhamento compacta os outros dois.
+        // "Cumprimento de Medidas" — logo após Bens Apreendidos (mesma ordem do popup:
+        // Apreensões vem antes de Cumprimento de Medidas dentro da categoria Crime).
+        // Indicador: total em atraso (o mais urgente dos 3 contadores); detalhamento
+        // compacta os outros dois.
         if (secaoCumprimentoMedidas) {
             const r = secaoCumprimentoMedidas.dados;
             const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
@@ -5762,19 +5800,6 @@
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
-            });
-        }
-        // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
-        // indicador é o total pendente somado de todos os tipos com pendência > 0; o
-        // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
-        if (secaoOutrosCumprimentos) {
-            const totalPendentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.pendentes || 0), 0);
-            const totalUrgentes = secaoOutrosCumprimentos.dados.reduce((s, d) => s + (d.urgentes || 0), 0);
-            itensOutros.push({
-                nome: 'Outros Cumprimentos',
-                indicador: `${totalPendentes} pendente(s)`,
-                detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -6044,6 +6069,14 @@
             if (!pgAlvo) return;
             doc.setPage(l._rect.page);
             doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
+        });
+        // Mesmo PASSO 4, agora para o nome do magistrado na tabela de Gabinete do
+        // resumo geral (ver _rect capturado em desenharBlocoDominio) — pedido do
+        // usuário: atalho direto para a página com os dados daquele magistrado.
+        gabinete.itens.forEach(it => {
+            if (!it._rect || !it.pgResumoInicio) return;
+            doc.setPage(it._rect.page);
+            doc.link(it._rect.x, it._rect.y, it._rect.w, it._rect.h, { pageNumber: it.pgResumoInicio });
         });
 
         const sufixo = somenteResumo ? '_resumo' : '';
@@ -7731,7 +7764,7 @@
         doc.text(TITULO_ATIVOS_CLASSE, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${r.length} classe(s) processual(is) — corte do dia`;
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${r.length} classe(s) processual(is)`;
         if (!rotuloInfo.semFrase) {
             const frase = fraseCompetenciasComContagem(r);
             if (frase) subtitulo += `  •  ${frase}`;
