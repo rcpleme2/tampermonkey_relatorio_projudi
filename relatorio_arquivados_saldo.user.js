@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      2.0
+// @version      2.1
 // @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, seleciona CSV, clica em Gerar Relatório e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -392,21 +392,36 @@
         doc.save(`processos_arquivados_saldo_projudi_${dataArquivo}.pdf`);
     }
 
-    // ── Passo final: marca CSV, clica em Gerar Relatório de verdade (pedido do
-    // usuário) e, em paralelo, pede os mesmos dados via GM_xmlhttpRequest — é essa
-    // segunda via que alimenta o PDF (ver comentário no topo do arquivo sobre por que
-    // não dá pra confiar só no clique nativo). ──────────────────────────────────────
+    // ── Passo final: pede os dados via GM_xmlhttpRequest PRIMEIRO (é essa via que
+    // alimenta o PDF) e só DEPOIS de já ter o PDF em mãos clica em Gerar Relatório de
+    // verdade (pedido do usuário). ORDEM IMPORTA: clicar em "Gerar Relatório" ANTES
+    // (como a v2.0 fazia) mostrou-se arriscado em teste real — o clique dispara
+    // abrirRelatorio() (código do próprio Projudi, fora do nosso controle), que abriu uma
+    // aba nova em branco E disparou um download nativo do CSV ao mesmo tempo; se esse
+    // fluxo nativo mexer na aba/frame ATUAL de alguma forma (recarregar, navegar), o
+    // GM_xmlhttpRequest em andamento pode ser cancelado e o PDF nunca sai — e foi
+    // exatamente isso que aconteceu (usuário reportou: CSV baixado + aba em branco, sem
+    // PDF nenhum). Buscando os dados ANTES, o PDF já está gerado e baixado quando
+    // clicamos no botão nativo por último — o que acontecer com ele daí em diante
+    // (aba bloqueada, download nativo, etc.) não afeta mais o resultado.
     async function extrairAgora(form) {
-        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — marcando CSV e clicando em Gerar Relatório');
+        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados (GM_xmlhttpRequest)');
         const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
         if (radioCSV && !radioCSV.checked) radioCSV.click();
+
         // getElementById no MESMO documento do form (não o "document" global do frame
         // onde este ciclo de passo() rodou — o form pode estar num frame diferente).
+        // Guardado agora porque, se abrirRelatorio() navegar/recarregar a página depois,
+        // pode não dar mais pra reencontrar o botão.
         const botaoGerar = form.ownerDocument.getElementById('editButton');
-        if (botaoGerar) {
-            try { botaoGerar.click(); } catch (e) { console.warn('[Projudi Arquivados c/ Saldo] clique em Gerar Relatório falhou (seguindo pela via de dados mesmo assim)', e); }
-        } else {
-            console.warn('[Projudi Arquivados c/ Saldo] botão #editButton não encontrado — só a via de dados (GM_xmlhttpRequest) será usada');
+
+        function clicarGerarRelatorioPorUltimo() {
+            if (!botaoGerar) {
+                console.warn('[Projudi Arquivados c/ Saldo] botão #editButton não encontrado — só a via de dados (GM_xmlhttpRequest) foi usada');
+                return;
+            }
+            try { botaoGerar.click(); }
+            catch (e) { console.warn('[Projudi Arquivados c/ Saldo] clique em Gerar Relatório falhou (o PDF já tinha sido gerado antes, sem impacto)', e); }
         }
 
         try {
@@ -416,6 +431,7 @@
             gerarPDF(dados);
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
+            clicarGerarRelatorioPorUltimo();
         } catch (err) {
             console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
             store.removeItem(ATIVO_KEY);
