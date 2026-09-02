@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.12
+// @version      24.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -353,7 +353,20 @@
                 {
                     titulo: 'Com pré-análise', acento: 'aqua',
                     calc: (sub) => sub.filter(temPreAnalise).length,
-                    subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
+                    // Pedido do usuário: distinguir, entre as pré-análises, quantas foram
+                    // feitas pelo próprio magistrado (nome da pré-análise = nome do
+                    // magistrado, comparado sem diferenciar maiúsculas/minúsculas) e
+                    // quantas pela assessoria — ver preAnaliseEhDoMagistrado. "Mag"/"Ass"
+                    // abreviado de propósito — o card central só mostra a 1ª linha
+                    // resultante de splitTextToSize (ver desenharCard), então o texto
+                    // precisa caber na largura do card mesmo com 4 cards na mesma linha.
+                    subs: (sub, v) => {
+                        const peloMagistrado = sub.filter(preAnaliseEhDoMagistrado).length;
+                        return [
+                            `${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`,
+                            `Mag: ${peloMagistrado} · Ass: ${v - peloMagistrado}`,
+                        ];
+                    },
                 },
                 {
                     titulo: 'Sem pré-análise', acento: 'ambar',
@@ -4252,6 +4265,16 @@
     // "Sim"/"Não" a partir do texto bruto da célula de Pré-análise (não vazio = houve).
     function temPreAnalise(d) { return !!(d.preAnalise && d.preAnalise.trim()); }
 
+    // Pedido do usuário: entre as conclusões COM pré-análise, distinguir quantas foram
+    // feitas pelo PRÓPRIO magistrado (nome da pré-análise = nome do magistrado da
+    // conclusão) das feitas pela assessoria — comparação sem diferenciar maiúsculas/
+    // minúsculas (o texto de cada campo vem digitado livremente no Projudi, podendo
+    // divergir só na capitalização).
+    function preAnaliseEhDoMagistrado(d) {
+        if (!temPreAnalise(d)) return false;
+        return (d.preAnalise || '').trim().toLowerCase() === (d.responsavel || '').trim().toLowerCase();
+    }
+
     function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, tempoMedioConclusaoJuizInfo) {
         if (!primeira) doc.addPage();
         const agora = new Date();
@@ -4265,6 +4288,10 @@
 
         const comPreAnalise = sub.filter(temPreAnalise);
         const semPreAnalise = sub.length - comPreAnalise.length;
+        // Pedido do usuário: entre as pré-análises deste magistrado, quantas ele mesmo
+        // fez (nome da pré-análise = seu próprio nome) e quantas foram da assessoria.
+        const preAnalisePeloMagistrado = comPreAnalise.filter(preAnaliseEhDoMagistrado).length;
+        const preAnalisePelaAssessoria = comPreAnalise.length - preAnalisePeloMagistrado;
         const prio = contarPrioritarios(sub);
 
         let hy = m + 2;
@@ -4304,7 +4331,10 @@
         const kpis = [
             { titulo: 'Pendentes', valor: String(sub.length), subs: [], acento: COR.azul },
             { titulo: 'Prioritários', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
-            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
+            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [
+                `${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`,
+                `Mag: ${preAnalisePeloMagistrado} · Ass: ${preAnalisePelaAssessoria}`,
+            ], acento: COR.aqua },
             { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -5238,7 +5268,18 @@
         function linhaTarefa(t, nome, unidade) {
             const detalhes = [];
             if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
-            if (t.maisAntiga != null) detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)`);
+            if (t.maisAntiga != null) {
+                // Pedido do usuário: no relatório de Mandados Pendentes de Cumprimento,
+                // quando a situação está crítica (vermelho), identificar já na capa qual
+                // processo é o mandado mais antigo — evita ter que abrir o resumo
+                // detalhado só para descobrir qual está parado há mais tempo.
+                let sufixoProcesso = '';
+                if (t.status === 'critico' && t.secao.cfgOriginal === CFG_MANDADOS_CUMPRIMENTO) {
+                    const antigo = acharMaisAntigo(t.dados, CFG_MANDADOS_CUMPRIMENTO.pdf.dataCampo);
+                    if (antigo && antigo.registro && antigo.registro.processo) sufixoProcesso = ` (${antigo.registro.processo})`;
+                }
+                detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)${sufixoProcesso}`);
+            }
             return {
                 nome,
                 indicador: `${t.pendentes} ${unidade || 'pendente(s)'}`,
@@ -5450,6 +5491,16 @@
                 tempoMedioConclusaoJuizInfo = { media: Math.round(mediaJuiz * 10) / 10, periodo: periodoTxt };
             }
         }
+        // Pedido do usuário: unidades onde um relatório exclusivo da categoria Crime
+        // (Apreensões/Cumprimento de Medidas) não foi encontrado após 3 tentativas (ver
+        // marcarPrejudicadoEAvancar) entram aqui como "Prejudicado" — some no
+        // detalhamento da linha e marca a situação, em vez de aparecer como "0" (que
+        // pareceria um resultado genuíno em vez de uma extração que nem chegou a rodar).
+        function prejudicadoInfo(cfg) {
+            const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            if (!lista.length) return null;
+            return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
+        }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
         // "apenas o número de apreensões" no quadro); o detalhamento compacta a
@@ -5457,12 +5508,15 @@
         // gráficos — ver contarPorCampo), sem estourar a célula.
         if (secaoApreensoes) {
             const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
-            const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
+            const prejudicado = prejudicadoInfo(CFG_APREENSOES);
+            const detalhamento = prejudicado
+                ? `${prejudicado}${porTipo.length ? ' · ' + porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') : ''}`
+                : (porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—');
             itensOutros.push({
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
             });
         }
         // "Cumprimento de Medidas" — logo após Bens Apreendidos (pedido do usuário: mesma
@@ -5473,11 +5527,14 @@
             const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
             const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
             const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
+            const prejudicado = prejudicadoInfo(CFG_CUMPRIMENTO_MEDIDAS);
             itensOutros.push({
                 nome: 'Cumprimento de Medidas',
                 indicador: `${atrasados} em atraso`,
-                detalhamento: `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+                detalhamento: prejudicado
+                    ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
+                    : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
             });
         }
         // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
@@ -6175,6 +6232,33 @@
         if (porTipo.length) {
             desenharBarras(doc, m, chartY, uw, alturaChart, 'Audiências por Tipo', porTipo, undefined, COR.aqua);
             proximoY = chartY + alturaChart + 6;
+        }
+
+        // Observação destacada (pedido do usuário): quando há audiência com termo
+        // pendente há mais de 5 dias (vencida, ou seja, já realizada, mas sem termo
+        // lançado), recomenda que a secretaria observe e regularize a situação.
+        const vencidasMaisDe5Dias = vencidas.filter(d => {
+            const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+            return n != null && Math.abs(n) > 5;
+        });
+        if (vencidasMaisDe5Dias.length) {
+            const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
+                + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
+            const linhasObs = doc.splitTextToSize(obs, uw - 4);
+            const alturaObs = linhasObs.length * 3.6 + 10;
+            if (proximoY + alturaObs > ph - m - 10) {
+                doc.addPage();
+                desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                proximoY = m + 4;
+            }
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
+            doc.rect(m, proximoY, uw, alturaObs, 'FD');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('OBSERVAÇÃO', m + 3, proximoY + 6);
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text(linhasObs, m + 3, proximoY + 11);
+            proximoY += alturaObs + 6;
         }
 
         if (somenteResumo || !dados.length) {
@@ -9927,6 +10011,36 @@
         setTimeout(passoAutomacao, 300);
     }
 
+    // Pedido do usuário: em unidades sem os relatórios específicos da categoria Crime
+    // (Apreensões/Cumprimento de Medidas — ver categoriaEspecifica em REPORTS_AUTOMACAO),
+    // o link/aba nunca aparece, e esperar as 8 tentativas padrão (LIMITE_TENTATIVAS em
+    // passoAutomacao) antes de travar era tempo desperdiçado numa situação normal (não um
+    // erro de navegação a investigar, só uma unidade sem competência criminal). Com 3
+    // tentativas sem achar o link, pula automaticamente essa extração (sem travar, sem
+    // precisar do usuário clicar "Pular") E marca "Prejudicado" para esta atribuição —
+    // diferente de executarPular/"erro" (que marca o relatório inteiro como interrompido,
+    // sem distinguir de qual unidade), aqui guarda-se A ATUAÇÃO afetada, já que unidades
+    // diferentes da mesma rodada de automação podem ter ou não esse relatório.
+    function marcarPrejudicadoEAvancar(rel, atuacao) {
+        const nomeAtuacao = (atuacao || '(sem atuação)').trim();
+        console.warn(`[Auto Projudi] "${rel.rotulo}" não encontrado após 3 tentativas em "${nomeAtuacao}" — marcando como Prejudicado e avançando (provável unidade sem esse relatório).`);
+        cfgsDoRelatorio(rel).forEach(cfg => {
+            const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            if (!lista.includes(nomeAtuacao)) lista.push(nomeAtuacao);
+            store.setItem(cfg.prefixo + 'prejudicado', JSON.stringify(lista));
+            store.setItem(cfg.prefixo + 'coletado', '1');
+            store.removeItem(cfg.prefixo + 'rodando');
+        });
+        const fila = lerFilaAutomacao();
+        const idx = fila.indexOf(rel.key);
+        const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        store.removeItem('projudi_auto_nav_falhas');
+        store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
+        store.setItem('projudi_auto_lock', String(Date.now()));
+        atualizarPainel();
+        setTimeout(passoAutomacao, 300);
+    }
+
     // "Pular a extração atual" (botão no painel, visível só com a automação em curso) —
     // usado quando a coleta trava e o usuário não quer esperar/reiniciar tudo.
     function pularRelatorioAtual() {
@@ -10108,6 +10222,18 @@
             store.setItem(chaveFalhas, JSON.stringify(registro));
             console.warn(`[Auto Projudi] tentativa ${registro.n} sem sucesso para "${rel.navAlvo}" — URL atual: ${location.href}`);
 
+            // Relatórios exclusivos da categoria Crime (Apreensões/Cumprimento de
+            // Medidas) podem simplesmente não existir em unidades sem competência
+            // criminal — não é um erro de navegação a investigar, então usa um limite
+            // menor (3, não 8) e, ao esgotar, pula automaticamente e marca "Prejudicado"
+            // para esta atribuição em vez de travar a fila inteira esperando o usuário
+            // (ver marcarPrejudicadoEAvancar).
+            const LIMITE_TENTATIVAS_CRIME = 3;
+            if (rel.categoriaEspecifica === 'crime' && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+                store.removeItem(chaveFalhas);
+                marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
+                return;
+            }
             const LIMITE_TENTATIVAS = 8; // ~8 tentativas * 4s de trava = ~32s
             if (registro.n >= LIMITE_TENTATIVAS) {
                 store.removeItem(chaveFalhas);
@@ -10172,6 +10298,7 @@
             store.removeItem(c.prefixo + 'ts');
             store.removeItem(c.prefixo + 'coletado');
             store.removeItem(c.prefixo + 'erro');
+            store.removeItem(c.prefixo + 'prejudicado');
         });
         store.removeItem(AUTO_ESTADO);
         store.removeItem(CHAVE_AUTO_INICIO);
