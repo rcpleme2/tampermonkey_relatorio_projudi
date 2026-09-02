@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.15
+// @version      24.16
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -676,8 +676,14 @@
         larguras: [{ wch: 50 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
         extrai: (tds, atuacao) => {
             const numCel = (td) => { const n = parseInt(textoCelula(td), 10); return isNaN(n) ? 0 : n; };
+            const classe = textoCelula(tds[0]);
+            // A tabela real do Projudi termina com uma linha "TOTAL" (em negrito) somando
+            // todas as classes — bug relatado pelo usuário: estava sendo extraída como se
+            // fosse mais uma classe processual, dobrando a soma de "Em andamento" (a linha
+            // TOTAL já É a soma; somar ela também conta tudo duas vezes). Descarta aqui.
+            if (/^total$/i.test(classe)) return null;
             return {
-                classe: textoCelula(tds[0]),
+                classe,
                 acoesNovas: numCel(tds[1]),
                 emAndamento: numCel(tds[2]),
                 suspensos: numCel(tds[3]),
@@ -4402,7 +4408,7 @@
         return (d.preAnalise || '').trim().toLowerCase() === (d.responsavel || '').trim().toLowerCase();
     }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, tempoMedioConclusaoJuizInfo, analiseTMDesteJuiz) {
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, estatisticasTM) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -4434,31 +4440,24 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} conclusão(ões) pendente(s)`, m, hy);
         hy += 3;
-        // Pedido do usuário: quando Tempo Médio também foi incluído no mesmo PDF,
-        // mostra o tempo médio de CONCLUSÃO DO JUIZ (Dt. Envio -> Dt. Análise) e o
-        // período considerado — é uma estatística da UNIDADE toda (Tempo Médio não
-        // identifica o juiz por registro, só o cartório), então aparece igual em todas
-        // as páginas de Conclusões, não por magistrado.
-        if (tempoMedioConclusaoJuizInfo) {
+        // Pedido do usuário: quando Tempo Médio também foi incluído no mesmo PDF, mostra
+        // quantas conclusões ESTE magistrado(a) já analisou (dados do Tempo Médio, não
+        // das pendentes acima), o tempo médio de CONCLUSÃO DO JUIZ (Dt.Envio ->
+        // Dt.Análise) e quantas ele(a) mesmo fez diretamente x quantas passaram por
+        // pré-análise de outra pessoa — tudo já filtrado por este magistrado(a) E pela
+        // mesma atribuição/competência de `rotuloBloco` (ver calcularEstatisticasTMJuiz
+        // em gerarPDFConjunto). Bug corrigido: antes esses números eram os mesmos em
+        // TODOS os resumos (gerais e individuais, de qualquer competência) — não
+        // individualizados por atribuição.
+        if (estatisticasTM) {
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
-            const mediaTxt = String(tempoMedioConclusaoJuizInfo.media).replace('.', ',');
-            let textoTM = `Tempo médio de conclusão do juiz (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
-            if (tempoMedioConclusaoJuizInfo.periodo) textoTM += `  •  Período considerado: ${tempoMedioConclusaoJuizInfo.periodo}`;
-            const linhasTM = doc.splitTextToSize(textoTM, uw);
-            doc.text(linhasTM, m, hy + 3);
-            hy += linhasTM.length * 3.4 + 4;
-        }
-        // Pedido do usuário: entre as conclusões JÁ ANALISADAS deste magistrado(a) (dados
-        // do Tempo Médio, não das pendentes acima), quantas ele(a) mesmo fez diretamente
-        // (sem pré-análise, ou pré-análise com o próprio nome) e quantas passaram por
-        // pré-análise de outra pessoa — ver analiseTMPorJuiz em gerarPDFConjunto. Só
-        // aparece quando Tempo Médio também foi incluído no mesmo PDF E há registros
-        // deste magistrado(a) especificamente ali (nem toda unidade coleta os dois).
-        if (analiseTMDesteJuiz) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
-            let textoAnalise = `Conclusões já analisadas: ${analiseTMDesteJuiz.total}`
-                + (analiseTMDesteJuiz.periodo ? `  •  Período: ${analiseTMDesteJuiz.periodo}` : '')
-                + `  •  ${analiseTMDesteJuiz.peloMagistrado} diretamente pelo magistrado, ${analiseTMDesteJuiz.porOutros} por outras pessoas`;
+            let textoAnalise = `Conclusões já analisadas: ${estatisticasTM.total}`
+                + (estatisticasTM.periodo ? `  •  Período: ${estatisticasTM.periodo}` : '');
+            if (estatisticasTM.media != null) {
+                const mediaTxt = String(estatisticasTM.media).replace('.', ',');
+                textoAnalise += `  •  Tempo médio de conclusão (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
+            }
+            textoAnalise += `  •  ${estatisticasTM.peloMagistrado} diretamente pelo magistrado, ${estatisticasTM.porOutros} por outras pessoas`;
             const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
             doc.text(linhasAnalise, m, hy + 3);
             hy += linhasAnalise.length * 3.4 + 4;
@@ -5662,16 +5661,17 @@
         // ── Outros (itens do Cartório sem subgrupo no popup do painel: Tempo Médio,
         // Bens Apreendidos, Outros Cumprimentos) ────────────────────────────────────
         const itensOutros = [];
-        // Preenchido logo abaixo quando Tempo Médio está incluído — usado por
-        // montarResumoJuizConclusoes (ver o loop de Gabinete mais adiante).
-        let tempoMedioConclusaoJuizInfo = null;
-        // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
-        // ANALISADOS, do Tempo Médio — não das conclusões PENDENTES) e, dessas, quantas
-        // ele(a) mesmo fez diretamente (sem pré-análise, ou pré-análise com o próprio
-        // nome) versus quantas passaram por pré-análise de outra pessoa. Chave do mapa
-        // em minúsculas/sem espaço nas pontas — o nome do responsável pode vir com
-        // capitalização levemente diferente entre telas do Projudi.
-        const analiseTMPorJuiz = new Map();
+        // Usado por montarResumoJuizConclusoes (ver o loop de Gabinete mais adiante) —
+        // função (não valor fixo) porque precisa ser recalculada PARA CADA bloco
+        // (Resumo Geral x Competência: X), não só por magistrado. Bug relatado pelo
+        // usuário: antes era um valor ÚNICO por juiz (ou até só um por unidade inteira),
+        // então "Resumo Geral" e cada bloco de competência de um mesmo magistrado
+        // mostravam exatamente os mesmos números de Tempo Médio — não individualizados
+        // por atribuição. calcularEstatisticasTMJuiz(juiz, competencia) filtra
+        // secaoTempoMedio.dados por responsavel (case-insensitive) E, se `competencia`
+        // for informada, também por competencia/atuacao — o mesmo critério usado por
+        // subBlocosPorAtribuicao para montar bloco.dados das conclusões pendentes.
+        let calcularEstatisticasTMJuiz = () => null;
         if (secaoTempoMedio) {
             const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
             const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
@@ -5686,30 +5686,37 @@
                 detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
-            // Pedido do usuário: se Tempo Médio foi incluído no mesmo PDF, calcula
-            // também o tempo médio de CONCLUSÃO DO JUIZ (Dt. Envio -> Dt. Análise —
-            // quanto tempo o processo ficou esperando decisão, diferente do "tempo de
-            // cumprimento" acima, que mede só o cartório, Dt. Análise -> Dt. Análise
-            // Cartório) e injeta essa informação, com o período considerado, em cada
-            // página de resumo de Conclusões (ver montarResumoJuizConclusoes).
-            const validosJuiz = secaoTempoMedio.dados.filter(d => d.diasConclusaoJuiz != null);
-            if (validosJuiz.length) {
-                const mediaJuiz = validosJuiz.reduce((s, d) => s + d.diasConclusaoJuiz, 0) / validosJuiz.length;
-                tempoMedioConclusaoJuizInfo = { media: Math.round(mediaJuiz * 10) / 10, periodo: periodoTxt };
-            }
-            secaoTempoMedio.dados.forEach(d => {
-                const nome = (d.responsavel || '').trim();
-                if (!nome) return;
-                const chave = nome.toLowerCase();
-                if (!analiseTMPorJuiz.has(chave)) analiseTMPorJuiz.set(chave, { total: 0, peloMagistrado: 0, porOutros: 0, periodo: periodoTxt });
-                const info = analiseTMPorJuiz.get(chave);
-                info.total++;
-                // "Diretamente" = sem pré-análise (ninguém mais mexeu) OU pré-análise
-                // com o nome do próprio magistrado; "por outras pessoas" = pré-análise
-                // de alguém com nome diferente (assessoria).
-                if (!temPreAnalise(d) || preAnaliseEhDoMagistrado(d)) info.peloMagistrado++;
-                else info.porOutros++;
-            });
+            // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
+            // ANALISADOS, do Tempo Médio — não das conclusões PENDENTES), quantas ele(a)
+            // mesmo fez diretamente (sem pré-análise, ou pré-análise com o próprio nome)
+            // versus quantas passaram por pré-análise de outra pessoa, e o tempo médio de
+            // CONCLUSÃO DO JUIZ (Dt.Envio -> Dt.Análise) — tudo escopado pela mesma
+            // atribuição/competência do bloco sendo desenhado (nome/rótulo já vinham
+            // sendo comparados sem diferenciar maiúsculas/minúsculas — mantido aqui).
+            calcularEstatisticasTMJuiz = (juiz, competencia) => {
+                const nomeJuiz = (juiz || '').trim().toLowerCase();
+                if (!nomeJuiz) return null;
+                const dadosDoJuiz = secaoTempoMedio.dados.filter(d => {
+                    if ((d.responsavel || '').trim().toLowerCase() !== nomeJuiz) return false;
+                    if (competencia && (d.competencia || d.atuacao || '').trim() !== competencia) return false;
+                    return true;
+                });
+                if (!dadosDoJuiz.length) return null;
+                const validosJuiz = dadosDoJuiz.filter(d => d.diasConclusaoJuiz != null);
+                const mediaJuiz = validosJuiz.length ? validosJuiz.reduce((s, d) => s + d.diasConclusaoJuiz, 0) / validosJuiz.length : null;
+                let peloMagistrado = 0, porOutros = 0;
+                dadosDoJuiz.forEach(d => {
+                    // "Diretamente" = sem pré-análise (ninguém mais mexeu) OU pré-análise
+                    // com o nome do próprio magistrado; "por outras pessoas" = pré-análise
+                    // de alguém com nome diferente (assessoria).
+                    if (!temPreAnalise(d) || preAnaliseEhDoMagistrado(d)) peloMagistrado++;
+                    else porOutros++;
+                });
+                return {
+                    total: dadosDoJuiz.length, peloMagistrado, porOutros, periodo: periodoTxt,
+                    media: mediaJuiz != null ? Math.round(mediaJuiz * 10) / 10 : null,
+                };
+            };
         }
         // Pedido do usuário: unidades onde um relatório exclusivo da categoria Crime
         // (Apreensões/Cumprimento de Medidas) não foi encontrado após 3 tentativas (ver
@@ -5907,8 +5914,13 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                const analiseTMDesteJuiz = analiseTMPorJuiz.get((info.rotulo || '').trim().toLowerCase()) || null;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, tempoMedioConclusaoJuizInfo, analiseTMDesteJuiz);
+                // Bloco de competência específica ("Competência: X") -> filtra as
+                // estatísticas de Tempo Médio por essa mesma competência; "Resumo Geral"
+                // ou sem split (bloco.rotulo null) -> soma todas (competencia=null).
+                const competenciaDoBloco = bloco.rotulo && bloco.rotulo.startsWith('Competência: ')
+                    ? bloco.rotulo.slice('Competência: '.length) : null;
+                const estatisticasTM = calcularEstatisticasTMJuiz(info.rotulo, competenciaDoBloco);
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, estatisticasTM);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -7713,8 +7725,6 @@
 
         const r = dados || [];
         const totalAtivos = r.reduce((s, d) => s + (d.emAndamento || 0), 0);
-        const totalSuspensos = r.reduce((s, d) => s + (d.suspensos || 0), 0);
-        const totalAcoesNovas = r.reduce((s, d) => s + (d.acoesNovas || 0), 0);
         const classeComMais = r.length ? [...r].sort((a, b) => b.emAndamento - a.emAndamento)[0] : null;
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -7742,15 +7752,11 @@
             classeComMais ? classeComMais.classe : '—',
             classeComMais ? [`${classeComMais.emAndamento} ativo(s)`] : [], true, COR.ambar);
 
-        // Linha 2: suspensos / ações novas distribuídas (contexto do corte do dia).
-        const k2Y = kY + 28 + gap;
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m,           k2Y, kW2, 24, 'Suspensos', String(totalSuspensos), [], true, COR.vermelho);
-        desenharCard(doc, m + kW2+gap, k2Y, kW2, 24, 'Ações Novas Distribuídas', String(totalAcoesNovas), [], true, COR.azul);
-
         // Gráfico: distribuição do acervo (Em andamento) entre as classes — reaproveita
         // o mesmo "calc" de cfg.pdf.distribuicoes (somarPorCampo), sem duplicar a lógica.
-        const chartY = k2Y + 24 + gap + 4;
+        // Pedido do usuário: só o essencial neste relatório por enquanto — sem KPIs de
+        // Suspensos/Ações Novas Distribuídas (removidos, dado não pedido aqui).
+        const chartY = kY + 28 + gap + 4;
         const dist = CFG_ATIVOS_CLASSE.pdf.distribuicoes[0];
         const itensBarras = dist.calc(r);
         const disponivel = ph - m - chartY - 14;
@@ -7770,6 +7776,9 @@
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
         const ordenados = (dados || []).slice().sort((a, b) => b.emAndamento - a.emAndamento);
+        // Pedido do usuário: percentual de cada classe sobre o TOTAL de ativos (soma de
+        // "Em andamento" de todas as classes desta atuação — a mesma base usada na capa).
+        const totalAtivos = ordenados.reduce((s, d) => s + (d.emAndamento || 0), 0);
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
@@ -7780,6 +7789,7 @@
                 { header: 'Classe Processual', dataKey: 'classe' },
                 { header: 'Ações Novas', dataKey: 'acoesNovas' },
                 { header: 'Em Andamento', dataKey: 'emAndamento' },
+                { header: '% do Total', dataKey: 'percentual' },
                 { header: 'Suspensos', dataKey: 'suspensos' },
                 { header: 'Deixaram Suspensão', dataKey: 'deixaramSuspensao' },
                 { header: 'Arq. sem Baixa', dataKey: 'arquivadosSemBaixa' },
@@ -7790,6 +7800,7 @@
                 classe: d.classe,
                 acoesNovas: String(d.acoesNovas),
                 emAndamento: String(d.emAndamento),
+                percentual: `${totalAtivos ? (d.emAndamento / totalAtivos * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '0'}%`,
                 suspensos: String(d.suspensos),
                 deixaramSuspensao: String(d.deixaramSuspensao),
                 arquivadosSemBaixa: String(d.arquivadosSemBaixa),
@@ -7806,6 +7817,7 @@
             columnStyles: {
                 classe: { cellWidth: 56 },
                 emAndamento: { fontStyle: 'bold', textColor: COR.tinta },
+                percentual: { halign: 'right' },
             },
             didDrawPage: () => desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
@@ -11134,6 +11146,25 @@
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
+
+        // Pedido do usuário: com a automação rodando NESTA unidade, esconder a
+        // checklist de relatórios/abas (não dá pra mexer nela mesmo — já fica
+        // desabilitada, ver .pa-check abaixo) e mostrar só a janela de status
+        // (state-row/unidades/tempo/progresso/ações) — evita a lista comprida
+        // distraindo de "o que está acontecendo agora". Volta a aparecer assim que a
+        // automação para (concluído, travado ou nunca iniciada).
+        painel.querySelectorAll('.pa-tabs, .pa-group, .pa-links, .pa-resumo, .pa-dica').forEach(el => {
+            // .pa-group-especifico tem uma 2ª regra própria de visibilidade além da
+            // automação (aplicarCategoria só a mostra fora da aba Cível-Geral) — combina
+            // as duas aqui em vez de deixar aplicarCategoria brigar com esta função pra
+            // decidir o display por último.
+            if (el.classList.contains('pa-group-especifico')) {
+                const categoriaAtual = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
+                el.style.display = (emCurso || categoriaAtual === 'civel') ? 'none' : '';
+                return;
+            }
+            el.style.display = emCurso ? 'none' : '';
+        });
 
         // Unidades (atribuições/atuações) onde o botão "Automatizar" já foi de fato
         // clicado — pedido do usuário: entrar na unidade sozinho (sem clicar em
