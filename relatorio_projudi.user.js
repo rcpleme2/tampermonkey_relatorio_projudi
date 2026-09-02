@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.13
+// @version      24.14
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -353,20 +353,7 @@
                 {
                     titulo: 'Com pré-análise', acento: 'aqua',
                     calc: (sub) => sub.filter(temPreAnalise).length,
-                    // Pedido do usuário: distinguir, entre as pré-análises, quantas foram
-                    // feitas pelo próprio magistrado (nome da pré-análise = nome do
-                    // magistrado, comparado sem diferenciar maiúsculas/minúsculas) e
-                    // quantas pela assessoria — ver preAnaliseEhDoMagistrado. "Mag"/"Ass"
-                    // abreviado de propósito — o card central só mostra a 1ª linha
-                    // resultante de splitTextToSize (ver desenharCard), então o texto
-                    // precisa caber na largura do card mesmo com 4 cards na mesma linha.
-                    subs: (sub, v) => {
-                        const peloMagistrado = sub.filter(preAnaliseEhDoMagistrado).length;
-                        return [
-                            `${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`,
-                            `Mag: ${peloMagistrado} · Ass: ${v - peloMagistrado}`,
-                        ];
-                    },
+                    subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
                 },
                 {
                     titulo: 'Sem pré-análise', acento: 'ambar',
@@ -535,8 +522,8 @@
         usaAtuacao: false,
         nomeArquivo: 'tempo_medio_projudi',
         rotulos: { coletar: 'Extrair Tempo Médio', coletarMais: 'Extrair mais (Tempo Médio)', baixar: '⬇ Baixar Tempo Médio' },
-        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Usuário Cartório', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
+        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Usuário Cartório', 'Magistrado(a)', 'Pré-análise', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[1].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
@@ -552,6 +539,15 @@
             const usuarioCartorio = usuarioDeTexto(tds[4]); // login abaixo da data, na mesma célula
             const classeCompleta = textoAteBr(tds[6]) || textoCelula(tds[6]);
             const classe = classeCompleta.split(' (')[0].trim(); // classe sem o "(Assunto Principal)"
+            // tds[5] ("Tipo de conclusão") é a MESMA célula/estrutura de CFG_CONCLUSOES —
+            // as duas telas compartilham a base "Estatísticas de Conclusões", só o rádio
+            // "situacao" (Pendentes/Analisados) muda o filtro (ver detecta() acima) —
+            // então também traz <strong>magistrado</strong>/<i>pré-análise</i>. Pedido do
+            // usuário: precisa saber quem analisou cada conclusão JÁ ANALISADA (não só
+            // quem está pendente), para calcular quantas o magistrado fez diretamente x
+            // quantas passaram por pré-análise de outra pessoa.
+            const strongEl = tds[5].querySelector('strong');
+            const iEl = tds[5].querySelector('i');
             // Dias para cumprimento = Dt. Análise Cartório - Dt. Análise
             const tE = parseDataBR(dtEnvio), tA = parseDataBR(dtAnalise), tC = parseDataBR(dtCartorio);
             const dias = (tA != null && tC != null) ? Math.max(0, Math.round((tC - tA) / DIA_MS)) : null;
@@ -564,6 +560,8 @@
                 dtAnalise,
                 dtCartorio,
                 usuarioCartorio,
+                responsavel: strongEl ? strongEl.textContent.replace(/^Dr\(a\)\.\s*/i, '').trim() : '',
+                preAnalise: iEl ? iEl.textContent.trim() : '',
                 tipoConclusao: textoAteBr(tds[5]),
                 classe,
                 dias,
@@ -573,7 +571,7 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.tipoConclusao, d.classe,
+        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.responsavel, d.preAnalise, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedio(dados, somenteResumo),
     };
@@ -4275,7 +4273,7 @@
         return (d.preAnalise || '').trim().toLowerCase() === (d.responsavel || '').trim().toLowerCase();
     }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, tempoMedioConclusaoJuizInfo) {
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, tempoMedioConclusaoJuizInfo, analiseTMDesteJuiz) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -4288,10 +4286,6 @@
 
         const comPreAnalise = sub.filter(temPreAnalise);
         const semPreAnalise = sub.length - comPreAnalise.length;
-        // Pedido do usuário: entre as pré-análises deste magistrado, quantas ele mesmo
-        // fez (nome da pré-análise = seu próprio nome) e quantas foram da assessoria.
-        const preAnalisePeloMagistrado = comPreAnalise.filter(preAnaliseEhDoMagistrado).length;
-        const preAnalisePelaAssessoria = comPreAnalise.length - preAnalisePeloMagistrado;
         const prio = contarPrioritarios(sub);
 
         let hy = m + 2;
@@ -4325,16 +4319,28 @@
             doc.text(linhasTM, m, hy + 3);
             hy += linhasTM.length * 3.4 + 4;
         }
+        // Pedido do usuário: entre as conclusões JÁ ANALISADAS deste magistrado(a) (dados
+        // do Tempo Médio, não das pendentes acima), quantas ele(a) mesmo fez diretamente
+        // (sem pré-análise, ou pré-análise com o próprio nome) e quantas passaram por
+        // pré-análise de outra pessoa — ver analiseTMPorJuiz em gerarPDFConjunto. Só
+        // aparece quando Tempo Médio também foi incluído no mesmo PDF E há registros
+        // deste magistrado(a) especificamente ali (nem toda unidade coleta os dois).
+        if (analiseTMDesteJuiz) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
+            let textoAnalise = `Conclusões já analisadas: ${analiseTMDesteJuiz.total}`
+                + (analiseTMDesteJuiz.periodo ? `  •  Período: ${analiseTMDesteJuiz.periodo}` : '')
+                + `  •  ${analiseTMDesteJuiz.peloMagistrado} diretamente pelo magistrado, ${analiseTMDesteJuiz.porOutros} por outras pessoas`;
+            const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
+            doc.text(linhasAnalise, m, hy + 3);
+            hy += linhasAnalise.length * 3.4 + 4;
+        }
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
         const kY = hy + 6;
         const kpis = [
             { titulo: 'Pendentes', valor: String(sub.length), subs: [], acento: COR.azul },
             { titulo: 'Prioritários', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
-            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [
-                `${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`,
-                `Mag: ${preAnalisePeloMagistrado} · Ass: ${preAnalisePelaAssessoria}`,
-            ], acento: COR.aqua },
+            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
             { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -4590,6 +4596,56 @@
             },
         });
         desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
+
+        // Pedido do usuário: tabela própria com TODOS os mandados em situação crítica
+        // (mesmo limiar de "crítico" usado no resto do relatório — LIMITES_CARTORIO.
+        // critico=90 dias, ver classificarSituacaoPorDias) — antes só dava pra achar o
+        // mandado mais antigo (1 registro) na capa; agora lista todos os que já passaram
+        // do limiar, não só o pior caso.
+        const criticos = dados
+            .map(d => ({ ...d, dias: (() => { const ts = parseDataBR(d.dataExpedicao); return ts != null ? Math.floor((agoraTs - ts) / DIA_MS) : null; })() }))
+            .filter(d => d.dias != null && d.dias > 90)
+            .sort((a, b) => b.dias - a.dias);
+        if (criticos.length) {
+            doc.addPage();
+            let hyCrit = m + 2;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(p.titulo, m, hyCrit); hyCrit += 8;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.vermelho);
+            doc.text(`Mandados em Situação Crítica (${criticos.length})`, m, hyCrit); hyCrit += 5;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+            doc.text('Mais de 90 dias desde a expedição, ordenados do mais antigo para o mais recente.', m, hyCrit); hyCrit += 3;
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.5); doc.line(m, hyCrit, pw - m, hyCrit);
+            hyCrit += 6;
+
+            doc.autoTable({
+                columns: [
+                    { header: 'Processo', dataKey: 'processo' },
+                    { header: 'Oficial de Justiça', dataKey: 'oficial' },
+                    { header: 'Dt. Expedição', dataKey: 'dataExpedicao' },
+                    { header: 'Dias', dataKey: 'dias' },
+                    { header: 'Natureza', dataKey: 'natureza' },
+                    { header: 'Urgente', dataKey: 'urgente' },
+                ],
+                body: criticos.map(d => ({
+                    processo: d.processo || '', oficial: d.oficial || '(sem oficial)',
+                    dataExpedicao: d.dataExpedicao || '', dias: String(d.dias), natureza: d.natureza || '',
+                    urgente: d.urgente ? 'Sim' : 'Não',
+                })),
+                startY: hyCrit,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.vermelho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: {
+                    processo: { fontStyle: 'bold', textColor: COR.tinta },
+                    dias: { halign: 'right', fontStyle: 'bold', textColor: COR.vermelho },
+                    urgente: { halign: 'center' },
+                },
+                didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            });
+        }
     }
 
     // PDF individual (botão "Baixar PDF" na tela/painel, fora do Relatório PDF conjunto) —
@@ -5465,6 +5521,13 @@
         // Preenchido logo abaixo quando Tempo Médio está incluído — usado por
         // montarResumoJuizConclusoes (ver o loop de Gabinete mais adiante).
         let tempoMedioConclusaoJuizInfo = null;
+        // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
+        // ANALISADOS, do Tempo Médio — não das conclusões PENDENTES) e, dessas, quantas
+        // ele(a) mesmo fez diretamente (sem pré-análise, ou pré-análise com o próprio
+        // nome) versus quantas passaram por pré-análise de outra pessoa. Chave do mapa
+        // em minúsculas/sem espaço nas pontas — o nome do responsável pode vir com
+        // capitalização levemente diferente entre telas do Projudi.
+        const analiseTMPorJuiz = new Map();
         if (secaoTempoMedio) {
             const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
             const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
@@ -5490,6 +5553,19 @@
                 const mediaJuiz = validosJuiz.reduce((s, d) => s + d.diasConclusaoJuiz, 0) / validosJuiz.length;
                 tempoMedioConclusaoJuizInfo = { media: Math.round(mediaJuiz * 10) / 10, periodo: periodoTxt };
             }
+            secaoTempoMedio.dados.forEach(d => {
+                const nome = (d.responsavel || '').trim();
+                if (!nome) return;
+                const chave = nome.toLowerCase();
+                if (!analiseTMPorJuiz.has(chave)) analiseTMPorJuiz.set(chave, { total: 0, peloMagistrado: 0, porOutros: 0, periodo: periodoTxt });
+                const info = analiseTMPorJuiz.get(chave);
+                info.total++;
+                // "Diretamente" = sem pré-análise (ninguém mais mexeu) OU pré-análise
+                // com o nome do próprio magistrado; "por outras pessoas" = pré-análise
+                // de alguém com nome diferente (assessoria).
+                if (!temPreAnalise(d) || preAnaliseEhDoMagistrado(d)) info.peloMagistrado++;
+                else info.porOutros++;
+            });
         }
         // Pedido do usuário: unidades onde um relatório exclusivo da categoria Crime
         // (Apreensões/Cumprimento de Medidas) não foi encontrado após 3 tentativas (ver
@@ -5687,7 +5763,8 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, tempoMedioConclusaoJuizInfo);
+                const analiseTMDesteJuiz = analiseTMPorJuiz.get((info.rotulo || '').trim().toLowerCase()) || null;
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, tempoMedioConclusaoJuizInfo, analiseTMDesteJuiz);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
