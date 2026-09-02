@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.3
+// @version      5.4
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -31,6 +31,15 @@
 // Extrair"/"🔍 Diagnosticar"/"✖ Cancelar") hoje só acessíveis pelo menu da extensão
 // Tampermonkey — revisão do pedido original de "sem botão na tela": o usuário não
 // achava o menu da extensão pra disparar o script.
+//
+// v5.4 — corrige a causa raiz dos "0 bytes": o comando "🔍 Diagnosticar" rodado ao
+// vivo confirmou que a aba nova baixa o CSV de verdade quando o formulário é enviado
+// com o checkbox marcado e os campos REAIS (idRelatorio=606, numeroColunas,
+// descricaoUser, tipoUser, tamanhoUser, entre outros — nada a ver com os 3 campos
+// chutados em corpoFormulario() antes). O fluxo normal (extrairAgora, que nunca clica
+// em nada) agora marca o mesmo checkbox e serializa o FormData real do formulário
+// (ver corpoFormulario()/marcarCheckboxDoRelatorio()) em vez de montar o corpo à mão —
+// isso, e não a arquitetura fetch/GM_xmlhttpRequest em si, era o motivo do 0 bytes.
 //
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
@@ -316,8 +325,31 @@
         return { texto: null, tentativas };
     }
 
-    function corpoFormulario() {
-        return new URLSearchParams({ tamanhoFonte: '10', formato: 'R', tipoExportacao: 'CSV' });
+    // Corrigido a partir do diagnóstico ao vivo (comando "🔍 Diagnosticar"): os campos
+    // reais do formulário (idRelatorio=606, numeroColunas, descricaoUser, tipoUser,
+    // tamanhoUser, e outros — nada a ver com os 3 campos chutados antes) explicam os
+    // "0 bytes" anteriores. Serializar o FormData real (depois de garantir o checkbox
+    // marcado, ver marcarCheckboxDoRelatorio) replica exatamente a requisição que — já
+    // confirmado no mesmo diagnóstico — baixa o CSV de verdade quando enviada por um
+    // clique real.
+    function corpoFormulario(form) {
+        return new URLSearchParams(new FormData(form));
+    }
+
+    // Marca o checkbox do formulário (equivalente ao passo 3 do trace puppeteer —
+    // table.form input:nth-of-type(6)) se ele existir e ainda não estiver marcado.
+    // Usado tanto pelo diagnóstico (antes do clique real) quanto pelo fluxo normal
+    // (antes de serializar o FormData em segundo plano) — precisam do MESMO estado do
+    // formulário pra a requisição em segundo plano replicar fielmente a que funciona.
+    function marcarCheckboxDoRelatorio(form) {
+        const checkbox = form.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) {
+            console.log('[Projudi Arquivados c/ Saldo] marcando checkbox do relatório (equivalente ao passo 3 do trace puppeteer):', checkbox.name || checkbox.id || '(sem name/id)');
+            checkbox.click();
+        } else if (!checkbox) {
+            console.warn('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário — o trace puppeteer clicava em um (table.form input:nth-of-type(6)); confira manualmente se o relatório depende dele.');
+        }
+        return checkbox;
     }
 
     // Interpreta o ArrayBuffer da resposta (0 bytes / não parece CSV / CSV reconhecido) —
@@ -339,22 +371,16 @@
     // Via 1 (preferida): fetch() da PRÓPRIA página — roda na origem/sessão do documento
     // (mesmo "mundo" de cookies que um clique real do usuário), diferente de
     // GM_xmlhttpRequest, que passa pelo processo da extensão e PODE (dependendo do
-    // navegador/versão do Tampermonkey) não carregar a sessão do jeito esperado — foi o
-    // que os testes reais sugeriram: um clique de verdade no botão nativo baixava o CSV
-    // normalmente, mas GM_xmlhttpRequest sozinho voltava 0 bytes.
-    async function coletarViaFetch(urlAction) {
+    // navegador/versão do Tampermonkey) não carregar a sessão do jeito esperado.
+    // `corpo` é o FormData real do formulário (ver corpoFormulario) — nada de campos
+    // chutados; sem X-Requested-With, pra ficar o mais fiel possível ao POST de um
+    // submit real (o diagnóstico ao vivo mostrou que é um form POST comum, não uma
+    // rota pensada pra AJAX).
+    async function coletarViaFetch(urlAction, corpo) {
         const resp = await fetch(urlAction, {
             method: 'POST',
-            body: corpoFormulario(),
+            body: corpo,
             credentials: 'same-origin',
-            // X-Requested-With: marcador clássico de requisição AJAX que alguns
-            // filtros/WAFs de aplicações Java (Struts/JSF/Spring, comuns em sistemas do
-            // Judiciário) exigem para não tratar a chamada como suspeita — tentativa
-            // barata diante de dois mecanismos diferentes (fetch/GM_xmlhttpRequest)
-            // voltando 0 bytes do mesmo jeito, o que sugere algo no SERVIDOR
-            // distinguindo "navegação real" de "chamada em segundo plano", não um
-            // problema de qual API do navegador está sendo usada.
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
         // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
         // (302) para uma URL de download gerada — moveria o problema para "por que o
@@ -367,13 +393,13 @@
 
     // Via 2 (reserva): GM_xmlhttpRequest — mantida como alternativa caso fetch() falhe
     // por algum motivo (ex.: CSP da página bloqueando fetch pra esse endpoint).
-    function coletarViaGM(urlAction) {
+    function coletarViaGM(urlAction, corpo) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: urlAction,
-                data: corpoFormulario().toString(),
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+                data: corpo.toString(),
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 responseType: 'arraybuffer',
                 onload: (resp) => {
                     console.log('[Projudi Arquivados c/ Saldo] [GM_xmlhttpRequest] status=', resp.status, 'finalUrl=', resp.finalUrl, 'headers=', resp.responseHeaders);
@@ -397,13 +423,13 @@
     // CSP, ou a própria interpretarResposta rejeitando 0 bytes/CSV não reconhecido).
     // Se as duas falharem, o erro final junta as DUAS mensagens — diagnóstico completo
     // pra não precisar mais de uma rodada de "manda o erro que apareceu".
-    async function coletarCSV(urlAction) {
+    async function coletarCSV(urlAction, corpo) {
         try {
-            return await coletarViaFetch(urlAction);
+            return await coletarViaFetch(urlAction, corpo);
         } catch (e1) {
             console.warn('[Projudi Arquivados c/ Saldo] fetch() falhou, tentando GM_xmlhttpRequest como reserva:', e1.message);
             try {
-                return await coletarViaGM(urlAction);
+                return await coletarViaGM(urlAction, corpo);
             } catch (e2) {
                 throw new Error(`${e1.message}\n${e2.message}`);
             }
@@ -550,9 +576,11 @@
     // o comportamento que não se quer mais aqui. O chamador (passo()) já garante que só
     // uma frame por vez chega até aqui (ver tentarTravarExtracao).
     async function extrairAgora(form) {
-        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
+        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem clicar em "Gerar Relatório")');
         try {
-            const texto = await coletarCSV(form.action);
+            marcarCheckboxDoRelatorio(form);
+            const corpo = corpoFormulario(form);
+            const texto = await coletarCSV(form.action, corpo);
             const dados = parseCSV(texto);
             console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — gerando PDF`);
             gerarPDF(dados);
@@ -604,13 +632,7 @@
         // logar o que recebeu — ver listener no fim do arquivo.
         store.setItem(DIAG_ABA_KEY, String(Date.now()));
 
-        const checkbox = form.querySelector('input[type="checkbox"]');
-        if (checkbox && !checkbox.checked) {
-            console.log('[Projudi Arquivados c/ Saldo][DIAG] marcando checkbox (equivalente ao passo 3 do trace puppeteer):', checkbox.name || checkbox.id || '(sem name/id)');
-            checkbox.click();
-        } else if (!checkbox) {
-            console.warn('[Projudi Arquivados c/ Saldo][DIAG] nenhum checkbox encontrado no formulário — o trace puppeteer clicava em um (table.form input:nth-of-type(6)); confira manualmente.');
-        }
+        marcarCheckboxDoRelatorio(form);
 
         const botao = form.querySelector('#editButton') || Array.from(form.querySelectorAll('a, input[type="submit"], button'))
             .find(el => /gerar\s+relat[óo]rio/i.test((el.textContent || el.value || '').trim()));
