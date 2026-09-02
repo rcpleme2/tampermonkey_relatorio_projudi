@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.9
+// @version      5.10
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -97,6 +97,24 @@
 // texto desenhado.
 // (2) REMOVE o card "Saldo Médio por Processo" do resumo — sobram os cards "Total de
 // Processos" e "Saldo Total", que ocupam a largura toda dividida em 2 (antes 3).
+//
+// v5.10 — dois bugs relatados pelo usuário num PDF real de 36 processos (2 páginas):
+// (1) a linha "TOTAL" aparecia ao final da tabela de CADA página, não só ao final da
+// tabela inteira — o autoTable repete o `foot` em toda página por padrão
+// (showFoot:'everyPage'); corrigido com showFoot:'lastPage', que só desenha o TOTAL na
+// última página da tabela.
+// (2) os números da tabela (Processo, datas, Conta Judicial, Saldo — todas as colunas
+// têm dígitos) saíam com espaços estranhos entre os caracteres, ex.: "000228 3-42.2016.8
+// .16.0154" em vez de "0002283-42.2016.8.16.0154". O CONTEÚDO do texto no PDF estava
+// correto (copiar/colar do PDF saía certo) — o problema era só de POSICIONAMENTO visual
+// dos caracteres. Causa: a fonte PublicSans embutida (FONTE_PUBLIC_SANS_REGULAR) declara
+// larguras de glifo (/Widths, no dicionário de fonte do PDF) que não batem exatamente
+// com o desenho de certos glifos nesse peso/tamanho pequeno (7.5-8pt), abrindo espaços
+// onde não deveria — qualquer leitor de PDF (Acrobat, navegador, etc.) posiciona cada
+// caractere usando essas larguras declaradas, então o defeito é real e consistente, não
+// um problema só do preview usado pra conferir. Corrigido trocando a fonte da tabela
+// inteira (corpo, cabeçalho e rodapé) de PublicSans pra Helvetica — fonte padrão do PDF,
+// não embutida, sem esse risco (mesma lógica já usada no balão de observação).
 //
 // NOTA para uma futura integração ao relatorio_projudi.user.js principal (pedido do
 // usuário — NÃO fazer agora, só documentar aqui pra não esquecer): quando este
@@ -732,13 +750,24 @@
             startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+            // Fonte Helvetica (não PublicSans) no corpo/cabeçalho/rodapé da tabela —
+            // pedido do usuário: os números (Processo, datas, Conta Judicial, Saldo)
+            // saíam com espaços estranhos entre os caracteres. Causa raiz: a fonte
+            // PublicSans embutida (FONTE_PUBLIC_SANS_REGULAR) declara larguras de glifo
+            // (Widths, no dicionário /Font do PDF) que não batem exatamente com o
+            // desenho real de certos glifos nesse peso/tamanho — o CONTEÚDO do texto sai
+            // correto (por isso copiar/colar do PDF funciona normalmente), mas o
+            // posicionamento visual de cada caractere fica errado, abrindo espaços onde
+            // não deveria. Helvetica é fonte padrão do PDF (não embutida), sem esse
+            // risco — mesma solução já usada no balão de observação.
+            showFoot: 'lastPage', // TOTAL só na última página da tabela (pedido do usuário) — o padrão do autoTable repete o rodapé em toda página
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
                       lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
-            footStyles: { font: 'PublicSans', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
+            footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
             didDrawPage: () => desenharRodape(doc, TITULO, carimbo, pw, ph, m),
         });
     }
