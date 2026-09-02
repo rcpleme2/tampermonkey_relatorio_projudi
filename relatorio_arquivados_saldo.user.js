@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.7
+// @version      5.8
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -58,15 +58,27 @@
 // "Arquivo CSV" antes de montar o corpo, chamada tanto no fluxo normal (extrairAgora)
 // quanto no diagnóstico (diagnosticar) — sem isso a requisição saía pedindo PDF.
 //
-// v5.7 — acrescenta, em montarResumo(), uma observação em texto (itálico, mesmo padrão
-// visual das notas do script principal) logo abaixo dos cards de resumo e antes da
-// tabela discriminada (que fica em página separada — ver montarTabela/doc.addPage()):
-// "Dados extraídos do Sistema Projudi indicaram a existência de processos arquivados
-// com saldo em conta judicial. A secretaria deverá analisar os processos mencionados e
-// providenciar o levantamento dos valores, observando, para tanto, as regras do Código
-// de Normas do Foro Judicial e o teor do Decreto Judiciário nº 626/2018." Só aparece
-// quando há ao menos um processo listado (dados.length > 0) — pedido explícito do
-// usuário, para não exibir a nota num PDF "zerado".
+// v5.7 — acrescenta, em montarResumo(), uma observação em texto logo abaixo dos cards
+// de resumo e antes da tabela discriminada. Só aparece quando há ao menos um processo
+// listado (dados.length > 0) — pedido explícito do usuário, para não exibir a nota num
+// PDF "zerado". (Texto e estilo revistos na v5.8, ver abaixo — mantido aqui só como
+// histórico de quando a observação foi introduzida.)
+//
+// v5.8 — revisão da observação (pedido do usuário): (1) texto novo — "Verificou-se, a
+// partir de dados extraídos do Sistema Projudi, a existência de processos arquivados
+// com saldo em conta judicial. A secretaria deverá promover a análise dos processos
+// indicados e adotar as medidas cabíveis para o levantamento dos valores depositados,
+// em estrita observância ao Código de Normas do Foro Judicial e ao Decreto Judiciário
+// nº 626/2018."; (2) passa a ser um balão autônomo (ver desenharCardObservacao()), no
+// mesmo estilo visual dos cards de totais, em vez de texto solto; (3) fonte Helvetica
+// (não PublicSans) e texto justificado; (4) coluna Saldo da tabela discriminada agora
+// alinhada à esquerda, igual às demais colunas (antes só ela tinha halign:'right'); (5)
+// montarTabela() não força mais doc.addPage() — recebe startY e continua na MESMA
+// página logo abaixo do balão de observação; o autoTable pagina sozinho só quando o
+// volume de processos realmente não cabe numa única página (pedido explícito do
+// usuário: uma página quando tudo couber, mais de uma só quando a tabela exigir, e
+// sempre começando imediatamente após a observação, nunca numa página em branco à
+// parte).
 //
 // NOTA para uma futura integração ao relatorio_projudi.user.js principal (pedido do
 // usuário — NÃO fazer agora, só documentar aqui pra não esquecer): quando este
@@ -221,6 +233,39 @@
         doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
         subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
+    }
+
+    // Balão de observação (pedido do usuário): mesmo estilo visual dos cards de totais
+    // (caixa arredondada + barra de destaque à esquerda), mas com um parágrafo corrido
+    // em vez de um valor/título centralizados — por isso não reaproveita desenharCard()
+    // diretamente. Fonte Helvetica (pedido explícito do usuário — as demais peças do PDF
+    // usam PublicSans) e texto justificado (todas as linhas exceto a última, convenção
+    // tipográfica padrão). Altura calculada e devolvida (não fixa) porque o texto varia
+    // de tamanho; quem chama usa o retorno pra continuar o layout logo abaixo.
+    function desenharCardObservacao(doc, x, y, w, texto) {
+        const padX = 6, padTop = 8, gapRotuloTexto = 5, alturaLinha = 4.2, padBottom = 4;
+        const larguraTexto = w - 2 * padX;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+        const linhas = doc.splitTextToSize(texto, larguraTexto);
+        const yRotulo = y + padTop;
+        const yTexto = yRotulo + gapRotuloTexto;
+        const h = padTop + gapRotuloTexto + (linhas.length - 1) * alturaLinha + padBottom;
+
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.azul);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text('OBSERVAÇÃO', x + padX, yRotulo);
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+        linhas.forEach((linha, i) => {
+            const ultima = i === linhas.length - 1;
+            doc.text(linha, x + padX, yTexto + i * alturaLinha, ultima ? {} : { align: 'justify', maxWidth: larguraTexto });
+        });
+
+        return h;
     }
 
     function desenharRodape(doc, titulo, quando, pw, ph, m) {
@@ -595,25 +640,32 @@
 
         // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
         // relatório efetivamente lista algum processo — sem isso a nota apareceria mesmo
-        // num PDF "zerado", o que não tem utilidade.
+        // num PDF "zerado", o que não tem utilidade. Desenhada como balão autônomo (ver
+        // desenharCardObservacao), no mesmo estilo dos cards de totais acima.
         let yApos = aY + 28 + gap;
         if (r.length) {
-            const observacao = 'Dados extraídos do Sistema Projudi indicaram a existência de processos '
-                + 'arquivados com saldo em conta judicial. A secretaria deverá analisar os processos '
-                + 'mencionados e providenciar o levantamento dos valores, observando, para tanto, as regras '
-                + 'do Código de Normas do Foro Judicial e o teor do Decreto Judiciário nº 626/2018.';
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-            const linhasObs = doc.splitTextToSize(observacao, uw);
-            doc.text(linhasObs, m, yApos);
-            yApos += linhasObs.length * 3.4 + 2;
+            const observacao = 'Verificou-se, a partir de dados extraídos do Sistema Projudi, a existência de '
+                + 'processos arquivados com saldo em conta judicial. A secretaria deverá promover a análise '
+                + 'dos processos indicados e adotar as medidas cabíveis para o levantamento dos valores '
+                + 'depositados, em estrita observância ao Código de Normas do Foro Judicial e ao Decreto '
+                + 'Judiciário nº 626/2018.';
+            const alturaObs = desenharCardObservacao(doc, m, yApos, uw, observacao);
+            yApos += alturaObs + gap;
+        } else {
+            // Sem processos, montarTabela() nunca roda (ver gerarPDF) — o rodapé desta
+            // página única precisa ser desenhado aqui. Com processos, quem desenha o
+            // rodapé (de TODAS as páginas, inclusive esta primeira) é o autoTable de
+            // montarTabela, que continua na mesma página logo abaixo (ver startY abaixo).
+            desenharRodape(doc, TITULO, carimbo, pw, ph, m);
         }
-
-        desenharRodape(doc, TITULO, carimbo, pw, ph, m);
         return yApos;
     }
 
-    function montarTabela(doc, dados) {
-        doc.addPage();
+    // startY: posição (mm) logo abaixo do balão de observação, na MESMA página — pedido
+    // do usuário: uma única página quando tudo couber; várias só quando a própria tabela
+    // exigir, mas sempre começando imediatamente abaixo da observação (nunca numa página
+    // em branco à parte). autoTable pagina sozinho quando o conteúdo não cabe.
+    function montarTabela(doc, dados, startY) {
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
@@ -622,8 +674,8 @@
         const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
         const r = dados || [];
 
-        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO} (${r.length} processo(s))`);
-        const tabInicioY = m + 10;
+        tituloSecao(doc, m, startY + 4, uw, `Tabela discriminada — ${TITULO} (${r.length} processo(s))`);
+        const tabInicioY = startY + 10;
 
         const colunas = [
             { header: 'Processo', width: 26, get: d => d.processo },
@@ -635,9 +687,10 @@
         const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
         const fatorLargura = uw / somaLarguras;
         const columnStyles = {};
+        // Coluna Saldo alinhada à esquerda, igual às demais (pedido do usuário — antes
+        // tinha halign:'right' só nela, destoando do resto da tabela).
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
         const idxSaldo = colunas.findIndex(c => c.header === 'Saldo');
-        columnStyles['k' + idxSaldo] = { ...columnStyles['k' + idxSaldo], halign: 'right' };
 
         const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
         const corpo = ordenados.map(d => {
@@ -660,17 +713,14 @@
             columnStyles,
             foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
             footStyles: { font: 'PublicSans', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
-            didParseCell: (data) => {
-                if (data.section === 'foot' && data.column.index === idxSaldo) data.cell.styles.halign = 'right';
-            },
             didDrawPage: () => desenharRodape(doc, TITULO, carimbo, pw, ph, m),
         });
     }
 
     function gerarPDF(dados) {
         const doc = novoDocPDF();
-        montarResumo(doc, dados);
-        if (dados.length) montarTabela(doc, dados);
+        const yApos = montarResumo(doc, dados);
+        if (dados.length) montarTabela(doc, dados, yApos);
         const dataArquivo = new Date().toISOString().slice(0, 10);
         const nomeArquivo = `processos_arquivados_saldo_projudi_${dataArquivo}.pdf`;
         doc.save(nomeArquivo);
