@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.4
+// @version      5.5
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -41,6 +41,14 @@
 // (ver corpoFormulario()/marcarCheckboxDoRelatorio()) em vez de montar o corpo à mão —
 // isso, e não a arquitetura fetch/GM_xmlhttpRequest em si, era o motivo do 0 bytes.
 //
+// v5.5 — log detalhado de TODAS as ações do script no console (pedido do usuário, não
+// só os erros): helpers log()/logAviso()/logErro() com um ID de frame aleatório por
+// instância (o script roda em várias frames ao mesmo tempo — ver comentário sobre
+// EXTRAINDO_KEY logo abaixo) para deixar claro qual frame fez o quê. Cobre carregamento
+// do script, busca de links/formulário (achado ou não, quantos documentos checados),
+// tentativas de trava, campos serializados em corpoFormulario(), início/fim de cada
+// requisição (fetch e GM_xmlhttpRequest), cada tentativa de passo() e o PDF salvo.
+//
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
 // "Relatórios/Estatísticas" > "Relatórios Dinâmicos" > o link do relatório. Ao chegar no
@@ -70,6 +78,16 @@
     const ATIVO_KEY = PREFIXO + 'ativo';
     const TENTATIVAS_KEY = PREFIXO + 'tentativas';
     const MAX_TENTATIVAS = 20; // ~20 cargas de página / tentativas dentro da página — teto de segurança
+
+    // ── Log — pedido do usuário: todo ponto de decisão/ação do script (não só erros)
+    // deve deixar rastro no console (F12), com um prefixo único fácil de filtrar. Como o
+    // script roda em VÁRIAS frames ao mesmo tempo (sem @noframes), cada linha também
+    // identifica de qual frame ela veio (útil pra depurar exatamente o tipo de corrida
+    // entre frames que a trava em EXTRAINDO_KEY existe pra evitar).
+    const ID_FRAME = Math.random().toString(36).slice(2, 8);
+    function log(...args) { console.log(`[Projudi Arquivados c/ Saldo][frame ${ID_FRAME}]`, ...args); }
+    function logAviso(...args) { console.warn(`[Projudi Arquivados c/ Saldo][frame ${ID_FRAME}]`, ...args); }
+    function logErro(...args) { console.error(`[Projudi Arquivados c/ Saldo][frame ${ID_FRAME}]`, ...args); }
 
     // ── Modo diagnóstico (Fase 1 da investigação do "0 bytes") ──────────────────────
     // MODO_KEY diferencia o que passo() faz quando acha o formulário: 'extrair' (fluxo
@@ -101,12 +119,17 @@
     function tentarTravarExtracao() {
         const agora = Date.now();
         const travaAtual = parseInt(store.getItem(EXTRAINDO_KEY) || '0', 10);
-        if (travaAtual && (agora - travaAtual) < TRAVA_MS) return false;
+        if (travaAtual && (agora - travaAtual) < TRAVA_MS) {
+            log(`trava de extração OCUPADA (outra frame começou há ${agora - travaAtual}ms) — desistindo nesta frame`);
+            return false;
+        }
         store.setItem(EXTRAINDO_KEY, String(agora));
+        log('trava de extração OBTIDA — esta frame vai pedir os dados');
         return true;
     }
     function destravarExtracao() {
         store.removeItem(EXTRAINDO_KEY);
+        log('trava de extração liberada');
     }
 
     // ── Paleta e helpers visuais (mesmo estilo do relatorio_projudi.user.js principal,
@@ -259,9 +282,11 @@
             for (const a of d.querySelectorAll('a[href]')) {
                 if (urlRe && !urlRe.test(a.href)) continue;
                 if (textoRe && !textoRe.test((a.textContent || '').trim())) continue;
+                log(`acharLinkMenu(${urlRe},${textoRe}) — achado: "${(a.textContent || '').trim()}" (${a.href})`);
                 return a;
             }
         }
+        log(`acharLinkMenu(${urlRe},${textoRe}) — nada encontrado em ${docs.length} documento(s) acessível(is)`);
         return null;
     }
 
@@ -273,9 +298,13 @@
         for (const d of docs) {
             for (const a of d.querySelectorAll('a[href]')) {
                 if (!/administracao\/relatorio\.do/i.test(a.href)) continue;
-                if (/processos\s+arquivados\s+com\s+saldo/i.test((a.textContent || '').trim())) return a;
+                if (/processos\s+arquivados\s+com\s+saldo/i.test((a.textContent || '').trim())) {
+                    log(`acharLinkArquivadosSaldoNaListagem — achado: ${a.href}`);
+                    return a;
+                }
             }
         }
+        log(`acharLinkArquivadosSaldoNaListagem — nada encontrado em ${docs.length} documento(s) acessível(is)`);
         return null;
     }
 
@@ -292,7 +321,10 @@
             for (const label of labels) {
                 if (!/^nome:?$/i.test(label.textContent.trim())) continue;
                 const valorTd = label.nextElementSibling;
-                if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) return form;
+                if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) {
+                    log(`formularioArquivadosSaldo — encontrado (action=${form.action})`);
+                    return form;
+                }
             }
         }
         return null;
@@ -333,7 +365,9 @@
     // confirmado no mesmo diagnóstico — baixa o CSV de verdade quando enviada por um
     // clique real.
     function corpoFormulario(form) {
-        return new URLSearchParams(new FormData(form));
+        const corpo = new URLSearchParams(new FormData(form));
+        log('corpoFormulario — campos serializados:', Object.fromEntries(corpo.entries()));
+        return corpo;
     }
 
     // Marca o checkbox do formulário (equivalente ao passo 3 do trace puppeteer —
@@ -344,10 +378,12 @@
     function marcarCheckboxDoRelatorio(form) {
         const checkbox = form.querySelector('input[type="checkbox"]');
         if (checkbox && !checkbox.checked) {
-            console.log('[Projudi Arquivados c/ Saldo] marcando checkbox do relatório (equivalente ao passo 3 do trace puppeteer):', checkbox.name || checkbox.id || '(sem name/id)');
+            log('marcarCheckboxDoRelatorio — marcando (equivalente ao passo 3 do trace puppeteer):', checkbox.name || checkbox.id || '(sem name/id)');
             checkbox.click();
-        } else if (!checkbox) {
-            console.warn('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário — o trace puppeteer clicava em um (table.form input:nth-of-type(6)); confira manualmente se o relatório depende dele.');
+        } else if (checkbox) {
+            log('marcarCheckboxDoRelatorio — já estava marcado:', checkbox.name || checkbox.id || '(sem name/id)');
+        } else {
+            logAviso('marcarCheckboxDoRelatorio — nenhum checkbox encontrado no formulário (o trace puppeteer clicava em um — table.form input:nth-of-type(6)); confira manualmente se o relatório depende dele.');
         }
         return checkbox;
     }
@@ -356,15 +392,16 @@
     // usado pelas duas vias abaixo, pra dar o MESMO diagnóstico rico não importa qual
     // delas respondeu.
     function interpretarResposta(buffer, origem) {
+        log(`[${origem}] interpretando resposta — ${buffer ? buffer.byteLength : 0} byte(s)`);
         if (!buffer || buffer.byteLength === 0) {
             throw new Error(`[${origem}] a resposta veio vazia (0 bytes) — sessão pode ter expirado, ou a sessão usada nesta via não é a mesma da aba.`);
         }
         const { texto, encoding, tentativas } = decodificarResposta(buffer);
         if (!texto) {
-            console.warn(`[Projudi Arquivados c/ Saldo] [${origem}] nenhuma decodificação pareceu CSV:`, tentativas);
+            logAviso(`[${origem}] nenhuma decodificação pareceu CSV:`, tentativas);
             throw new Error(`[${origem}] a resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`);
         }
-        console.log(`[Projudi Arquivados c/ Saldo] [${origem}] CSV reconhecido (encoding ${encoding})`);
+        log(`[${origem}] CSV reconhecido (encoding ${encoding})`);
         return texto;
     }
 
@@ -377,6 +414,7 @@
     // submit real (o diagnóstico ao vivo mostrou que é um form POST comum, não uma
     // rota pensada pra AJAX).
     async function coletarViaFetch(urlAction, corpo) {
+        log(`[fetch] iniciando POST para ${urlAction}`);
         const resp = await fetch(urlAction, {
             method: 'POST',
             body: corpo,
@@ -385,7 +423,7 @@
         // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
         // (302) para uma URL de download gerada — moveria o problema para "por que o
         // redirecionamento não está sendo seguido com os mesmos cookies/cabeçalhos".
-        console.log('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
+        log('[fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
         if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
         const buffer = await resp.arrayBuffer();
         return interpretarResposta(buffer, 'fetch');
@@ -394,6 +432,7 @@
     // Via 2 (reserva): GM_xmlhttpRequest — mantida como alternativa caso fetch() falhe
     // por algum motivo (ex.: CSP da página bloqueando fetch pra esse endpoint).
     function coletarViaGM(urlAction, corpo) {
+        log(`[GM_xmlhttpRequest] iniciando POST para ${urlAction}`);
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -402,7 +441,7 @@
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 responseType: 'arraybuffer',
                 onload: (resp) => {
-                    console.log('[Projudi Arquivados c/ Saldo] [GM_xmlhttpRequest] status=', resp.status, 'finalUrl=', resp.finalUrl, 'headers=', resp.responseHeaders);
+                    log('[GM_xmlhttpRequest] status=', resp.status, 'finalUrl=', resp.finalUrl, 'headers=', resp.responseHeaders);
                     if (resp.status < 200 || resp.status >= 300) {
                         reject(new Error(`[GM_xmlhttpRequest] HTTP ${resp.status} ao solicitar o relatório`));
                         return;
@@ -424,12 +463,17 @@
     // Se as duas falharem, o erro final junta as DUAS mensagens — diagnóstico completo
     // pra não precisar mais de uma rodada de "manda o erro que apareceu".
     async function coletarCSV(urlAction, corpo) {
+        log('coletarCSV — começando (via 1: fetch)');
         try {
-            return await coletarViaFetch(urlAction, corpo);
+            const texto = await coletarViaFetch(urlAction, corpo);
+            log('coletarCSV — sucesso pela via fetch');
+            return texto;
         } catch (e1) {
-            console.warn('[Projudi Arquivados c/ Saldo] fetch() falhou, tentando GM_xmlhttpRequest como reserva:', e1.message);
+            logAviso('fetch() falhou, tentando GM_xmlhttpRequest como reserva:', e1.message);
             try {
-                return await coletarViaGM(urlAction, corpo);
+                const texto = await coletarViaGM(urlAction, corpo);
+                log('coletarCSV — sucesso pela via GM_xmlhttpRequest (reserva)');
+                return texto;
             } catch (e2) {
                 throw new Error(`${e1.message}\n${e2.message}`);
             }
@@ -565,7 +609,9 @@
         montarResumo(doc, dados);
         if (dados.length) montarTabela(doc, dados);
         const dataArquivo = new Date().toISOString().slice(0, 10);
-        doc.save(`processos_arquivados_saldo_projudi_${dataArquivo}.pdf`);
+        const nomeArquivo = `processos_arquivados_saldo_projudi_${dataArquivo}.pdf`;
+        doc.save(nomeArquivo);
+        log(`gerarPDF — PDF salvo como "${nomeArquivo}" (${doc.internal.getNumberOfPages()} página(s))`);
     }
 
     // ── Passo final: pede os dados em segundo plano (fetch/GM_xmlhttpRequest — ver
@@ -576,18 +622,20 @@
     // o comportamento que não se quer mais aqui. O chamador (passo()) já garante que só
     // uma frame por vez chega até aqui (ver tentarTravarExtracao).
     async function extrairAgora(form) {
-        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem clicar em "Gerar Relatório")');
+        log('extrairAgora — formulário encontrado, solicitando os dados em segundo plano (sem clicar em "Gerar Relatório")');
         try {
             marcarCheckboxDoRelatorio(form);
             const corpo = corpoFormulario(form);
             const texto = await coletarCSV(form.action, corpo);
+            log(`extrairAgora — CSV obtido, ${texto.length} caractere(s) de texto bruto — parseando`);
             const dados = parseCSV(texto);
-            console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — gerando PDF`);
+            log(`extrairAgora — ${dados.length} processo(s) reconhecido(s) no CSV — gerando PDF`);
             gerarPDF(dados);
+            log('extrairAgora — concluído com sucesso, limpando estado da extração');
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
         } catch (err) {
-            console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
+            logErro('extrairAgora — falha ao obter/processar os dados:', err);
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
             alert(`Não foi possível gerar o PDF de "Processos Arquivados com Saldo":\n\n${err.message}\n\nRode de novo pelo menu do Tampermonkey.`);
@@ -608,41 +656,42 @@
     // dá pra saber comparando os dois. Nunca chamado automaticamente por passo(); só pelo
     // comando de menu "🔍 Diagnosticar".
     function diagnosticar(form) {
-        console.log('[Projudi Arquivados c/ Saldo][DIAG] formulário encontrado — coletando estado real antes do clique');
-        console.log('[Projudi Arquivados c/ Saldo][DIAG] action=', form.action, 'method=', form.method, 'target=', form.target);
+        log('[DIAG] formulário encontrado — coletando estado real antes do clique');
+        log('[DIAG] action=', form.action, 'method=', form.method, 'target=', form.target);
         const campos = {};
         new FormData(form).forEach((valor, nome) => {
             campos[nome] = (campos[nome] === undefined) ? valor : [].concat(campos[nome], valor);
         });
-        console.log('[Projudi Arquivados c/ Saldo][DIAG] campos do formulário (FormData real):', campos);
+        log('[DIAG] campos do formulário (FormData real):', campos);
 
         // Hooks temporários (só logam, nunca bloqueiam) pra capturar a URL de fato usada
         // quando o Projudi abre a aba nova — cobre tanto window.open(...) quanto uma
         // submissão de form nativa com target="relatorio" (que não passa por window.open).
         const openOriginal = window.open;
         window.open = function (url, alvo, params) {
-            console.log('[Projudi Arquivados c/ Saldo][DIAG] window.open() interceptado — url=', url, 'alvo=', alvo, 'params=', params);
+            log('[DIAG] window.open() interceptado — url=', url, 'alvo=', alvo, 'params=', params);
             return openOriginal.apply(this, arguments);
         };
         form.addEventListener('submit', () => {
-            console.log('[Projudi Arquivados c/ Saldo][DIAG] submit do formulário disparado — action=', form.action, 'method=', form.method, 'target=', form.target);
+            log('[DIAG] submit do formulário disparado — action=', form.action, 'method=', form.method, 'target=', form.target);
         }, { capture: true });
 
         // Avisa a aba nova (mesma origem, vai rodar esta mesma userscript) que ela deve
         // logar o que recebeu — ver listener no fim do arquivo.
         store.setItem(DIAG_ABA_KEY, String(Date.now()));
+        log('[DIAG] DIAG_ABA_KEY marcado — a próxima aba/página que abrir vai logar o que recebeu');
 
         marcarCheckboxDoRelatorio(form);
 
         const botao = form.querySelector('#editButton') || Array.from(form.querySelectorAll('a, input[type="submit"], button'))
             .find(el => /gerar\s+relat[óo]rio/i.test((el.textContent || el.value || '').trim()));
         if (!botao) {
-            console.error('[Projudi Arquivados c/ Saldo][DIAG] não achei o botão "Gerar Relatório" (#editButton) — abortando diagnóstico.');
+            logErro('[DIAG] não achei o botão "Gerar Relatório" (#editButton) — abortando diagnóstico.');
             store.removeItem(ATIVO_KEY);
             store.removeItem(MODO_KEY);
             return;
         }
-        console.log('[Projudi Arquivados c/ Saldo][DIAG] clicando de verdade em "Gerar Relatório" — observe se abre aba nova, se ela mostra o CSV como texto ou dispara "Salvar arquivo" do navegador.');
+        log('[DIAG] clicando de verdade em "Gerar Relatório" — observe se abre aba nova, se ela mostra o CSV como texto ou dispara "Salvar arquivo" do navegador.');
         store.removeItem(ATIVO_KEY);
         store.removeItem(MODO_KEY);
         botao.click();
@@ -657,6 +706,7 @@
     function passo(tentativa) {
         tentativa = tentativa || 0;
         if (store.getItem(ATIVO_KEY) !== '1') return;
+        log(`passo(tentativa=${tentativa}, modo=${store.getItem(MODO_KEY)}) — URL atual: ${location.href}`);
 
         const form = formularioArquivadosSaldo();
         if (form) {
@@ -665,7 +715,7 @@
             // trava chama extrairAgora(); as outras desistem silenciosamente (a que
             // travou já está cuidando disso).
             if (!tentarTravarExtracao()) {
-                console.log('[Projudi Arquivados c/ Saldo] outra frame já está extraindo agora — nada a fazer aqui');
+                log('passo — outra frame já está extraindo agora, nada a fazer nesta frame');
                 return;
             }
             if (store.getItem(MODO_KEY) === 'diag') {
@@ -679,7 +729,7 @@
 
         const linkListagem = acharLinkArquivadosSaldoNaListagem();
         if (linkListagem) {
-            console.log('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
+            log('passo — achei a listagem de Relatórios Dinâmicos, clicando no link do relatório');
             store.setItem(TENTATIVAS_KEY, '0');
             linkListagem.click();
             return;
@@ -687,7 +737,7 @@
 
         const linkMenu = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         if (linkMenu) {
-            console.log('[Projudi Arquivados c/ Saldo] menu "Relatórios/Estatísticas" — clicando em "Relatórios Dinâmicos"');
+            log('passo — achei o menu "Relatórios/Estatísticas", clicando em "Relatórios Dinâmicos"');
             store.setItem(TENTATIVAS_KEY, '0');
             linkMenu.click();
             return;
@@ -695,7 +745,7 @@
 
         const total = tentativa + (parseInt(store.getItem(TENTATIVAS_KEY) || '0', 10));
         if (total >= MAX_TENTATIVAS) {
-            console.warn('[Projudi Arquivados c/ Saldo] não achei nem o formulário, nem a listagem, nem o menu depois de várias tentativas — desistindo.');
+            logAviso(`passo — não achei nem o formulário, nem a listagem, nem o menu depois de ${total} tentativa(s) — desistindo.`);
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
             alert('Não consegui chegar até a tela de "Processos Arquivados com Saldo" automaticamente.\n\nNavegue manualmente (Relatórios/Estatísticas > Relatórios Dinâmicos) e rode o menu de novo já na tela do relatório.');
@@ -703,6 +753,7 @@
         }
         // Ainda nesta carga de página: tenta mais algumas vezes (conteúdo pode estar
         // carregando) antes de esperar a PRÓXIMA carga de página cuidar disso.
+        log(`passo — nada encontrado ainda (tentativa ${total + 1}/${MAX_TENTATIVAS})`);
         if (tentativa < 6) {
             setTimeout(() => passo(tentativa + 1), 400);
         } else {
@@ -711,6 +762,7 @@
     }
 
     function iniciar() {
+        log('iniciar — usuário disparou a extração (menu do Tampermonkey ou painel flutuante)');
         store.setItem(MODO_KEY, 'extrair');
         store.setItem(ATIVO_KEY, '1');
         store.setItem(TENTATIVAS_KEY, '0');
@@ -721,7 +773,7 @@
         store.setItem(MODO_KEY, 'diag');
         store.setItem(ATIVO_KEY, '1');
         store.setItem(TENTATIVAS_KEY, '0');
-        console.log('[Projudi Arquivados c/ Saldo][DIAG] modo diagnóstico iniciado — vai navegar até o formulário e CLICAR DE VERDADE (abre aba nova). Acompanhe o console E a aba nova.');
+        log('[DIAG] modo diagnóstico iniciado — vai navegar até o formulário e CLICAR DE VERDADE (abre aba nova). Acompanhe o console E a aba nova.');
         passo(0);
     }
 
@@ -729,8 +781,10 @@
         store.removeItem(ATIVO_KEY);
         store.removeItem(TENTATIVAS_KEY);
         store.removeItem(MODO_KEY);
-        console.log('[Projudi Arquivados c/ Saldo] extração/diagnóstico cancelado pelo usuário');
+        log('cancelar — extração/diagnóstico cancelado pelo usuário');
     }
+
+    log(`script carregado nesta frame — URL: ${location.href} — é o frame mais externo acessível: ${window === maiorAncestralAcessivel()} — extração/diagnóstico ativo: ${store.getItem(ATIVO_KEY) === '1'}`);
 
     // Registra o menu só no frame mais externo ACESSÍVEL (ver maiorAncestralAcessivel) —
     // o Projudi roda o script em várias frames simultâneas (sem @noframes); registrar em
@@ -739,6 +793,7 @@
         GM_registerMenuCommand('▶ Extrair Processos Arquivados com Saldo', iniciar);
         GM_registerMenuCommand('🔍 Diagnosticar requisição real (clica de verdade)', iniciarDiagnostico);
         GM_registerMenuCommand('✖ Cancelar extração em andamento', cancelar);
+        log('menu do Tampermonkey registrado nesta frame');
     }
 
     // ── Painel flutuante — o comando do menu da extensão Tampermonkey (ícone na barra
@@ -807,7 +862,7 @@
             if (!doc || !doc.body || doc.getElementById(PAINEL_ID)) continue;
             if (doc.body.clientWidth < 50 || doc.body.clientHeight < 50) continue;
             doc.body.appendChild(montarPainel(doc));
-            console.log('[Projudi Arquivados c/ Saldo] painel flutuante injetado em', doc.location.href);
+            log('painel flutuante injetado em', doc.location.href);
             return;
         }
     }
@@ -822,6 +877,7 @@
     agendarInjecaoPainel();
 
     if (store.getItem(ATIVO_KEY) === '1') {
+        log('extração/diagnóstico em andamento — retomando nesta carga de página');
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => passo(0));
         } else {
@@ -840,11 +896,11 @@
         const desde = parseInt(store.getItem(DIAG_ABA_KEY) || '0', 10);
         if (!desde || (Date.now() - desde) > DIAG_ABA_TTL_MS) return;
         const corpo = (document.body && document.body.textContent) || '';
-        console.log('[Projudi Arquivados c/ Saldo][DIAG][aba nova] esta página carregou —',
+        log('[DIAG][aba nova] esta página carregou —',
             'href=', location.href,
             'contentType=', document.contentType,
             'title=', document.title,
             'pareceCSV=', pareceCSV(corpo));
-        console.log('[Projudi Arquivados c/ Saldo][DIAG][aba nova] início do body (primeiros 500 caracteres):', corpo.slice(0, 500));
+        log('[DIAG][aba nova] início do body (primeiros 500 caracteres):', corpo.slice(0, 500));
     })();
 })();
