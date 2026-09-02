@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      4.0
+// @version      5.0
 // @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -28,11 +28,17 @@
 // causou um bug real: o download nativo/aba nova interferiam na requisição em segundo
 // plano e o PDF não saía). Em vez disso, pede os MESMOS dados do formulário em segundo
 // plano, na mesma aba, sem nenhum popup: fetch() (roda na origem/sessão do próprio
-// documento) como via principal, com GM_xmlhttpRequest como reserva se fetch() falhar —
-// em teste real GM_xmlhttpRequest sozinho voltou 200 OK com corpo vazio (0 bytes),
-// possível sintoma de não carregar a sessão do jeito esperado (passa pelo processo da
-// extensão, não pela aba); fetch() roda como se fosse a própria página, mesma sessão
-// que o clique manual do usuário sempre usou com sucesso.
+// documento) como via principal, com GM_xmlhttpRequest como reserva se fetch() falhar.
+//
+// Trava entre frames (ver EXTRAINDO_KEY/tentarTravarExtracao): o Projudi carrega mais de
+// uma frame de projudi2.tjpr.jus.br na mesma página (o widget de área de atuação, além
+// do conteúdo principal), e como o script roda em TODAS elas (sem @noframes), mais de
+// uma frame podia achar o mesmo formulário ao mesmo tempo e chamar extrairAgora() em
+// paralelo — em teste real, tanto fetch() quanto GM_xmlhttpRequest voltaram 200 OK com
+// corpo vazio (0 bytes) nas DUAS vias, o que aponta pra requisições concorrentes
+// colidindo (se o servidor trata a geração do relatório como algo exclusivo por sessão)
+// mais do que pra um problema de uma via específica. A trava garante que só UMA frame
+// por vez chega a pedir os dados.
 (function () {
     'use strict';
 
@@ -41,6 +47,32 @@
     const ATIVO_KEY = PREFIXO + 'ativo';
     const TENTATIVAS_KEY = PREFIXO + 'tentativas';
     const MAX_TENTATIVAS = 20; // ~20 cargas de página / tentativas dentro da página — teto de segurança
+
+    // ── Trava entre frames — o Projudi carrega VÁRIAS frames de projudi2.tjpr.jus.br na
+    // mesma página (ex.: o widget de área de atuação, além do conteúdo principal), e como
+    // o script roda em todas elas (sem @noframes), formularioArquivadosSaldo() busca em
+    // TODOS os frames acessíveis e pode achar o MESMO formulário a partir de mais de um
+    // frame ao mesmo tempo — cada um chamando extrairAgora() de forma independente. Se o
+    // servidor tratar a geração do relatório como algo exclusivo por sessão (uma segunda
+    // requisição concorrente invalidando ou "roubando" a primeira), duas chamadas
+    // simultâneas explicam bem os "0 bytes" reportados nas duas vias (fetch E
+    // GM_xmlhttpRequest) — nenhuma delas era mais confiável, as DUAS podiam estar
+    // colidindo uma com a outra. localStorage é compartilhado entre frames da mesma
+    // origem, então serve de trava simples (com expiração, caso uma frame trave/recarregue
+    // no meio e nunca destrave).
+    const EXTRAINDO_KEY = PREFIXO + 'extraindo_desde';
+    const TRAVA_MS = 15000;
+
+    function tentarTravarExtracao() {
+        const agora = Date.now();
+        const travaAtual = parseInt(store.getItem(EXTRAINDO_KEY) || '0', 10);
+        if (travaAtual && (agora - travaAtual) < TRAVA_MS) return false;
+        store.setItem(EXTRAINDO_KEY, String(agora));
+        return true;
+    }
+    function destravarExtracao() {
+        store.removeItem(EXTRAINDO_KEY);
+    }
 
     // ── Paleta e helpers visuais (mesmo estilo do relatorio_projudi.user.js principal,
     // pra manter a identidade visual do PDF) ────────────────────────────────────────
@@ -473,12 +505,13 @@
         doc.save(`processos_arquivados_saldo_projudi_${dataArquivo}.pdf`);
     }
 
-    // ── Passo final: pede os dados via GM_xmlhttpRequest — SÓ isso, sem tocar em
-    // nenhum botão nativo da tela. Pedido explícito do usuário: nada de clicar em "Gerar
-    // Relatório" de verdade — esse clique aciona abrirRelatorio() (código do próprio
-    // Projudi, fora do nosso controle), que abre uma aba nova em branco e dispara um
-    // download nativo do CSV ao mesmo tempo — exatamente o comportamento que não se quer
-    // mais aqui. GM_xmlhttpRequest, na mesma aba, sem popup nenhum, é a única via agora.
+    // ── Passo final: pede os dados em segundo plano (fetch/GM_xmlhttpRequest — ver
+    // coletarCSV) — SÓ isso, sem tocar em nenhum botão nativo da tela. Pedido explícito
+    // do usuário: nada de clicar em "Gerar Relatório" de verdade — esse clique aciona
+    // abrirRelatorio() (código do próprio Projudi, fora do nosso controle), que abre uma
+    // aba nova em branco e dispara um download nativo do CSV ao mesmo tempo — exatamente
+    // o comportamento que não se quer mais aqui. O chamador (passo()) já garante que só
+    // uma frame por vez chega até aqui (ver tentarTravarExtracao).
     async function extrairAgora(form) {
         console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
         try {
@@ -493,6 +526,8 @@
             store.removeItem(ATIVO_KEY);
             store.removeItem(TENTATIVAS_KEY);
             alert(`Não foi possível gerar o PDF de "Processos Arquivados com Saldo":\n\n${err.message}\n\nRode de novo pelo menu do Tampermonkey.`);
+        } finally {
+            destravarExtracao();
         }
     }
 
@@ -507,7 +542,18 @@
         if (store.getItem(ATIVO_KEY) !== '1') return;
 
         const form = formularioArquivadosSaldo();
-        if (form) { extrairAgora(form); return; }
+        if (form) {
+            // Mais de uma frame de projudi2.tjpr.jus.br pode achar o MESMO formulário ao
+            // mesmo tempo (ver comentário em EXTRAINDO_KEY) — só a frame que consegue a
+            // trava chama extrairAgora(); as outras desistem silenciosamente (a que
+            // travou já está cuidando disso).
+            if (!tentarTravarExtracao()) {
+                console.log('[Projudi Arquivados c/ Saldo] outra frame já está extraindo agora — nada a fazer aqui');
+                return;
+            }
+            extrairAgora(form);
+            return;
+        }
 
         const linkListagem = acharLinkArquivadosSaldoNaListagem();
         if (linkListagem) {
