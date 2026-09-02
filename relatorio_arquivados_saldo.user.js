@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.0
+// @version      5.1
 // @description  Menu do Tampermonkey navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -321,8 +321,19 @@
             method: 'POST',
             body: corpoFormulario(),
             credentials: 'same-origin',
+            // X-Requested-With: marcador clássico de requisição AJAX que alguns
+            // filtros/WAFs de aplicações Java (Struts/JSF/Spring, comuns em sistemas do
+            // Judiciário) exigem para não tratar a chamada como suspeita — tentativa
+            // barata diante de dois mecanismos diferentes (fetch/GM_xmlhttpRequest)
+            // voltando 0 bytes do mesmo jeito, o que sugere algo no SERVIDOR
+            // distinguindo "navegação real" de "chamada em segundo plano", não um
+            // problema de qual API do navegador está sendo usada.
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
-        console.log('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'headers=', Object.fromEntries(resp.headers.entries()));
+        // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
+        // (302) para uma URL de download gerada — moveria o problema para "por que o
+        // redirecionamento não está sendo seguido com os mesmos cookies/cabeçalhos".
+        console.log('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
         if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
         const buffer = await resp.arrayBuffer();
         return interpretarResposta(buffer, 'fetch');
@@ -336,7 +347,7 @@
                 method: 'POST',
                 url: urlAction,
                 data: corpoFormulario().toString(),
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
                 responseType: 'arraybuffer',
                 onload: (resp) => {
                     console.log('[Projudi Arquivados c/ Saldo] [GM_xmlhttpRequest] status=', resp.status, 'finalUrl=', resp.finalUrl, 'headers=', resp.responseHeaders);
