@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi - Processos Arquivados com Saldo
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      5.6
+// @version      5.7
 // @description  Painel flutuante (ou menu do Tampermonkey) navega automaticamente até o Relatório Dinâmico "Processos Arquivados com saldo (depósito eletrônico)" do Projudi, obtém os dados em segundo plano (sem abrir aba nova nem baixar nada nativamente) e gera um PDF consolidado (resumo + tabela).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -57,6 +57,24 @@
 // verdade antes de enviar. Nova função selecionarFormatoCSV() clica de verdade no rádio
 // "Arquivo CSV" antes de montar o corpo, chamada tanto no fluxo normal (extrairAgora)
 // quanto no diagnóstico (diagnosticar) — sem isso a requisição saía pedindo PDF.
+//
+// v5.7 — acrescenta, em montarResumo(), uma observação em texto (itálico, mesmo padrão
+// visual das notas do script principal) logo abaixo dos cards de resumo e antes da
+// tabela discriminada (que fica em página separada — ver montarTabela/doc.addPage()):
+// "Dados extraídos do Sistema Projudi indicaram a existência de processos arquivados
+// com saldo em conta judicial. A secretaria deverá analisar os processos mencionados e
+// providenciar o levantamento dos valores, observando, para tanto, as regras do Código
+// de Normas do Foro Judicial e o teor do Decreto Judiciário nº 626/2018." Só aparece
+// quando há ao menos um processo listado (dados.length > 0) — pedido explícito do
+// usuário, para não exibir a nota num PDF "zerado".
+//
+// NOTA para uma futura integração ao relatorio_projudi.user.js principal (pedido do
+// usuário — NÃO fazer agora, só documentar aqui pra não esquecer): quando este
+// relatório for agrupado ao script principal, o PDF gerado aqui precisa se somar aos
+// demais documentos do conjunto — ou seja, entrar no pipeline normal (capa unificada
+// gerarPDFConjunto/desenharBlocoCartorioUnificado, já que por ser um relatório novo cai
+// na convenção "todo relatório novo é Cartório" do CLAUDE.md) em vez de continuar sendo
+// baixado como um PDF avulso e separado dos demais.
 //
 // Disparo: menu do Tampermonkey (ícone da extensão) — "▶ Extrair Processos Arquivados
 // com Saldo". A partir daí a navegação até a tela do relatório é automática: menu
@@ -575,8 +593,23 @@
         }
         desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, COR.vermelho);
 
+        // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
+        // relatório efetivamente lista algum processo — sem isso a nota apareceria mesmo
+        // num PDF "zerado", o que não tem utilidade.
+        let yApos = aY + 28 + gap;
+        if (r.length) {
+            const observacao = 'Dados extraídos do Sistema Projudi indicaram a existência de processos '
+                + 'arquivados com saldo em conta judicial. A secretaria deverá analisar os processos '
+                + 'mencionados e providenciar o levantamento dos valores, observando, para tanto, as regras '
+                + 'do Código de Normas do Foro Judicial e o teor do Decreto Judiciário nº 626/2018.';
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
+            const linhasObs = doc.splitTextToSize(observacao, uw);
+            doc.text(linhasObs, m, yApos);
+            yApos += linhasObs.length * 3.4 + 2;
+        }
+
         desenharRodape(doc, TITULO, carimbo, pw, ph, m);
-        return aY + 28 + gap;
+        return yApos;
     }
 
     function montarTabela(doc, dados) {
