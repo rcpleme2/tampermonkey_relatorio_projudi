@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi — Cumprimento de Medidas (protótipo)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      0.6
+// @version      0.7
 // @description  Protótipo desacoplado: extrai os indicadores da aba "Cumprimentos de Medidas" (Mesa do Magistrado) do Projudi e gera um PDF de uma página. Não interfere no relatório principal (relatorio_projudi.user.js).
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -373,39 +373,59 @@
     // Os 3 contadores só existem no DOM quando a aba "Cumprimentos de Medidas" está
     // ativa E já carregada — servem tanto para detectar "estamos na aba certa" quanto
     // para a extração propriamente dita.
-    const IDS_CONTADORES = {
-        atrasados: 'numeroCumprimentosAtrasados',
-        semCumprimento: 'numeroMedidasSemCumpr',
-        aVencer: 'numeroCumprimentosAVencer',
+    //
+    // NÃO usa mais busca por id (numeroCumprimentosAtrasados etc.) — reportado pelo
+    // usuário: numa outra competência (VEPMA/ANPP, tela mesaAnalistaVepma.do em vez de
+    // mesaAnalista.do — template JSP diferente do Projudi para o mesmo painel) os MESMOS
+    // 3 indicadores existem, com o MESMO texto de rótulo ("Cumprimentos em Atraso:" etc.)
+    // e a MESMA estrutura de tabela (<td class="label">rótulo</td><td>valor</td>), mas o
+    // valor vem só como <a href="..."><em><u>120</u></em></a> — SEM nenhum id no elemento.
+    // Como a extração dependia só do id, ficava esperando pra sempre (nunca achava o
+    // span), e o usuário via a automação travada até o próprio Projudi devolver pra tela
+    // inicial por inatividade. Buscar pelo RÓTULO (texto estável nas duas variantes) e
+    // pegar o número na célula <td> vizinha é robusto nos dois formatos — funciona tanto
+    // quando o valor está num <span id="..."> quanto quando é só texto solto dentro de
+    // <em>/<u>/<a>, sem depender de nenhuma marcação específica de um template só.
+    const ROTULOS_CONTADORES = {
+        atrasados: /^cumprimentos\s+em\s+atraso\s*:?$/i,
+        semCumprimento: /^medidas\s+sem\s+cumprimentos\s+gerados\s*:?$/i,
+        aVencer: /^cumprimentos\s+a\s+vencer\s*:?$/i,
     };
 
-    function acharSpanContador(id) {
+    function acharTdRotulo(regexRotulo) {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
-            const el = d.getElementById(id);
-            if (el) return el;
+            const tds = d.querySelectorAll('td');
+            for (const td of tds) {
+                if (regexRotulo.test((td.textContent || '').trim())) return td;
+            }
         }
         return null;
     }
 
     function abaCumprimentoMedidasCarregada() {
-        return !!acharSpanContador(IDS_CONTADORES.atrasados);
+        return !!acharTdRotulo(ROTULOS_CONTADORES.atrasados);
     }
 
-    // achou:false diferencia "span nem existe no DOM" de "span existe mas contém 0" —
-    // sem essa distinção um bug de extração (id errado, span ainda não inserido) fica
-    // indistinguível de "realmente zero", que é uma leitura válida (ver CLAUDE.md).
-    function lerContador(id) {
-        const el = acharSpanContador(id);
-        const achou = !!el;
-        const valor = parseInt(((el && el.textContent) || '').trim(), 10) || 0;
-        return { achou, valor };
+    // achou:false diferencia "rótulo nem existe no DOM ainda" de "rótulo existe mas o
+    // valor ao lado não tinha número nenhum" — sem essa distinção um bug de extração
+    // fica indistinguível de "realmente zero", que é uma leitura válida (ver CLAUDE.md).
+    // Remove pontos antes de procurar dígitos (separador de milhar do Projudi, ex.:
+    // "1.234") — sem isso um valor de 4+ dígitos leria só a primeira parte.
+    function lerContador(regexRotulo) {
+        const tdRotulo = acharTdRotulo(regexRotulo);
+        if (!tdRotulo) return { achou: false, valor: 0 };
+        let tdValor = tdRotulo.nextElementSibling;
+        while (tdValor && tdValor.tagName !== 'TD') tdValor = tdValor.nextElementSibling;
+        if (!tdValor) return { achou: false, valor: 0 };
+        const m = /\d+/.exec((tdValor.textContent || '').replace(/\./g, ''));
+        return { achou: true, valor: m ? parseInt(m[0], 10) : 0 };
     }
 
     function lerContadores() {
-        const atrasados = lerContador(IDS_CONTADORES.atrasados);
-        const semCumprimento = lerContador(IDS_CONTADORES.semCumprimento);
-        const aVencer = lerContador(IDS_CONTADORES.aVencer);
+        const atrasados = lerContador(ROTULOS_CONTADORES.atrasados);
+        const semCumprimento = lerContador(ROTULOS_CONTADORES.semCumprimento);
+        const aVencer = lerContador(ROTULOS_CONTADORES.aVencer);
         if (!atrasados.achou || !semCumprimento.achou || !aVencer.achou) {
             console.warn('[Projudi Cumprimento de Medidas] algum contador não foi encontrado no DOM no momento da extração:',
                 { atrasadosAchou: atrasados.achou, semCumprimentoAchou: semCumprimento.achou, aVencerAchou: aVencer.achou });
