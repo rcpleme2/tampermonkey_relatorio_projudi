@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.7
+// @version      24.8
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -516,22 +516,34 @@
         extrai: (tds, atuacao) => {
             const emProc = tds[1].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
+            // "Dt.Envio" — data em que o processo foi remetido para conclusão (mesma
+            // semântica de dtRemessa em CFG_CONCLUSOES, ver comentário no layout de
+            // colunas acima). Não entrava nos dados antes — pedido do usuário: precisa
+            // dela para calcular o tempo médio de CONCLUSÃO DO JUIZ (Dt.Envio ->
+            // Dt.Análise), diferente de "Dias p/ Cumprimento" (que mede o cartório,
+            // Dt.Análise -> Dt.Análise Cartório).
+            const dtEnvio = dataDeTexto(tds[2]);
             const dtAnalise = dataDeTexto(tds[3]);
             const dtCartorio = dataDeTexto(tds[4]);
             const usuarioCartorio = usuarioDeTexto(tds[4]); // login abaixo da data, na mesma célula
             const classeCompleta = textoAteBr(tds[6]) || textoCelula(tds[6]);
             const classe = classeCompleta.split(' (')[0].trim(); // classe sem o "(Assunto Principal)"
             // Dias para cumprimento = Dt. Análise Cartório - Dt. Análise
-            const tA = parseDataBR(dtAnalise), tC = parseDataBR(dtCartorio);
+            const tE = parseDataBR(dtEnvio), tA = parseDataBR(dtAnalise), tC = parseDataBR(dtCartorio);
             const dias = (tA != null && tC != null) ? Math.max(0, Math.round((tC - tA) / DIA_MS)) : null;
+            // Tempo de conclusão do juiz = Dt.Análise - Dt.Envio (quanto tempo o processo
+            // ficou esperando decisão, ANTES de chegar ao cartório de novo).
+            const diasConclusaoJuiz = (tE != null && tA != null) ? Math.max(0, Math.round((tA - tE) / DIA_MS)) : null;
             return {
                 processo,
+                dtEnvio,
                 dtAnalise,
                 dtCartorio,
                 usuarioCartorio,
                 tipoConclusao: textoAteBr(tds[5]),
                 classe,
                 dias,
+                diasConclusaoJuiz,
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
@@ -715,6 +727,10 @@
         pdf: {
             titulo: 'Suspensos por Prazo Indeterminado',
             atosTitulo: 'Processos suspensos',
+            // Pedido do usuário: "Prioritários suspensos", não o padrão genérico
+            // "Prioritários pendentes" (ver rotuloPrioridadeKpi em montarResumoGenerico) —
+            // mais preciso pra este relatório específico.
+            rotuloPrioridadeKpi: 'Prioritários suspensos',
             agingTitulo: 'Tempo de suspensão',
             tabelaTitulo: 'Tabela discriminada dos processos suspensos por prazo indeterminado',
             dataCampo: 'inicioSuspensao',
@@ -724,6 +740,15 @@
             distribuicoes: [
                 { titulo: 'Suspensos por Classe Processual', campo: 'classe', topN: 12 },
             ],
+            // Observação final destacada (pedido do usuário) — texto literal fornecido.
+            observacaoFinal: 'A Corregedoria-Geral da Justiça não recomenda o uso irrestrito da suspensão por '
+                + 'prazo indeterminado, pois isso pode gerar descontrole dos processos. Recomenda-se que o '
+                + 'magistrado e o cartório estipulem uma rotina de revisão desses processos suspensos e que a '
+                + 'suspensão sempre ocorra com prazo determinado, mesmo não havendo como prever com exatidão '
+                + 'quando se dará o termo final do evento que gerou a suspensão. Essa prática recomendada '
+                + 'garante que, findo o prazo da suspensão, haverá consulta manual quanto à necessidade de '
+                + 'renovar a suspensão por mais um prazo determinado ou será identificada eventual hipótese de '
+                + 'retomada do processo que possa ter sido esquecida anteriormente.',
             // colunas também é um getter, mesma regra da coluna Excel acima: só entra
             // "Motivo da Suspensão" quando os dados coletados vieram da área Crime.
             get colunas() {
@@ -848,8 +873,12 @@
         usaAtuacao: false,
         nomeArquivo: 'instancia_recursal_projudi',
         rotulos: { coletar: 'Extrair Instância Recursal', coletarMais: 'Extrair mais (Instância Recursal)', baixar: '⬇ Baixar Instância Recursal' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio'],
-        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }],
+        // Coluna "Competência" (pedido do usuário): o relatório passa a apresentar todos
+        // os dados consolidados num único resumo geral (sem dividir em Resumo Geral +
+        // um bloco por atribuição, ver montarResumoInstanciaRecursal), então a atribuição
+        // de cada processo precisa aparecer na própria tabela discriminada.
+        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio', 'Competência'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }, { wch: 30 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
@@ -861,7 +890,7 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.dataEnvio],
+        linha: (d) => [d.processo, d.classe, d.dataEnvio, d.competencia || ''],
         // Sem cfg.pdf genérico: o resumo pedido (detalhamento dos enviados há mais de 2
         // anos, distribuição por faixa de tempo desde o envio) não cabe no mecanismo
         // genérico — ver gerarPDFInstanciaRecursal.
@@ -2717,6 +2746,12 @@
                 if (legado) dados = dados.concat(legado);
                 else console.error('[Exportar Projudi] parte ilegível no índice', i);
             }
+            // Pedido do usuário: como o número único do processo é identificador único,
+            // o mesmo processo não pode ser contado duas vezes dentro da mesma seção do
+            // relatório (ex.: reload de página no meio da coleta duplicando uma página).
+            // Exceção: Tempo Médio — ali o mesmo processo pode legitimamente ir e voltar
+            // à conclusão mais de uma vez no período (cada ida é um registro válido).
+            if (cfg !== CFG_TEMPOMEDIO) dados = removerProcessosDuplicados(dados);
             return dados;
         }
 
@@ -2982,6 +3017,7 @@
         }
 
         return { iniciar, continuar, baixar, pdf, pdfPorJuiz, limpar, render, rodando, obsoleta,
+                 adicionarPagina, lerTudo,
                  limparFlags: () => { store.removeItem(KEY_RODANDO); store.removeItem(KEY_TS); } };
     }
 
@@ -3776,8 +3812,26 @@
             const chartsP1 = chartsTodos.filter(c => !c.pagina2);
             const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
 
+            // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
+            // usado por CFG_SUSPENSOS): reserva espaço embaixo do grid de gráficos, numa
+            // caixa com título "OBSERVAÇÃO" em destaque, antes do rodapé.
+            let alturaObsFinal = 0;
+            let linhasObsFinal = [];
+            if (p.observacaoFinal) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4);
+                linhasObsFinal = doc.splitTextToSize(p.observacaoFinal, uw);
+                alturaObsFinal = 6 + linhasObsFinal.length * 3.3 + 4;
+            }
             const gY0 = aY + 28 + gap + 2;
-            desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, chartsP1);
+            desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0 - alturaObsFinal, chartsP1);
+            if (p.observacaoFinal) {
+                const yObsFinal = ph - m - alturaObsFinal + 6;
+                doc.setDrawColor(...COR.ambar); doc.setLineWidth(0.4); doc.line(m, yObsFinal - 4, pw - m, yObsFinal - 4);
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.6); doc.setTextColor(...COR.ambar);
+                doc.text('OBSERVAÇÃO', m, yObsFinal);
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
+                doc.text(linhasObsFinal, m, yObsFinal + 4);
+            }
             desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
 
             if (chartsP2.length) {
@@ -4027,7 +4081,7 @@
     // "Sim"/"Não" a partir do texto bruto da célula de Pré-análise (não vazio = houve).
     function temPreAnalise(d) { return !!(d.preAnalise && d.preAnalise.trim()); }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco) {
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, tempoMedioConclusaoJuizInfo) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -4059,6 +4113,20 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         doc.text(`Extraído em ${hoje} às ${hora}  •  ${sub.length} conclusão(ões) pendente(s)`, m, hy);
         hy += 3;
+        // Pedido do usuário: quando Tempo Médio também foi incluído no mesmo PDF,
+        // mostra o tempo médio de CONCLUSÃO DO JUIZ (Dt. Envio -> Dt. Análise) e o
+        // período considerado — é uma estatística da UNIDADE toda (Tempo Médio não
+        // identifica o juiz por registro, só o cartório), então aparece igual em todas
+        // as páginas de Conclusões, não por magistrado.
+        if (tempoMedioConclusaoJuizInfo) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
+            const mediaTxt = String(tempoMedioConclusaoJuizInfo.media).replace('.', ',');
+            let textoTM = `Tempo médio de conclusão do juiz (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
+            if (tempoMedioConclusaoJuizInfo.periodo) textoTM += `  •  Período considerado: ${tempoMedioConclusaoJuizInfo.periodo}`;
+            const linhasTM = doc.splitTextToSize(textoTM, uw);
+            doc.text(linhasTM, m, hy + 3);
+            hy += linhasTM.length * 3.4 + 4;
+        }
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
         const kY = hy + 6;
@@ -4851,6 +4919,11 @@
     function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
         opcoes = opcoes || {};
         const porAtribuicao = !!opcoes.porAtribuicao;
+        // Instância Recursal fica de fora do split "Resumo Geral + 1 bloco por
+        // atribuição" (pedido do usuário) — sempre um resumo único consolidado, com a
+        // competência de cada processo já indicada na própria tabela discriminada (ver
+        // cfg.cabecalhos/linha de CFG_INSTANCIA_RECURSAL).
+        const porAtribuicaoPara = (cfgOriginal) => porAtribuicao && cfgOriginal !== CFG_INSTANCIA_RECURSAL;
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
@@ -4966,13 +5039,13 @@
             if (!porCompetencia.length) return [linhaPrincipal];
             return [linhaPrincipal, ...porCompetencia.map(it => linhaSubAtribuicao(it.competencia, sufixo(it.contagem)))];
         }
-        function linhaTarefa(t, nome) {
+        function linhaTarefa(t, nome, unidade) {
             const detalhes = [];
             if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
             if (t.maisAntiga != null) detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)`);
             return {
                 nome,
-                indicador: `${t.pendentes} pendente(s)`,
+                indicador: `${t.pendentes} ${unidade || 'pendente(s)'}`,
                 detalhamento: detalhes.length ? detalhes.join(' · ') : '—',
                 situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
                 corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
@@ -5031,8 +5104,10 @@
         }
         const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
         if (itemSuspensos) {
+            // Pedido do usuário: "processo(s)", não "pendente(s)" — são processos
+            // suspensos, não uma fila de pendências no sentido usual do termo.
             itensEstatisticasGerais.push(...comSubLinhasAtribuicao(
-                linhaTarefa(itemSuspensos, itemSuspensos.rotulo), itemSuspensos.dados, (n) => `${n} pendente(s)`,
+                linhaTarefa(itemSuspensos, itemSuspensos.rotulo, 'processo(s)'), itemSuspensos.dados, (n) => `${n} processo(s)`,
             ));
         }
         // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
@@ -5150,6 +5225,9 @@
         // ── Outros (itens do Cartório sem subgrupo no popup do painel: Tempo Médio,
         // Bens Apreendidos, Outros Cumprimentos) ────────────────────────────────────
         const itensOutros = [];
+        // Preenchido logo abaixo quando Tempo Médio está incluído — usado por
+        // montarResumoJuizConclusoes (ver o loop de Gabinete mais adiante).
+        let tempoMedioConclusaoJuizInfo = null;
         if (secaoTempoMedio) {
             const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
             const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
@@ -5164,6 +5242,17 @@
                 detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
+            // Pedido do usuário: se Tempo Médio foi incluído no mesmo PDF, calcula
+            // também o tempo médio de CONCLUSÃO DO JUIZ (Dt. Envio -> Dt. Análise —
+            // quanto tempo o processo ficou esperando decisão, diferente do "tempo de
+            // cumprimento" acima, que mede só o cartório, Dt. Análise -> Dt. Análise
+            // Cartório) e injeta essa informação, com o período considerado, em cada
+            // página de resumo de Conclusões (ver montarResumoJuizConclusoes).
+            const validosJuiz = secaoTempoMedio.dados.filter(d => d.diasConclusaoJuiz != null);
+            if (validosJuiz.length) {
+                const mediaJuiz = validosJuiz.reduce((s, d) => s + d.diasConclusaoJuiz, 0) / validosJuiz.length;
+                tempoMedioConclusaoJuizInfo = { media: Math.round(mediaJuiz * 10) / 10, periodo: periodoTxt };
+            }
         }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
         // relatório da categoria Crime. O indicador é só a contagem total (pedido:
@@ -5303,7 +5392,7 @@
         // bookmarks aninhados).
         let bmCartorio = null;
         itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-            const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+            const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
             let bmItem = null;
             blocos.forEach((bloco, i) => {
                 const primeira = !usouPagina1;
@@ -5330,7 +5419,7 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo);
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, tempoMedioConclusaoJuizInfo);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5352,7 +5441,7 @@
             return s.dados.length === 0;
         }
         outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
-            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
             let bmItem = null;
             blocos.forEach((bloco, i) => {
                 const primeira = !usouPagina1;
@@ -5380,7 +5469,7 @@
             // Sem pendências, não há o que discriminar — dispensa a tabela (mas o resumo com
             // o KPI já foi desenhado no passo 1 de qualquer forma, ex.: Suspensos zerado).
             itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-                const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+                const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
                     const pg = t.secao.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
@@ -5411,7 +5500,7 @@
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
             // mostrar (ex.: Audiências Pendentes zerado).
             outrasSecoes.filter(secaoTemTabela).forEach(s => {
-                const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+                const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
                     const pg = s.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
@@ -7231,10 +7320,14 @@
         const paginaInicial = doc.internal.getNumberOfPages();
         tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
 
+        // Coluna "Competência" (pedido do usuário) — o relatório não divide mais em
+        // Resumo Geral + bloco por atribuição, então cada processo precisa indicar a
+        // qual atribuição pertence direto na tabela.
         const colunas = [
-            { header: 'Processo', width: 40, get: (d) => d.processo },
-            { header: 'Classe Processual', width: 70, get: (d) => d.classe },
-            { header: 'Data de Envio', width: 30, get: (d) => d.dataEnvio },
+            { header: 'Processo', width: 34, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 56, get: (d) => d.classe },
+            { header: 'Data de Envio', width: 26, get: (d) => d.dataEnvio },
+            { header: 'Competência', width: 40, get: (d) => d.competencia || '' },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
@@ -7256,6 +7349,28 @@
             columnStyles,
             didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
+
+        // Observação destacada ao final da tabela (pedido do usuário): só quando há
+        // processo em trâmite há mais de 2 anos — recomenda conferência manual pra
+        // evitar paralisação por falha na comunicação do julgamento definitivo.
+        const maisDe2AnosTabela = processosEnviadosHaMaisDeXAnos(dados, 2);
+        if (maisDe2AnosTabela.length) {
+            const obs = `Há ${maisDe2AnosTabela.length} processo(s) em trâmite na 2ª instância há mais de 2 anos. `
+                + 'Recomenda-se conferência MANUAL da tramitação desses processos, para evitar paralisação no caso '
+                + 'de eventual falha na comunicação do julgamento definitivo.';
+            const uwObs = pw - 2 * m;
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
+            const linhasObs = doc.splitTextToSize(obs, uwObs - 4);
+            const alturaObs = linhasObs.length * 3.6 + 10;
+            let yObs = doc.lastAutoTable.finalY + 8;
+            if (yObs + alturaObs > ph - m) { doc.addPage(); yObs = m + 4; desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice); }
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
+            doc.rect(m, yObs, uwObs, alturaObs, 'FD');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('OBSERVAÇÃO', m + 3, yObs + 6);
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text(linhasObs, m + 3, yObs + 11);
+        }
 
         return paginaInicial;
     }
@@ -8814,6 +8929,22 @@
         return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
     }
 
+    // Remove registros com número de processo repetido dentro do mesmo array, mantendo
+    // só a primeira ocorrência — o número único do processo é identificador único, então
+    // o mesmo processo não deve ser contado duas vezes na mesma seção do relatório (ex.:
+    // reload de página no meio de uma coleta paginada duplicando uma página inteira).
+    // Itens sem campo .processo (relatórios "resumo único", ex. Outros Cumprimentos,
+    // Audiências Designadas/Realizadas) passam direto, sem filtro.
+    function removerProcessosDuplicados(dados) {
+        const vistos = new Set();
+        return dados.filter(d => {
+            if (!d || !d.processo) return true;
+            if (vistos.has(d.processo)) return false;
+            vistos.add(d.processo);
+            return true;
+        });
+    }
+
     // Contagem RÁPIDA e SÍNCRONA de registros acumulados — usada só para exibição (painel
     // de automação, confirmação antes de reiniciar) onde ler o IndexedDB inteiro a cada
     // atualização seria lento demais (atualizarPainel roda a cada poucos segundos). Usa o
@@ -8856,7 +8987,7 @@
             const legado = desembrulharArray(b);
             if (legado) dados = dados.concat(legado);
         }
-        return dados;
+        return removerProcessosDuplicados(dados);
     }
 
     // Relatórios disponíveis para a automação, na ordem padrão de execução. 'precisaPreencher'
@@ -9557,6 +9688,39 @@
         return secoes.filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
+    // Restringe as seções às atribuições MARCADAS pelo usuário no diálogo do PDF
+    // conjunto (ver escolherOpcoesPDFConjunto) — `null` (nenhum filtro escolhido, ou só
+    // 1 atribuição no total) devolve `secoes` sem alterar nada. Para relatórios "lista de
+    // processos" (cfg.cabecalhos/cfg.linha), é um filter simples pelo campo
+    // competencia/atuacao de cada registro. Os 3 relatórios de "resumo único"
+    // (CFGS_SEM_PROCESSO_POR_LINHA) guardam um objeto agregado, não uma lista — reaplica
+    // as mesmas funções de recálculo já usadas pra mesclar atribuições na COLETA
+    // (calcularResumoAudienciasDesignadasDeTabela/calcularResumoAudienciasRealizadasDeListas),
+    // agora sobre o subconjunto filtrado, em vez de reimplementar a agregação aqui.
+    function filtrarSecoesPorAtribuicoes(secoes, atribuicoesSelecionadas) {
+        if (!atribuicoesSelecionadas) return secoes;
+        const pertence = (d) => atribuicoesSelecionadas.has((d && (d.competencia || d.atuacao) || '').trim());
+        return secoes.map(s => {
+            if (s.cfg === CFG_AUDIENCIAS_DESIGNADAS) {
+                const resumo = s.dados[0];
+                if (!resumo) return s;
+                const tabelaFiltrada = (resumo.tabela || []).filter(pertence);
+                return { ...s, dados: [{ ...calcularResumoAudienciasDesignadasDeTabela(tabelaFiltrada), competencia: resumo.competencia }] };
+            }
+            if (s.cfg === CFG_AUDIENCIAS_REALIZADAS) {
+                const resumo = s.dados[0];
+                if (!resumo) return s;
+                const porAtribuicaoFiltrado = (resumo.porAtribuicao || []).filter(pertence);
+                const porUsuarioFiltrado = (resumo.porUsuario || []).filter(pertence);
+                return { ...s, dados: [calcularResumoAudienciasRealizadasDeListas(porAtribuicaoFiltrado, porUsuarioFiltrado, resumo.periodo)] };
+            }
+            // Demais cfgs (inclusive CFG_OUTROS_CUMPRIMENTOS, cujos registros já são uma
+            // lista tagueada por atribuição — ver coletarOutrosCumprimentosAgora): filter
+            // direto por competencia/atuacao do próprio registro.
+            return { ...s, dados: s.dados.filter(pertence) };
+        });
+    }
+
     async function baixarPDFConjunto(somenteResumo) {
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
@@ -9577,18 +9741,26 @@
                 secoes.flatMap(s => (s.dados || []).map(d => (d && (d.competencia || d.atuacao) || '').trim()))
             )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
+            let secoesFiltradas = secoes;
             if (atuacoes.length > 1) {
-                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
-                // nativo do confirm() (que não dá pra personalizar) — ver
-                // confirmarComBotoes.
-                porAtribuicao = await confirmarComBotoes(
-                    `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
-                    + 'Cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral '
-                    + '(todas as atribuições somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
+                // Pedido do usuário: além de "resumo geral" vs. "resumo geral + por
+                // atribuição", escolher com checkboxes QUAIS das atribuições coletadas
+                // entram no PDF — todas marcadas por padrão (ver escolherOpcoesPDFConjunto).
+                const escolha = await escolherOpcoesPDFConjunto(
+                    `Foram coletadas ${atuacoes.length} atribuições diferentes. Cada item do relatório (Juntadas, `
+                    + 'Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral (todas as atribuições '
+                    + 'somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
                     'Somar e detalhar por atribuição', 'Só resumo geral',
+                    atuacoes,
                 );
+                porAtribuicao = escolha.porAtribuicao;
+                // Só filtra de verdade quando o usuário desmarcou alguma — com todas
+                // marcadas (padrão), evita reprocessar à toa.
+                if (escolha.atribuicoesSelecionadas.size < atuacoes.length) {
+                    secoesFiltradas = filtrarSecoesPorAtribuicoes(secoes, escolha.atribuicoesSelecionadas);
+                }
             }
-            gerarPDFConjunto(secoes, somenteResumo, { porAtribuicao });
+            gerarPDFConjunto(secoesFiltradas, somenteResumo, { porAtribuicao });
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
@@ -10479,6 +10651,12 @@
             width: 360px; max-width: 90vw; padding: 18px;
         }
         .projudi-confirm-msg { font-size: .85em; color: #1A1A1A; line-height: 1.5; white-space: pre-line; margin-bottom: 14px; }
+        .projudi-confirm-lista-titulo { font-size: .78em; font-weight: 700; color: #52514E; margin-bottom: 6px; }
+        .projudi-confirm-lista {
+            max-height: 160px; overflow-y: auto; border: 1px solid #DEDDD6; border-radius: 6px;
+            padding: 6px 8px; margin-bottom: 14px;
+        }
+        .projudi-confirm-check-item { display: flex; align-items: center; gap: 6px; font-size: .82em; color: #1A1A1A; padding: 3px 0; cursor: pointer; }
         .projudi-confirm-botoes { display: flex; gap: 8px; justify-content: flex-end; }
         .projudi-confirm-btn {
             border-radius: 6px; padding: 8px 14px; font-size: .8em; font-weight: 600;
@@ -10517,6 +10695,69 @@
             botoes.appendChild(btnCancelar);
             botoes.appendChild(btnConfirmar);
             box.appendChild(msg);
+            box.appendChild(botoes);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+        });
+    }
+
+    // Mesmo diálogo de "Resumo geral" vs. "Somar e detalhar por atribuição" (ver
+    // baixarPDFConjunto), mas com uma lista de checkboxes (pedido do usuário) pra
+    // escolher QUAIS das atribuições já coletadas entram no PDF — todas vêm marcadas por
+    // padrão. Devolve { porAtribuicao, atribuicoesSelecionadas } (Set com os nomes
+    // marcados) — nunca `null`/cancela a exportação, só ajusta as duas opções antes de
+    // gerar (mesmo comportamento de sempre: "Cancelar" nunca abortava a geração, só
+    // escolhia o modo "resumo geral").
+    function escolherOpcoesPDFConjunto(mensagem, textoConfirmar, textoCancelar, atuacoes) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'projudi-confirm-overlay';
+            const box = document.createElement('div');
+            box.className = 'projudi-confirm-box';
+            const msg = document.createElement('div');
+            msg.className = 'projudi-confirm-msg';
+            msg.textContent = mensagem;
+            box.appendChild(msg);
+
+            const listaTitulo = document.createElement('div');
+            listaTitulo.className = 'projudi-confirm-lista-titulo';
+            listaTitulo.textContent = 'Atribuições a incluir no PDF:';
+            box.appendChild(listaTitulo);
+
+            const lista = document.createElement('div');
+            lista.className = 'projudi-confirm-lista';
+            const checkboxes = atuacoes.map(a => {
+                const label = document.createElement('label');
+                label.className = 'projudi-confirm-check-item';
+                const chk = document.createElement('input');
+                chk.type = 'checkbox';
+                chk.checked = true; // todas marcadas por padrão, pedido do usuário
+                label.appendChild(chk);
+                label.appendChild(document.createTextNode(' ' + a));
+                lista.appendChild(label);
+                return { atuacao: a, chk };
+            });
+            box.appendChild(lista);
+
+            const botoes = document.createElement('div');
+            botoes.className = 'projudi-confirm-botoes';
+            const btnCancelar = document.createElement('button');
+            btnCancelar.type = 'button';
+            btnCancelar.className = 'projudi-confirm-btn projudi-confirm-btn-secondary';
+            btnCancelar.textContent = textoCancelar;
+            const btnConfirmar = document.createElement('button');
+            btnConfirmar.type = 'button';
+            btnConfirmar.className = 'projudi-confirm-btn projudi-confirm-btn-primary';
+            btnConfirmar.textContent = textoConfirmar;
+            const selecionadas = () => new Set(checkboxes.filter(c => c.chk.checked).map(c => c.atuacao));
+            const finalizar = (porAtribuicao) => {
+                overlay.remove();
+                resolve({ porAtribuicao, atribuicoesSelecionadas: selecionadas() });
+            };
+            btnCancelar.onclick = () => finalizar(false);
+            btnConfirmar.onclick = () => finalizar(true);
+            botoes.appendChild(btnCancelar);
+            botoes.appendChild(btnConfirmar);
             box.appendChild(botoes);
             overlay.appendChild(box);
             document.body.appendChild(overlay);
