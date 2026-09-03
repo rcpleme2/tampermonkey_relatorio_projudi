@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.20
+// @version      24.21
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2994,10 +2994,28 @@
         return new URLSearchParams(new FormData(form));
     }
 
-    // Interpreta o ArrayBuffer da resposta (0 bytes / não parece CSV / CSV reconhecido).
+    // Bytes mágicos "%PDF" no início do arquivo — assinatura padrão de qualquer PDF,
+    // independente de encoding/idioma.
+    function respostaEhPDF(buffer) {
+        const b = new Uint8Array(buffer.slice(0, 4));
+        return b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46; // "%PDF"
+    }
+
+    // Interpreta o ArrayBuffer da resposta (0 bytes / PDF avulso — 0 processos / não
+    // parece CSV / CSV reconhecido).
     function interpretarResposta(buffer, origem) {
         if (!buffer || buffer.byteLength === 0) {
             throw new Error(`[${origem}] a resposta veio vazia (0 bytes) — sessão pode ter expirado, ou a sessão usada nesta via não é a mesma da aba.`);
+        }
+        // Quando não há nenhum processo arquivado com saldo, o Projudi ignora o
+        // tipoExportacao=CSV pedido e devolve um PDF avulso (relatório vazio) em vez do
+        // CSV esperado — confirmado em uso real: "a resposta não parece o CSV esperado.
+        // Início do que voltou: ... "%PDF-1.5 ...". Isso é um resultado válido (0
+        // registros), não uma falha — mesmo tratamento que o resto do script já dá a
+        // buscas sem resultado (ver "sem buttonBar = 0 registros" em injetarBotoes).
+        if (respostaEhPDF(buffer)) {
+            console.log(`[Projudi Arquivados c/ Saldo] [${origem}] resposta veio como PDF (não CSV) — nenhum processo arquivado com saldo encontrado, tratando como 0 registros.`);
+            return '';
         }
         const { texto, encoding, tentativas } = decodificarResposta(buffer);
         if (!texto) {
@@ -10048,23 +10066,51 @@
         store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
     }
 
-    // Reconhece a tela de seleção de área de atuação em QUALQUER contexto (página cheia
-    // do login OU dentro do iframe do popup "Alterar Atuação") — mesmo HTML nos dois
-    // casos, identificado pelo container da árvore de Comarcas.
+    // Reconhece a tela de seleção de área de atuação no document LOCAL (página cheia do
+    // login OU dentro do iframe do popup "Alterar Atuação", quando é ESTE frame que tem o
+    // popup) — mesmo HTML nos dois casos, identificado pelo container da árvore de
+    // Comarcas. Só o document local de propósito: usada por injetarSeletorUnidades, que
+    // injeta elementos (checkbox) diretamente no DOM deste mesmo document — buscar em
+    // outro frame e tentar inserir nó de um document dentro da árvore de outro
+    // quebraria (insertBefore exige mesmo document). Para saber se a árvore existe em
+    // QUALQUER frame acessível (usado pelo poll da automação, que roda em frames
+    // diferentes do frame que efetivamente tem o popup), ver documentoComArvoreAreaAtuacao.
     function paginaSelecaoAreaAtuacao() {
         return !!document.getElementById('listaAreaAtuacaocomarca');
+    }
+
+    // Acha o documento (frame local, iframe do popup "Alterar Atuação", ou página cheia
+    // do login) que contém a árvore de seleção de área de atuação, buscando em TODOS os
+    // frames acessíveis — mesmo motivo já documentado em tentarAbrirPopupTrocaAtuacao/
+    // lerAtuacaoEmQualquerFrame: o Projudi roda o userscript em frames independentes,
+    // cada um com seu próprio poll de passoAutomacao(), e nem sempre é o frame que abriu
+    // o popup quem ganha a vez de rodar no próximo tick. Bug relatado pelo usuário: o
+    // poll de 'trocando_unidade' e listarUnidadesAreaAtuacao() checavam só o document
+    // local — quando o poll vinha de um frame SEM o popup, a árvore parecia "sumida"
+    // mesmo genuinamente aberta (e visível na tela) noutro frame, e a automação em várias
+    // unidades travava pra sempre a partir da 2ª troca.
+    function documentoComArvoreAreaAtuacao() {
+        for (const doc of todosDocumentosAcessiveis()) {
+            if (doc.getElementById && doc.getElementById('listaAreaAtuacaocomarca')) return doc;
+        }
+        return null;
     }
 
     // Lista achatada de {titulo, elemento} — só os <a> de unidade de verdade (os
     // cabeçalhos de Comarca são <img class="subAreaGroup"> + texto solto, sem <a>, então
     // não entram aqui). Também cobre "Últimas visitadas" (mesmo formato de link),
     // deduplicado por título — uma unidade que aparece nas duas listas vira uma entrada
-    // só (a primeira encontrada), o suficiente pra localizar por título depois.
+    // só (a primeira encontrada), o suficiente pra localizar por título depois. Busca no
+    // documento que TEM a árvore (documentoComArvoreAreaAtuacao), não necessariamente o
+    // document local — clicarUnidadePorTitulo só precisa de uma referência ao elemento
+    // pra chamar .click() nele (funciona entre frames acessíveis, mesmo padrão já usado
+    // por acharLinkMenu/navegarMenu em todo o resto do script), não de inserir nós nele.
     function listarUnidadesAreaAtuacao() {
-        if (!paginaSelecaoAreaAtuacao()) return [];
+        const doc = documentoComArvoreAreaAtuacao();
+        if (!doc) return [];
         const vistos = new Set();
         const unidades = [];
-        document.querySelectorAll('#listaAreaAtuacaocomarca a[href*="areaAtuacao.do"], #listaAreasAtuacaoVisitadas a[href*="areaAtuacao.do"]').forEach(a => {
+        doc.querySelectorAll('#listaAreaAtuacaocomarca a[href*="areaAtuacao.do"], #listaAreasAtuacaoVisitadas a[href*="areaAtuacao.do"]').forEach(a => {
             const titulo = (a.title || a.textContent || '').trim();
             if (!titulo || vistos.has(titulo)) return;
             vistos.add(titulo);
@@ -11106,10 +11152,14 @@
         // 'trocando_unidade': aguarda o popup/iframe da árvore de seleção aparecer (clica
         // a próxima unidade marcada) ou a nova atuação já estar ativa (retoma a fila) —
         // ver comentário grande acima de CHAVE_MU_ATIVO sobre por que isso é dirigido só
-        // por estado/localStorage entre frames independentes.
+        // por estado/localStorage entre frames independentes. Usa
+        // documentoComArvoreAreaAtuacao (busca em TODOS os frames), não
+        // paginaSelecaoAreaAtuacao (só o document local) — este poll roda em QUALQUER
+        // frame, não necessariamente o que tem o popup aberto (bug relatado pelo
+        // usuário: travava a partir da 2ª troca de unidade).
         if (estado === 'trocando_unidade') {
             store.setItem('projudi_auto_lock', String(agora));
-            const naArvore = paginaSelecaoAreaAtuacao();
+            const naArvore = !!documentoComArvoreAreaAtuacao();
             console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
             if (naArvore) {
                 avancarParaProximaUnidadeSelecionada();
