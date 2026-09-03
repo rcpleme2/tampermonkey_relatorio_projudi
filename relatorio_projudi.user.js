@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.22
+// @version      24.23
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4763,37 +4763,40 @@
             { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
             { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
         ];
-        // Pedido do usuário: quantas conclusões ESTE magistrado(a) já analisou (dados do
-        // Tempo Médio, não das pendentes acima, quando Tempo Médio também foi incluído
-        // no mesmo PDF) e quantas ele(a) mesmo fez diretamente x quantas passaram por
-        // pré-análise de outra pessoa — tudo já filtrado por este magistrado(a) E pela
-        // mesma atribuição/competência de `rotuloBloco` (ver calcularEstatisticasTMJuiz
-        // em gerarPDFConjunto). Pedido do usuário (rodada seguinte): esta informação
-        // entra como um CARD a mais, junto dos demais KPIs — não mais misturada no
-        // subtítulo/cabeçalho da página. Período/tempo médio (texto mais longo, não cabe
-        // na 1ª linha do card) ganham uma legenda própria logo abaixo da fileira de cards.
-        if (estatisticasTM) {
-            kpis.push({
-                titulo: 'Já Analisadas', valor: String(estatisticasTM.total),
-                subs: [`Mag: ${estatisticasTM.peloMagistrado} · Ass: ${estatisticasTM.porOutros}`],
-                acento: COR.vinho,
-            });
-        }
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
+        // Pedido do usuário: quantas conclusões ESTE magistrado(a) já analisou (dados do
+        // Tempo Médio, não das pendentes acima, quando Tempo Médio também foi incluído
+        // no mesmo PDF), quantas ele(a) mesmo fez diretamente x quantas passaram por
+        // pré-análise de outra pessoa, o tempo médio de conclusão e o período analisado —
+        // tudo já filtrado por este magistrado(a) E pela mesma atribuição/competência de
+        // `rotuloBloco` (ver calcularEstatisticasTMJuiz em gerarPDFConjunto). Pedido do
+        // usuário (rodada seguinte): período e tempo médio ganham CADA UM seu próprio
+        // card (antes vinham como texto solto abaixo dos KPIs, cortado/sem contexto) —
+        // numa fileira própria, separada da fileira de Pendentes/Prioritários acima, para
+        // não espremer os cards já existentes (bug relatado: "Já Analisadas" cortado ao
+        // dividir a largura entre 5 cards).
         let gY0 = kY + 28 + gap + 2;
-        if (estatisticasTM && (estatisticasTM.periodo || estatisticasTM.media != null)) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
-            let textoAnalise = 'Conclusões já analisadas (Tempo Médio)';
-            if (estatisticasTM.periodo) textoAnalise += `  •  Período: ${estatisticasTM.periodo}`;
+        if (estatisticasTM) {
+            const kpisTM = [{
+                titulo: 'Já Analisadas', valor: String(estatisticasTM.total),
+                subs: [`Mag: ${estatisticasTM.peloMagistrado} · Ass: ${estatisticasTM.porOutros}`],
+                acento: COR.vinho,
+            }];
             if (estatisticasTM.media != null) {
-                const mediaTxt = String(estatisticasTM.media).replace('.', ',');
-                textoAnalise += `  •  Tempo médio de conclusão (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
+                kpisTM.push({
+                    titulo: 'Tempo Médio de Conclusão', valor: `${String(estatisticasTM.media).replace('.', ',')} dia(s)`,
+                    subs: ['Dt. Envio → Dt. Análise'], acento: COR.aqua,
+                });
             }
-            const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
-            doc.text(linhasAnalise, m, gY0);
-            gY0 += linhasAnalise.length * 3.4 + 3;
+            if (estatisticasTM.periodo) {
+                kpisTM.push({ titulo: 'Período Analisado', valor: estatisticasTM.periodo, subs: [], acento: COR.azul });
+            }
+            const kY2 = gY0;
+            const kW2 = (uw - (kpisTM.length - 1) * gap) / kpisTM.length;
+            kpisTM.forEach((k, i) => desenharCard(doc, m + i * (kW2 + gap), kY2, kW2, 28, k.titulo, k.valor, k.subs, true, k.acento));
+            gY0 = kY2 + 28 + gap + 2;
         }
         const charts = [
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
@@ -8189,10 +8192,6 @@
         desenharBarras(doc, m, chart2Y, uw, chart2H, 'Tempo médio em remessa por Classe Processual', porClasse, fmtDias, COR.aqua);
 
         desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
-
-        // Mesma página complementar de Paralisados (ver montarPaginaUltimoMovimento) — em
-        // Remessas o último movimento indica onde a remessa emperrou.
-        montarPaginaUltimoMovimento(doc, dados, TITULO_REMESSAS, 'Remessas paradas por último movimento', comIndice);
     }
 
     // Tabela discriminada do relatório de Remessas em Aberto (sempre inicia em página
@@ -8307,24 +8306,38 @@
 
         const gap = 6;
         // Linha 1: 3 KPIs — total de ativos (Em andamento somado) / classes distintas /
-        // classe com mais ativos.
+        // classe com mais ativos. "Classe com Mais Ativos" usa desenharCardLista (quebra
+        // em linhas, nunca corta) em vez de desenharCard — nome de classe processual é
+        // texto longo ("283 - AÇÃO PENAL - PROCEDIMENTO ORDINÁRIO...") que a elipse de
+        // desenharCard cortava de forma ilegível (bug relatado pelo usuário); a altura da
+        // linha inteira acompanha a maior das duas (mesma altura pros 3 cards, pra não
+        // ficarem desalinhados).
         const kY = yLinha + 5;
         const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m,               kY, kW3, 28, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Classes Processuais', String(r.length), [], true, COR.aqua);
-        desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Classe com Mais Ativos',
-            classeComMais ? classeComMais.classe : '—',
-            classeComMais ? [`${classeComMais.emAndamento} ativo(s)`] : [], true, COR.ambar);
+        const alturaClasseMais = classeComMais ? medirAlturaCardLista(doc, kW3, classeComMais.classe, true) : 28;
+        const alturaLinha1 = Math.max(28, alturaClasseMais);
+        desenharCard(doc, m,               kY, kW3, alturaLinha1, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, alturaLinha1, 'Classes Processuais', String(r.length), [], true, COR.aqua);
+        if (classeComMais) {
+            desenharCardLista(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos',
+                classeComMais.classe, `${classeComMais.emAndamento} ativo(s)`, COR.ambar);
+        } else {
+            desenharCard(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos', '—', [], true, COR.ambar);
+        }
 
         // Gráfico: distribuição do acervo (Em andamento) entre as classes — reaproveita
         // o mesmo "calc" de cfg.pdf.distribuicoes (somarPorCampo), sem duplicar a lógica.
         // Pedido do usuário: só o essencial neste relatório por enquanto — sem KPIs de
-        // Suspensos/Ações Novas Distribuídas (removidos, dado não pedido aqui).
-        const chartY = kY + 28 + gap + 4;
+        // Suspensos/Ações Novas Distribuídas (removidos, dado não pedido aqui). Rótulo da
+        // barra mostra o percentual de composição do acervo (pedido do usuário), além da
+        // contagem bruta — mesmo mecanismo de "fmt" já usado por outros gráficos de barra
+        // (ex.: fmtDias em Remessas/Paralisados), sem mexer em desenharBarras.
+        const chartY = kY + alturaLinha1 + gap + 4;
         const dist = CFG_ATIVOS_CLASSE.pdf.distribuicoes[0];
         const itensBarras = dist.calc(r);
         const disponivel = ph - m - chartY - 14;
-        desenharBarras(doc, m, chartY, uw, Math.max(40, disponivel), dist.titulo, itensBarras, undefined, COR.azul);
+        const fmtComPercentual = (v) => `${v} (${totalAtivos ? Math.round(v / totalAtivos * 100) : 0}%)`;
+        desenharBarras(doc, m, chartY, uw, Math.max(40, disponivel), dist.titulo, itensBarras, fmtComPercentual, COR.azul);
 
         desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
