@@ -2828,8 +2828,39 @@
         return { texto: null, tentativas };
     }
 
-    function corpoFormularioArquivadosSaldo() {
-        return new URLSearchParams({ tamanhoFonte: '10', formato: 'R', tipoExportacao: 'CSV' });
+    // Garante que o rádio "Arquivo CSV" esteja selecionado antes de enviar o
+    // formulário — a tela vem com "PDF" marcado por padrão (checked="checked" no HTML
+    // original, confirmado em capturas reais da tela: table.form > tr > td >
+    // input[name="tipoExportacao"], com valores PDF/Excel/HTML/"Excel (Somente
+    // Planilha)"/"RTF (Word, Writter etc...)"/CSV). Sem isso, corpoFormularioArquivadosSaldo()
+    // serializaria o formulário exatamente como está — ou seja, pediria PDF, não CSV.
+    // Clique real (não checked=true + dispatchEvent — mesma lição já documentada no
+    // resto deste arquivo: telas do Projudi só reagem a clique de verdade).
+    function selecionarFormatoCSV(form) {
+        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCSV && !radioCSV.checked) radioCSV.click();
+        else if (!radioCSV) console.warn('[Projudi Arquivados c/ Saldo] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        return radioCSV;
+    }
+
+    // Marca o checkbox do formulário (equivalente ao passo do trace puppeteer usado
+    // pra mapear a navegação até esta tela) se ele existir e ainda não estiver marcado —
+    // precisa do MESMO estado do formulário que um clique real deixaria, pra requisição
+    // em segundo plano replicar fielmente a que de fato funciona (ver corpoFormularioArquivadosSaldo).
+    function marcarCheckboxDoRelatorio(form) {
+        const checkbox = form.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) checkbox.click();
+        else if (!checkbox) console.warn('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário; confira manualmente se o relatório depende dele.');
+        return checkbox;
+    }
+
+    // Serializa o FormData REAL do formulário (depois de selecionarFormatoCSV/
+    // marcarCheckboxDoRelatorio terem ajustado seu estado) — não um punhado de campos
+    // chutados: os campos reais (idRelatorio, numeroColunas, descricaoUser, tipoUser,
+    // tamanhoUser, entre outros específicos deste relatório dinâmico) são o que faz a
+    // diferença entre a resposta vir com o CSV de verdade ou vir vazia (0 bytes).
+    function corpoFormularioArquivadosSaldo(form) {
+        return new URLSearchParams(new FormData(form));
     }
 
     // Interpreta o ArrayBuffer da resposta (0 bytes / não parece CSV / CSV reconhecido).
@@ -2847,17 +2878,16 @@
     }
 
     // fetch() da PRÓPRIA página — roda na origem/sessão do documento (mesmo "mundo" de
-    // cookies que um clique real do usuário). Sem via de reserva (ver comentário no topo
-    // desta seção sobre não reintroduzir GM_xmlhttpRequest).
-    async function coletarViaFetch(urlAction) {
+    // cookies que um clique real do usuário). Sem X-Requested-With: o diagnóstico ao
+    // vivo (feito no script standalone antes deste merge) confirmou que o endpoint é um
+    // form POST comum, não uma rota pensada pra AJAX — copiar fielmente um submit real
+    // (sem cabeçalhos extras) é o que faz a resposta vir com o CSV de verdade. Sem via de
+    // reserva (ver comentário no topo desta seção sobre não reintroduzir GM_xmlhttpRequest).
+    async function coletarViaFetch(urlAction, corpo) {
         const resp = await fetch(urlAction, {
             method: 'POST',
-            body: corpoFormularioArquivadosSaldo(),
+            body: corpo,
             credentials: 'same-origin',
-            // X-Requested-With: marcador clássico de requisição AJAX que alguns
-            // filtros/WAFs de aplicações Java (Struts/JSF/Spring, comuns em sistemas do
-            // Judiciário) exigem para não tratar a chamada como suspeita.
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
         });
         // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
         // (302) para uma URL de download gerada.
@@ -2885,7 +2915,10 @@
         store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'ts', String(Date.now()));
         console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
         try {
-            const texto = await coletarViaFetch(form.action);
+            selecionarFormatoCSV(form);
+            marcarCheckboxDoRelatorio(form);
+            const corpo = corpoFormularioArquivadosSaldo(form);
+            const texto = await coletarViaFetch(form.action, corpo);
             const dados = parseCSV(texto);
             console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — salvando e avançando a automação`);
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', JSON.stringify(dados));
@@ -6802,6 +6835,55 @@
     // p.dataCampo/p.processoCampo configurável — aqui as colunas já vêm fixas do CSV, e o
     // "aging" que interessa é por dinheiro parado, não por dias de tramitação padrão), por
     // isso resumo e tabela dedicados, iguais em estrutura aos de Outros Cumprimentos.
+    // Diferente do gerarPDF/montarResumo/montarTabela do userscript standalone que deu
+    // origem a este relatório: aqui montarTabela SEMPRE começa em página própria
+    // (doc.addPage() no início), em vez de continuar na mesma página do resumo — a capa
+    // unificada (gerarPDFConjunto) monta TODOS os resumos primeiro e só depois TODAS as
+    // tabelas (páginas não ficam mais adjacentes nesse ponto), o mesmo padrão de
+    // Outros Cumprimentos/Paralisados/etc.; "uma única página quando tudo couber" não é
+    // possível de garantir nesse pipeline.
+
+    // Balão de observação (pedido do usuário, herdado do standalone): mesmo estilo
+    // visual dos cards de totais (caixa arredondada + barra de destaque à esquerda), mas
+    // com um parágrafo corrido em vez de um valor/título centralizados — por isso não
+    // reaproveita desenharCard() diretamente. Fonte Helvetica (pedido explícito do
+    // usuário) e texto justificado numa ÚNICA chamada de doc.text() com o parágrafo
+    // inteiro (não pré-quebrado em linhas) — o jsPDF só aplica o espaçamento extra entre
+    // palavras (justificação de verdade) quando é ELE MESMO que quebra o texto via
+    // maxWidth; passando uma linha pré-quebrada por vez, cada chamada vira um "array de 1
+    // linha" e a lógica de justify nunca dispara. Altura calculada via
+    // doc.getLineHeight()/scaleFactor (métrica real de espaçamento entre linhas do jsPDF,
+    // em pt, convertida pra mm) e devolvida (não fixa) porque o texto é sempre o mesmo,
+    // mas a robustez de calcular > chutar vale o custo.
+    function desenharCardObservacaoArquivadosSaldo(doc, x, y, w, texto) {
+        const padX = 6, padTop = 8, gapRotuloTexto = 5, padBottom = 4;
+        const larguraTexto = w - 2 * padX;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+        const linhas = doc.splitTextToSize(texto, larguraTexto);
+        const alturaLinha = doc.getLineHeight() / doc.internal.scaleFactor;
+        const yRotulo = y + padTop;
+        const yTexto = yRotulo + gapRotuloTexto;
+        const h = padTop + gapRotuloTexto + (linhas.length - 1) * alturaLinha + padBottom;
+
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.azul);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text('OBSERVAÇÃO', x + padX, yRotulo);
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+        doc.text(texto, x + padX, yTexto, { align: 'justify', maxWidth: larguraTexto });
+
+        return h;
+    }
+
+    const OBSERVACAO_ARQUIVADOS_SALDO = 'Verificou-se, a partir de dados extraídos do Sistema Projudi, a existência de '
+        + 'processos arquivados com saldo em conta judicial. A secretaria deverá promover a análise '
+        + 'dos processos indicados e adotar as medidas cabíveis para o levantamento dos valores '
+        + 'depositados, em estrita observância ao Código de Normas do Foro Judicial e ao Decreto '
+        + 'Judiciário nº 626/2018.';
 
     function gerarPDFArquivadosSaldo(dados) {
         const doc = novoDocPDF();
@@ -6835,13 +6917,13 @@
 
         const gap = 6;
         const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
-        const saldoMedio = r.length ? saldoTotal / r.length : 0;
 
+        // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
+        // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
         const kY = yLinha + 6;
         const kpis = [
             { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
             { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
-            { titulo: 'Saldo Médio por Processo', valor: fmtBRL(saldoMedio), acento: COR.ambar },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
@@ -6860,6 +6942,12 @@
             subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
         }
         desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+
+        // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
+        // relatório efetivamente lista algum processo.
+        if (r.length) {
+            desenharCardObservacaoArquivadosSaldo(doc, m, aY + 28 + gap, uw, OBSERVACAO_ARQUIVADOS_SALDO);
+        }
 
         desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
@@ -6890,9 +6978,10 @@
         const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
         const fatorLargura = uw / somaLarguras;
         const columnStyles = {};
+        // Saldo alinhado à esquerda, igual às demais colunas (pedido do usuário — antes
+        // só ela tinha halign:'right', destoando do resto da tabela).
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
         const idxSaldo = colunas.findIndex(c => c.header === 'Saldo');
-        columnStyles['k' + idxSaldo] = { ...columnStyles['k' + idxSaldo], halign: 'right' };
 
         const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
         const corpo = ordenados.map(d => {
@@ -6908,16 +6997,26 @@
             startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+            // TOTAL só na última página da tabela (pedido do usuário) — o padrão do
+            // autoTable repete o `foot` em toda página (bug relatado num PDF real de
+            // 2 páginas: a linha TOTAL aparecia ao final de CADA uma).
+            showFoot: 'lastPage',
+            // Fonte Helvetica (não PublicSans) — bug relatado pelo usuário: os números
+            // desta tabela (Processo, datas, Conta Judicial, Saldo) saíam com espaços
+            // estranhos entre os caracteres. Causa: a fonte PublicSans embutida
+            // (FONTE_PUBLIC_SANS_REGULAR) declara larguras de glifo que não batem
+            // exatamente com o desenho real de certos glifos neste peso/tamanho — o
+            // CONTEÚDO do texto sai correto (copiar/colar do PDF funciona normalmente),
+            // só o posicionamento visual de cada caractere fica errado. Helvetica é fonte
+            // padrão do PDF (não embutida), sem esse risco — mesma solução usada no balão
+            // de observação acima.
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
                       lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
             foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
-            footStyles: { font: 'PublicSans', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
-            didParseCell: (data) => {
-                if (data.section === 'foot' && data.column.index === idxSaldo) data.cell.styles.halign = 'right';
-            },
+            footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
             didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, carimbo, pw, ph, m, comIndice),
         });
 
