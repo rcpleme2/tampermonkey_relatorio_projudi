@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      23.3
+// @version      24.19
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -125,39 +125,19 @@
     }
 
     // ── Estatísticas Gerais (processos ativos por atuação) ──────────────────────
-    // Lê "Processos Ativos > Eletrônicos: N" da página inicial. Só existe nessa página
-    // (fora dela retorna null, sem custo real — chamado sempre no bootstrap).
-    function lerProcessosAtivos() {
-        const labels = document.querySelectorAll('td.label label');
-        for (const label of labels) {
-            if (!/eletr[ôo]nicos\s*:/i.test(label.textContent)) continue;
-            const tr = label.closest('tr');
-            const tds = tr ? tr.querySelectorAll('td') : [];
-            const txt = tds[1] ? tds[1].textContent : '';
-            const m = /([\d.]+)/.exec(txt);
-            if (m) { const n = parseInt(m[1].replace(/\./g, ''), 10); if (!isNaN(n)) return n; }
-        }
-        return null;
-    }
-
-    function lerMapaAtivos() {
+    // Sobrescrita temporária de lerMapaAtivos(), setada só por gerarPDFConjunto quando o
+    // usuário filtrou atribuições no diálogo de checkboxes (escolherOpcoesPDFConjunto) —
+    // ver comentário grande lá. lerMapaAtivos() é usada em VÁRIOS lugares (a linha
+    // "Processos Ativos" da capa, contagemPorCompetencia/fraseCompetenciasComContagem
+    // usadas por quase todo resumo do Cartório) — sobrescrever aqui, na ÚNICA fonte,
+    // filtra todos eles de uma vez sem precisar passar um parâmetro extra por ~10 pontos
+    // de chamada diferentes.
+    let overrideMapaAtivos = null;
+    function lerMapaAtivosBruto() {
         try { return JSON.parse(store.getItem('projudi_estatisticas_ativos') || '{}'); } catch (e) { return {}; }
     }
-
-    // Grava/atualiza a contagem de processos ativos da atuação atual — acumulado entre
-    // rodadas da automação (uma por atuação), como os demais relatórios.
-    function gravarProcessosAtivosSeDisponivel() {
-        // Opção controlável pelo painel (ver CHAVE_INCLUIR_ATIVOS/injetarPainel) — default
-        // marcado (comportamento antigo: sempre coleta). Checar aqui, na COLETA, e não só
-        // na hora de montar a capa em gerarPDFConjunto, evita acumular dados obsoletos no
-        // mapa de atuações quando o usuário desmarcou a opção deliberadamente.
-        if (!incluirProcessosAtivos()) return;
-        const n = lerProcessosAtivos();
-        if (n == null) return;
-        const atuacao = lerAtuacao() || '(sem atuação)';
-        const mapa = lerMapaAtivos();
-        mapa[atuacao] = n;
-        store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
+    function lerMapaAtivos() {
+        return overrideMapaAtivos || lerMapaAtivosBruto();
     }
 
     function norm(s) {
@@ -511,33 +491,56 @@
         usaAtuacao: false,
         nomeArquivo: 'tempo_medio_projudi',
         rotulos: { coletar: 'Extrair Tempo Médio', coletarMais: 'Extrair mais (Tempo Médio)', baixar: '⬇ Baixar Tempo Médio' },
-        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Usuário Cartório', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
-        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
+        cabecalhos: ['Processo', 'Dt. Análise', 'Dt. Análise Cartório', 'Usuário Cartório', 'Magistrado(a)', 'Pré-análise', 'Tipo de Conclusão', 'Classe Processual', 'Dias p/ Cumprimento', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 26 }, { wch: 40 }, { wch: 18 }, { wch: 11 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[1].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
+            // "Dt.Envio" — data em que o processo foi remetido para conclusão (mesma
+            // semântica de dtRemessa em CFG_CONCLUSOES, ver comentário no layout de
+            // colunas acima). Não entrava nos dados antes — pedido do usuário: precisa
+            // dela para calcular o tempo médio de CONCLUSÃO DO JUIZ (Dt.Envio ->
+            // Dt.Análise), diferente de "Dias p/ Cumprimento" (que mede o cartório,
+            // Dt.Análise -> Dt.Análise Cartório).
+            const dtEnvio = dataDeTexto(tds[2]);
             const dtAnalise = dataDeTexto(tds[3]);
             const dtCartorio = dataDeTexto(tds[4]);
             const usuarioCartorio = usuarioDeTexto(tds[4]); // login abaixo da data, na mesma célula
             const classeCompleta = textoAteBr(tds[6]) || textoCelula(tds[6]);
             const classe = classeCompleta.split(' (')[0].trim(); // classe sem o "(Assunto Principal)"
+            // tds[5] ("Tipo de conclusão") é a MESMA célula/estrutura de CFG_CONCLUSOES —
+            // as duas telas compartilham a base "Estatísticas de Conclusões", só o rádio
+            // "situacao" (Pendentes/Analisados) muda o filtro (ver detecta() acima) —
+            // então também traz <strong>magistrado</strong>/<i>pré-análise</i>. Pedido do
+            // usuário: precisa saber quem analisou cada conclusão JÁ ANALISADA (não só
+            // quem está pendente), para calcular quantas o magistrado fez diretamente x
+            // quantas passaram por pré-análise de outra pessoa.
+            const strongEl = tds[5].querySelector('strong');
+            const iEl = tds[5].querySelector('i');
             // Dias para cumprimento = Dt. Análise Cartório - Dt. Análise
-            const tA = parseDataBR(dtAnalise), tC = parseDataBR(dtCartorio);
+            const tE = parseDataBR(dtEnvio), tA = parseDataBR(dtAnalise), tC = parseDataBR(dtCartorio);
             const dias = (tA != null && tC != null) ? Math.max(0, Math.round((tC - tA) / DIA_MS)) : null;
+            // Tempo de conclusão do juiz = Dt.Análise - Dt.Envio (quanto tempo o processo
+            // ficou esperando decisão, ANTES de chegar ao cartório de novo).
+            const diasConclusaoJuiz = (tE != null && tA != null) ? Math.max(0, Math.round((tA - tE) / DIA_MS)) : null;
             return {
                 processo,
+                dtEnvio,
                 dtAnalise,
                 dtCartorio,
                 usuarioCartorio,
+                responsavel: strongEl ? strongEl.textContent.replace(/^Dr\(a\)\.\s*/i, '').trim() : '',
+                preAnalise: iEl ? iEl.textContent.trim() : '',
                 tipoConclusao: textoAteBr(tds[5]),
                 classe,
                 dias,
+                diasConclusaoJuiz,
                 prioritario: emPrioritario(emProc),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.tipoConclusao, d.classe,
+        linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.responsavel, d.preAnalise, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedio(dados, somenteResumo),
     };
@@ -633,6 +636,81 @@
         pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados, somenteResumo),
     };
 
+    // Relatório de Processos Ativos por Classe Processual (processo/movimentoForense.do,
+    // "Movimento Forense" — NÃO confundir com "Movimento Forense - Juiz",
+    // movimentoForenseJuiz.do, tela parecida mas outro relatório). Substitui a antiga
+    // leitura passiva de "Processos Ativos > Eletrônicos: N" da página inicial (ver
+    // lerMapaAtivos/CHAVE_INCLUIR_ATIVOS removida) — agora navega até a tela, preenche
+    // dataInicio/dataFim com a data de hoje (um "corte" no dia corrente, não um
+    // intervalo — mesmo dia nos dois campos) e pesquisa (ver
+    // preencherEPesquisarAtivosClasse). O total de "ativos" da unidade passa a ser a
+    // SOMA da coluna "Em andamento" de todas as classes processuais (ver
+    // CFG_ATIVOS_CLASSE.aoTerminarColeta, que grava em lerMapaAtivos() no mesmo formato
+    // de sempre — os ~10 pontos que dependem desse mapa continuam funcionando sem
+    // mudança).
+    //
+    // Tabela de resultado (result.html real): uma linha por classe processual, SEM
+    // paginação de verdade (o navegador de páginas vem comentado/vazio no HTML), mas
+    // usa criarColetor mesmo assim — o padrão genérico já lida com "só uma página, sem
+    // próxima" sem esforço extra. Colunas confirmadas (índices 0-7): [0] Classe
+    // Processual [1] Ações Novas Distribuídas [2] Em andamento [3] Suspensos
+    // [4] Deixaram Suspensão [5] Arquivados sem baixa [6] Arquivados com baixa
+    // [7] Desarquivados. Mantém TODAS as linhas, mesmo com "Em andamento"===0 — é dado
+    // de distribuição completo do acervo, não uma fila de pendências a esconder quando
+    // zerada (mostrarSeVazio: true, mesmo padrão de CFG_APREENSOES/
+    // CFG_OUTROS_CUMPRIMENTOS/CFG_CUMPRIMENTO_MEDIDAS).
+    const TITULO_ATIVOS_CLASSE = 'Processos Ativos por Classe Processual';
+    const CFG_ATIVOS_CLASSE = {
+        prefixo: 'projudi_ativosclasse_',
+        // Exige a combinação "Classe Processual" + "Em andamento" + "Ações Novas
+        // Distribuídas" no cabeçalho — a mesma tabela aparece (com cabeçalho parecido)
+        // em outras variações do relatório (ex. "Movimento Forense - Juiz"); a
+        // combinação das 3 evita colisão com essas outras telas.
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /em\s+andamento/i.test(cab) && /a[çc][õo]es\s+novas\s+distribu[íi]das/i.test(cab),
+        minTds: 8,
+        usaAtuacao: true,
+        mostrarSeVazio: true,
+        nomeArquivo: 'ativos_por_classe_projudi',
+        rotulos: { coletar: 'Extrair Ativos por Classe', coletarMais: 'Extrair mais (Ativos por Classe)', baixar: '⬇ Baixar Ativos por Classe' },
+        cabecalhos: ['Classe Processual', 'Ações Novas Distribuídas', 'Em andamento', 'Suspensos', 'Deixaram Suspensão', 'Arquivados sem baixa', 'Arquivados com baixa', 'Desarquivados'],
+        larguras: [{ wch: 50 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const numCel = (td) => { const n = parseInt(textoCelula(td), 10); return isNaN(n) ? 0 : n; };
+            const classe = textoCelula(tds[0]);
+            // A tabela real do Projudi termina com uma linha "TOTAL" (em negrito) somando
+            // todas as classes — bug relatado pelo usuário: estava sendo extraída como se
+            // fosse mais uma classe processual, dobrando a soma de "Em andamento" (a linha
+            // TOTAL já É a soma; somar ela também conta tudo duas vezes). Descarta aqui.
+            if (/^total$/i.test(classe)) return null;
+            return {
+                classe,
+                acoesNovas: numCel(tds[1]),
+                emAndamento: numCel(tds[2]),
+                suspensos: numCel(tds[3]),
+                deixaramSuspensao: numCel(tds[4]),
+                arquivadosSemBaixa: numCel(tds[5]),
+                arquivadosComBaixa: numCel(tds[6]),
+                desarquivados: numCel(tds[7]),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.classe, String(d.acoesNovas), String(d.emAndamento), String(d.suspensos), String(d.deixaramSuspensao), String(d.arquivadosSemBaixa), String(d.arquivadosComBaixa), String(d.desarquivados)],
+        pdf: {
+            titulo: TITULO_ATIVOS_CLASSE,
+            // "calc" próprio (soma de emAndamento por classe, não contagem de linhas) —
+            // secaoWordGenerica pula distribuições com calc() (ver comentário lá), então
+            // fica de fora do Word conjunto; o PDF usa a mesma função diretamente em
+            // montarResumoAtivosClasse, sem duplicar a lógica.
+            distribuicoes: [{ titulo: 'Ativos por Classe Processual', campo: 'classe', topN: 15, calc: (dados) => somarPorCampo(dados, 'classe', 'emAndamento', 15) }],
+        },
+        pdfCustom: (dados, somenteResumo) => gerarPDFAtivosClasse(dados, somenteResumo),
+        // Ao terminar a coleta desta unidade, calcula o total de ativos (soma de "Em
+        // andamento" de TODAS as classes desta atuação) e grava no mesmo mapa que
+        // lerMapaAtivos() já expõe — ver comentário grande na função abaixo.
+        aoTerminarColeta: () => gravarTotalAtivosClasseEAvancar(),
+    };
+
     // Relatório de Processos Suspensos por Prazo Indeterminado (processoBuscaSuspenso.do,
     // acessado pelo número na página inicial, com o checkbox "Tempo Indeterminado" já
     // marcado — ver prazoIndeterminadoMarcado). Colunas da tabela — CONFIRMADO por 2
@@ -715,6 +793,10 @@
         pdf: {
             titulo: 'Suspensos por Prazo Indeterminado',
             atosTitulo: 'Processos suspensos',
+            // Pedido do usuário: "Prioritários suspensos", não o padrão genérico
+            // "Prioritários pendentes" (ver rotuloPrioridadeKpi em montarResumoGenerico) —
+            // mais preciso pra este relatório específico.
+            rotuloPrioridadeKpi: 'Prioritários suspensos',
             agingTitulo: 'Tempo de suspensão',
             tabelaTitulo: 'Tabela discriminada dos processos suspensos por prazo indeterminado',
             dataCampo: 'inicioSuspensao',
@@ -724,6 +806,15 @@
             distribuicoes: [
                 { titulo: 'Suspensos por Classe Processual', campo: 'classe', topN: 12 },
             ],
+            // Observação final destacada (pedido do usuário) — texto literal fornecido.
+            observacaoFinal: 'A Corregedoria-Geral da Justiça não recomenda o uso irrestrito da suspensão por '
+                + 'prazo indeterminado, pois isso pode gerar descontrole dos processos. Recomenda-se que o '
+                + 'magistrado e o cartório estipulem uma rotina de revisão desses processos suspensos e que a '
+                + 'suspensão sempre ocorra com prazo determinado, mesmo não havendo como prever com exatidão '
+                + 'quando se dará o termo final do evento que gerou a suspensão. Essa prática recomendada '
+                + 'garante que, findo o prazo da suspensão, haverá consulta manual quanto à necessidade de '
+                + 'renovar a suspensão por mais um prazo determinado ou será identificada eventual hipótese de '
+                + 'retomada do processo que possa ter sido esquecida anteriormente.',
             // colunas também é um getter, mesma regra da coluna Excel acima: só entra
             // "Motivo da Suspensão" quando os dados coletados vieram da área Crime.
             get colunas() {
@@ -848,8 +939,12 @@
         usaAtuacao: false,
         nomeArquivo: 'instancia_recursal_projudi',
         rotulos: { coletar: 'Extrair Instância Recursal', coletarMais: 'Extrair mais (Instância Recursal)', baixar: '⬇ Baixar Instância Recursal' },
-        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio'],
-        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }],
+        // Coluna "Competência" (pedido do usuário): o relatório passa a apresentar todos
+        // os dados consolidados num único resumo geral (sem dividir em Resumo Geral +
+        // um bloco por atribuição, ver montarResumoInstanciaRecursal), então a atribuição
+        // de cada processo precisa aparecer na própria tabela discriminada.
+        cabecalhos: ['Processo', 'Classe Processual', 'Data de Envio', 'Competência'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 16 }, { wch: 30 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
@@ -861,7 +956,7 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.processo, d.classe, d.dataEnvio],
+        linha: (d) => [d.processo, d.classe, d.dataEnvio, d.competencia || ''],
         // Sem cfg.pdf genérico: o resumo pedido (detalhamento dos enviados há mais de 2
         // anos, distribuição por faixa de tempo desde o envio) não cabe no mecanismo
         // genérico — ver gerarPDFInstanciaRecursal.
@@ -1431,12 +1526,6 @@
     const CHAVE_ACUMULADO_AR = 'projudi_audienciasrealizadas_acumulado';
     const CHAVE_PROGRESSO_AR = 'projudi_audienciasrealizadas_progresso';
     const CHAVE_TOTAL_USUARIOS_AR = 'projudi_audienciasrealizadas_total_usuarios';
-    // Fica FORA de limparEstadoTransitorioAR de propósito — precisa sobreviver à
-    // recoleta automática disparada por uma divergência de soma (ver
-    // finalizarAudienciasRealizadas) pra saber que já é a 2ª tentativa. Zerada só quando
-    // uma coleta de verdade começa do zero (ver o ponto que lê 'preenchendo_
-    // audienciasrealizadas') ou quando finalizarAudienciasRealizadas efetivamente termina.
-    const CHAVE_TENTATIVA_AR = 'projudi_audienciasrealizadas_tentativa';
 
     function atualizarProgressoAR(processados, total) {
         store.setItem(CHAVE_PROGRESSO_AR, JSON.stringify({ processados, total }));
@@ -1620,44 +1709,9 @@
         // foi removido). Ordenados pelo total de realizadas, maior primeiro.
         const porUsuario = acumulado.slice().sort((a, b) => b.quantidade - a.quantidade);
 
-        // Confere se a soma dos valores individuais bate com o total geral da vara (pedido
-        // do usuário) — cada pesquisa por magistrado é uma requisição independente ao
-        // Projudi, então um total que não fecha é sinal de coleta incompleta/inconsistente
-        // (ex.: pesquisa que não terminou de carregar antes de ler). Não trava o
-        // relatório — só avisa, no console e no próprio PDF, pra conferência.
-        const somar = (campo) => acumulado.reduce((s, u) => s + (u[campo] || 0), 0);
-        const somaIndividual = {
-            quantidade: somar('quantidade'), canceladas: somar('canceladas'), negativas: somar('negativas'),
-            naoRealizadas: somar('naoRealizadas'), redesignadas: somar('redesignadas'), pessoasOuvidas: somar('pessoasOuvidas'),
-        };
-        const totalIndividual = { quantidade: totalGeral, ...extrasGeral };
-        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
-        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = camposConferidos
-            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
-            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
-        const somaConfere = divergencias.length === 0;
-        if (!somaConfere) {
-            const detalhe = divergencias.map(d => `${d.campo} (geral=${d.geral}, soma=${d.soma})`).join(', ');
-            const tentativa = parseInt(store.getItem(CHAVE_TENTATIVA_AR) || '0', 10);
-            // Pedido do usuário: antes de lançar o aviso no PDF, refazer a coleta inteira
-            // uma vez (pode ter sido uma leitura ruim/instável, não necessariamente um dado
-            // real divergente) — só se for a 1ª divergência desta coleta (tentativa < 1). Se
-            // divergir de novo mesmo depois de recolher do zero, aí sim finaliza com o aviso.
-            if (tentativa < 1) {
-                console.warn(`[Projudi Audiências Realizadas] soma não bate (${detalhe}) — refazendo a coleta do zero para conferir antes de avisar no relatório`);
-                store.setItem(CHAVE_TENTATIVA_AR, String(tentativa + 1));
-                limparEstadoTransitorioAR();
-                iniciarBuscaAudienciasRealizadas();
-                return;
-            }
-            console.warn(`[Projudi Audiências Realizadas] a soma dos valores por magistrado NÃO bate com o total geral mesmo após recoleta: ${detalhe}`);
-        }
-
-        // A partir daqui, a checagem de consistência acima (somaConfere/divergencias) já
-        // validou/refez ESTA coleta (uma vara). Agora mescla com as demais atribuições já
-        // coletadas antes — bug relatado pelo usuário: coletar numa 2ª vara sobrescrevia
-        // o resumo da 1ª. Mesmo padrão de Audiências Designadas
+        // Mescla com as demais atribuições já coletadas antes — bug relatado pelo
+        // usuário: coletar numa 2ª vara sobrescrevia o resumo da 1ª. Mesmo padrão de
+        // Audiências Designadas
         // (calcularResumoAudienciasDesignadasDeTabela/salvarResumoAudienciasDesignadas):
         // guarda os dados BRUTOS tagueados por atribuição (porUsuario e porAtribuicao,
         // este último com os totais/extras "gerais" desta vara) e recalcula todos os
@@ -1676,13 +1730,12 @@
         const porAtribuicaoMesclado = [...porAtribuicaoAnterior.filter(a => (a.atuacao || '') !== (atuacao || '')), totaisDestaAtribuicao];
 
         const resumo = calcularResumoAudienciasRealizadasDeListas(porAtribuicaoMesclado, porUsuarioMesclado, periodo);
-        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length} somaConfere=${resumo.somaConfere}`);
+        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length}`);
 
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
         store.setItem(prefixo + 'coletado', '1');
         limparEstadoTransitorioAR();
-        store.removeItem(CHAVE_TENTATIVA_AR);
 
         avancarAutomacao(CFG_AUDIENCIAS_REALIZADAS);
     }
@@ -1702,18 +1755,6 @@
         const redesignadas = somarCampo(porAtribuicao, 'redesignadas');
         const pessoasOuvidas = somarCampo(porAtribuicao, 'pessoasOuvidas');
 
-        const somaIndividual = {
-            quantidade: somarCampo(porUsuario, 'quantidade'), canceladas: somarCampo(porUsuario, 'canceladas'),
-            negativas: somarCampo(porUsuario, 'negativas'), naoRealizadas: somarCampo(porUsuario, 'naoRealizadas'),
-            redesignadas: somarCampo(porUsuario, 'redesignadas'), pessoasOuvidas: somarCampo(porUsuario, 'pessoasOuvidas'),
-        };
-        const totalIndividual = { quantidade: totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas };
-        const camposConferidos = ['quantidade', 'canceladas', 'negativas', 'naoRealizadas', 'redesignadas', 'pessoasOuvidas'];
-        const rotulosConferidos = { quantidade: 'Realizadas', canceladas: 'Canceladas', negativas: 'Negativas', naoRealizadas: 'Não Realizadas', redesignadas: 'Redesignadas', pessoasOuvidas: 'Pessoas Ouvidas' };
-        const divergencias = camposConferidos
-            .filter(c => (somaIndividual[c] || 0) !== (totalIndividual[c] || 0))
-            .map(c => ({ campo: rotulosConferidos[c], geral: totalIndividual[c] || 0, soma: somaIndividual[c] || 0 }));
-
         return {
             geradoEm: new Date().toISOString(),
             totalGeral, canceladas, negativas, naoRealizadas, redesignadas, pessoasOuvidas,
@@ -1721,8 +1762,6 @@
             porUsuario: porUsuario.slice().sort((a, b) => b.quantidade - a.quantidade),
             porAtribuicao,
             totalUsuarios: porUsuario.length,
-            somaConfere: divergencias.length === 0,
-            divergencias,
         };
     }
 
@@ -1820,6 +1859,30 @@
                 { header: 'Descrição', width: 28, get: (d) => d.descricao },
             ],
         },
+    };
+
+    // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
+    // Categoria Crime, logo após Apreensões (pedido do usuário) — protótipo desenvolvido
+    // desacoplado (branch claude/cumprimento-medidas-extraction-0foe5f, arquivo próprio
+    // cumprimento_medidas.user.js) e integrado aqui seguindo o mesmo padrão de "resumo
+    // único" de CFG_OUTROS_CUMPRIMENTOS: uma tela só, sem paginação, 3 contadores
+    // agregados (Cumprimentos em Atraso / Medidas sem Cumprimentos Gerados / Cumprimentos
+    // a Vencer) em vez de uma lista de processos — ver detecção/coleta logo abaixo de
+    // CFG_OUTROS_CUMPRIMENTOS e geração de PDF perto de gerarPDFOutrosCumprimentos.
+    const CFG_CUMPRIMENTO_MEDIDAS = {
+        prefixo: 'projudi_cumprmedidas_',
+        // "Zero cumprimentos em atraso/pendentes" é uma informação válida (mesmo padrão
+        // de CFG_APREENSOES/CFG_OUTROS_CUMPRIMENTOS) — mostra a linha mesmo com os 3
+        // contadores zerados, desde que já coletado.
+        mostrarSeVazio: true,
+        // Nunca detectado pelo cabeçalho genérico de table.resultTable — não há tabela
+        // nenhuma nesta tela, só 3 contadores (spans); detecção própria em
+        // paginaCumprimentoMedidas()/detectarConfig (ver abaixo).
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'cumprimento_medidas_projudi',
+        rotulos: { coletar: 'Extrair Cumprimento de Medidas', baixar: '⬇ Baixar Cumprimento de Medidas' },
+        pdfCustom: (dados) => gerarPDFCumprimentoMedidas(dados),
     };
 
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — TRÊS relatórios derivados
@@ -2428,6 +2491,74 @@
         }, 1500);
     }
 
+    // Tela de filtros de "Movimento Forense" (processo/movimentoForense.do) — form +
+    // table.resultTable (com o resultado da pesquisa anterior/padrão do Projudi) juntos
+    // desde o primeiro carregamento, mesmo padrão de Suspensos com Prazo/Instância
+    // Recursal acima. "Por Juizado" (opcaoPorComarca=false) e a vara (codVara) já vêm
+    // preenchidos — não mexer; só dataInicio/dataFim precisam ser ajustados para hoje
+    // (ver preencherEPesquisarAtivosClasse).
+    function formularioAtivosClasse() {
+        const form = document.getElementById('movimentoForenseForm');
+        return form && form.querySelector('#dataInicio') && form.querySelector('#dataFim') ? form : null;
+    }
+
+    // Preenche dataInicio e dataFim com a data de HOJE (mesmo dia nos dois campos — um
+    // "corte" no dia corrente, não um intervalo, pedido do usuário) e clica em
+    // Pesquisar. Reaproveita preencherPeriodoAR/formatarDataBR (mesmo helper já usado
+    // por Audiências Realizadas para campos mask_date_br) e o mesmo padrão de
+    // clicar+aguardar+diagnosticar em 15s de preencherEPesquisarSuspensoPrazo/
+    // preencherEPesquisarInstanciaRecursal — botão aqui é #searchButton ("Pesquisar"),
+    // confirmado no HTML real da tela.
+    function preencherEPesquisarAtivosClasse() {
+        const form = formularioAtivosClasse();
+        if (!form) return;
+
+        const hojeBR = formatarDataBR(new Date());
+        preencherPeriodoAR(form, { dataInicio: hojeBR, dataFim: hojeBR });
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Ativos por Classe] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Ativos por Classe] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Ativos por Classe] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Ativos por Classe] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Chamado via CFG_ATIVOS_CLASSE.aoTerminarColeta ao final da coleta desta unidade —
+    // total de "ativos" = soma de "Em andamento" de TODAS as classes processuais
+    // coletadas NESTA atuação (não a contagem de linhas/classes, e não o acumulado de
+    // outras atuações já coletadas antes, já que CFG_ATIVOS_CLASSE.usaAtuacao acumula
+    // registros de várias atuações no mesmo array — precisa filtrar por d.atuacao antes
+    // de somar). Grava no MESMO mapa que lerMapaAtivos() já expõe
+    // ('projudi_estatisticas_ativos'), no formato {atuacao: total} — os ~10 pontos que
+    // dependem desse mapa (linha "Processos Ativos" da capa unificada, contagemPorCompetencia/
+    // fraseCompetenciasComContagem, filtro de atribuições do diálogo de checkboxes do PDF
+    // conjunto) continuam funcionando sem mudança.
+    async function gravarTotalAtivosClasseEAvancar() {
+        try {
+            const dados = await lerDadosDe(CFG_ATIVOS_CLASSE.prefixo);
+            const atuacao = lerAtuacao() || '(sem atuação)';
+            const total = dados
+                .filter(d => (d.atuacao || '(sem atuação)') === atuacao)
+                .reduce((s, d) => s + (d.emAndamento || 0), 0);
+            const mapa = lerMapaAtivos();
+            mapa[atuacao] = total;
+            store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
+            console.log(`[Projudi Ativos por Classe] total de ativos gravado para "${atuacao}": ${total}`);
+        } catch (e) {
+            console.error('[Projudi Ativos por Classe] erro ao calcular/gravar total de ativos', e);
+        }
+        avancarAutomacao(CFG_ATIVOS_CLASSE);
+    }
+
     // ── Outros Cumprimentos (Mesa do Magistrado) — mesaAnalista.do?actionType=
     // listaOutrosCumprimentos ───────────────────────────────────────────────────
     // Diferente de TODOS os demais relatórios: não é uma lista paginada de processos, é
@@ -2972,6 +3103,142 @@
         // (menu) ou o conteúdo ainda está carregando; nada a fazer neste ciclo.
     }
 
+    // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
+    // Mesma armadilha de Outros Cumprimentos: a aba é um <a> SEM href (só reage a clique
+    // real, não a eventos sintéticos) e fica restrita ao container da barra de abas
+    // (#tabHorz/.tabCenter) — buscar "a" solto no documento já causou falso positivo
+    // noutras telas. acharAbaCumprimentoMedidas/paginaCumprimentoMedidas usam
+    // todosDocumentosAcessiveis (definida mais abaixo, perto da automação em várias
+    // unidades) para cobrir o caso de a home "Mesa do Magistrado" estar num frame que não
+    // é o document local.
+    function acharAbaCumprimentoMedidas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
+            for (const a of candidatos) {
+                if (/^cumprimentos\s+de\s+medidas$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // Os 3 contadores só existem no DOM quando a aba "Cumprimentos de Medidas" está
+    // ativa E já carregada — servem tanto para detectar "estamos na aba certa" quanto
+    // para a extração propriamente dita.
+    const IDS_CONTADORES_CM = {
+        atrasados: 'numeroCumprimentosAtrasados',
+        semCumprimento: 'numeroMedidasSemCumpr',
+        aVencer: 'numeroCumprimentosAVencer',
+    };
+
+    function acharSpanCumprimentoMedidas(id) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const el = d.getElementById(id);
+            if (el) return el;
+        }
+        return null;
+    }
+
+    function paginaCumprimentoMedidas() {
+        return !!acharSpanCumprimentoMedidas(IDS_CONTADORES_CM.atrasados);
+    }
+
+    function lerContadorCumprimentoMedidas(id) {
+        const el = acharSpanCumprimentoMedidas(id);
+        return parseInt(((el && el.textContent) || '').trim(), 10) || 0;
+    }
+
+    function lerContadoresCumprimentoMedidas() {
+        return {
+            atrasados: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.atrasados),
+            semCumprimento: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.semCumprimento),
+            aVencer: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.aVencer),
+        };
+    }
+
+    function assinaturaCumprimentoMedidas() {
+        const c = lerContadoresCumprimentoMedidas();
+        return `${c.atrasados}|${c.semCumprimento}|${c.aVencer}`;
+    }
+
+    // Lê os 3 contadores e grava uma linha por atribuição/unidade (mesmo padrão de
+    // coletarOutrosCumprimentosAgora: acumula entre atribuições, descartando só o
+    // registro da MESMA atribuição antes de gravar de novo — permite multi-unidade e
+    // reextração manual sem duplicar). Ao ler de volta (montarResumoCumprimentoMedidas),
+    // os contadores são SOMADOS entre as linhas — são só 3 números agregados por unidade,
+    // não precisa de nenhuma lógica de mesclagem mais sofisticada.
+    function coletarCumprimentoMedidasAgora() {
+        const atuacao = lerAtuacao();
+        const competencia = competenciaDe(atuacao);
+        const contadores = lerContadoresCumprimentoMedidas();
+        const registro = { ...contadores, atuacao, competencia };
+
+        console.log(`[Projudi Cumprimento de Medidas] "${atuacao || '(sem atuação)'}" — atrasados=${contadores.atrasados} semCumprimento=${contadores.semCumprimento} aVencer=${contadores.aVencer}`);
+
+        const prefixo = CFG_CUMPRIMENTO_MEDIDAS.prefixo;
+        const anteriores = desembrulharArray(store.getItem(prefixo + 'pagina_0')) || [];
+        const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
+        const registros = [...semEstaAtribuicao, registro];
+        store.setItem(prefixo + 'pagina_0', JSON.stringify(registros));
+        store.setItem(prefixo + 'num_paginas', '1');
+        store.setItem(prefixo + 'coletado', '1');
+
+        avancarAutomacao(CFG_CUMPRIMENTO_MEDIDAS);
+    }
+
+    let ultimaAssinaturaCM = null;
+    let leiturasEstaveisCM = 0;
+    // "Cumprimentos em Atraso" carrega rápido, mas os outros 2 contadores vêm de uma
+    // chamada assíncrona mais lenta e de duração variável (a tela nasce com "0" nesses
+    // spans, não com o span ausente) — mínimo de ~5s (10 tentativas) antes de aceitar
+    // como estável, com 3 leituras iguais seguidas exigidas, e teto de ~40s (80
+    // tentativas) pra não travar a automação pra sempre num Projudi lento (mesmos valores
+    // do protótipo original, já ajustados por 2 rodadas de relato do usuário).
+    const CM_TENTATIVAS_MINIMAS = 10;
+    const CM_LEITURAS_ESTAVEIS_NECESSARIAS = 3;
+    const CM_TENTATIVAS_MAXIMAS = 80;
+    function aguardarCumprimentoMedidasProntoEExtrair(tentativa, callback) {
+        const atual = assinaturaCumprimentoMedidas();
+        if (atual === ultimaAssinaturaCM) {
+            leiturasEstaveisCM++;
+        } else {
+            leiturasEstaveisCM = 1;
+            ultimaAssinaturaCM = atual;
+        }
+        if (tentativa >= CM_TENTATIVAS_MINIMAS && leiturasEstaveisCM >= CM_LEITURAS_ESTAVEIS_NECESSARIAS) {
+            coletarCumprimentoMedidasAgora();
+            if (callback) callback();
+            return;
+        }
+        if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
+            console.warn('[Projudi Cumprimento de Medidas] tela não estabilizou em ~40s — extraindo mesmo assim (dados podem estar incompletos).');
+            coletarCumprimentoMedidasAgora();
+            if (callback) callback();
+            return;
+        }
+        setTimeout(() => aguardarCumprimentoMedidasProntoEExtrair(tentativa + 1, callback), 500);
+    }
+
+    let coletaCumprimentoMedidasEmAndamento = false;
+
+    // Ponto de entrada da coleta — chamado tanto pela automação quanto pelos botões
+    // manuais (mesmo formato de coletarOutrosCumprimentos, callback opcional pro botão
+    // "Baixar PDF"). Trava contra chamadas concorrentes.
+    function coletarCumprimentoMedidas(callback) {
+        if (coletaCumprimentoMedidasEmAndamento) {
+            console.log('[Projudi Cumprimento de Medidas] coleta já em andamento — ignorando novo disparo');
+            return;
+        }
+        coletaCumprimentoMedidasEmAndamento = true;
+        ultimaAssinaturaCM = null;
+        leiturasEstaveisCM = 0;
+        aguardarCumprimentoMedidasProntoEExtrair(0, () => {
+            coletaCumprimentoMedidasEmAndamento = false;
+            if (callback) callback();
+        });
+    }
+
     // ── Coletor genérico (parametrizado por configuração) ───────────────────────
 
     function criarColetor(cfg) {
@@ -3028,8 +3295,12 @@
             const totalDepois = totalAntes + dadosPagina.length;
             store.setItem(KEY_TOTAL_REGISTROS, String(totalDepois));
             if (cfg.usaAtuacao) {
-                let atuacoes = [];
-                try { atuacoes = JSON.parse(store.getItem(KEY_ATUACOES) || '[]'); } catch (e) { /* ignore */ }
+                // desembrulharArray (não JSON.parse único) — mesma proteção usada em
+                // lerFilaAutomacao/lerUnidadesAutomatizadas (ver comentários lá): sem
+                // isso, um valor em camadas virava STRING e new Set(string) iterava
+                // CARACTERES soltos em vez das atuações, corrompendo a lista em silêncio
+                // (sem lançar erro — pior que travar, porque passava despercebido).
+                const atuacoes = desembrulharArray(store.getItem(KEY_ATUACOES)) || [];
                 const s = new Set(atuacoes);
                 dadosPagina.forEach(d => { if (d.atuacao) s.add(d.atuacao); });
                 store.setItem(KEY_ATUACOES, JSON.stringify([...s]));
@@ -3052,6 +3323,12 @@
                 if (legado) dados = dados.concat(legado);
                 else console.error('[Exportar Projudi] parte ilegível no índice', i);
             }
+            // Pedido do usuário: como o número único do processo é identificador único,
+            // o mesmo processo não pode ser contado duas vezes dentro da mesma seção do
+            // relatório (ex.: reload de página no meio da coleta duplicando uma página).
+            // Exceção: Tempo Médio — ali o mesmo processo pode legitimamente ir e voltar
+            // à conclusão mais de uma vez no período (cada ida é um registro válido).
+            if (cfg !== CFG_TEMPOMEDIO) dados = removerProcessosDuplicados(dados);
             return dados;
         }
 
@@ -3059,7 +3336,7 @@
         // ver comentário em KEY_TOTAL_REGISTROS/KEY_ATUACOES acima.
         function contarRegistros() { return parseInt(store.getItem(KEY_TOTAL_REGISTROS) || '0', 10); }
         function contarAtuacoes() {
-            try { return (JSON.parse(store.getItem(KEY_ATUACOES) || '[]')).length; } catch (e) { return 0; }
+            return (desembrulharArray(store.getItem(KEY_ATUACOES)) || []).length;
         }
 
         function coletarPaginaAtual() {
@@ -3317,6 +3594,7 @@
         }
 
         return { iniciar, continuar, baixar, pdf, pdfPorJuiz, limpar, render, rodando, obsoleta,
+                 adicionarPagina, lerTudo,
                  limparFlags: () => { store.removeItem(KEY_RODANDO); store.removeItem(KEY_TS); } };
     }
 
@@ -3433,6 +3711,29 @@
                 arr = arr.slice(0, topN);
                 arr.push({ label: 'Outros', valor: resto });
             }
+        }
+        return arr;
+    }
+
+    // Variante de contarPorCampo que SOMA um campo numérico por chave, em vez de contar
+    // ocorrências — usada quando cada registro já é um agregado com uma contagem própria
+    // (ex.: CFG_ATIVOS_CLASSE — uma linha por classe processual, com "emAndamento" já
+    // somado pelo Projudi; contarPorCampo daria "1" pra cada classe, não o total de
+    // processos daquela classe). Mesma assinatura de topN/"Outros" de contarPorCampo,
+    // sem os parâmetros limpar/semOutros/minValor (não usados pelos chamadores atuais).
+    function somarPorCampo(dados, campo, campoValor, topN) {
+        const mapa = new Map();
+        dados.forEach(d => {
+            const k = (d[campo] || '').trim() || '(vazio)';
+            const v = d[campoValor];
+            if (typeof v !== 'number' || isNaN(v)) return;
+            mapa.set(k, (mapa.get(k) || 0) + v);
+        });
+        let arr = [...mapa.entries()].map(([label, valor]) => ({ label, valor })).sort((a, b) => b.valor - a.valor);
+        if (arr.length > topN) {
+            const resto = arr.slice(topN).reduce((s, i) => s + i.valor, 0);
+            arr = arr.slice(0, topN);
+            arr.push({ label: 'Outros', valor: resto });
         }
         return arr;
     }
@@ -4111,8 +4412,26 @@
             const chartsP1 = chartsTodos.filter(c => !c.pagina2);
             const chartsP2 = chartsTodos.filter(c => c.pagina2).map(c => ({ ...c, span: 2 })); // largura total na 2ª página
 
+            // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
+            // usado por CFG_SUSPENSOS): reserva espaço embaixo do grid de gráficos, numa
+            // caixa com título "OBSERVAÇÃO" em destaque, antes do rodapé.
+            let alturaObsFinal = 0;
+            let linhasObsFinal = [];
+            if (p.observacaoFinal) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4);
+                linhasObsFinal = doc.splitTextToSize(p.observacaoFinal, uw);
+                alturaObsFinal = 6 + linhasObsFinal.length * 3.3 + 4;
+            }
             const gY0 = aY + 28 + gap + 2;
-            desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0, chartsP1);
+            desenharGradeGraficos(doc, m, gY0, uw, ph - m - gY0 - alturaObsFinal, chartsP1);
+            if (p.observacaoFinal) {
+                const yObsFinal = ph - m - alturaObsFinal + 6;
+                doc.setDrawColor(...COR.ambar); doc.setLineWidth(0.4); doc.line(m, yObsFinal - 4, pw - m, yObsFinal - 4);
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.6); doc.setTextColor(...COR.ambar);
+                doc.text('OBSERVAÇÃO', m, yObsFinal);
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
+                doc.text(linhasObsFinal, m, yObsFinal + 4);
+            }
             desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
 
             if (chartsP2.length) {
@@ -4362,7 +4681,17 @@
     // "Sim"/"Não" a partir do texto bruto da célula de Pré-análise (não vazio = houve).
     function temPreAnalise(d) { return !!(d.preAnalise && d.preAnalise.trim()); }
 
-    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco) {
+    // Pedido do usuário: entre as conclusões COM pré-análise, distinguir quantas foram
+    // feitas pelo PRÓPRIO magistrado (nome da pré-análise = nome do magistrado da
+    // conclusão) das feitas pela assessoria — comparação sem diferenciar maiúsculas/
+    // minúsculas (o texto de cada campo vem digitado livremente no Projudi, podendo
+    // divergir só na capitalização).
+    function preAnaliseEhDoMagistrado(d) {
+        if (!temPreAnalise(d)) return false;
+        return (d.preAnalise || '').trim().toLowerCase() === (d.responsavel || '').trim().toLowerCase();
+    }
+
+    function montarResumoJuizConclusoes(doc, juiz, sub, now, primeira, rotuloBloco, estatisticasTM) {
         if (!primeira) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -4403,10 +4732,38 @@
             { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
             { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
         ];
+        // Pedido do usuário: quantas conclusões ESTE magistrado(a) já analisou (dados do
+        // Tempo Médio, não das pendentes acima, quando Tempo Médio também foi incluído
+        // no mesmo PDF) e quantas ele(a) mesmo fez diretamente x quantas passaram por
+        // pré-análise de outra pessoa — tudo já filtrado por este magistrado(a) E pela
+        // mesma atribuição/competência de `rotuloBloco` (ver calcularEstatisticasTMJuiz
+        // em gerarPDFConjunto). Pedido do usuário (rodada seguinte): esta informação
+        // entra como um CARD a mais, junto dos demais KPIs — não mais misturada no
+        // subtítulo/cabeçalho da página. Período/tempo médio (texto mais longo, não cabe
+        // na 1ª linha do card) ganham uma legenda própria logo abaixo da fileira de cards.
+        if (estatisticasTM) {
+            kpis.push({
+                titulo: 'Já Analisadas', valor: String(estatisticasTM.total),
+                subs: [`Mag: ${estatisticasTM.peloMagistrado} · Ass: ${estatisticasTM.porOutros}`],
+                acento: COR.vinho,
+            });
+        }
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
-        const gY0 = kY + 28 + gap + 2;
+        let gY0 = kY + 28 + gap + 2;
+        if (estatisticasTM && (estatisticasTM.periodo || estatisticasTM.media != null)) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.tintaSec);
+            let textoAnalise = 'Conclusões já analisadas (Tempo Médio)';
+            if (estatisticasTM.periodo) textoAnalise += `  •  Período: ${estatisticasTM.periodo}`;
+            if (estatisticasTM.media != null) {
+                const mediaTxt = String(estatisticasTM.media).replace('.', ',');
+                textoAnalise += `  •  Tempo médio de conclusão (Dt. Envio → Dt. Análise): ${mediaTxt} dia(s)`;
+            }
+            const linhasAnalise = doc.splitTextToSize(textoAnalise, uw);
+            doc.text(linhasAnalise, m, gY0);
+            gY0 += linhasAnalise.length * 3.4 + 3;
+        }
         const charts = [
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { tipo: 'barras', span: 1, titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -4491,6 +4848,78 @@
             doc.outline.add(bmJuiz, 'Tabela detalhada', { pageNumber: pgTabela });
         });
         baixarBlob(doc.output('blob'), `conclusoes_por_juiz_projudi_${dataArquivo()}.pdf`);
+    }
+
+    // Resumo do relatório GERAL de Conclusões (não confundir com "PDF por Juiz", um
+    // arquivo à parte) — pedido do usuário: mostrar a divisão de conclusos por
+    // atribuição (vara/unidade) NO MESMO relatório, sem gerar um PDF novo por
+    // atribuição. Só faz sentido quando há mais de uma atribuição nos dados (ex.: depois
+    // de rodar a automação em várias unidades, ver total_automatizacao) — com uma única
+    // atribuição a tabela seria só o total geral de novo, já mostrado nos KPIs pelo
+    // resumo genérico, então nem desenha a página extra.
+    function montarResumoConclusoes(doc, dados, primeira, comIndice, rotuloBloco) {
+        montarResumoGenerico(doc, dados, CFG_CONCLUSOES, primeira, comIndice, rotuloBloco);
+
+        const porAtribuicao = new Map();
+        dados.forEach(d => {
+            const chave = d.competencia || d.atuacao || '(sem atribuição)';
+            if (!porAtribuicao.has(chave)) porAtribuicao.set(chave, { total: 0, comPreAnalise: 0 });
+            const o = porAtribuicao.get(chave);
+            o.total += 1;
+            if (temPreAnalise(d)) o.comPreAnalise += 1;
+        });
+        if (porAtribuicao.size < 2) return;
+
+        const linhas = [...porAtribuicao.entries()]
+            .map(([atribuicao, o]) => ({ atribuicao, total: o.total, comPreAnalise: o.comPreAnalise, semPreAnalise: o.total - o.comPreAnalise }))
+            .sort((a, b) => b.total - a.total);
+
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const titulo = CFG_CONCLUSOES.pdf.titulo;
+
+        doc.addPage();
+        let hy = m + 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, m, hy); hy += 8;
+        tituloSecao(doc, m, hy, pw - 2 * m, 'Conclusões por Atribuição');
+        hy += 6;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`${dados.length} conclusão(ões) pendente(s) em ${linhas.length} atribuição(ões)`, m, hy);
+        hy += 4;
+
+        doc.autoTable({
+            columns: [
+                { header: 'Atribuição', dataKey: 'atribuicao' },
+                { header: 'Total de Conclusos', dataKey: 'total' },
+                { header: 'Com Pré-análise', dataKey: 'comPreAnalise' },
+                { header: 'Sem Pré-análise', dataKey: 'semPreAnalise' },
+            ],
+            body: linhas.map(l => ({
+                atribuicao: l.atribuicao, total: String(l.total),
+                comPreAnalise: String(l.comPreAnalise), semPreAnalise: String(l.semPreAnalise),
+            })),
+            foot: [{
+                atribuicao: 'Total geral', total: String(dados.length),
+                comPreAnalise: String(linhas.reduce((s, l) => s + l.comPreAnalise, 0)),
+                semPreAnalise: String(linhas.reduce((s, l) => s + l.semPreAnalise, 0)),
+            }],
+            startY: hy,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            footStyles: { fillColor: COR.cartao, textColor: COR.tinta, fontStyle: 'bold', fontSize: 8.5, lineColor: COR.grade, lineWidth: 0.1 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                atribuicao: { fontStyle: 'bold', textColor: COR.tinta },
+                total: { halign: 'right' }, comPreAnalise: { halign: 'right' }, semPreAnalise: { halign: 'right' },
+            },
+            didDrawPage: () => desenharRodape(doc, titulo, carimbo, pw, ph, m, comIndice),
+        });
     }
 
     // Resolve como montar o resumo/tabela de uma seção do PDF conjunto, dado o cfg do
@@ -4584,6 +5013,56 @@
             },
         });
         desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice);
+
+        // Pedido do usuário: tabela própria com TODOS os mandados em situação crítica
+        // (mesmo limiar de "crítico" usado no resto do relatório — LIMITES_CARTORIO.
+        // critico=90 dias, ver classificarSituacaoPorDias) — antes só dava pra achar o
+        // mandado mais antigo (1 registro) na capa; agora lista todos os que já passaram
+        // do limiar, não só o pior caso.
+        const criticos = dados
+            .map(d => ({ ...d, dias: (() => { const ts = parseDataBR(d.dataExpedicao); return ts != null ? Math.floor((agoraTs - ts) / DIA_MS) : null; })() }))
+            .filter(d => d.dias != null && d.dias > 90)
+            .sort((a, b) => b.dias - a.dias);
+        if (criticos.length) {
+            doc.addPage();
+            let hyCrit = m + 2;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(p.titulo, m, hyCrit); hyCrit += 8;
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.vermelho);
+            doc.text(`Mandados em Situação Crítica (${criticos.length})`, m, hyCrit); hyCrit += 5;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+            doc.text('Mais de 90 dias desde a expedição, ordenados do mais antigo para o mais recente.', m, hyCrit); hyCrit += 3;
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.5); doc.line(m, hyCrit, pw - m, hyCrit);
+            hyCrit += 6;
+
+            doc.autoTable({
+                columns: [
+                    { header: 'Processo', dataKey: 'processo' },
+                    { header: 'Oficial de Justiça', dataKey: 'oficial' },
+                    { header: 'Dt. Expedição', dataKey: 'dataExpedicao' },
+                    { header: 'Dias', dataKey: 'dias' },
+                    { header: 'Natureza', dataKey: 'natureza' },
+                    { header: 'Urgente', dataKey: 'urgente' },
+                ],
+                body: criticos.map(d => ({
+                    processo: d.processo || '', oficial: d.oficial || '(sem oficial)',
+                    dataExpedicao: d.dataExpedicao || '', dias: String(d.dias), natureza: d.natureza || '',
+                    urgente: d.urgente ? 'Sim' : 'Não',
+                })),
+                startY: hyCrit,
+                margin: { left: m, right: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                headStyles: { fillColor: COR.vermelho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: {
+                    processo: { fontStyle: 'bold', textColor: COR.tinta },
+                    dias: { halign: 'right', fontStyle: 'bold', textColor: COR.vermelho },
+                    urgente: { halign: 'center' },
+                },
+                didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            });
+        }
     }
 
     // PDF individual (botão "Baixar PDF" na tela/painel, fora do Relatório PDF conjunto) —
@@ -4670,8 +5149,26 @@
         if (cfg === CFG_ARQUIVADOS_SALDO) {
             return {
                 rotulo: TITULO_ARQUIVADOS_SALDO,
+                // Tabela discriminada embutida direto no resumo (pedido do usuário) —
+                // sem passo de tabela separado (ver secaoTemTabela/montarResumoArquivadosSaldo).
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, rotuloBloco),
-                montarTabela: (doc, dados, comIndice) => montarTabelaArquivadosSaldo(doc, dados, comIndice),
+                montarTabela: null,
+            };
+        }
+        if (cfg === CFG_CUMPRIMENTO_MEDIDAS) {
+            return {
+                rotulo: TITULO_CUMPRIMENTO_MEDIDAS,
+                // Só resumo — não há lista de processos a discriminar, apenas os 3
+                // totais (mesmo esquema de CFG_AUDIENCIAS_REALIZADAS).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoCumprimentoMedidas(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: null,
+            };
+        }
+        if (cfg === CFG_CONCLUSOES) {
+            return {
+                rotulo: cfg.pdf.titulo,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoConclusoes(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
         if (cfg === CFG_SUSPENSOS_PRAZO) {
@@ -4686,6 +5183,13 @@
                 rotulo: TITULO_INSTANCIA_RECURSAL,
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
+            };
+        }
+        if (cfg === CFG_ATIVOS_CLASSE) {
+            return {
+                rotulo: TITULO_ATIVOS_CLASSE,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAtivosClasse(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaAtivosClasse(doc, dados, comIndice),
             };
         }
         return {
@@ -4784,6 +5288,17 @@
                     data.cell.styles.textColor = corpo[data.row.index]._cor;
                     data.cell.styles.fontStyle = 'bold';
                 }
+            },
+            // Pedido do usuário: atalho clicável no nome do magistrado, no resumo geral
+            // (esta tabela), direto para a página onde constam os dados dele — mesmo
+            // mecanismo _rect/PASSO 4 já usado pela tabela unificada do Cartório (ver
+            // didDrawCell logo acima, em desenharBlocoCartorioUnificado). Só chamada para
+            // Gabinete (cfg.itens = gabinete.itens) — a linha "Total" (índice fora de
+            // cfg.itens) fica sem link.
+            didDrawCell: (data) => {
+                if (data.section !== 'body' || data.column.dataKey !== 'rotulo') return;
+                const it = cfg.itens[data.row.index];
+                if (it) it._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
             },
         });
         return doc.lastAutoTable.finalY;
@@ -4984,6 +5499,13 @@
         // Audiências Realizadas é só totais (geral + por usuário) — nunca tem tabela
         // discriminada de processos.
         if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return false;
+        // Cumprimento de Medidas é só os 3 contadores agregados — nunca tem tabela
+        // discriminada de processos (ver montarTabela: null em descreverSecaoPDF).
+        if (s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS) return false;
+        // Processos Arquivados com Saldo desenha a tabela dentro do próprio resumo
+        // (pedido do usuário: sem página de tabela separada ao final) — nunca entra no
+        // passo de tabela separado.
+        if (s.cfgOriginal === CFG_ARQUIVADOS_SALDO) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -4996,7 +5518,7 @@
     // `processo`; Designadas/Realizadas guardam um resumo agregado, ver
     // coletarAudienciasDesignadas/finalizarAudienciasRealizadas). Ficam de fora do
     // cruzamento de múltiplas pendências.
-    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS];
+    const CFGS_SEM_PROCESSO_POR_LINHA = [CFG_OUTROS_CUMPRIMENTOS, CFG_AUDIENCIAS_DESIGNADAS, CFG_AUDIENCIAS_REALIZADAS, CFG_CUMPRIMENTO_MEDIDAS, CFG_ATIVOS_CLASSE];
 
     // Página "Processos com Múltiplas Pendências" — cruza o número do processo entre TODOS
     // os relatórios coletados nesta rodada (pedido da Corregedoria: hoje cada relatório é
@@ -5113,7 +5635,20 @@
     // atribuições somadas (nunca filtrada) — só os itens internos se subdividem.
     function gerarPDFConjunto(secoesEntrada, somenteResumo, opcoes) {
         opcoes = opcoes || {};
+        // Bug relatado pelo usuário: sem isso, lerMapaAtivos() (a linha "Processos
+        // Ativos" da capa e as contagens por competência dos demais resumos) ignorava a
+        // seleção do diálogo de checkboxes e sempre mostrava TODAS as atribuições já
+        // coletadas alguma vez — inclusive unidades desmarcadas e unidades de coletas
+        // antigas que nem apareciam mais no popup. Ver overrideMapaAtivos/lerMapaAtivos.
+        overrideMapaAtivos = opcoes.atribuicoesSelecionadas
+            ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
+            : null;
         const porAtribuicao = !!opcoes.porAtribuicao;
+        // Instância Recursal fica de fora do split "Resumo Geral + 1 bloco por
+        // atribuição" (pedido do usuário) — sempre um resumo único consolidado, com a
+        // competência de cada processo já indicada na própria tabela discriminada (ver
+        // cfg.cabecalhos/linha de CFG_INSTANCIA_RECURSAL).
+        const porAtribuicaoPara = (cfgOriginal) => porAtribuicao && cfgOriginal !== CFG_INSTANCIA_RECURSAL;
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
@@ -5199,11 +5734,16 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
+        const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
+        // overrideMapaAtivos (setado no topo desta função, ver comentário lá) já filtra
+        // esta chamada pelas atribuições escolhidas no diálogo de checkboxes — cobre não
+        // só a linha "Processos Ativos" abaixo, mas também contagemPorCompetencia/
+        // fraseCompetenciasComContagem usadas mais adiante pelos resumos do Cartório.
         const mapaAtivos = lerMapaAtivos();
         const atuacoesAtivas = Object.keys(mapaAtivos);
         const linhasCartorio = [];
@@ -5230,13 +5770,24 @@
             if (!porCompetencia.length) return [linhaPrincipal];
             return [linhaPrincipal, ...porCompetencia.map(it => linhaSubAtribuicao(it.competencia, sufixo(it.contagem)))];
         }
-        function linhaTarefa(t, nome) {
+        function linhaTarefa(t, nome, unidade) {
             const detalhes = [];
             if (t.prioritarios) detalhes.push(`${t.prioritarios} prioritário(s)`);
-            if (t.maisAntiga != null) detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)`);
+            if (t.maisAntiga != null) {
+                // Pedido do usuário: no relatório de Mandados Pendentes de Cumprimento,
+                // quando a situação está crítica (vermelho), identificar já na capa qual
+                // processo é o mandado mais antigo — evita ter que abrir o resumo
+                // detalhado só para descobrir qual está parado há mais tempo.
+                let sufixoProcesso = '';
+                if (t.status === 'critico' && t.secao.cfgOriginal === CFG_MANDADOS_CUMPRIMENTO) {
+                    const antigo = acharMaisAntigo(t.dados, CFG_MANDADOS_CUMPRIMENTO.pdf.dataCampo);
+                    if (antigo && antigo.registro && antigo.registro.processo) sufixoProcesso = ` (${antigo.registro.processo})`;
+                }
+                detalhes.push(`Mais antiga: ${t.maisAntiga} dia(s)${sufixoProcesso}`);
+            }
             return {
                 nome,
-                indicador: `${t.pendentes} pendente(s)`,
+                indicador: `${t.pendentes} ${unidade || 'pendente(s)'}`,
                 detalhamento: detalhes.length ? detalhes.join(' · ') : '—',
                 situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
                 corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
@@ -5275,14 +5826,22 @@
         // Recursal) ──────────────────────────────────────────────────────────────────
         const itensEstatisticasGerais = [];
         // Processos Ativos entra como a primeira linha do Cartório (pedido do usuário) —
-        // não é mais um card à parte no topo da capa.
+        // não é mais um card à parte no topo da capa. cfgOriginal: CFG_ATIVOS_CLASSE
+        // (desde que o relatório de verdade tenha sido coletado — ver
+        // CFG_ATIVOS_CLASSE.aoTerminarColeta/gravarTotalAtivosClasseEAvancar, que grava
+        // mapaAtivos a partir da soma de "Em andamento") faz a linha virar link clicável
+        // pro resumo detalhado (PASSO 4 abaixo) — mesmo padrão de "Outros Cumprimentos"/
+        // "Cumprimento de Medidas" (ver itensOutros mais abaixo). Sem seção correspondente
+        // em outrasSecoes (ex.: mapa herdado de uma coleta antiga, sem CFG_ATIVOS_CLASSE
+        // coletado desta vez) o PASSO 4 simplesmente não encontra pgAlvo e a linha fica
+        // sem link, como qualquer outra linha "órfã" — sem quebrar nada.
         if (atuacoesAtivas.length) {
             const totalAtivos = atuacoesAtivas.reduce((s, k) => s + (mapaAtivos[k] || 0), 0);
             const linhaAtivos = {
                 nome: 'Processos Ativos',
                 indicador: `${totalAtivos} ativo(s)`,
                 detalhamento: '—',
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: null,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ATIVOS_CLASSE,
             };
             // Pedido do usuário: cada atribuição como um SUBITEM indentado (não mais um
             // texto corrido em "Detalhamento") — mapaAtivos já é por atribuição, então
@@ -5295,8 +5854,10 @@
         }
         const itemSuspensos = itensCartorio.find(t => t.secao.cfgOriginal === CFG_SUSPENSOS);
         if (itemSuspensos) {
+            // Pedido do usuário: "processo(s)", não "pendente(s)" — são processos
+            // suspensos, não uma fila de pendências no sentido usual do termo.
             itensEstatisticasGerais.push(...comSubLinhasAtribuicao(
-                linhaTarefa(itemSuspensos, itemSuspensos.rotulo), itemSuspensos.dados, (n) => `${n} pendente(s)`,
+                linhaTarefa(itemSuspensos, itemSuspensos.rotulo, 'processo(s)'), itemSuspensos.dados, (n) => `${n} processo(s)`,
             ));
         }
         // "Suspensos com Prazo" — indicador: total de processos suspensos por prazo
@@ -5414,6 +5975,17 @@
         // ── Outros (itens do Cartório sem subgrupo no popup do painel: Tempo Médio,
         // Bens Apreendidos, Outros Cumprimentos) ────────────────────────────────────
         const itensOutros = [];
+        // Usado por montarResumoJuizConclusoes (ver o loop de Gabinete mais adiante) —
+        // função (não valor fixo) porque precisa ser recalculada PARA CADA bloco
+        // (Resumo Geral x Competência: X), não só por magistrado. Bug relatado pelo
+        // usuário: antes era um valor ÚNICO por juiz (ou até só um por unidade inteira),
+        // então "Resumo Geral" e cada bloco de competência de um mesmo magistrado
+        // mostravam exatamente os mesmos números de Tempo Médio — não individualizados
+        // por atribuição. calcularEstatisticasTMJuiz(juiz, competencia) filtra
+        // secaoTempoMedio.dados por responsavel (case-insensitive) E, se `competencia`
+        // for informada, também por competencia/atuacao — o mesmo critério usado por
+        // subBlocosPorAtribuicao para montar bloco.dados das conclusões pendentes.
+        let calcularEstatisticasTMJuiz = () => null;
         if (secaoTempoMedio) {
             const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
             const media = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
@@ -5428,22 +6000,55 @@
                 detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
+            // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
+            // ANALISADOS, do Tempo Médio — não das conclusões PENDENTES), quantas ele(a)
+            // mesmo fez diretamente (sem pré-análise, ou pré-análise com o próprio nome)
+            // versus quantas passaram por pré-análise de outra pessoa, e o tempo médio de
+            // CONCLUSÃO DO JUIZ (Dt.Envio -> Dt.Análise) — tudo escopado pela mesma
+            // atribuição/competência do bloco sendo desenhado (nome/rótulo já vinham
+            // sendo comparados sem diferenciar maiúsculas/minúsculas — mantido aqui).
+            calcularEstatisticasTMJuiz = (juiz, competencia) => {
+                const nomeJuiz = (juiz || '').trim().toLowerCase();
+                if (!nomeJuiz) return null;
+                const dadosDoJuiz = secaoTempoMedio.dados.filter(d => {
+                    if ((d.responsavel || '').trim().toLowerCase() !== nomeJuiz) return false;
+                    if (competencia && (d.competencia || d.atuacao || '').trim() !== competencia) return false;
+                    return true;
+                });
+                if (!dadosDoJuiz.length) return null;
+                const validosJuiz = dadosDoJuiz.filter(d => d.diasConclusaoJuiz != null);
+                const mediaJuiz = validosJuiz.length ? validosJuiz.reduce((s, d) => s + d.diasConclusaoJuiz, 0) / validosJuiz.length : null;
+                let peloMagistrado = 0, porOutros = 0;
+                dadosDoJuiz.forEach(d => {
+                    // "Diretamente" = sem pré-análise (ninguém mais mexeu) OU pré-análise
+                    // com o nome do próprio magistrado; "por outras pessoas" = pré-análise
+                    // de alguém com nome diferente (assessoria).
+                    if (!temPreAnalise(d) || preAnaliseEhDoMagistrado(d)) peloMagistrado++;
+                    else porOutros++;
+                });
+                return {
+                    total: dadosDoJuiz.length, peloMagistrado, porOutros, periodo: periodoTxt,
+                    media: mediaJuiz != null ? Math.round(mediaJuiz * 10) / 10 : null,
+                };
+            };
         }
-        // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
-        // relatório da categoria Crime. O indicador é só a contagem total (pedido:
-        // "apenas o número de apreensões" no quadro); o detalhamento compacta a
-        // distribuição por Tipo da apreensão (top 5 + "Outros", mesmo corte usado nos
-        // gráficos — ver contarPorCampo), sem estourar a célula.
-        if (secaoApreensoes) {
-            const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
-            const detalhamento = porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—';
-            itensOutros.push({
-                nome: 'Bens Apreendidos',
-                indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
-                detalhamento,
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_APREENSOES,
-            });
+        // Pedido do usuário: unidades onde um relatório exclusivo da categoria Crime
+        // (Apreensões/Cumprimento de Medidas) não foi encontrado após 3 tentativas (ver
+        // marcarPrejudicadoEAvancar) entram aqui como "Prejudicado" — some no
+        // detalhamento da linha e marca a situação, em vez de aparecer como "0" (que
+        // pareceria um resultado genuíno em vez de uma extração que nem chegou a rodar).
+        function prejudicadoInfo(cfg) {
+            const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            if (!lista.length) return null;
+            return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
+        // Pedido do usuário: a ordem da capa unificada precisa bater EXATAMENTE com a
+        // ordem do popup de automação (REPORTS_AUTOMACAO) — dentro deste subgrupo sem
+        // nome próprio, a ordem declarada lá é Tempo Médio (já empilhado acima), Outros
+        // Cumprimentos, Conclusões (vai para o Gabinete, não aqui), Apreensões,
+        // Cumprimento de Medidas. Estava fora de ordem (Apreensões/Cumprimento de
+        // Medidas empilhados ANTES de Outros Cumprimentos).
+        //
         // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
         // indicador é o total pendente somado de todos os tipos com pendência > 0; o
         // detalhamento compacta quantos tipos têm pendência e quantos itens estão urgentes.
@@ -5457,10 +6062,48 @@
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
             });
         }
+        // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
+        // relatório da categoria Crime. O indicador é só a contagem total (pedido:
+        // "apenas o número de apreensões" no quadro); o detalhamento compacta a
+        // distribuição por Tipo da apreensão (top 5 + "Outros", mesmo corte usado nos
+        // gráficos — ver contarPorCampo), sem estourar a célula.
+        if (secaoApreensoes) {
+            const porTipo = contarPorCampo(secaoApreensoes.dados, 'tipo', 5);
+            const prejudicado = prejudicadoInfo(CFG_APREENSOES);
+            const detalhamento = prejudicado
+                ? `${prejudicado}${porTipo.length ? ' · ' + porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') : ''}`
+                : (porTipo.map(it => `${it.label}: ${it.valor}`).join(' · ') || '—');
+            itensOutros.push({
+                nome: 'Bens Apreendidos',
+                indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
+                detalhamento,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
+            });
+        }
+        // "Cumprimento de Medidas" — logo após Bens Apreendidos (mesma ordem do popup:
+        // Apreensões vem antes de Cumprimento de Medidas dentro da categoria Crime).
+        // Indicador: total em atraso (o mais urgente dos 3 contadores); detalhamento
+        // compacta os outros dois.
+        if (secaoCumprimentoMedidas) {
+            const r = secaoCumprimentoMedidas.dados;
+            const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
+            const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
+            const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
+            const prejudicado = prejudicadoInfo(CFG_CUMPRIMENTO_MEDIDAS);
+            itensOutros.push({
+                nome: 'Cumprimento de Medidas',
+                indicador: `${atrasados} em atraso`,
+                detalhamento: prejudicado
+                    ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
+                    : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+            });
+        }
         // "Processos Arquivados com Saldo" — mesmo padrão de Outros Cumprimentos: sem
         // classificação por situação/aging (a métrica é monetária, não dias parado), por
-        // isso semSituacao: true. Último item empilhado (portanto último da tabela
-        // "Outros"/do Cartório) por pedido explícito do usuário.
+        // isso semSituacao: true. Empilhado por ÚLTIMO de propósito (depois de Bens
+        // Apreendidos/Cumprimento de Medidas), por pedido explícito do usuário: último
+        // item da tabela "Outros"/do Cartório no PDF conjunto.
         if (secaoArquivadosSaldo) {
             const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
             itensOutros.push({
@@ -5580,7 +6223,7 @@
         // bookmarks aninhados).
         let bmCartorio = null;
         itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-            const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+            const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
             let bmItem = null;
             blocos.forEach((bloco, i) => {
                 const primeira = !usouPagina1;
@@ -5607,7 +6250,13 @@
                 const primeira = !usouPagina1;
                 const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
                 usouPagina1 = true;
-                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo);
+                // Bloco de competência específica ("Competência: X") -> filtra as
+                // estatísticas de Tempo Médio por essa mesma competência; "Resumo Geral"
+                // ou sem split (bloco.rotulo null) -> soma todas (competencia=null).
+                const competenciaDoBloco = bloco.rotulo && bloco.rotulo.startsWith('Competência: ')
+                    ? bloco.rotulo.slice('Competência: '.length) : null;
+                const estatisticasTM = calcularEstatisticasTMJuiz(info.rotulo, competenciaDoBloco);
+                montarResumoJuizConclusoes(doc, info.rotulo, bloco.dados, now, primeira, bloco.rotulo, estatisticasTM);
                 if (i === 0) info.pgResumoInicio = pg;
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info.pgResumoInicio });
                 if (blocos.length === 1) {
@@ -5629,7 +6278,7 @@
             return s.dados.length === 0;
         }
         outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
-            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
             let bmItem = null;
             blocos.forEach((bloco, i) => {
                 const primeira = !usouPagina1;
@@ -5657,7 +6306,7 @@
             // Sem pendências, não há o que discriminar — dispensa a tabela (mas o resumo com
             // o KPI já foi desenhado no passo 1 de qualquer forma, ex.: Suspensos zerado).
             itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
-                const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicao);
+                const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
                     const pg = t.secao.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: t.pgResumoInicio });
@@ -5688,7 +6337,7 @@
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
             // mostrar (ex.: Audiências Pendentes zerado).
             outrasSecoes.filter(secaoTemTabela).forEach(s => {
-                const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicao);
+                const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
                     const pg = s.montarTabela(doc, bloco.dados, { label: '← Voltar ao resumo', pageNumber: s.pgResumoInicio });
@@ -5732,9 +6381,18 @@
             doc.setPage(l._rect.page);
             doc.link(l._rect.x, l._rect.y, l._rect.w, l._rect.h, { pageNumber: pgAlvo });
         });
+        // Mesmo PASSO 4, agora para o nome do magistrado na tabela de Gabinete do
+        // resumo geral (ver _rect capturado em desenharBlocoDominio) — pedido do
+        // usuário: atalho direto para a página com os dados daquele magistrado.
+        gabinete.itens.forEach(it => {
+            if (!it._rect || !it.pgResumoInicio) return;
+            doc.setPage(it._rect.page);
+            doc.link(it._rect.x, it._rect.y, it._rect.w, it._rect.h, { pageNumber: it.pgResumoInicio });
+        });
 
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
+        overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
         return doc;
     }
 
@@ -6153,6 +6811,33 @@
             proximoY = chartY + alturaChart + 6;
         }
 
+        // Observação destacada (pedido do usuário): quando há audiência com termo
+        // pendente há mais de 5 dias (vencida, ou seja, já realizada, mas sem termo
+        // lançado), recomenda que a secretaria observe e regularize a situação.
+        const vencidasMaisDe5Dias = vencidas.filter(d => {
+            const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
+            return n != null && Math.abs(n) > 5;
+        });
+        if (vencidasMaisDe5Dias.length) {
+            const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
+                + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
+            const linhasObs = doc.splitTextToSize(obs, uw - 4);
+            const alturaObs = linhasObs.length * 3.6 + 10;
+            if (proximoY + alturaObs > ph - m - 10) {
+                doc.addPage();
+                desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                proximoY = m + 4;
+            }
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
+            doc.rect(m, proximoY, uw, alturaObs, 'FD');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('OBSERVAÇÃO', m + 3, proximoY + 6);
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text(linhasObs, m + 3, proximoY + 11);
+            proximoY += alturaObs + 6;
+        }
+
         if (somenteResumo || !dados.length) {
             desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
             return;
@@ -6481,7 +7166,7 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0, somaConfere: true, divergencias: [] };
+        const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0 };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
@@ -6518,21 +7203,11 @@
         const linhasAvisoPermanente = doc.splitTextToSize(avisoPermanente, uw);
         doc.text(linhasAvisoPermanente, m, yObs);
         yObs += linhasAvisoPermanente.length * 3.4 + 2;
-        // Observação adicional: só aparece quando a soma dos valores por magistrado NÃO
-        // bate com o total geral da vara (pedido do usuário — conferência antes de
-        // seguir no relatório) — sinal de coleta incompleta/inconsistente a checar
-        // manualmente, ALÉM da explicação de magistrados desabilitados acima. Quando
-        // bate, não polui a página com um aviso extra sem necessidade.
-        let yLinha = yObs;
-        if (!r.somaConfere && r.divergencias && r.divergencias.length) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.vermelho);
-            const obs = `Atenção: a soma dos valores por magistrado não bate com o total geral da vara — `
-                + r.divergencias.map(d => `${d.campo} (geral=${d.geral}, soma dos magistrados=${d.soma})`).join('; ')
-                + `. Possível coleta incompleta — confira antes de usar estes números.`;
-            const linhasObs = doc.splitTextToSize(obs, uw);
-            doc.text(linhasObs, m, yObs);
-            yLinha = yObs + (linhasObs.length - 1) * 3.4 + 3.5;
-        }
+        // O aviso de divergência soma-vs-total (condicional, em vermelho) foi removido a
+        // pedido do usuário — o aviso permanente acima (magistrados desabilitados) já
+        // explica por que o total pode legitimamente ser maior que a soma do
+        // detalhamento, o que cobria a maior parte dos casos em que a soma "não batia".
+        const yLinha = yObs;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         // Pedido do usuário: no resumo GERAL, um magistrado(a) que atuou em mais de uma
@@ -6609,6 +7284,170 @@
         } else {
             desenharRodape(doc, TITULO_AUDIENCIAS_REALIZADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
+    }
+
+    // ── PDF do relatório de Cumprimento de Medidas (Mesa do Magistrado) ────────────
+    // Painel de 3 contadores agregados — sem processo/data individual, então NÃO
+    // reaproveita montarResumoGenerico. Só resumo (sem tabela discriminada — não há lista
+    // de processos nesta tela, apenas os 3 totais).
+    const TITULO_CUMPRIMENTO_MEDIDAS = 'Cumprimento de Medidas';
+
+    // Texto fixo da Observação (parágrafo único, justificado), pedido pelo autor do
+    // protótipo original.
+    const TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS = 'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
+        + 'realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir. Os '
+        + 'comprovantes individualizados de cumprimento deverão ser anexados ao Projudi. Em caso de atraso '
+        + 'no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da '
+        + 'Comunidade informações atualizadas acerca de sua execução. O controle rigoroso das medidas '
+        + 'impostas deve constituir prática permanente da secretaria.';
+
+    // Altura ocupada por um parágrafo justificado, na fonte/tamanho já ativos no doc —
+    // chamado ANTES de desenhar (mesmo espírito de medirAlturaCardLista) para dimensionar
+    // a caixa de fundo da Observação com a altura certa.
+    function alturaParagrafoJustificado(doc, texto, larguraMax, entreLinhas) {
+        return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
+    }
+
+    // Justificação MANUAL, por repetição de espaços, em vez de doc.text(..., {align:
+    // 'justify'}) nativo do jsPDF ou de reposicionar cada palavra por coordenada própria
+    // — ambas as abordagens produziram palavras acentuadas GRUDADAS sem espaço nenhum em
+    // leitores de PDF reais (bug relatado pelo autor do protótipo original, mesmo com a
+    // largura de cada palavra medida corretamente — o problema é o MECANISMO de
+    // reposicionamento por coordenada entre chamadas de doc.text(), não a conta). Aqui
+    // cada linha vira UMA ÚNICA STRING (com espaços de verdade, às vezes repetidos) e é
+    // desenhada com UMA chamada doc.text() só — o mesmo mecanismo simples já usado em todo
+    // o resto do relatório. Última linha de cada parágrafo fica com espaço simples,
+    // alinhada à esquerda (convenção tipográfica de texto justificado).
+    function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
+        const linhas = doc.splitTextToSize(texto, larguraMax);
+        const espacoLargura = doc.getTextWidth(' ') || 1;
+        linhas.forEach((linha, i) => {
+            const ultimaLinha = i === linhas.length - 1;
+            const palavras = linha.split(' ').filter(Boolean);
+            if (ultimaLinha || palavras.length <= 1) {
+                doc.text(linha, x, y);
+            } else {
+                const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
+                const numLacunas = palavras.length - 1;
+                const totalEspacos = Math.max(numLacunas, Math.round((larguraMax - larguraPalavras) / espacoLargura));
+                const base = Math.floor(totalEspacos / numLacunas);
+                let resto = totalEspacos - base * numLacunas;
+                let linhaJustificada = palavras[0];
+                for (let k = 1; k < palavras.length; k++) {
+                    let n = base;
+                    if (resto > 0) { n++; resto--; }
+                    linhaJustificada += ' '.repeat(Math.max(1, n)) + palavras[k];
+                }
+                doc.text(linhaJustificada, x, y);
+            }
+            y += entreLinhas;
+        });
+        return linhas.length * entreLinhas;
+    }
+
+    // Card de KPI especializado: título pode quebrar em 2 linhas (ex. "Medidas sem
+    // Cumprimentos Gerados", mais longo que os títulos curtos que desenharCard assume) e
+    // aviso "Situação: Crítico" em destaque colorido — cenário específico o bastante
+    // (título multi-linha + aviso condicional) pra não valer a pena generalizar o
+    // desenharCard compartilhado, usado por ~20 outros relatórios sem essa necessidade.
+    function desenharCardCumprimentoMedidas(doc, x, y, w, h, titulo, valor, critico, acento) {
+        acento = acento || COR.azul;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        const cx = x + w / 2;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        const linhasTitulo = doc.splitTextToSize(String(titulo).toUpperCase(), w - 8);
+        const alturaLinhaTitulo = 3.3;
+        const blocoH = linhasTitulo.length * alturaLinhaTitulo + 8 + (critico ? 4.2 : 0);
+        let yy = y + (h - blocoH) / 2 + alturaLinhaTitulo;
+        linhasTitulo.forEach(l => { doc.text(l, cx, yy, { align: 'center' }); yy += alturaLinhaTitulo; });
+        yy += 4.5;
+        const valorTexto = String(valor);
+        const TAMANHOS_VALOR_CARD = [15, 13, 11, 10, 9];
+        let fonteValor = TAMANHOS_VALOR_CARD[TAMANHOS_VALOR_CARD.length - 1];
+        for (const tam of TAMANHOS_VALOR_CARD) {
+            doc.setFontSize(tam);
+            if (doc.getTextWidth(valorTexto) <= w - 10) { fonteValor = tam; break; }
+        }
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+        doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
+        if (critico) {
+            // Helvetica (não PublicSans embutida), mesma decisão do texto da Observação
+            // logo abaixo — ver comentário grande em desenharParagrafoJustificado sobre o
+            // bug de espaçamento em texto acentuado com a fonte TTF customizada.
+            doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('Situação: Crítico', cx, yy, { align: 'center' });
+        }
+    }
+
+    function gerarPDFCumprimentoMedidas(dados) {
+        const doc = novoDocPDF();
+        montarResumoCumprimentoMedidas(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `cumprimento_medidas_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoCumprimentoMedidas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = dados || [];
+        // Soma os contadores entre todas as unidades já coletadas (mesmo espírito de
+        // Outros Cumprimentos) — cada linha de "dados" é uma unidade/atribuição distinta;
+        // são só 3 números agregados, então somar entre unidades é suficiente (sem
+        // precisar de nenhuma lógica de mesclagem mais sofisticada).
+        const atrasados = r.reduce((s, d) => s + (d.atrasados || 0), 0);
+        const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
+        const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_CUMPRIMENTO_MEDIDAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  Mesa do Magistrado — aba "Cumprimentos de Medidas"`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        // Limiares de "Situação: Crítico" — mesmos valores do protótipo original (pedido
+        // explícito do usuário).
+        const LIMIAR_ATRASO_CRITICO = 100;
+        const LIMIAR_SEM_CUMPRIMENTO_CRITICO = 50;
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 34; // 2 linhas de título + valor + linha de "Situação: Crítico"
+        const kW = (uw - 2 * gap) / 3;
+        desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), atrasados > LIMIAR_ATRASO_CRITICO, COR.vermelho);
+        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.ambar);
+        desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
+
+        let y = kY + kH + 10;
+        tituloSecao(doc, m, y, uw, 'Observação', COR.azul);
+        y += 5;
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+        const entreLinhas = 4.6;
+        const padding = 5;
+        const alturaTexto = alturaParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, uw - 2 * padding, entreLinhas);
+        const caixaH = alturaTexto + 2 * padding;
+
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(m, y, uw, caixaH, 2, 2, 'FD');
+
+        const ty = y + padding + 3.2;
+        doc.setTextColor(...COR.tintaSec);
+        desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, m + padding, ty, uw - 2 * padding, entreLinhas);
+
+        desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
@@ -6887,12 +7726,10 @@
 
     function gerarPDFArquivadosSaldo(dados) {
         const doc = novoDocPDF();
+        // Tabela discriminada embutida direto no resumo (pedido do usuário) — não há
+        // mais um passo de "tabela detalhada" separado nem bookmark próprio para ela.
         montarResumoArquivadosSaldo(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        if (dados && dados.length) {
-            const pgTabela = montarTabelaArquivadosSaldo(doc, dados, false);
-            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        }
         baixarBlob(doc.output('blob'), `processos_arquivados_saldo_projudi_${dataArquivo()}.pdf`);
     }
 
@@ -6945,28 +7782,23 @@
 
         // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
         // relatório efetivamente lista algum processo.
+        let proximoY = aY + 28 + gap;
         if (r.length) {
-            desenharCardObservacaoArquivadosSaldo(doc, m, aY + 28 + gap, uw, OBSERVACAO_ARQUIVADOS_SALDO);
+            const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, OBSERVACAO_ARQUIVADOS_SALDO);
+            proximoY += alturaObs + gap;
         }
 
-        desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice);
-    }
+        // Tabela discriminada direto no resumo (pedido do usuário: sem página separada
+        // ao final) — mesmo padrão de montarResumoAudiencias, embutindo a tabela na
+        // mesma página quando couber e deixando o autoTable paginar sozinho quando não
+        // couber. Sem tabela nenhuma (0 processos), só desenha o rodapé e encerra.
+        if (!r.length) {
+            desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
+        }
 
-    function montarTabelaArquivadosSaldo(doc, dados, comIndice) {
-        doc.addPage();
-        const agora = new Date();
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 12;
-        const uw = pw - 2 * m;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const pagina = doc.internal.getNumberOfPages();
-        const carimbo = `${hoje} ${hora}`;
-        const r = dados || [];
-
-        tituloSecao(doc, m, m + 4, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
-        const tabInicioY = m + 10;
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
+        const tabInicioY = proximoY + 6;
 
         const colunas = [
             { header: 'Processo', width: 26, get: d => d.processo },
@@ -6989,7 +7821,6 @@
             colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
             return o;
         });
-        const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
 
         doc.autoTable({
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
@@ -7017,10 +7848,8 @@
             columnStyles,
             foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
             footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
-            didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, carimbo, pw, ph, m, comIndice),
+            didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
-
-        return pagina;
     }
 
     // ── Gargalo por "Último Movimento" (Paralisados e Remessas) ────────────────
@@ -7390,6 +8219,142 @@
         return paginaInicial;
     }
 
+    // ── PDF do relatório de Ativos por Classe Processual ────────────────────────────
+    // Cada registro já é um AGREGADO (uma linha por classe processual, com contadores
+    // prontos do Projudi) — não uma lista por processo/data. Mais parecido com Outros
+    // Cumprimentos/Cumprimento de Medidas do que com Paralisados/Remessas (que também
+    // são "lista simples", mas por PROCESSO individual) — por isso resumo e tabela são
+    // funções dedicadas (montarResumoAtivosClasse/montarTabelaAtivosClasse), não
+    // montarResumoGenerico/montarTabelaGenerico (que pressupõem dataCampo/processoCampo,
+    // sem sentido aqui). "Ativos" = soma de "Em andamento" (decisão de negócio do
+    // usuário — ver CFG_ATIVOS_CLASSE.aoTerminarColeta/gravarTotalAtivosClasseEAvancar).
+
+    function gerarPDFAtivosClasse(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoAtivosClasse(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaAtivosClasse(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_ATIVOS_CLASSE.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Página de RESUMO (KPIs + distribuição por classe) do relatório de Ativos por
+    // Classe Processual. ehPrimeiraSecao=false começa em página nova (uso no conjunto).
+    function montarResumoAtivosClasse(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const r = dados || [];
+        const totalAtivos = r.reduce((s, d) => s + (d.emAndamento || 0), 0);
+        const classeComMais = r.length ? [...r].sort((a, b) => b.emAndamento - a.emAndamento)[0] : null;
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_ATIVOS_CLASSE, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${r.length} classe(s) processual(is)`;
+        if (!rotuloInfo.semFrase) {
+            const frase = fraseCompetenciasComContagem(r);
+            if (frase) subtitulo += `  •  ${frase}`;
+        }
+        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        // Linha 1: 3 KPIs — total de ativos (Em andamento somado) / classes distintas /
+        // classe com mais ativos.
+        const kY = yLinha + 5;
+        const kW3 = (uw - 2 * gap) / 3;
+        desenharCard(doc, m,               kY, kW3, 28, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Classes Processuais', String(r.length), [], true, COR.aqua);
+        desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Classe com Mais Ativos',
+            classeComMais ? classeComMais.classe : '—',
+            classeComMais ? [`${classeComMais.emAndamento} ativo(s)`] : [], true, COR.ambar);
+
+        // Gráfico: distribuição do acervo (Em andamento) entre as classes — reaproveita
+        // o mesmo "calc" de cfg.pdf.distribuicoes (somarPorCampo), sem duplicar a lógica.
+        // Pedido do usuário: só o essencial neste relatório por enquanto — sem KPIs de
+        // Suspensos/Ações Novas Distribuídas (removidos, dado não pedido aqui).
+        const chartY = kY + 28 + gap + 4;
+        const dist = CFG_ATIVOS_CLASSE.pdf.distribuicoes[0];
+        const itensBarras = dist.calc(r);
+        const disponivel = ph - m - chartY - 14;
+        desenharBarras(doc, m, chartY, uw, Math.max(40, disponivel), dist.titulo, itensBarras, undefined, COR.azul);
+
+        desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Tabela discriminada do relatório de Ativos por Classe Processual — uma linha por
+    // classe, ordenada da maior para a menor "Em andamento" (mesma leitura do gráfico).
+    function montarTabelaAtivosClasse(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = (dados || []).slice().sort((a, b) => b.emAndamento - a.emAndamento);
+        // Pedido do usuário: percentual de cada classe sobre o TOTAL de ativos (soma de
+        // "Em andamento" de todas as classes desta atuação — a mesma base usada na capa).
+        const totalAtivos = ordenados.reduce((s, d) => s + (d.emAndamento || 0), 0);
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_ATIVOS_CLASSE}`);
+
+        doc.autoTable({
+            columns: [
+                { header: 'Classe Processual', dataKey: 'classe' },
+                { header: 'Ações Novas', dataKey: 'acoesNovas' },
+                { header: 'Em Andamento', dataKey: 'emAndamento' },
+                { header: '% do Total', dataKey: 'percentual' },
+                { header: 'Suspensos', dataKey: 'suspensos' },
+                { header: 'Deixaram Suspensão', dataKey: 'deixaramSuspensao' },
+                { header: 'Arq. sem Baixa', dataKey: 'arquivadosSemBaixa' },
+                { header: 'Arq. com Baixa', dataKey: 'arquivadosComBaixa' },
+                { header: 'Desarquivados', dataKey: 'desarquivados' },
+            ],
+            body: ordenados.map(d => ({
+                classe: d.classe,
+                acoesNovas: String(d.acoesNovas),
+                emAndamento: String(d.emAndamento),
+                percentual: `${totalAtivos ? (d.emAndamento / totalAtivos * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '0'}%`,
+                suspensos: String(d.suspensos),
+                deixaramSuspensao: String(d.deixaramSuspensao),
+                arquivadosSemBaixa: String(d.arquivadosSemBaixa),
+                arquivadosComBaixa: String(d.arquivadosComBaixa),
+                desarquivados: String(d.desarquivados),
+            })),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7, cellPadding: 1.5, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 7.5 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: {
+                classe: { cellWidth: 56 },
+                emAndamento: { fontStyle: 'bold', textColor: COR.tinta },
+                percentual: { halign: 'right' },
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
     const TITULO_SUSPENSOS_PRAZO = 'Suspensos com Prazo Determinado';
 
     // Duração em dias (fim - início) de uma suspensão por prazo determinado. null se
@@ -7714,10 +8679,14 @@
         const paginaInicial = doc.internal.getNumberOfPages();
         tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
 
+        // Coluna "Competência" (pedido do usuário) — o relatório não divide mais em
+        // Resumo Geral + bloco por atribuição, então cada processo precisa indicar a
+        // qual atribuição pertence direto na tabela.
         const colunas = [
-            { header: 'Processo', width: 40, get: (d) => d.processo },
-            { header: 'Classe Processual', width: 70, get: (d) => d.classe },
-            { header: 'Data de Envio', width: 30, get: (d) => d.dataEnvio },
+            { header: 'Processo', width: 34, get: (d) => d.processo },
+            { header: 'Classe Processual', width: 56, get: (d) => d.classe },
+            { header: 'Data de Envio', width: 26, get: (d) => d.dataEnvio },
+            { header: 'Competência', width: 40, get: (d) => d.competencia || '' },
         ];
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
@@ -7739,6 +8708,28 @@
             columnStyles,
             didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
+
+        // Observação destacada ao final da tabela (pedido do usuário): só quando há
+        // processo em trâmite há mais de 2 anos — recomenda conferência manual pra
+        // evitar paralisação por falha na comunicação do julgamento definitivo.
+        const maisDe2AnosTabela = processosEnviadosHaMaisDeXAnos(dados, 2);
+        if (maisDe2AnosTabela.length) {
+            const obs = `Há ${maisDe2AnosTabela.length} processo(s) em trâmite na 2ª instância há mais de 2 anos. `
+                + 'Recomenda-se conferência MANUAL da tramitação desses processos, para evitar paralisação no caso '
+                + 'de eventual falha na comunicação do julgamento definitivo.';
+            const uwObs = pw - 2 * m;
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
+            const linhasObs = doc.splitTextToSize(obs, uwObs - 4);
+            const alturaObs = linhasObs.length * 3.6 + 10;
+            let yObs = doc.lastAutoTable.finalY + 8;
+            if (yObs + alturaObs > ph - m) { doc.addPage(); yObs = m + 4; desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice); }
+            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
+            doc.rect(m, yObs, uwObs, alturaObs, 'FD');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text('OBSERVAÇÃO', m + 3, yObs + 6);
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text(linhasObs, m + 3, yObs + 11);
+        }
 
         return paginaInicial;
     }
@@ -7819,10 +8810,14 @@
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
+        else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
         else if (paginaOutrosCumprimentos()) cfg = CFG_OUTROS_CUMPRIMENTOS;
+        // Cumprimento de Medidas tem o mesmo formato de detecção própria (sem cabeçalho
+        // de table.resultTable reconhecível — só 3 contadores, ver paginaCumprimentoMedidas).
+        else if (paginaCumprimentoMedidas()) cfg = CFG_CUMPRIMENTO_MEDIDAS;
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaInstanciaSuperior\.do/i.test(location.pathname + location.search)) cfg = CFG_INSTANCIA_RECURSAL;
@@ -8265,6 +9260,85 @@
         }
     }
 
+    // Sobe a árvore a partir de "el" até achar um ancestral cuja tagName seja "tag" —
+    // usado para achar a <table> inteira da barra de abas (ver injetarBotaoCumprimentoMedidas
+    // abaixo), sem depender de Element.prototype.closest.
+    function acharAncestralTag(el, tag) {
+        let cur = el;
+        while (cur) {
+            if (cur.tagName === tag) return cur;
+            cur = cur.parentNode;
+        }
+        return null;
+    }
+
+    // Mesmo problema já corrigido em Outros Cumprimentos: inserir o botão como filho
+    // direto da <tr> da barra de abas é HTML inválido (só aceita <td>/<th>) e quebra o
+    // layout de toda a tabela. Sobe até achar a <table> inteira (#tabHorz) e insere o
+    // botão ANTES dela, dentro do container que a envolve — nesting válido, mesma
+    // âncora usada pelo protótipo original (já testado em produção).
+    function tratarPaginaCumprimentoMedidas(tentativa) {
+        tentativa = tentativa || 0;
+        if (!paginaCumprimentoMedidas()) {
+            if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
+                console.warn('[Projudi Cumprimento de Medidas] os contadores não apareceram em ~40s — desistindo (tela pode ter mudado ou carregamento travou).');
+                const estadoDesistencia = store.getItem(AUTO_ESTADO);
+                if (estadoDesistencia === 'coletando_cumprimentomedidas' || estadoDesistencia === 'preenchendo_cumprimentomedidas') {
+                    console.warn('[Projudi Cumprimento de Medidas] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    store.setItem(CFG_CUMPRIMENTO_MEDIDAS.prefixo + 'coletado', '1');
+                    avancarAutomacao(CFG_CUMPRIMENTO_MEDIDAS);
+                }
+                return;
+            }
+            setTimeout(() => tratarPaginaCumprimentoMedidas(tentativa + 1), 500);
+            return;
+        }
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        if (estadoAtual === 'coletando_cumprimentomedidas' || estadoAtual === 'preenchendo_cumprimentomedidas') {
+            console.log('[Projudi Cumprimento de Medidas] automação: extraindo os contadores (sem preencher/pesquisar — a tela já chega pronta)');
+            coletarCumprimentoMedidas();
+            return;
+        }
+        // Uso manual — injeta os botões (Extrair + Baixar PDF) perto da barra de abas,
+        // já que não há table.buttonBar nesta tela.
+        if (!mostrarBotoesIndividuais()) return;
+        if (!document.getElementById('btn-cumprmedidas-extrair')) {
+            const abaLink = acharAbaCumprimentoMedidas();
+            const tabela = abaLink && acharAncestralTag(abaLink, 'TABLE');
+            const doc = (abaLink && abaLink.ownerDocument) || document;
+            const ancora = (tabela && tabela.parentNode) || doc.body;
+
+            const div = doc.createElement('div');
+
+            const bExtrair = doc.createElement('button');
+            bExtrair.id = 'btn-cumprmedidas-extrair';
+            bExtrair.type = 'button';
+            bExtrair.className = 'projudi-btn';
+            bExtrair.title = 'Lê os 3 contadores exibidos e gera o resumo (sem paginação, sem pesquisa)';
+            bExtrair.textContent = CFG_CUMPRIMENTO_MEDIDAS.rotulos.coletar;
+            bExtrair.onclick = () => coletarCumprimentoMedidas();
+            div.appendChild(bExtrair);
+
+            const bBaixar = doc.createElement('button');
+            bBaixar.id = 'btn-cumprmedidas-baixar';
+            bBaixar.type = 'button';
+            bBaixar.className = 'projudi-btn';
+            bBaixar.title = 'Extrai (se ainda não extraído) e baixa o PDF individual deste painel';
+            bBaixar.textContent = CFG_CUMPRIMENTO_MEDIDAS.rotulos.baixar;
+            bBaixar.onclick = () => {
+                coletarCumprimentoMedidas(async () => {
+                    const dados = await lerDadosDe(CFG_CUMPRIMENTO_MEDIDAS.prefixo);
+                    gerarPDFCumprimentoMedidas(dados);
+                });
+            };
+            div.appendChild(bBaixar);
+
+            if (tabela) ancora.insertBefore(div, tabela);
+            else ancora.appendChild(div);
+        }
+    }
+
     function injetarBotoes() {
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
         console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
@@ -8313,6 +9387,20 @@
             || estadoAutoNoInicio === 'coletando_arquivadosaldo';
         if (pareceTelaArquivadosSaldo) {
             tratarPaginaArquivadosSaldo();
+            return;
+        }
+
+        // Página de Cumprimento de Medidas — mesmo tratamento de Outros Cumprimentos
+        // acima (painel sem table.buttonBar, conteúdo carregado via AJAX). paginaCumprimen
+        // toMedidas() (span já no DOM) só cobre "já carregou"; a URL de destino do clique
+        // na aba (actionType=listaPendenciasCumprimentos) e o estado da automação cobrem
+        // a janela entre o clique e o AJAX terminar, igual ao caso de Outros Cumprimentos.
+        const pareceTelaCumprimentoMedidas = paginaCumprimentoMedidas()
+            || /actionType=listaPendenciasCumprimentos/i.test(location.href)
+            || estadoAutoNoInicio === 'coletando_cumprimentomedidas'
+            || estadoAutoNoInicio === 'preenchendo_cumprimentomedidas';
+        if (pareceTelaCumprimentoMedidas) {
+            tratarPaginaCumprimentoMedidas();
             return;
         }
 
@@ -8578,9 +9666,6 @@
             // aguardarResultadoAREEstabilizarEProcessar) — checar só "existe tabela"
             // pegava valores da pesquisa ANTERIOR, ainda não substituídos pelo AJAX.
             if (estadoAtual === 'preenchendo_audienciasrealizadas') {
-                // Início de verdade de uma coleta (não uma recoleta por divergência de
-                // soma) — zera o contador de tentativa aqui, ponto único de entrada.
-                store.setItem(CHAVE_TENTATIVA_AR, '0');
                 iniciarBuscaAudienciasRealizadas();
                 return;
             }
@@ -8691,6 +9776,31 @@
                 bInstanciaRecursal.textContent = 'Preencher e Pesquisar (Instância Recursal)';
                 bInstanciaRecursal.onclick = () => preencherEPesquisarInstanciaRecursal();
                 buttonBar.appendChild(bInstanciaRecursal);
+            }
+        }
+
+        // Tela de filtros de "Movimento Forense"/Ativos por Classe Processual
+        // (processo/movimentoForense.do) — mesmo padrão de Suspensos com Prazo/Instância
+        // Recursal acima: decide pelo ESTADO da automação, não pela presença de
+        // resultados; botão de pesquisa é "Pesquisar" (#searchButton).
+        if (formularioAtivosClasse()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_ativosclasse') {
+                console.log('[Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_ativosclasse');
+                preencherEPesquisarAtivosClasse();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso que preenche dataInicio/
+            // dataFim com hoje e pesquisa.
+            if (estadoAtual !== 'coletando_ativosclasse' && mostrarBotoesIndividuais()) {
+                const bAtivosClasse = document.createElement('button');
+                bAtivosClasse.type = 'button';
+                bAtivosClasse.className = 'projudi-btn';
+                bAtivosClasse.title = 'Preenche dataInicio/dataFim com a data de hoje e pesquisa — não altera Por Juizado/Vara';
+                bAtivosClasse.textContent = 'Preencher e Pesquisar (Ativos por Classe)';
+                bAtivosClasse.onclick = () => preencherEPesquisarAtivosClasse();
+                buttonBar.appendChild(bAtivosClasse);
             }
         }
 
@@ -8813,25 +9923,18 @@
     // nas páginas, apenas no popup").
     function mostrarBotoesIndividuais() { return false; }
 
-    // Checkbox "Processos Ativos" do painel (ver injetarPainel/gravarProcessosAtivosSeDisponivel
-    // /gerarPDFConjunto) — default MARCADO (chave ausente = true) para preservar o
-    // comportamento histórico (sempre incluído), já que este recurso é novo e não deve
-    // mudar nada pra quem nunca abriu essa opção.
-    const CHAVE_INCLUIR_ATIVOS = 'projudi_incluir_ativos';
-    function incluirProcessosAtivos() { return store.getItem(CHAVE_INCLUIR_ATIVOS) !== '0'; }
-
     // Unidades/atuações em que o botão "Automatizar" já foi de fato clicado — usado só
     // pelo mostrador "Unidades coletadas" do painel (pedido do usuário: só entrar como
     // coletada depois de apertar Automatizar, não só por ter passado pela página
-    // inicial). Diferente de lerMapaAtivos() (Processos Ativos): esse mapa é gravado
-    // passivamente sempre que a página inicial carrega (ver
-    // gravarProcessosAtivosSeDisponivel), então uma unidade em que o usuário só deu uma
-    // olhada — sem nunca ter clicado em Automatizar — aparecia como "coletada" no
-    // mostrador, o que não é verdade.
+    // inicial).
     const CHAVE_UNIDADES_AUTOMATIZADAS = 'projudi_unidades_automatizadas';
     function lerUnidadesAutomatizadas() {
-        try { return JSON.parse(store.getItem(CHAVE_UNIDADES_AUTOMATIZADAS) || '[]'); }
-        catch (e) { return []; }
+        // desembrulharArray (não JSON.parse único) — mesma proteção de lerFilaAutomacao
+        // (ver comentário lá): sob automação em várias unidades, esta chave é lida/escrita
+        // com muito mais frequência (uma vez por unidade) e mais frames concorrentes, o
+        // que expôs o mesmo bug de "JSON em camadas" aqui (erro real relatado pelo
+        // usuário: "TypeError: unidades.join is not a function" em atualizarPainel).
+        return desembrulharArray(store.getItem(CHAVE_UNIDADES_AUTOMATIZADAS)) || [];
     }
     function marcarUnidadeAutomatizada(atuacao) {
         if (!atuacao) return;
@@ -8849,14 +9952,461 @@
     // marcados, ver relatorioMarcadoPorPadrao).
     const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
     function lerSelecoesSalvasPainel() {
-        try { return JSON.parse(store.getItem(CHAVE_RELATORIOS_SELECIONADOS) || 'null') || {}; }
-        catch (e) { return {}; }
+        // desembrulharObjeto (não JSON.parse único) — mesma proteção de
+        // lerFilaAutomacao/lerUnidadesAutomatizadas: sob automação em várias unidades
+        // esta chave também é lida com muito mais frequência/concorrência entre frames,
+        // expondo o mesmo bug de "JSON em camadas" — sem isso, relatorioMarcadoPorPadrao
+        // podia devolver sempre o padrão (ou quebrar) mesmo com marcações salvas.
+        return desembrulharObjeto(store.getItem(CHAVE_RELATORIOS_SELECIONADOS)) || {};
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
     function relatorioMarcadoPorPadrao(key) {
         const salvas = lerSelecoesSalvasPainel();
         return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+    }
+
+    // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
+    // Tela "Selecione a Área de Atuação" (usuario/areaAtuacao.do — tanto a página cheia
+    // do login quanto o POPUP "Alterar Atuação", que é um <iframe> com o MESMO HTML
+    // carregado por cima da página atual): uma árvore de Comarcas > unidades, cada
+    // unidade um <a href=".../areaAtuacao.do?...">. Injeta um checkbox ao lado de cada
+    // unidade (ÚNICA forma de escolher — pedido do usuário: nada de dropdown/popup à
+    // parte) e um painel com o checklist de relatórios (mesmos REPORTS_AUTOMACAO/
+    // CHAVE_RELATORIOS_SELECIONADOS do painel da página inicial, ver injetarPainel) —
+    // unidades E relatórios já ficam decididos nesta primeira tela, sem precisar visitar
+    // a página inicial antes (ver injetarSeletorUnidades). O botão "Rodar automação"
+    // dispara a fila configurada em CADA unidade marcada, uma atrás da outra — clicando a
+    // unidade, deixando a automação normal rodar até o fim (AUTO_ESTADO='ir_fim'), então
+    // clicando #alterarAreaAtuacao (presente em toda página autenticada, dentro de
+    // table#userinfo) pra abrir o popup, e clicando a PRÓXIMA unidade marcada de dentro
+    // do iframe do popup.
+    //
+    // O iframe do popup é uma página https://projudi2.tjpr.jus.br/projudi/... própria —
+    // como o userscript roda em @match .../projudi/* SEM @noframes, ele é injetado
+    // DENTRO do iframe também, como uma instância independente (outro bootstrap(), outro
+    // setInterval de 2s). Não há como essa instância "de dentro do popup" e a instância
+    // "de fora" (que clicou o ícone) se falarem diretamente — só via localStorage
+    // (mesmo padrão já usado no arquivo inteiro pra coordenar frames, ver comentário
+    // sobre IndexedDB/localStorage no topo do arquivo). Por isso o fluxo é dirigido só
+    // por ESTADO (AUTO_ESTADO='trocando_unidade' + as chaves CHAVE_MU_*) checado a cada
+    // poll de 2s em QUALQUER frame (mesmo mecanismo de passoAutomacao/bootstrap) — quem
+    // primeiro perceber "estou na tela de seleção de unidade" clica a próxima; quem
+    // primeiro perceber "já estou numa atuação normal de novo" retoma a fila de
+    // relatórios.
+    //
+    // IMPORTANTE — parte menos testada deste arquivo: não há como confirmar, sem uma
+    // sessão real do Projudi, exatamente quanto tempo leva nem que sinal exato indica
+    // "a troca de atuação terminou e a página já recarregou de verdade" depois de clicar
+    // a unidade dentro do popup. A implementação assume que clicar o <a> da unidade
+    // aplica a troca e recarrega a página (mesmo efeito de escolher a atuação no login),
+    // e detecta isso pela ausência da árvore de seleção + presença de lerAtuacao() de
+    // novo — com o mesmo debounce de 4s dos demais passos de ir_* pra tolerar polls
+    // duplicados de frames diferentes. Se na prática o popup não fechar sozinho ou
+    // demorar mais que os ~2s de poll pra refletir, ajustar aqui.
+    const CHAVE_MU_ATIVO = 'projudi_mu_ativo';
+    const CHAVE_MU_TITULOS = 'projudi_mu_titulos';       // JSON: array de títulos (na ordem de execução)
+    const CHAVE_MU_INDICE = 'projudi_mu_indice';         // índice da PRÓXIMA unidade a clicar
+    // Atuação de ONDE estávamos saindo quando a troca começou — necessário porque o
+    // popup "Alterar Atuação" é só uma SOBREPOSIÇÃO: a página de baixo (e o frame que
+    // clicou o ícone) continua com a atuação ANTIGA até o usuário escolher a nova dentro
+    // do iframe. Sem comparar com essa referência, "lerAtuacao() preenchido" (usado como
+    // sinal de "já trocou") ficava verdadeiro o tempo todo — inclusive com o popup ainda
+    // aberto, esperando o iframe carregar — e retomarAutomacaoNaProximaUnidade() disparava
+    // cedo demais, reiniciando a MESMA unidade em vez de esperar a troca de verdade (bug
+    // relatado pelo usuário: "não deu certo novamente").
+    const CHAVE_MU_ATUACAO_ANTERIOR = 'projudi_mu_atuacao_anterior';
+    // Nº de unidades encontradas na árvore na ÚLTIMA leitura — usado só pra esperar a
+    // árvore "parar de crescer" antes de clicar (mesma ideia de assinaturaResultadoTM/
+    // aguardarOutrosCumprimentosProntoEExtrair): a tela de seleção é uma página gigante
+    // (uma <li> por unidade do ESTADO INTEIRO, ver captura real usada no desenho deste
+    // recurso) e pode demorar mais que um poll de 2s pra terminar de carregar/renderizar
+    // (pedido do usuário, relatado ao vivo).
+    const CHAVE_MU_ASSINATURA_ARVORE = 'projudi_mu_assinatura_arvore';
+
+    function multiUnidadeEmCurso() { return store.getItem(CHAVE_MU_ATIVO) === '1'; }
+
+    function lerTitulosMultiUnidade() {
+        return desembrulharArray(store.getItem(CHAVE_MU_TITULOS)) || [];
+    }
+
+    function haProximaUnidadeMultiUnidade() {
+        if (!multiUnidadeEmCurso()) return false;
+        const idx = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
+        return idx < lerTitulosMultiUnidade().length;
+    }
+
+    function finalizarMultiUnidade() {
+        console.log('[Projudi MultiUnidade] encerrando modo várias unidades — limpando estado');
+        store.removeItem(CHAVE_MU_ATIVO);
+        store.removeItem(CHAVE_MU_TITULOS);
+        store.removeItem(CHAVE_MU_INDICE);
+        store.removeItem(CHAVE_MU_ATUACAO_ANTERIOR);
+        store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
+    }
+
+    // Reconhece a tela de seleção de área de atuação em QUALQUER contexto (página cheia
+    // do login OU dentro do iframe do popup "Alterar Atuação") — mesmo HTML nos dois
+    // casos, identificado pelo container da árvore de Comarcas.
+    function paginaSelecaoAreaAtuacao() {
+        return !!document.getElementById('listaAreaAtuacaocomarca');
+    }
+
+    // Lista achatada de {titulo, elemento} — só os <a> de unidade de verdade (os
+    // cabeçalhos de Comarca são <img class="subAreaGroup"> + texto solto, sem <a>, então
+    // não entram aqui). Também cobre "Últimas visitadas" (mesmo formato de link),
+    // deduplicado por título — uma unidade que aparece nas duas listas vira uma entrada
+    // só (a primeira encontrada), o suficiente pra localizar por título depois.
+    function listarUnidadesAreaAtuacao() {
+        if (!paginaSelecaoAreaAtuacao()) return [];
+        const vistos = new Set();
+        const unidades = [];
+        document.querySelectorAll('#listaAreaAtuacaocomarca a[href*="areaAtuacao.do"], #listaAreasAtuacaoVisitadas a[href*="areaAtuacao.do"]').forEach(a => {
+            const titulo = (a.title || a.textContent || '').trim();
+            if (!titulo || vistos.has(titulo)) return;
+            vistos.add(titulo);
+            unidades.push({ titulo, elemento: a });
+        });
+        return unidades;
+    }
+
+    // Clique de verdade (não dispatchEvent sintético — ver armadilha já documentada no
+    // topo do arquivo: alguns elementos do Projudi só reagem a clique real do usuário).
+    function clicarUnidadePorTitulo(titulo) {
+        const alvo = listarUnidadesAreaAtuacao().find(u => u.titulo === titulo);
+        if (!alvo) return false;
+        alvo.elemento.click();
+        return true;
+    }
+
+    // Mesma ideia de lerAtuacao() (linha ~110), mas varrendo TODOS os frames acessíveis
+    // em vez de só document local — necessário porque, sob automação em várias
+    // unidades, o frame que está fazendo o poll de 'trocando_unidade' às vezes não é o
+    // mesmo frame que tem a table#userinfo com o bloco "Atuação:" (ver comentário grande
+    // em tentarAbrirPopupTrocaAtuacao logo abaixo — mesmo bug, mesma causa).
+    function lerAtuacaoEmQualquerFrame() {
+        for (const doc of todosDocumentosAcessiveis()) {
+            if (!doc.querySelectorAll) continue;
+            const grupos = doc.querySelectorAll('div.group');
+            for (const grupo of grupos) {
+                const label = grupo.querySelector('span.userinfo_label');
+                if (label && /atua[çc][ãa]o/i.test(label.textContent)) {
+                    const span = grupo.querySelector('span[title]');
+                    if (span && span.textContent.trim()) return span.textContent.trim();
+                }
+            }
+        }
+        return '';
+    }
+
+    // #alterarAreaAtuacao (dentro de table#userinfo) existe em toda página autenticada —
+    // abre o popup "Alterar Atuação" com o iframe da árvore de seleção. Guarda a atuação
+    // ATUAL antes de clicar (ver CHAVE_MU_ATUACAO_ANTERIOR) — é a referência usada depois
+    // pra saber se a troca de verdade já aconteceu, já que o popup é só uma sobreposição
+    // e a página de baixo continua com a atuação antiga até a escolha ser feita.
+    // Log real do usuário mostrou #alterarAreaAtuacao "não encontrado" mesmo em páginas
+    // onde ele deveria existir (ex.: logo depois de Apreensões terminar) — porque
+    // document.getElementById só enxerga o DOM do FRAME que está executando esta função
+    // agora, e o Projudi roda em frameset (menu + conteúdo + cabecalho-oid.jsp...), com
+    // uma instância do userscript em CADA frame (sem @noframes). O elemento pode estar
+    // num frame IRMÃO/pai do que está fazendo o poll neste tick. Mesmo problema que
+    // acharLinkMenu/todosDocumentosAcessiveis já resolvem pra navegação — busca em TODOS
+    // os documentos acessíveis (sobe até o maior ancestral de mesma origem, desce por
+    // todos os frames), não só no document local.
+    function tentarAbrirPopupTrocaAtuacao() {
+        for (const doc of todosDocumentosAcessiveis()) {
+            const link = doc.getElementById && doc.getElementById('alterarAreaAtuacao');
+            if (!link) continue;
+            const atuacaoAtual = lerAtuacaoEmQualquerFrame();
+            store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, atuacaoAtual || '');
+            console.log(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (achado em ${doc === document ? 'frame local' : 'outro frame'}; atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
+            link.click();
+            return true;
+        }
+        console.warn(`[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado em nenhum frame acessível (${todosDocumentosAcessiveis().length} documento(s) verificado(s)) — tentando de novo no próximo poll`);
+        return false;
+    }
+
+    // Assinatura simples do carregamento da árvore (só a contagem de unidades já
+    // encontradas) — usada pra ESPERAR a árvore estabilizar antes de clicar (pedido do
+    // usuário: a tela de seleção é grande — uma <li> por unidade do estado inteiro — e
+    // pode não estar completamente carregada ainda no primeiro poll depois do popup
+    // abrir). Mesma ideia de assinaturaResultadoTM/aguardarOutrosCumprimentosProntoE
+    // Extrair: só age quando a contagem se repete IGUAL em duas leituras seguidas.
+    function arvoreUnidadesEstabilizada() {
+        const n = listarUnidadesAreaAtuacao().length;
+        const anterior = store.getItem(CHAVE_MU_ASSINATURA_ARVORE);
+        console.log(`[Projudi MultiUnidade] lendo árvore de unidades — ${n} unidade(s) encontrada(s) nesta leitura (leitura anterior: ${anterior === null ? '(nenhuma)' : anterior})`);
+        if (n === 0) {
+            // Árvore ainda nem começou a aparecer — não conta como "leitura anterior"
+            // válida, senão duas leituras vazias seguidas (ex.: script rodou antes do
+            // popup nem existir) passariam como "estável".
+            store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
+            return false;
+        }
+        if (anterior !== String(n)) {
+            store.setItem(CHAVE_MU_ASSINATURA_ARVORE, String(n));
+            console.log('[Projudi MultiUnidade] árvore ainda carregando (contagem mudou) — aguardando estabilizar no próximo poll');
+            return false;
+        }
+        console.log(`[Projudi MultiUnidade] árvore estabilizada em ${n} unidade(s) — prosseguindo`);
+        return true;
+    }
+
+    // Clica a PRÓXIMA unidade marcada (dentro da árvore atual — página cheia ou popup) e
+    // avança o índice. Sem unidade restante, encerra o modo várias-unidades e deixa a
+    // automação seguir pro fim normal (concluido) no próximo passoAutomacao.
+    function avancarParaProximaUnidadeSelecionada() {
+        if (!arvoreUnidadesEstabilizada()) return; // ainda carregando — tenta de novo no próximo poll
+        store.removeItem(CHAVE_MU_ASSINATURA_ARVORE);
+        const idx = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
+        const titulos = lerTitulosMultiUnidade();
+        const titulo = titulos[idx];
+        if (!titulo) {
+            console.warn('[Projudi MultiUnidade] sem próxima unidade na fila — encerrando modo várias unidades');
+            finalizarMultiUnidade();
+            store.setItem(AUTO_ESTADO, 'ir_fim');
+            return;
+        }
+        console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length} — procurando "${titulo}" na árvore`);
+        // A troca só é reconhecida quando lerAtuacaoEmQualquerFrame() mudar em relação a
+        // ESTA leitura (ver CHAVE_MU_ATUACAO_ANTERIOR/retomarAutomacaoNaProximaUnidade) —
+        // dentro do iframe do popup normalmente vem vazio (não é a página do app), então
+        // não custa nada regravar aqui também, por segurança.
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
+        const ok = clicarUnidadePorTitulo(titulo);
+        store.setItem(CHAVE_MU_INDICE, String(idx + 1));
+        if (ok) console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clique em "${titulo}" disparado — aguardando a página recarregar`);
+        else console.warn(`[Projudi MultiUnidade] unidade "${titulo}" NÃO encontrada na árvore desta tela (${titulos.length} no total marcadas) — pulando pra próxima`);
+    }
+
+    // Só estamos de volta numa atuação normal quando: (1) não é mais a tela de seleção,
+    // (2) lerAtuacaoEmQualquerFrame() vem preenchido, E (3) é DIFERENTE da atuação
+    // registrada em CHAVE_MU_ATUACAO_ANTERIOR (ver tentarAbrirPopupTrocaAtuacao/
+    // avancarParaProximaUnidadeSelecionada) — sem a condição (3), o popup ainda ABERTO
+    // sobre a página antiga (aguardando o iframe carregar) já passava como "trocou",
+    // porque a página de baixo continua reportando a atuação ANTIGA enquanto isso (bug
+    // relatado pelo usuário). Retoma a MESMA fila de relatórios (persistida em
+    // 'projudi_auto_fila' desde o início da rodada) pra essa nova unidade.
+    function retomarAutomacaoNaProximaUnidade() {
+        const atuacaoAtual = lerAtuacaoEmQualquerFrame();
+        const atuacaoAnterior = store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || '';
+        if (!atuacaoAtual || atuacaoAtual === atuacaoAnterior) {
+            console.log(`[Projudi MultiUnidade] ainda na atuação anterior ("${atuacaoAnterior || '(vazia)'}") — popup/troca ainda em andamento, aguardando`);
+            return;
+        }
+        store.removeItem(CHAVE_MU_ATUACAO_ANTERIOR);
+        const fila = lerFilaAutomacao();
+        const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1m';
+        console.log(`[Projudi MultiUnidade] nova atuação confirmada ("${atuacaoAnterior || '(vazia)'}" -> "${atuacaoAtual}") — retomando automação com ${fila.length} relatório(s): ${fila.join(', ')}`);
+        iniciarAutomacao(fila, periodoTM);
+    }
+
+    // Botão "Rodar automação em várias unidades" (ver injetarSeletorUnidades) — reusa os
+    // relatórios já marcados no painel da página inicial (mesma fonte que #pa-iniciar,
+    // ver relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS): o usuário marca os
+    // relatórios uma vez no painel, marca as unidades aqui, e os dois ficam combinados.
+    function iniciarAutomacaoMultiUnidade(titulos) {
+        if (!titulos || !titulos.length) { alert('Selecione ao menos uma unidade.'); return; }
+        const fila = REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
+        if (!fila.length) {
+            alert('Nenhum relatório está marcado. Marque ao menos um relatório no painel desta mesma tela.');
+            return;
+        }
+        console.log(`[Projudi MultiUnidade] === iniciando automação em ${titulos.length} unidade(s) === relatórios marcados: ${fila.join(', ')}`);
+        console.log(`[Projudi MultiUnidade] ordem das unidades: ${titulos.map((t, i) => `${i + 1}) ${t}`).join(' | ')}`);
+        store.setItem(CHAVE_MU_TITULOS, JSON.stringify(titulos));
+        store.setItem(CHAVE_MU_INDICE, '1'); // [0] é clicado agora mesmo, abaixo
+        store.setItem(CHAVE_MU_ATIVO, '1');
+        store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
+        store.setItem('projudi_auto_fila', JSON.stringify(fila));
+        store.setItem('projudi_auto_periodo_tm', store.getItem('projudi_auto_periodo_tm') || '1m');
+        store.setItem(AUTO_ESTADO, 'trocando_unidade');
+        store.setItem('projudi_auto_lock', String(Date.now()));
+        console.log(`[Projudi MultiUnidade] unidade 1/${titulos.length}: procurando "${titulos[0]}" na árvore`);
+        if (!clicarUnidadePorTitulo(titulos[0])) {
+            console.error(`[Projudi MultiUnidade] unidade "${titulos[0]}" NÃO encontrada nesta tela — abortando`);
+            alert(`Não foi possível localizar a unidade "${titulos[0]}" nesta tela.`);
+            finalizarMultiUnidade();
+            store.removeItem(AUTO_ESTADO);
+        } else {
+            console.log(`[Projudi MultiUnidade] clique em "${titulos[0]}" disparado — aguardando a página recarregar`);
+        }
+    }
+
+    // Injeta, na tela de seleção de área de atuação (página cheia ou popup), um checkbox
+    // ao lado de cada unidade da árvore — ÚNICA forma de escolher unidades (pedido do
+    // usuário: nada de dropdown/popup separado, só os checkboxes na própria página) — e
+    // um painel com o checklist de relatórios (mesmos REPORTS_AUTOMACAO/
+    // CHAVE_RELATORIOS_SELECIONADOS do painel da página inicial — ver injetarPainel) pra
+    // decidir TUDO (unidades + relatórios) já nesta primeira tela, sem precisar visitar a
+    // página inicial antes. Idempotente — seguro chamar de novo a cada poll do bootstrap
+    // (verifica se já injetou antes de mexer no DOM).
+    function injetarSeletorUnidades() {
+        if (!paginaSelecaoAreaAtuacao()) return;
+        const unidades = listarUnidadesAreaAtuacao();
+        if (!unidades.length) {
+            console.log('[Projudi MultiUnidade] tela de seleção de área de atuação detectada, mas ainda sem unidades na árvore — aguardando carregar');
+            return;
+        }
+
+        if (document.getElementById('projudi-mu-painel')) return; // já injetado nesta tela
+
+        console.log(`[Projudi MultiUnidade] injetando painel de seleção — ${unidades.length} unidade(s) encontrada(s) na árvore`);
+        unidades.forEach(({ titulo, elemento }) => {
+            if (elemento.dataset.muInjetado) return;
+            elemento.dataset.muInjetado = '1';
+            const chk = document.createElement('input');
+            chk.type = 'checkbox';
+            chk.className = 'projudi-mu-chk';
+            chk.dataset.tituloUnidade = titulo;
+            chk.style.marginRight = '4px';
+            chk.title = 'Incluir esta unidade na automação de várias unidades';
+            elemento.parentNode.insertBefore(chk, elemento);
+        });
+
+        function contarSelecionadas() { return document.querySelectorAll('.projudi-mu-chk:checked').length; }
+
+        function linhaRelatorio(r) {
+            const seletorPeriodo = r.key === 'tempomedio'
+                ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
+                    PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                  }</select>`
+                : '';
+            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            return `<label class="${classeItem}">
+                    <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                </label>`;
+        }
+        // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
+        // linhasComSubgrupos em injetarPainel) — pedido do usuário: reproduzir aqui os
+        // itens/subitens do popup secundário (ex.: cabeçalho "Audiências" agrupando
+        // Pendentes/Designadas/Realizadas, hoje só apareciam soltas sem o cabeçalho).
+        function linhasComSubgruposMU(itens) {
+            let html = '';
+            let subgrupoAberto = null;
+            itens.forEach(r => {
+                if (r.subgrupo !== subgrupoAberto) {
+                    subgrupoAberto = r.subgrupo || null;
+                    if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
+                }
+                html += linhaRelatorio(r);
+            });
+            return html;
+        }
+        // Checklist de relatórios — mesma fonte/persistência de injetarPainel
+        // (relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS). Duas categorias,
+        // igual ao painel da página inicial (CATEGORIAS_PAINEL/categoriaEspecifica) —
+        // pedido do usuário: antes só aparecia um grupo "geral" sem os relatórios de
+        // Crime visíveis (Apreensões), mas a automação incluía Apreensões mesmo assim
+        // (relatorioMarcadoPorPadrao volta `true` por padrão pra qualquer item que o
+        // usuário nunca viu/desmarcou) — sem aparecer no popup, não dava pra desmarcar.
+        // Aqui as duas ficam empilhadas e sempre visíveis (sem abas — contexto mais
+        // enxuto que o painel da página inicial), então nada fica escondido.
+        const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
+        const linhasCivel = GRUPOS_AUTOMACAO.map(g => {
+            const itens = itensCivel.filter(r => r.dominio === g.chave);
+            // "Processos Ativos" agora é um item comum de REPORTS_AUTOMACAO
+            // (CFG_ATIVOS_CLASSE/key 'ativosclasse') — entra em `itens` como qualquer
+            // outro, sem checkbox/chave de persistência própria.
+            if (!itens.length) return '';
+            return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhasComSubgruposMU(itens)}</div>`;
+        }).join('');
+        const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
+        const linhasCrime = itensCrime.length
+            ? `<div class="pa-group"><p class="pa-group-lbl especifico">Crime</p>${linhasComSubgruposMU(itensCrime)}</div>`
+            : '';
+
+        // Mesma estrutura/classes .pa-* do painel da página inicial (injetarPainel) —
+        // pedido do usuário: o visual deve corresponder ao popup já existente. A folha
+        // de estilo é a MESMA (ver GM_addStyle no final do arquivo — os seletores
+        // #painel-automacao ali também casam com #projudi-mu-painel).
+        const painel = document.createElement('div');
+        painel.id = 'projudi-mu-painel';
+        painel.innerHTML = `
+            <div class="pa-head">
+                <span class="pa-titulo">Automação em várias unidades</span>
+                <div class="pa-icons">
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Recolher">▲</button>
+                    <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
+                </div>
+            </div>
+            <div class="pa-body">
+                <div id="projudi-mu-contador" class="pa-unidades">0 unidade(s) marcada(s) na árvore ao lado</div>
+                <div class="pa-group">
+                    <p class="pa-group-lbl">Relatórios a extrair</p>
+                </div>
+                <div class="pa-links">
+                    <button id="projudi-mu-rel-marcar" class="pa-link" type="button">Marcar tudo</button>
+                    <button id="projudi-mu-rel-desmarcar" class="pa-link" type="button">Desmarcar tudo</button>
+                </div>
+                ${linhasCivel}
+                ${linhasCrime}
+                <div class="pa-actions">
+                    <button id="projudi-mu-iniciar" class="pa-btn pa-btn-primary" type="button">▶ Rodar automação nas unidades marcadas</button>
+                    <button id="projudi-mu-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
+                </div>
+                <div class="pa-dica">Marque as unidades desejadas na árvore ao lado e os relatórios acima, depois clique em "Rodar automação".</div>
+            </div>
+        `;
+        document.body.appendChild(painel);
+        habilitarArrastePainel(painel);
+
+        painel.querySelector('.pa-btn-colapsar').onclick = () => {
+            const body = painel.querySelector('.pa-body');
+            const btn = painel.querySelector('.pa-btn-colapsar');
+            const recolhido = body.style.display !== 'none';
+            body.style.display = recolhido ? 'none' : '';
+            btn.textContent = recolhido ? '▼' : '▲';
+            btn.title = recolhido ? 'Expandir' : 'Recolher';
+        };
+        painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
+
+        const contador = painel.querySelector('#projudi-mu-contador');
+        function atualizarContador() {
+            contador.textContent = `${contarSelecionadas()} unidade(s) marcada(s) na árvore ao lado`;
+        }
+        document.querySelectorAll('.projudi-mu-chk').forEach(chk => {
+            chk.addEventListener('change', atualizarContador);
+        });
+        atualizarContador();
+
+        // Checkboxes de relatório persistem no MESMO snapshot que injetarPainel usa
+        // (relatorioMarcadoPorPadrao lê de lá) — marcar aqui ou na página inicial dá no
+        // mesmo, os dois ficam sincronizados via essa chave.
+        function salvarSelecoesRelatorios() {
+            const obj = lerSelecoesSalvasPainel();
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { obj[c.dataset.key] = c.checked; });
+            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        }
+        painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
+            c.addEventListener('change', salvarSelecoesRelatorios);
+        });
+        painel.querySelector('#projudi-mu-rel-marcar').onclick = () => {
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = true; });
+            salvarSelecoesRelatorios();
+        };
+        painel.querySelector('#projudi-mu-rel-desmarcar').onclick = () => {
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = false; });
+            salvarSelecoesRelatorios();
+        };
+        const periodoTmSel = painel.querySelector('#projudi-mu-periodo-tm');
+        if (periodoTmSel) periodoTmSel.addEventListener('change', () => {
+            store.setItem('projudi_auto_periodo_tm', periodoTmSel.value);
+        });
+
+        painel.querySelector('#projudi-mu-iniciar').onclick = () => {
+            const titulos = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
+            iniciarAutomacaoMultiUnidade(titulos);
+        };
+        // Mesmo botão "Limpar" do painel da página inicial (#pa-limpar) — pedido do
+        // usuário: também precisa existir aqui, no popup secundário.
+        painel.querySelector('#projudi-mu-limpar').onclick = limparTudoAutomacao;
+
+        // Se chegamos aqui em modo automático (dentro do popup, no meio de uma rodada
+        // multi-unidade já em curso — ver 'trocando_unidade' em passoAutomacao), o clique
+        // na PRÓXIMA unidade é conduzido de lá, não por este painel manual — evita
+        // duplicar a lógica de clique aqui.
     }
 
     function desembrulharArray(valor) {
@@ -8872,6 +10422,22 @@
         let v = valor, t = 0;
         while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { return null; } t++; }
         return (v && typeof v === 'object' && !Array.isArray(v)) ? v : null;
+    }
+
+    // Remove registros com número de processo repetido dentro do mesmo array, mantendo
+    // só a primeira ocorrência — o número único do processo é identificador único, então
+    // o mesmo processo não deve ser contado duas vezes na mesma seção do relatório (ex.:
+    // reload de página no meio de uma coleta paginada duplicando uma página inteira).
+    // Itens sem campo .processo (relatórios "resumo único", ex. Outros Cumprimentos,
+    // Audiências Designadas/Realizadas) passam direto, sem filtro.
+    function removerProcessosDuplicados(dados) {
+        const vistos = new Set();
+        return dados.filter(d => {
+            if (!d || !d.processo) return true;
+            if (vistos.has(d.processo)) return false;
+            vistos.add(d.processo);
+            return true;
+        });
     }
 
     // Contagem RÁPIDA e SÍNCRONA de registros acumulados — usada só para exibição (painel
@@ -8916,7 +10482,7 @@
             const legado = desembrulharArray(b);
             if (legado) dados = dados.concat(legado);
         }
-        return dados;
+        return removerProcessosDuplicados(dados);
     }
 
     // Relatórios disponíveis para a automação, na ordem padrão de execução. 'precisaPreencher'
@@ -8932,13 +10498,17 @@
     // Mandados) e "Audiências" (movida do Crime pro Cível-Geral — ver abaixo). A ORDEM no
     // array importa: linhasComSubgrupos() (ver injetarPainel) agrupa por adjacência, não
     // por nome — itens do mesmo "subgrupo" precisam ficar em sequência no array, senão o
-    // cabeçalho do subgrupo repete. "Processos Ativos" não é um item de REPORTS_AUTOMACAO
-    // de verdade (não navega/coleta nada — ver gravarProcessosAtivosSeDisponivel); entra
-    // na posição certa via um objeto avulso construído em injetarPainel (ver ITEM_ATIVOS).
+    // cabeçalho do subgrupo repete.
     const REPORTS_AUTOMACAO = [
-        // ── Estatísticas Gerais (Processos Ativos entra aqui via ITEM_ATIVOS, ver
-        // injetarPainel) — o link de Suspensos por Prazo Indeterminado abre a tabela de
-        // resultados direto (sem tela de filtros), igual Juntadas/Retorno/Conclusões.
+        // ── Estatísticas Gerais — o link de Suspensos por Prazo Indeterminado abre a
+        // tabela de resultados direto (sem tela de filtros), igual Juntadas/Retorno/
+        // Conclusões.
+        // Ativos por Classe Processual — substitui a antiga leitura passiva "Processos
+        // Ativos" (ITEM_ATIVOS/CHAVE_INCLUIR_ATIVOS, removida): agora é um item de
+        // automação de verdade (navega, preenche as datas de hoje, pesquisa e coleta).
+        // Reaproveita o rótulo de checklist "Ativos" (rotuloChecklist) na mesma posição
+        // que o item especial ocupava, no topo de "Estatísticas Gerais".
+        { key: 'ativosclasse', cfg: CFG_ATIVOS_CLASSE, navAlvo: 'ativosclasse', rotulo: 'Ativos por Classe Processual', rotuloChecklist: 'Ativos', curto: 'Ativos', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         { key: 'suspensos',   cfg: CFG_SUSPENSOS,   navAlvo: 'suspensos',   rotulo: 'Suspensos p/ Prazo Indeterminado', curto: 'Suspensos',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Estatísticas Gerais' },
         // Suspensos com Prazo Determinado: passa por uma tela de filtros própria (por
         // isso precisaPreencher: true, mesmo padrão de Apreensões/Paralisados) antes de
@@ -9016,6 +10586,10 @@
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
+        // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
+        // Outros Cumprimentos.
+        { key: 'cumprimentomedidas', cfg: CFG_CUMPRIMENTO_MEDIDAS, navAlvo: 'cumprimentomedidas', rotulo: 'Cumprimento de Medidas', curto: 'Cumpr. Medidas', categoriaEspecifica: 'crime', precisaPreencher: false },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -9033,7 +10607,13 @@
     function cfgsDoRelatorio(r) { return r.cfgs || [r.cfg]; }
 
     function lerFilaAutomacao() {
-        try { return JSON.parse(store.getItem('projudi_auto_fila') || '[]'); } catch (e) { return []; }
+        // Mesma proteção usada em lerFilaMesesTempoMedio/desembrulharArray: o valor às
+        // vezes volta JSON-codificado em camadas — sem isso, um JSON.parse único deixava
+        // "fila" como STRING (não array), e (fila || []).filter em iniciarAutomacao
+        // explodia com "filter is not a function" (bug relatado pelo usuário — só
+        // aparecia no fluxo novo de várias unidades, que é o único chamador que lê essa
+        // chave de volta do localStorage em vez de montar a fila direto dos checkboxes).
+        return desembrulharArray(store.getItem('projudi_auto_fila')) || [];
     }
 
     // Sobe por window.parent enquanto for a mesma origem, parando um passo antes de
@@ -9188,6 +10768,12 @@
         // (SEM "Busca"/"Instancia"/"Superior") — relatório diferente; a regex de URL abaixo
         // já é específica o bastante pra não confundir os dois.
         else if (alvo === 'instanciarecursal') link = acharLinkMenu(/processoBuscaInstanciaSuperior\.do/i, /^remetidos$/i);
+        // "Movimento Forense" — NÃO "Movimento Forense - Juiz" (href
+        // movimentoForenseJuiz.do, relatório diferente). A regex de URL já não casa com
+        // esse outro link (".do" precisa vir logo após "movimentoForense", sem "Juiz" no
+        // meio), e o texto exato do link ("Movimento Forense", sem mais nada) reforça a
+        // distinção.
+        else if (alvo === 'ativosclasse') link = acharLinkMenu(/processo\/movimentoForense\.do/i, /^movimento\s+forense$/i);
         else if (alvo === 'audiencias') link = acharLinkMenu(/audiencia\/busca\.do/i, /^listagem$/i);
         else if (alvo === 'audienciasdesignadas') link = acharLinkMenu(/audiencia\/pautaAudiencia\.do/i, /^ver\s+pauta\s+de\s+hor[áa]rios$/i);
         else if (alvo === 'audienciasrealizadas') link = acharLinkMenu(/audiencia\/estatistica\.do/i, null);
@@ -9200,6 +10786,7 @@
         // do Projudi — o link específico do relatório é achado depois, na listagem (ver
         // acharLinkArquivadosSaldoNaListagem, chamada por tratarPaginaArquivadosSaldo).
         else if (alvo === 'arquivadosaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
+        else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
@@ -9244,6 +10831,19 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
+    function navegarAbaCumprimentoMedidas() {
+        const link = acharAbaCumprimentoMedidas();
+        if (!link) {
+            // Essa aba só existe em unidades com competência criminal (Mesa do
+            // Magistrado) — mesmo tratamento silencioso dos demais navegarMenu.
+            console.warn('[Auto Projudi] link de menu não encontrado: cumprimentomedidas (aba "Cumprimentos de Medidas" ausente — perfil sem Mesa do Magistrado/sem competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaCumprimentoMedidas — clicando na aba "Cumprimentos de Medidas" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -9298,7 +10898,10 @@
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
-        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}"`);
+        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
+        if (!prox && multiUnidadeEmCurso()) {
+            console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
+        }
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         setTimeout(passoAutomacao, 900);
     }
@@ -9343,6 +10946,36 @@
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
+        store.setItem('projudi_auto_lock', String(Date.now()));
+        atualizarPainel();
+        setTimeout(passoAutomacao, 300);
+    }
+
+    // Pedido do usuário: em unidades sem os relatórios específicos da categoria Crime
+    // (Apreensões/Cumprimento de Medidas — ver categoriaEspecifica em REPORTS_AUTOMACAO),
+    // o link/aba nunca aparece, e esperar as 8 tentativas padrão (LIMITE_TENTATIVAS em
+    // passoAutomacao) antes de travar era tempo desperdiçado numa situação normal (não um
+    // erro de navegação a investigar, só uma unidade sem competência criminal). Com 3
+    // tentativas sem achar o link, pula automaticamente essa extração (sem travar, sem
+    // precisar do usuário clicar "Pular") E marca "Prejudicado" para esta atribuição —
+    // diferente de executarPular/"erro" (que marca o relatório inteiro como interrompido,
+    // sem distinguir de qual unidade), aqui guarda-se A ATUAÇÃO afetada, já que unidades
+    // diferentes da mesma rodada de automação podem ter ou não esse relatório.
+    function marcarPrejudicadoEAvancar(rel, atuacao) {
+        const nomeAtuacao = (atuacao || '(sem atuação)').trim();
+        console.warn(`[Auto Projudi] "${rel.rotulo}" não encontrado após 3 tentativas em "${nomeAtuacao}" — marcando como Prejudicado e avançando (provável unidade sem esse relatório).`);
+        cfgsDoRelatorio(rel).forEach(cfg => {
+            const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            if (!lista.includes(nomeAtuacao)) lista.push(nomeAtuacao);
+            store.setItem(cfg.prefixo + 'prejudicado', JSON.stringify(lista));
+            store.setItem(cfg.prefixo + 'coletado', '1');
+            store.removeItem(cfg.prefixo + 'rodando');
+        });
+        const fila = lerFilaAutomacao();
+        const idx = fila.indexOf(rel.key);
+        const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        store.removeItem('projudi_auto_nav_falhas');
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         store.setItem('projudi_auto_lock', String(Date.now()));
         atualizarPainel();
@@ -9441,12 +11074,55 @@
 
         const agora = Date.now();
         const lock = parseInt(store.getItem('projudi_auto_lock') || '0', 10);
-        if (agora - lock < 4000) return; // já houve tentativa recente em algum frame
+        // Pedido do usuário: troca de unidade demorando demais mesmo com a árvore já
+        // carregada na tela. Causa raiz: este lock (4000ms) era MAIOR que o próprio
+        // intervalo de poll (setInterval de 2000ms no bootstrap), então TODA tentativa
+        // par era descartada sem fazer nada — cadência real acabava em ~4s por passo, não
+        // ~2s — e também engolia os "empurrões" rápidos (setTimeout(passoAutomacao, 300/
+        // 900) logo após avancarAutomacao/iniciarAutomacao), que quase sempre caíam
+        // dentro da janela de 4s do lock recém-setado e nunca chegavam a rodar,
+        // obrigando a esperar o próximo tick do setInterval mesmo. 1200ms (abaixo do
+        // intervalo de 2000ms) deixa CADA tick do setInterval fazer progresso de verdade
+        // e permite os empurrões rápidos funcionarem, mantendo só o suficiente pra
+        // deduplicar corridas entre frames que leem o lock quase ao mesmo tempo.
+        if (agora - lock < 1200) return; // já houve tentativa recente em algum frame
 
+        // Modo "várias unidades" (ver injetarSeletorUnidades/iniciarAutomacaoMultiUnidade):
+        // em vez de ir direto pra 'concluido' quando a fila de relatórios termina, troca
+        // de atuação e recomeça a MESMA fila na próxima unidade marcada.
+        if (estado === 'ir_fim' && haProximaUnidadeMultiUnidade()) {
+            store.setItem('projudi_auto_lock', String(agora));
+            store.setItem(AUTO_ESTADO, 'trocando_unidade');
+            store.setItem(CHAVE_AUTO_FIM, String(agora)); // marca o fim desta unidade (mostrador do painel)
+            const idxAtual = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
+            const totalUnidades = lerTitulosMultiUnidade().length;
+            console.log(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacaoEmQualquerFrame() || ''}") — abrindo popup pra trocar de atuação`);
+            if (!tentarAbrirPopupTrocaAtuacao()) navegarMenu('inicio');
+            return;
+        }
+        // 'trocando_unidade': aguarda o popup/iframe da árvore de seleção aparecer (clica
+        // a próxima unidade marcada) ou a nova atuação já estar ativa (retoma a fila) —
+        // ver comentário grande acima de CHAVE_MU_ATIVO sobre por que isso é dirigido só
+        // por estado/localStorage entre frames independentes.
+        if (estado === 'trocando_unidade') {
+            store.setItem('projudi_auto_lock', String(agora));
+            const naArvore = paginaSelecaoAreaAtuacao();
+            console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
+            if (naArvore) {
+                avancarParaProximaUnidadeSelecionada();
+            } else if (lerAtuacaoEmQualquerFrame()) {
+                retomarAutomacaoNaProximaUnidade();
+            } else if (!tentarAbrirPopupTrocaAtuacao()) {
+                console.warn('[Projudi MultiUnidade] nem árvore de seleção nem atuação detectadas, e #alterarAreaAtuacao não encontrado — indo pra página inicial e tentando de novo no próximo poll');
+                navegarMenu('inicio'); // popup ainda não achou o link nesta página — tenta a partir da início
+            }
+            return;
+        }
         if (estado === 'ir_fim') {
             store.setItem('projudi_auto_lock', String(agora));
             store.setItem(AUTO_ESTADO, 'concluido');
             store.setItem(CHAVE_AUTO_FIM, String(agora));
+            if (multiUnidadeEmCurso()) finalizarMultiUnidade(); // rodada de várias unidades chegou ao fim de verdade
             navegarMenu('inicio');
             return;
         }
@@ -9487,6 +11163,18 @@
             store.setItem(chaveFalhas, JSON.stringify(registro));
             console.warn(`[Auto Projudi] tentativa ${registro.n} sem sucesso para "${rel.navAlvo}" — URL atual: ${location.href}`);
 
+            // Relatórios exclusivos da categoria Crime (Apreensões/Cumprimento de
+            // Medidas) podem simplesmente não existir em unidades sem competência
+            // criminal — não é um erro de navegação a investigar, então usa um limite
+            // menor (3, não 8) e, ao esgotar, pula automaticamente e marca "Prejudicado"
+            // para esta atribuição em vez de travar a fila inteira esperando o usuário
+            // (ver marcarPrejudicadoEAvancar).
+            const LIMITE_TENTATIVAS_CRIME = 3;
+            if (rel.categoriaEspecifica === 'crime' && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+                store.removeItem(chaveFalhas);
+                marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
+                return;
+            }
             const LIMITE_TENTATIVAS = 8; // ~8 tentativas * 4s de trava = ~32s
             if (registro.n >= LIMITE_TENTATIVAS) {
                 store.removeItem(chaveFalhas);
@@ -9551,6 +11239,7 @@
             store.removeItem(c.prefixo + 'ts');
             store.removeItem(c.prefixo + 'coletado');
             store.removeItem(c.prefixo + 'erro');
+            store.removeItem(c.prefixo + 'prejudicado');
         });
         store.removeItem(AUTO_ESTADO);
         store.removeItem(CHAVE_AUTO_INICIO);
@@ -9589,6 +11278,39 @@
         return secoes.filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
+    // Restringe as seções às atribuições MARCADAS pelo usuário no diálogo do PDF
+    // conjunto (ver escolherOpcoesPDFConjunto) — `null` (nenhum filtro escolhido, ou só
+    // 1 atribuição no total) devolve `secoes` sem alterar nada. Para relatórios "lista de
+    // processos" (cfg.cabecalhos/cfg.linha), é um filter simples pelo campo
+    // competencia/atuacao de cada registro. Os 3 relatórios de "resumo único"
+    // (CFGS_SEM_PROCESSO_POR_LINHA) guardam um objeto agregado, não uma lista — reaplica
+    // as mesmas funções de recálculo já usadas pra mesclar atribuições na COLETA
+    // (calcularResumoAudienciasDesignadasDeTabela/calcularResumoAudienciasRealizadasDeListas),
+    // agora sobre o subconjunto filtrado, em vez de reimplementar a agregação aqui.
+    function filtrarSecoesPorAtribuicoes(secoes, atribuicoesSelecionadas) {
+        if (!atribuicoesSelecionadas) return secoes;
+        const pertence = (d) => atribuicoesSelecionadas.has((d && (d.competencia || d.atuacao) || '').trim());
+        return secoes.map(s => {
+            if (s.cfg === CFG_AUDIENCIAS_DESIGNADAS) {
+                const resumo = s.dados[0];
+                if (!resumo) return s;
+                const tabelaFiltrada = (resumo.tabela || []).filter(pertence);
+                return { ...s, dados: [{ ...calcularResumoAudienciasDesignadasDeTabela(tabelaFiltrada), competencia: resumo.competencia }] };
+            }
+            if (s.cfg === CFG_AUDIENCIAS_REALIZADAS) {
+                const resumo = s.dados[0];
+                if (!resumo) return s;
+                const porAtribuicaoFiltrado = (resumo.porAtribuicao || []).filter(pertence);
+                const porUsuarioFiltrado = (resumo.porUsuario || []).filter(pertence);
+                return { ...s, dados: [calcularResumoAudienciasRealizadasDeListas(porAtribuicaoFiltrado, porUsuarioFiltrado, resumo.periodo)] };
+            }
+            // Demais cfgs (inclusive CFG_OUTROS_CUMPRIMENTOS, cujos registros já são uma
+            // lista tagueada por atribuição — ver coletarOutrosCumprimentosAgora): filter
+            // direto por competencia/atuacao do próprio registro.
+            return { ...s, dados: s.dados.filter(pertence) };
+        });
+    }
+
     async function baixarPDFConjunto(somenteResumo) {
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
@@ -9609,18 +11331,34 @@
                 secoes.flatMap(s => (s.dados || []).map(d => (d && (d.competencia || d.atuacao) || '').trim()))
             )].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
             let porAtribuicao = false;
+            let secoesFiltradas = secoes;
+            // atribuicoesSelecionadas vai para gerarPDFConjunto mesmo quando nada foi
+            // desmarcado (sem custo) — sem isso a linha "Processos Ativos" (lida à parte
+            // de lerMapaAtivos, não das seções filtradas por filtrarSecoesPorAtribuicoes)
+            // ignorava a escolha do usuário no diálogo de checkboxes e sempre mostrava
+            // TODAS as atribuições já coletadas alguma vez, inclusive as que nem
+            // apareciam mais no popup (bug relatado pelo usuário).
+            let atribuicoesSelecionadas = null;
             if (atuacoes.length > 1) {
-                // Pedido do usuário: botões com texto próprio em vez do OK/Cancelar
-                // nativo do confirm() (que não dá pra personalizar) — ver
-                // confirmarComBotoes.
-                porAtribuicao = await confirmarComBotoes(
-                    `Foram coletadas ${atuacoes.length} atribuições diferentes:\n${atuacoes.map(a => `• ${a}`).join('\n')}\n\n`
-                    + 'Cada item do relatório (Juntadas, Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral '
-                    + '(todas as atribuições somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
+                // Pedido do usuário: além de "resumo geral" vs. "resumo geral + por
+                // atribuição", escolher com checkboxes QUAIS das atribuições coletadas
+                // entram no PDF — todas marcadas por padrão (ver escolherOpcoesPDFConjunto).
+                const escolha = await escolherOpcoesPDFConjunto(
+                    `Foram coletadas ${atuacoes.length} atribuições diferentes. Cada item do relatório (Juntadas, `
+                    + 'Retorno, Paralisados, Conclusões...) pode trazer só um resumo geral (todas as atribuições '
+                    + 'somadas), ou o resumo geral MAIS um resumo específico para cada atribuição.',
                     'Somar e detalhar por atribuição', 'Só resumo geral',
+                    atuacoes,
                 );
+                porAtribuicao = escolha.porAtribuicao;
+                atribuicoesSelecionadas = escolha.atribuicoesSelecionadas;
+                // Só filtra de verdade quando o usuário desmarcou alguma — com todas
+                // marcadas (padrão), evita reprocessar à toa.
+                if (escolha.atribuicoesSelecionadas.size < atuacoes.length) {
+                    secoesFiltradas = filtrarSecoesPorAtribuicoes(secoes, escolha.atribuicoesSelecionadas);
+                }
             }
-            gerarPDFConjunto(secoes, somenteResumo, { porAtribuicao });
+            gerarPDFConjunto(secoesFiltradas, somenteResumo, { porAtribuicao, atribuicoesSelecionadas });
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
@@ -9924,6 +11662,11 @@
                 return 'Armazenamento do navegador cheio — baixe/exporte os dados coletados e clique em "Limpar" antes de continuar.';
             }
             if (estado === 'ir_fim') return 'Finalizando…';
+            if (estado === 'trocando_unidade') {
+                const idx = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
+                const total = lerTitulosMultiUnidade().length;
+                return `Trocando de unidade (${Math.min(idx, total)}/${total})…`;
+            }
             if (estado.startsWith('preenchendo_')) { const rel = relatorioPorChave(estado.slice('preenchendo_'.length)); return `Preenchendo filtros de <strong>${rel ? rel.rotulo : estado}</strong>…`; }
             if (estado.startsWith('coletando_')) {
                 const chave = estado.slice(10);
@@ -9983,11 +11726,28 @@
         if (dot) dot.classList.toggle('on', emCurso);
         if (dot) dot.classList.toggle('alerta', travado);
 
+        // Pedido do usuário: com a automação rodando NESTA unidade, esconder a
+        // checklist de relatórios/abas (não dá pra mexer nela mesmo — já fica
+        // desabilitada, ver .pa-check abaixo) e mostrar só a janela de status
+        // (state-row/unidades/tempo/progresso/ações) — evita a lista comprida
+        // distraindo de "o que está acontecendo agora". Volta a aparecer assim que a
+        // automação para (concluído, travado ou nunca iniciada).
+        painel.querySelectorAll('.pa-tabs, .pa-group, .pa-links, .pa-resumo, .pa-dica').forEach(el => {
+            // .pa-group-especifico tem uma 2ª regra própria de visibilidade além da
+            // automação (aplicarCategoria só a mostra fora da aba Cível-Geral) — combina
+            // as duas aqui em vez de deixar aplicarCategoria brigar com esta função pra
+            // decidir o display por último.
+            if (el.classList.contains('pa-group-especifico')) {
+                const categoriaAtual = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
+                el.style.display = (emCurso || categoriaAtual === 'civel') ? 'none' : '';
+                return;
+            }
+            el.style.display = emCurso ? 'none' : '';
+        });
+
         // Unidades (atribuições/atuações) onde o botão "Automatizar" já foi de fato
         // clicado — pedido do usuário: entrar na unidade sozinho (sem clicar em
-        // Automatizar) não deve marcá-la como "coletada" aqui, mesmo que a página inicial
-        // já tenha gravado o contador de Processos Ativos passivamente (ver
-        // gravarProcessosAtivosSeDisponivel/lerMapaAtivos, um dado DIFERENTE deste).
+        // Automatizar) não deve marcá-la como "coletada" aqui.
         const elUnidades = painel.querySelector('.pa-unidades');
         if (elUnidades) {
             const unidades = lerUnidadesAutomatizadas();
@@ -10034,7 +11794,7 @@
         }
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        painel.querySelectorAll('.pa-check, .pa-check-extra, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
             el.disabled = emCurso;
         });
 
@@ -10083,25 +11843,13 @@
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
 
-        // "Processos Ativos" não é um item de REPORTS_AUTOMACAO de verdade (não navega/
-        // coleta paginado, é lido passivamente na página inicial — ver
-        // gravarProcessosAtivosSeDisponivel) — é um objeto avulso, só pra entrar na
-        // posição certa (subgrupo "Estatísticas Gerais", antes de Suspensos) junto dos
-        // itens de verdade em linhasComSubgrupos. "extra: true" faz linhaChecklistItem()
-        // renderizar .pa-check-extra em vez de .pa-check (não entra na fila de automação
-        // de #pa-iniciar, que filtra só .pa-check:checked), com id/data-key fixos que o
-        // resto do código já espera (ver #pa-incluir-ativos/CHAVE_INCLUIR_ATIVOS abaixo).
-        const ITEM_ATIVOS = { key: 'processosativos', rotuloChecklist: 'Ativos', subgrupo: 'Estatísticas Gerais', extra: true };
+        // "Processos Ativos" agora é um item comum de REPORTS_AUTOMACAO
+        // (CFG_ATIVOS_CLASSE/key 'ativosclasse', subgrupo "Estatísticas Gerais") — entra
+        // no checklist como qualquer outro item (.pa-check), sem tratamento especial.
 
         // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r) {
-            if (r.extra) {
-                return `
-                    <label class="pa-item pa-item-sub" title="Inclui a contagem de Processos Ativos (lida na página inicial do Projudi) como uma linha do Cartório na capa do PDF conjunto">
-                        <input type="checkbox" class="pa-check-extra" id="pa-incluir-ativos" data-key="processosativos" ${incluirProcessosAtivos() ? 'checked' : ''}> ${r.rotuloChecklist}
-                    </label>`;
-            }
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
@@ -10133,10 +11881,6 @@
         }
         const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
             const itensGrupo = itensCivel.filter(r => r.dominio === g.chave);
-            // ITEM_ATIVOS entra no início do Cartório, mesmo subgrupo "Estatísticas
-            // Gerais" de Suspensos (que já vem logo em seguida) — linhasComSubgrupos()
-            // trata os dois como um bloco só, sem duplicar o cabeçalho do subgrupo.
-            if (g.chave === 'cartorio') itensGrupo.unshift(ITEM_ATIVOS);
             const itens = linhasComSubgrupos(itensGrupo);
             return `
                 <div class="pa-group">
@@ -10196,7 +11940,7 @@
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
                 </div>
-                <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF.</div>
+                <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF, ou marque as unidades desejadas na tela "Alterar Atuação"/login para automatizar todas de uma vez.</div>
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = async () => {
@@ -10247,12 +11991,6 @@
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
-        const chkAtivos = painel.querySelector('#pa-incluir-ativos');
-        if (chkAtivos) {
-            chkAtivos.onchange = (ev) => {
-                store.setItem(CHAVE_INCLUIR_ATIVOS, ev.target.checked ? '1' : '0');
-            };
-        }
         // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
         // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
@@ -10265,14 +12003,8 @@
         }
         painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
 
-        // .pa-check-extra (hoje só "Processos Ativos") persiste seu estado em localStorage
-        // no próprio onchange do checkbox (ver acima) — mas setar `.checked` direto por
-        // código NÃO dispara "change" (só interação de verdade do usuário dispara), então
-        // marcar/desmarcar tudo precisa sincronizar o localStorage manualmente, senão o
-        // checkbox mostra um estado que não é o que fica salvo (some ao recarregar).
         function marcarDesmarcarTudo(valor) {
-            painel.querySelectorAll('.pa-check, .pa-check-extra').forEach(c => { c.checked = valor; });
-            if (chkAtivos) store.setItem(CHAVE_INCLUIR_ATIVOS, valor ? '1' : '0');
+            painel.querySelectorAll('.pa-check').forEach(c => { c.checked = valor; });
             salvarSelecoesPainel();
         }
         painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
@@ -10403,114 +12135,114 @@
     }
 
     GM_addStyle(`
-        #painel-automacao {
+        #painel-automacao , #projudi-mu-painel {
             position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
             box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
         }
-        #painel-automacao .pa-head {
+        #painel-automacao .pa-head , #projudi-mu-painel .pa-head {
             display: flex; align-items: center; justify-content: space-between;
             padding: 10px 11px; border-bottom: 1px solid #DEDDD6;
             border-left: 3px solid #3A5A7D; background: #F4F4F1;
             cursor: move;
         }
-        #painel-automacao .pa-head.pa-arrastando { cursor: grabbing; }
-        #painel-automacao .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
-        #painel-automacao .pa-icons { display: flex; gap: 4px; }
-        #painel-automacao .pa-icon-btn {
+        #painel-automacao .pa-head.pa-arrastando , #projudi-mu-painel .pa-head.pa-arrastando { cursor: grabbing; }
+        #painel-automacao .pa-titulo , #projudi-mu-painel .pa-titulo { font-size: .82em; font-weight: 700; color: #1A1A1A; }
+        #painel-automacao .pa-icons , #projudi-mu-painel .pa-icons { display: flex; gap: 4px; }
+        #painel-automacao .pa-icon-btn , #projudi-mu-painel .pa-icon-btn {
             width: 20px; height: 20px; border: 1px solid #DEDDD6; border-radius: 5px;
             background: #FFFFFF; cursor: pointer; color: #52514E; font-size: .68em;
             line-height: 1; padding: 0;
         }
-        #painel-automacao .pa-icon-btn:hover { background: #F4F4F1; }
+        #painel-automacao .pa-icon-btn:hover , #projudi-mu-painel .pa-icon-btn:hover { background: #F4F4F1; }
 
-        #painel-automacao .pa-tabs {
+        #painel-automacao .pa-tabs , #projudi-mu-painel .pa-tabs {
             display: flex; gap: 2px; padding: 8px 11px 0; background: #F4F4F1; border-bottom: 1px solid #DEDDD6;
             /* .pa-tabs mora dentro de .pa-body (para sumir junto ao colapsar — ver
                pa-btn-colapsar) mas mantém a aparência de faixa colada nas bordas do painel,
                cancelando o padding do .pa-body com margem negativa. */
             margin: -11px -11px 8px;
         }
-        #painel-automacao .pa-tab {
+        #painel-automacao .pa-tab , #projudi-mu-painel .pa-tab {
             flex: 1; border: none; background: none; padding: 7px 4px 8px; font-size: .68em; font-weight: 600;
             color: #82807A; cursor: pointer; border-bottom: 2px solid transparent; text-align: center;
             font-family: inherit;
         }
-        #painel-automacao .pa-tab:hover { color: #52514E; }
-        #painel-automacao .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
+        #painel-automacao .pa-tab:hover , #projudi-mu-painel .pa-tab:hover { color: #52514E; }
+        #painel-automacao .pa-tab.active , #projudi-mu-painel .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
 
-        #painel-automacao .pa-body { padding: 11px; }
+        #painel-automacao .pa-body , #projudi-mu-painel .pa-body { padding: 11px; }
 
-        #painel-automacao .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
-        #painel-automacao .pa-dot {
+        #painel-automacao .pa-state-row , #projudi-mu-painel .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+        #painel-automacao .pa-dot , #projudi-mu-painel .pa-dot {
             width: 7px; height: 7px; border-radius: 50%; background: #C3C2B7; flex: none;
             box-shadow: 0 0 0 3px rgba(195,194,183,.2);
         }
-        #painel-automacao .pa-dot.on { background: #9C742E; box-shadow: 0 0 0 3px rgba(156,116,46,.16); }
-        #painel-automacao .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
-        #painel-automacao .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
-        #painel-automacao .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
-        #painel-automacao .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
-        #painel-automacao .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-dot.on , #projudi-mu-painel .pa-dot.on { background: #9C742E; box-shadow: 0 0 0 3px rgba(156,116,46,.16); }
+        #painel-automacao .pa-dot.alerta , #projudi-mu-painel .pa-dot.alerta { background: #923A3A; box-shadow: 0 0 0 3px rgba(146,58,58,.16); }
+        #painel-automacao .pa-state-txt , #projudi-mu-painel .pa-state-txt { font-size: .72em; color: #52514E; line-height: 1.35; }
+        #painel-automacao .pa-state-txt strong , #projudi-mu-painel .pa-state-txt strong { color: #1A1A1A; font-weight: 600; }
+        #painel-automacao .pa-unidades , #projudi-mu-painel .pa-unidades { font-size: .68em; color: #52514E; line-height: 1.4; margin-top: 4px; padding: 5px 7px; background: #F4F2EC; border-radius: 4px; }
+        #painel-automacao .pa-unidades strong , #projudi-mu-painel .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
 
-        #painel-automacao .pa-progress { margin-bottom: 10px; }
-        #painel-automacao .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
-        #painel-automacao .pa-progress-bar {
+        #painel-automacao .pa-progress , #projudi-mu-painel .pa-progress { margin-bottom: 10px; }
+        #painel-automacao .pa-progress-track , #projudi-mu-painel .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
+        #painel-automacao .pa-progress-bar , #projudi-mu-painel .pa-progress-bar {
             background: #3A5A7D; height: 100%; width: 0%; border-radius: 4px; transition: width .4s ease;
         }
-        #painel-automacao .pa-progress-bar.pa-progress-completo { background: #527467; }
-        #painel-automacao .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
-        #painel-automacao .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
+        #painel-automacao .pa-progress-bar.pa-progress-completo , #projudi-mu-painel .pa-progress-bar.pa-progress-completo { background: #527467; }
+        #painel-automacao .pa-progress-lbl , #projudi-mu-painel .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
+        #painel-automacao .pa-tempo , #projudi-mu-painel .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
-        #painel-automacao .pa-group { margin-bottom: 10px; }
-        #painel-automacao .pa-group-lbl {
+        #painel-automacao .pa-group , #projudi-mu-painel .pa-group { margin-bottom: 10px; }
+        #painel-automacao .pa-group-lbl , #projudi-mu-painel .pa-group-lbl {
             display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
             letter-spacing: .05em; text-transform: uppercase; color: #82807A; margin: 0 0 5px;
         }
-        #painel-automacao .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
-        #painel-automacao .pa-group-lbl.especifico { color: #3A5A7D; }
+        #painel-automacao .pa-group-lbl::after , #projudi-mu-painel .pa-group-lbl::after { content: ""; flex: 1; height: 1px; background: #DEDDD6; }
+        #painel-automacao .pa-group-lbl.especifico , #projudi-mu-painel .pa-group-lbl.especifico { color: #3A5A7D; }
         /* margin-left 0 (não 14px) + text-align:left explícito — o cabeçalho do subgrupo
            (ex.: "AUDIÊNCIAS") fica alinhado à mesma margem esquerda dos demais itens do
            grupo, não recuado/deslocado do resto da lista. */
-        #painel-automacao .pa-subgroup-lbl {
+        #painel-automacao .pa-subgroup-lbl , #projudi-mu-painel .pa-subgroup-lbl {
             font-size: .68em; font-weight: 600; color: #82807A; margin: 4px 0 2px 0; text-align: left;
             text-transform: uppercase; letter-spacing: .02em;
         }
-        #painel-automacao .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-        #painel-automacao .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
-        #painel-automacao .pa-item input[type="checkbox"] { margin: 0; }
-        #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
-        #painel-automacao .pa-placeholder {
+        #painel-automacao .pa-item , #projudi-mu-painel .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+        #painel-automacao .pa-item-sub , #projudi-mu-painel .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item input[type="checkbox"] , #projudi-mu-painel .pa-item input[type="checkbox"] { margin: 0; }
+        #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select , #projudi-mu-painel .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
+        #painel-automacao .pa-placeholder , #projudi-mu-painel .pa-placeholder {
             display: flex; align-items: center; gap: 6px; padding: 8px 9px; background: #FAFAF8;
             border: 1px dashed #C3C2B7; border-radius: 6px; font-size: .7em; color: #82807A; font-style: italic;
         }
 
-        #painel-automacao .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
-        #painel-automacao .pa-link {
+        #painel-automacao .pa-links , #projudi-mu-painel .pa-links { display: flex; gap: 10px; margin-bottom: 8px; }
+        #painel-automacao .pa-link , #projudi-mu-painel .pa-link {
             background: none; border: none; padding: 0; cursor: pointer;
             font-size: .68em; font-weight: 600; color: #3A5A7D;
         }
-        #painel-automacao .pa-link:disabled { color: #82807A; cursor: not-allowed; }
+        #painel-automacao .pa-link:disabled , #projudi-mu-painel .pa-link:disabled { color: #82807A; cursor: not-allowed; }
 
-        #painel-automacao .pa-resumo {
+        #painel-automacao .pa-resumo , #projudi-mu-painel .pa-resumo {
             display: flex; align-items: center; gap: 7px; font-size: .72em; color: #52514E;
             padding: 7px 9px; background: #F4F4F1; border: 1px solid #DEDDD6; border-radius: 6px; margin-bottom: 10px;
         }
 
-        #painel-automacao .pa-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
-        #painel-automacao .pa-btn {
+        #painel-automacao .pa-actions , #projudi-mu-painel .pa-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+        #painel-automacao .pa-btn , #projudi-mu-painel .pa-btn {
             border-radius: 6px; padding: 7px 10px; font-size: .78em; font-weight: 600;
             cursor: pointer; border: 1px solid transparent; flex: 1;
         }
-        #painel-automacao .pa-btn:disabled { opacity: .5; cursor: not-allowed; }
-        #painel-automacao .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
-        #painel-automacao .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
-        #painel-automacao .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
-        #painel-automacao .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
-        #painel-automacao .pa-btn-row { display: flex; gap: 6px; }
+        #painel-automacao .pa-btn:disabled , #projudi-mu-painel .pa-btn:disabled { opacity: .5; cursor: not-allowed; }
+        #painel-automacao .pa-btn-primary , #projudi-mu-painel .pa-btn-primary { background: #3A5A7D; border-color: #2E4A69; color: #fff; }
+        #painel-automacao .pa-btn-secondary , #projudi-mu-painel .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
+        #painel-automacao .pa-btn-ghost , #projudi-mu-painel .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
+        #painel-automacao .pa-btn-alerta , #projudi-mu-painel .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
+        #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; gap: 6px; }
 
-        #painel-automacao .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
 
         /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
            window.confirm() nativo não permite customizar o texto dos botões, então este
@@ -10526,6 +12258,12 @@
             width: 360px; max-width: 90vw; padding: 18px;
         }
         .projudi-confirm-msg { font-size: .85em; color: #1A1A1A; line-height: 1.5; white-space: pre-line; margin-bottom: 14px; }
+        .projudi-confirm-lista-titulo { font-size: .78em; font-weight: 700; color: #52514E; margin-bottom: 6px; }
+        .projudi-confirm-lista {
+            max-height: 160px; overflow-y: auto; border: 1px solid #DEDDD6; border-radius: 6px;
+            padding: 6px 8px; margin-bottom: 14px;
+        }
+        .projudi-confirm-check-item { display: flex; align-items: center; gap: 6px; font-size: .82em; color: #1A1A1A; padding: 3px 0; cursor: pointer; }
         .projudi-confirm-botoes { display: flex; gap: 8px; justify-content: flex-end; }
         .projudi-confirm-btn {
             border-radius: 6px; padding: 8px 14px; font-size: .8em; font-weight: 600;
@@ -10570,6 +12308,69 @@
         });
     }
 
+    // Mesmo diálogo de "Resumo geral" vs. "Somar e detalhar por atribuição" (ver
+    // baixarPDFConjunto), mas com uma lista de checkboxes (pedido do usuário) pra
+    // escolher QUAIS das atribuições já coletadas entram no PDF — todas vêm marcadas por
+    // padrão. Devolve { porAtribuicao, atribuicoesSelecionadas } (Set com os nomes
+    // marcados) — nunca `null`/cancela a exportação, só ajusta as duas opções antes de
+    // gerar (mesmo comportamento de sempre: "Cancelar" nunca abortava a geração, só
+    // escolhia o modo "resumo geral").
+    function escolherOpcoesPDFConjunto(mensagem, textoConfirmar, textoCancelar, atuacoes) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'projudi-confirm-overlay';
+            const box = document.createElement('div');
+            box.className = 'projudi-confirm-box';
+            const msg = document.createElement('div');
+            msg.className = 'projudi-confirm-msg';
+            msg.textContent = mensagem;
+            box.appendChild(msg);
+
+            const listaTitulo = document.createElement('div');
+            listaTitulo.className = 'projudi-confirm-lista-titulo';
+            listaTitulo.textContent = 'Atribuições a incluir no PDF:';
+            box.appendChild(listaTitulo);
+
+            const lista = document.createElement('div');
+            lista.className = 'projudi-confirm-lista';
+            const checkboxes = atuacoes.map(a => {
+                const label = document.createElement('label');
+                label.className = 'projudi-confirm-check-item';
+                const chk = document.createElement('input');
+                chk.type = 'checkbox';
+                chk.checked = true; // todas marcadas por padrão, pedido do usuário
+                label.appendChild(chk);
+                label.appendChild(document.createTextNode(' ' + a));
+                lista.appendChild(label);
+                return { atuacao: a, chk };
+            });
+            box.appendChild(lista);
+
+            const botoes = document.createElement('div');
+            botoes.className = 'projudi-confirm-botoes';
+            const btnCancelar = document.createElement('button');
+            btnCancelar.type = 'button';
+            btnCancelar.className = 'projudi-confirm-btn projudi-confirm-btn-secondary';
+            btnCancelar.textContent = textoCancelar;
+            const btnConfirmar = document.createElement('button');
+            btnConfirmar.type = 'button';
+            btnConfirmar.className = 'projudi-confirm-btn projudi-confirm-btn-primary';
+            btnConfirmar.textContent = textoConfirmar;
+            const selecionadas = () => new Set(checkboxes.filter(c => c.chk.checked).map(c => c.atuacao));
+            const finalizar = (porAtribuicao) => {
+                overlay.remove();
+                resolve({ porAtribuicao, atribuicoesSelecionadas: selecionadas() });
+            };
+            btnCancelar.onclick = () => finalizar(false);
+            btnConfirmar.onclick = () => finalizar(true);
+            botoes.appendChild(btnCancelar);
+            botoes.appendChild(btnConfirmar);
+            box.appendChild(botoes);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+        });
+    }
+
     // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
     // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
     // sem a qual a automação fica parada sem nenhum aviso ao usuário.
@@ -10588,9 +12389,12 @@
         // sempre sem nenhum jeito de desligá-la (o gesto que a ativava/desativava também
         // não existe mais) — remove aqui, todo carregamento, por segurança.
         chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
-        chamarSeguro(gravarProcessosAtivosSeDisponivel, 'gravarProcessosAtivosSeDisponivel'); // nº de processos ativos, só existe na página inicial
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
+        // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
+        // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
+        // comentário grande acima de CHAVE_MU_ATIVO).
+        chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
         chamarSeguro(passoAutomacao, 'passoAutomacao'); // avança a automação se estiver em estado de navegação
         // Conduz a navegação da automação em QUALQUER página (não só na página inicial,
         // onde fica o painel) — a coleta ocorre no frame de conteúdo, que pode não ser o
@@ -10599,6 +12403,7 @@
         // automação parada até uma ação manual do usuário.
         setInterval(() => {
             chamarSeguro(atualizarPainel, 'atualizarPainel');
+            chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
         }, 2000);
