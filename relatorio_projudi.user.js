@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.24
+// @version      24.25
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5205,18 +5205,31 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
+        if (cfg === CFG_SUSPENSOS) {
+            return {
+                rotulo: CFG_SUSPENSOS.pdf.titulo,
+                // Tabela discriminada embutida direto no resumo (pedido do usuário) —
+                // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensos).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensos(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: null,
+            };
+        }
         if (cfg === CFG_SUSPENSOS_PRAZO) {
             return {
                 rotulo: TITULO_SUSPENSOS_PRAZO,
+                // Tabela discriminada embutida direto no resumo (pedido do usuário) —
+                // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensosPrazo).
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, rotuloBloco),
-                montarTabela: (doc, dados, comIndice) => montarTabelaSuspensosPrazo(doc, dados, comIndice),
+                montarTabela: null,
             };
         }
         if (cfg === CFG_INSTANCIA_RECURSAL) {
             return {
                 rotulo: TITULO_INSTANCIA_RECURSAL,
+                // Tabela discriminada embutida direto no resumo (pedido do usuário) —
+                // sem passo de tabela separado (ver secaoTemTabela/montarResumoInstanciaRecursal).
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, rotuloBloco),
-                montarTabela: (doc, dados, comIndice) => montarTabelaInstanciaRecursal(doc, dados, comIndice),
+                montarTabela: null,
             };
         }
         if (cfg === CFG_ATIVOS_CLASSE) {
@@ -5622,6 +5635,12 @@
         // (pedido do usuário: sem página de tabela separada ao final) — nunca entra no
         // passo de tabela separado.
         if (s.cfgOriginal === CFG_ARQUIVADOS_SALDO) return false;
+        // Suspensos (indeterminado), Suspensos com Prazo e Em Instância Recursal também
+        // passaram a desenhar a tabela discriminada dentro do próprio resumo (mesmo
+        // pedido do usuário acima) — sem página de tabela separada.
+        if (s.cfgOriginal === CFG_SUSPENSOS) return false;
+        if (s.cfgOriginal === CFG_SUSPENSOS_PRAZO) return false;
+        if (s.cfgOriginal === CFG_INSTANCIA_RECURSAL) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -5760,11 +5779,16 @@
             ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
             : null;
         const porAtribuicao = !!opcoes.porAtribuicao;
-        // Instância Recursal fica de fora do split "Resumo Geral + 1 bloco por
-        // atribuição" (pedido do usuário) — sempre um resumo único consolidado, com a
-        // competência de cada processo já indicada na própria tabela discriminada (ver
-        // cfg.cabecalhos/linha de CFG_INSTANCIA_RECURSAL).
-        const porAtribuicaoPara = (cfgOriginal) => porAtribuicao && cfgOriginal !== CFG_INSTANCIA_RECURSAL;
+        // Instância Recursal, Suspensos (indeterminado) e Suspensos com Prazo ficam de
+        // fora do split "Resumo Geral + 1 bloco por atribuição" (pedido do usuário) —
+        // esses três mostram um único conjunto de KPIs sobre TODOS os dados coletados
+        // mais uma única tabela combinada, com a competência de cada processo já
+        // indicada na própria linha (ver cfg.cabecalhos/linha de CFG_INSTANCIA_RECURSAL e
+        // as colunas "Atribuição (Competência)" de montarResumoSuspensos/
+        // montarResumoSuspensosPrazo) — um "relatório específico por competência" não é
+        // mais desejado para esses três.
+        const CFGS_SEM_SPLIT_ATRIBUICAO = [CFG_INSTANCIA_RECURSAL, CFG_SUSPENSOS, CFG_SUSPENSOS_PRAZO];
+        const porAtribuicaoPara = (cfgOriginal) => porAtribuicao && !CFGS_SEM_SPLIT_ATRIBUICAO.includes(cfgOriginal);
         const doc = novoDocPDF();
         const agora = new Date();
         const now = agora.getTime();
@@ -5799,7 +5823,16 @@
         // de todo o resto do Cartório (inclusive Mandados), independente da posição real
         // na capa — bug relatado pelo usuário (ordem do PDF divergindo da ordem do popup).
         const CFGS_FORA_DO_ESQUEMA = [...CFGS_CARTORIO, CFG_CONCLUSOES, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL];
-        const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal)
+        // Ativos por Classe (pedido do usuário) precisa ser a PRIMEIRA página de detalhe
+        // do PDF — já é a 1ª linha da capa (itensEstatisticasGerais), mas antes disso
+        // "outrasSecoes" (que a continha) só era desenhado DEPOIS de todo o Cartório e
+        // Gabinete no PASSO 1/2 abaixo, então a página física saía fora de ordem. Fica de
+        // fora de "outrasSecoes" aqui e é renderizado à parte, antes do loop de
+        // itensCartorio (ver secaoAtivosClasse/renderizarSecaoOutraResumo/
+        // renderizarSecaoOutraTabela mais abaixo).
+        const secaoAtivosClasse = secoes.find(s => s.cfgOriginal === CFG_ATIVOS_CLASSE
+            && (s.dados.length || (s.cfgOriginal.mostrarSeVazio && foiColetado(s.cfgOriginal))));
+        const outrasSecoes = secoes.filter(s => !CFGS_FORA_DO_ESQUEMA.includes(s.cfgOriginal) && s.cfgOriginal !== CFG_ATIVOS_CLASSE
             && (s.dados.length || (s.cfgOriginal.mostrarSeVazio && foiColetado(s.cfgOriginal))));
 
         // Limites de dias (pendência mais antiga) por domínio — ver legenda em
@@ -6340,6 +6373,41 @@
         // ÚLTIMO — usados por PASSO 3/4 do mesmo jeito que antes (link "voltar"/"ver
         // tabela" sempre aponta pro bloco geral, e a navegação fina fica a cargo dos
         // bookmarks aninhados).
+        // Mesma dispensa do Cartório para os relatórios "fora do esquema": zerado só
+        // aparece na tabela unificada, sem resumo próprio.
+        function secaoVazia(s) {
+            if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) return !(s.dados[0] && s.dados[0].totalDesignadas > 0);
+            if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return !(s.dados[0] && s.dados[0].totalGeral > 0);
+            return s.dados.length === 0;
+        }
+        // Corpo do resumo de uma seção "fora do esquema" (outrasSecoes), fatorado numa
+        // função (pedido: Ativos por Classe precisa ser renderizado PRIMEIRO, antes do
+        // Cartório, mas com o MESMO tratamento — bookmark de topo nível, sub-blocos por
+        // atribuição etc. — das demais seções deste grupo) — ver PASSO 2 abaixo para o
+        // par desta função (tabela em vez de resumo).
+        function renderizarSecaoOutraResumo(s) {
+            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
+            let bmItem = null;
+            blocos.forEach((bloco, i) => {
+                const primeira = !usouPagina1;
+                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                usouPagina1 = true;
+                s.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
+                if (i === 0) s.pgResumoInicio = pg;
+                if (blocos.length === 1) {
+                    s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                } else {
+                    if (!bmItem) bmItem = doc.outline.add(null, s.rotulo, { pageNumber: s.pgResumoInicio });
+                    doc.outline.add(bmItem, bloco.rotulo, { pageNumber: pg });
+                    s._bmOutra = bmItem;
+                }
+            });
+            s.pgResumoFim = doc.internal.getNumberOfPages();
+        }
+        // Ativos por Classe primeiro (pedido do usuário: já é a 1ª linha da capa — ver
+        // comentário em secaoAtivosClasse acima) — antes até do Cartório.
+        if (secaoAtivosClasse && !secaoVazia(secaoAtivosClasse)) renderizarSecaoOutraResumo(secaoAtivosClasse);
+
         let bmCartorio = null;
         itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
             const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
@@ -6389,32 +6457,7 @@
             info.pgResumoFim = doc.internal.getNumberOfPages();
         });
 
-        // Mesma dispensa do Cartório para os relatórios "fora do esquema": zerado só
-        // aparece na tabela unificada, sem resumo próprio.
-        function secaoVazia(s) {
-            if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) return !(s.dados[0] && s.dados[0].totalDesignadas > 0);
-            if (s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS) return !(s.dados[0] && s.dados[0].totalGeral > 0);
-            return s.dados.length === 0;
-        }
-        outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
-            const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
-            let bmItem = null;
-            blocos.forEach((bloco, i) => {
-                const primeira = !usouPagina1;
-                const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-                usouPagina1 = true;
-                s.montarResumo(doc, bloco.dados, primeira, false, bloco.rotulo);
-                if (i === 0) s.pgResumoInicio = pg;
-                if (blocos.length === 1) {
-                    s._bmOutra = doc.outline.add(null, s.rotulo, { pageNumber: pg });
-                } else {
-                    if (!bmItem) bmItem = doc.outline.add(null, s.rotulo, { pageNumber: s.pgResumoInicio });
-                    doc.outline.add(bmItem, bloco.rotulo, { pageNumber: pg });
-                    s._bmOutra = bmItem;
-                }
-            });
-            s.pgResumoFim = doc.internal.getNumberOfPages();
-        });
+        outrasSecoes.filter(s => !secaoVazia(s)).forEach(renderizarSecaoOutraResumo);
 
         // ═══ PASSO 2: todas as TABELAS (mesma ordem), cada uma já com o link "← Voltar
         // ao resumo" (a página do resumo já é conhecida, desenhada no passo 1) ═══
@@ -6424,7 +6467,10 @@
             // 1º bloco); a navegação pros blocos específicos fica pelos bookmarks.
             // Sem pendências, não há o que discriminar — dispensa a tabela (mas o resumo com
             // o KPI já foi desenhado no passo 1 de qualquer forma, ex.: Suspensos zerado).
-            itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
+            // t.secao.montarTabela pode ser null (Suspensos/Suspensos com Prazo/Instância
+            // Recursal desenham a tabela embutida no próprio resumo, sem passo de tabela
+            // separado — mesmo padrão de secaoTemTabela usado por outrasSecoes abaixo).
+            itensCartorio.filter(t => t.pendentes > 0 && t.secao.montarTabela).forEach(t => {
                 const blocos = subBlocosPorAtribuicao(t.dados, porAtribuicaoPara(t.secao.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
@@ -6454,8 +6500,10 @@
                 });
             });
             // Mesma dispensa do Cartório: sem registros, não há tabela discriminada a
-            // mostrar (ex.: Audiências Pendentes zerado).
-            outrasSecoes.filter(secaoTemTabela).forEach(s => {
+            // mostrar (ex.: Audiências Pendentes zerado). Fatorado numa função (mesmo
+            // motivo do renderizarSecaoOutraResumo no PASSO 1: Ativos por Classe entra
+            // primeiro, fora de outrasSecoes, mas com o mesmo tratamento).
+            function renderizarSecaoOutraTabela(s) {
                 const blocos = subBlocosPorAtribuicao(s.dados, porAtribuicaoPara(s.cfgOriginal));
                 let bmTabelaItem = null;
                 blocos.forEach((bloco, i) => {
@@ -6468,11 +6516,13 @@
                         doc.outline.add(bmTabelaItem, bloco.rotulo, { pageNumber: pg });
                     }
                 });
-            });
+            }
+            if (secaoAtivosClasse && secaoTemTabela(secaoAtivosClasse)) renderizarSecaoOutraTabela(secaoAtivosClasse);
+            outrasSecoes.filter(secaoTemTabela).forEach(renderizarSecaoOutraTabela);
 
             // ═══ PASSO 3: volta a cada resumo e desenha "Ver tabela detalhada →" agora
             // que a página da tabela é conhecida ═══
-            itensCartorio.filter(t => t.pendentes > 0).forEach(t => {
+            itensCartorio.filter(t => t.pendentes > 0 && t.secao.montarTabela).forEach(t => {
                 doc.setPage(t.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', t.pgTabela, pw, ph);
             });
@@ -6480,6 +6530,10 @@
                 doc.setPage(info.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', info.pgTabela, pw, ph);
             });
+            if (secaoAtivosClasse && secaoTemTabela(secaoAtivosClasse)) {
+                doc.setPage(secaoAtivosClasse.pgResumoFim);
+                desenharLinkRodape(doc, 'Ver tabela detalhada →', secaoAtivosClasse.pgTabela, pw, ph);
+            }
             outrasSecoes.filter(secaoTemTabela).forEach(s => {
                 doc.setPage(s.pgResumoFim);
                 desenharLinkRodape(doc, 'Ver tabela detalhada →', s.pgTabela, pw, ph);
@@ -6494,7 +6548,11 @@
         cartorio.linhas.forEach(l => {
             if (!l._rect || !l.cfgOriginal) return;
             const t = itensCartorio.find(it => it.secao.cfgOriginal === l.cfgOriginal);
-            const s = outrasSecoes.find(o => o.cfgOriginal === l.cfgOriginal);
+            // Ativos por Classe saiu de outrasSecoes (ver secaoAtivosClasse acima —
+            // renderizado antes do Cartório) mas continua precisando de link na linha
+            // "Processos Ativos" da capa, então entra na busca também.
+            const s = outrasSecoes.find(o => o.cfgOriginal === l.cfgOriginal)
+                || (secaoAtivosClasse && secaoAtivosClasse.cfgOriginal === l.cfgOriginal ? secaoAtivosClasse : null);
             const pgAlvo = (t && t.pgResumoInicio) || (s && s.pgResumoInicio);
             if (!pgAlvo) return;
             doc.setPage(l._rect.page);
@@ -7920,7 +7978,11 @@
         const tabInicioY = proximoY + 6;
 
         const colunas = [
-            { header: 'Processo', width: 26, get: d => d.processo },
+            { header: 'Processo', width: 24, get: d => d.processo },
+            // Atribuição (Competência) — pedido do usuário: cada linha já indica de qual
+            // atribuição veio, já que o relatório passou a acumular dados de todas as
+            // atribuições coletadas (ver competenciaDe/atuacao em CFG_ARQUIVADOS_SALDO.extrai).
+            { header: 'Atribuição (Competência)', width: 20, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
             { header: 'Dt Arquivamento', width: 12, get: d => d.dtArquivamento },
             { header: 'Conta Judicial', width: 15, get: d => d.contaJudicial },
             { header: 'Dt Últ. Atualização CEF', width: 13, get: d => d.dtAtualizacaoCEF },
@@ -7934,7 +7996,9 @@
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
         const idxSaldo = colunas.findIndex(c => c.header === 'Saldo');
 
-        const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
+        // Ordenado por Saldo DESCENDENTE (maior primeiro, pedido do usuário) — antes era
+        // por Dt Arquivamento ascendente.
+        const ordenados = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
         const corpo = ordenados.map(d => {
             const o = {};
             colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
@@ -7965,7 +8029,7 @@
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles,
-            foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
+            foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', k4: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
             footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
             didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
@@ -8484,6 +8548,122 @@
         return paginaInicial;
     }
 
+    // PDF individual (botão "Baixar PDF" na tela/painel, fora do Relatório PDF conjunto)
+    // de Suspensos por Prazo Indeterminado — mesmo padrão de gerarPDFArquivadosSaldo:
+    // tabela discriminada embutida direto no resumo, sem passo de tabela separado.
+    function gerarPDFSuspensos(dados) {
+        const doc = novoDocPDF();
+        montarResumoSuspensos(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `${CFG_SUSPENSOS.nomeArquivo}_${dataArquivo()}.pdf`);
+    }
+    CFG_SUSPENSOS.pdfCustom = (dados) => gerarPDFSuspensos(dados);
+
+    // Página de RESUMO do relatório de Suspensos por Prazo Indeterminado. Substitui o
+    // antigo caminho genérico (montarResumoGenerico via cfg.pdf) — pedido do usuário:
+    // KPIs calculados sobre TODOS os dados coletados (não mais um bloco "Resumo Geral" +
+    // um bloco por atribuição — ver exclusão em porAtribuicaoPara), sem os demais
+    // gráficos (removeu "Suspensos por Classe Processual"), com uma única tabela
+    // discriminada (Processo / Atribuição (Competência) / Início Suspensão) embutida
+    // direto no resumo, mesmo padrão de montarResumoArquivadosSaldo. cfg.pdf.observacaoFinal
+    // e os rótulos dos KPIs continuam definidos em CFG_SUSPENSOS.pdf (ainda fazem sentido
+    // ali como configuração), só deixaram de ser lidos por montarResumoGenerico.
+    function montarResumoSuspensos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const p = CFG_SUSPENSOS.pdf;
+        const r = dados || [];
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(p.titulo, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 4.2;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const prio = contarPrioritarios(r);
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m, kY, kW2, 28, p.atosTitulo, String(r.length), [], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, p.rotuloPrioridadeKpi || 'Prioritários pendentes', String(prio),
+            [`${r.length ? Math.round(prio / r.length * 100) : 0}% do total`], true, COR.vermelho);
+
+        // KPI da suspensão mais antiga — mesmo cálculo que montarResumoGenerico fazia via
+        // acharMaisAntigo/p.dataCampo, hand-coded aqui porque este relatório saiu do
+        // mecanismo genérico.
+        const aY = kY + 28 + gap;
+        const antigo = acharMaisAntigo(r, p.dataCampo);
+        let valAntigo = '—', subsAntigo = ['Data não disponível'];
+        if (antigo) {
+            const dias = Math.max(0, Math.floor((Date.now() - antigo.ts) / DIA_MS));
+            valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
+            subsAntigo = [
+                `Processo ${antigo.registro.processo || ''}${antigo.registro.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                antigo.registro.classe || '',
+            ];
+        }
+        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+
+        // Observação final destacada (texto literal pedido pela Corregedoria) — mantida
+        // mesmo sem os demais gráficos (pedido do usuário: manter o texto, remover só os
+        // gráficos). Mesmo desenho visual do balão de observação de Arquivados com Saldo.
+        let proximoY = aY + 28 + gap;
+        if (p.observacaoFinal) {
+            const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, p.observacaoFinal);
+            proximoY += alturaObs + gap;
+        }
+
+        // Tabela discriminada direto no resumo (pedido do usuário: sem página separada) —
+        // Processo / Atribuição (Competência) / Início Suspensão, ordenada por Início
+        // Suspensão ascendente (mais antiga primeiro, mesma convenção das demais tabelas
+        // discriminadas deste relatório).
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${p.titulo}`);
+        const tabInicioY = proximoY + 6;
+        if (!r.length) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Nenhum processo suspenso por prazo indeterminado.', m, tabInicioY + 2);
+            desenharRodape(doc, p.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
+        }
+
+        const colunas = [
+            { header: 'Processo', width: 30, get: d => d.processo },
+            { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
+            { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
+        ];
+        const columnStyles = {};
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+
+        const ordenados = r.slice().sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0));
+        const corpo = ordenados.map(d => {
+            const o = {};
+            colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+            return o;
+        });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: corpo,
+            startY: tabInicioY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, p.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+    }
+
     const TITULO_SUSPENSOS_PRAZO = 'Suspensos com Prazo Determinado';
 
     // Duração em dias (fim - início) de uma suspensão por prazo determinado. null se
@@ -8531,20 +8711,24 @@
 
     function gerarPDFSuspensosPrazo(dados, somenteResumo) {
         const doc = novoDocPDF();
+        // Tabela discriminada embutida direto no resumo (pedido do usuário) — não há
+        // mais um passo de "tabela detalhada" separado.
         montarResumoSuspensosPrazo(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        if (!somenteResumo && dados.length) {
-            const pgTabela = montarTabelaSuspensosPrazo(doc, dados, false);
-            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `suspensos_prazo_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
-    // Página de RESUMO (KPIs + lista "Classe — média de dias") do relatório de Suspensos
+    // Página de RESUMO (KPIs + tabela discriminada embutida) do relatório de Suspensos
     // com Prazo Determinado. Requisitos do usuário (b.2): quantidade de processos;
-    // classe processual com mais processos suspensos; tempo médio de suspensão por
-    // classe. E (b.1, também aqui) o processo com a data de fim de suspensão mais longa.
+    // classe processual com mais processos suspensos; e (b.1) o processo com a data de
+    // fim de suspensão mais longa. A tabela "Tempo médio de suspensão por Classe
+    // Processual" foi removida (pedido do usuário) — só a lista "Classe com Mais
+    // Suspensões" continua, como KPI (por isso mediaSuspensaoPorClasse ainda é chamada,
+    // só pra achar classeTop). A tabela discriminada (antes em montarTabelaSuspensosPrazo,
+    // função removida) passou a ser desenhada aqui direto, com uma coluna "Atribuição
+    // (Competência)" a mais (pedido do usuário) — mesmo padrão de
+    // montarResumoArquivadosSaldo/montarResumoSuspensos.
     function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
@@ -8554,23 +8738,24 @@
         const uw = pw - 2 * m;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const r = dados || [];
 
-        const porClasse = mediaSuspensaoPorClasse(dados);
+        const porClasse = mediaSuspensaoPorClasse(r);
         const classeTop = porClasse[0] || null;
-        const fimMaisLongo = acharFimMaisLongo(dados);
+        const fimMaisLongo = acharFimMaisLongo(r);
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
         const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
         const kY = yLinha + 5;
         const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(r.length), [], true, COR.azul);
         desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
             classeTop ? classeTop.classe : '—',
             classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
@@ -8583,44 +8768,21 @@
             fimMaisLongo ? fimMaisLongo.registro.processo : '—',
             fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
 
-        // Lista "Classe — média de dias de suspensão", uma linha por classe (já ordenada
-        // por quantidade de processos, maior primeiro — ver mediaSuspensaoPorClasse).
-        const listaY = kY + 28 + gap + 4;
-        tituloSecao(doc, m, listaY, uw, 'Tempo médio de suspensão por Classe Processual');
-        doc.autoTable({
-            columns: [
-                { header: 'Classe Processual', dataKey: 'classe' },
-                { header: 'Processos', dataKey: 'quantidade' },
-                { header: 'Média de Dias Suspenso', dataKey: 'media' },
-            ],
-            body: porClasse.map(c => ({ classe: c.classe, quantidade: String(c.quantidade), media: c.media.toFixed(1).replace('.', ',') })),
-            startY: listaY + 4,
-            margin: { left: m, right: m, bottom: 14 },
-            theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-            alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                classe: { cellWidth: uw * 0.56 },
-                quantidade: { cellWidth: uw * 0.2, halign: 'right' },
-                media: { cellWidth: uw * 0.24, halign: 'right' },
-            },
-            didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
-        });
-    }
+        // Tabela discriminada embutida direto no resumo (pedido do usuário: sem página
+        // separada) — ORDENADA pela data de Fim Suspensão DESCENDENTE (mais longa
+        // primeiro, pedido do usuário original desta tabela, mantido). Registros sem
+        // data de fim parseável vão ao final.
+        const tabY = kY + 28 + gap + 4;
+        tituloSecao(doc, m, tabY, uw, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
+        const tabInicioY = tabY + 6;
+        if (!r.length) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text('Nenhum processo suspenso por prazo determinado.', m, tabInicioY + 2);
+            desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
+        }
 
-    // Tabela discriminada — Processo, Classe, Prazo, Início Suspensão, Fim Suspensão —
-    // ORDENADA pela data de Fim Suspensão DESCENDENTE (mais longa primeiro, pedido do
-    // usuário). Registros sem data de fim parseável vão ao final.
-    function montarTabelaSuspensosPrazo(doc, dados, comIndice) {
-        const agora = new Date();
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 12;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-
-        const ordenados = dados.slice().sort((a, b) => {
+        const ordenados = r.slice().sort((a, b) => {
             const ta = parseDataBR(a.fimSuspensao);
             const tb = parseDataBR(b.fimSuspensao);
             const va = ta == null ? -Infinity : ta;
@@ -8628,22 +8790,19 @@
             return vb - va;
         });
 
-        doc.addPage();
-        const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
-
         // "Motivo da Suspensão" só existe na área Crime — entra na tabela discriminada só
         // quando algum registro coletado trouxer esse campo (ver CFG_SUSPENSOS_PRAZO.extrai).
-        const temMotivo = dados.some(d => d.motivo);
+        const temMotivo = r.some(d => d.motivo);
         const colunas = [
-            { header: 'Processo', width: 30, get: (d) => d.processo },
-            { header: 'Classe Processual', width: 44, get: (d) => d.classe },
-            { header: 'Prazo', width: 30, get: (d) => d.prazo },
-            { header: 'Início Suspensão', width: 24, get: (d) => d.inicioSuspensao },
-            { header: 'Fim Suspensão', width: 24, get: (d) => d.fimSuspensao },
+            { header: 'Processo', width: 26, get: (d) => d.processo },
+            { header: 'Atribuição (Competência)', width: 34, get: (d) => d.competencia || d.atuacao || '(sem atribuição)' },
+            { header: 'Classe Processual', width: 40, get: (d) => d.classe },
+            { header: 'Início Suspensão', width: 22, get: (d) => d.inicioSuspensao },
+            { header: 'Fim Suspensão', width: 22, get: (d) => d.fimSuspensao },
+            { header: 'Prazo', width: 26, get: (d) => d.prazo },
         ];
-        if (temMotivo) colunas.push({ header: 'Motivo da Suspensão', width: 40, get: (d) => d.motivo });
-        colunas.push({ header: 'Dias Paralisado', width: 24, get: (d) => (d.dias == null ? '' : String(d.dias)) });
+        if (temMotivo) colunas.push({ header: 'Motivo da Suspensão', width: 36, get: (d) => d.motivo });
+        colunas.push({ header: 'Dias Paralisado', width: 22, get: (d) => (d.dias == null ? '' : String(d.dias)) });
         const columnStyles = {};
         colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
 
@@ -8654,7 +8813,7 @@
                 colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
                 return o;
             }),
-            startY: m + 8,
+            startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
@@ -8664,8 +8823,6 @@
             columnStyles,
             didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
-
-        return paginaInicial;
     }
 
     const TITULO_INSTANCIA_RECURSAL = 'Em Instância Recursal';
@@ -8684,45 +8841,24 @@
             .sort((a, b) => a.ts - b.ts);
     }
 
-    // Faixas de tempo desde o envio (pedido do usuário, item b: "distribuição por faixa
-    // de tempo"). Mesma aproximação de dias de DIA_MS/365 usada acima.
-    function faixasTempoInstanciaRecursal(dados) {
-        const now = Date.now();
-        // Faixas pedidas pelo usuário (3, sem lacuna): Até 2 anos / 2 a 5 anos / mais de
-        // 5 anos — "mais de 5 anos" cobre o que o pedido original chamava de "mais de 10
-        // anos", só que sem deixar processos de 5 a 10 anos sem faixa própria.
-        const faixas = [
-            { label: 'Até 2 anos', min: 0, max: 730, valor: 0 },
-            { label: 'De 2 a 5 anos', min: 730, max: 1825, valor: 0 },
-            { label: 'Mais de 5 anos', min: 1825, max: Infinity, valor: 0 },
-        ];
-        dados.forEach(d => {
-            const ts = parseDataBR(d.dataEnvio);
-            if (ts == null) return;
-            const dias = (now - ts) / DIA_MS;
-            const faixa = faixas.find(f => dias >= f.min && dias < f.max) || faixas[faixas.length - 1];
-            faixa.valor++;
-        });
-        return faixas;
-    }
-
     function gerarPDFInstanciaRecursal(dados, somenteResumo) {
         const doc = novoDocPDF();
+        // Tabela discriminada embutida direto no resumo (pedido do usuário) — não há
+        // mais um passo de "tabela detalhada" separado.
         montarResumoInstanciaRecursal(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
-        if (!somenteResumo && dados.length) {
-            const pgTabela = montarTabelaInstanciaRecursal(doc, dados, false);
-            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
-        }
         const sufixo = somenteResumo ? '_resumo' : '';
         baixarBlob(doc.output('blob'), `instancia_recursal_projudi${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Página de RESUMO: KPIs (total em instância recursal, total enviado há mais de 2
-    // anos), lista dos processos enviados há mais de 2 anos (processo + data de envio,
-    // via mini-tabela — pode ser longa demais para um card sem apertar o layout, mesmo
-    // racional de outras listas potencialmente grandes do script) e o gráfico de barras
-    // "remetidos por faixa de tempo desde o envio" (item b do pedido do usuário).
+    // anos) seguidos da tabela discriminada TODA (Processo/Classe/Data de Envio/
+    // Competência), embutida direto no resumo — pedido do usuário: removeu o gráfico
+    // "Processos por Faixa de Tempo desde o Envio" (faixasTempoInstanciaRecursal, função
+    // removida) e a mini-tabela que só listava os processos enviados há mais de 2 anos;
+    // agora é uma única tabela com TODOS os processos (antes em
+    // montarTabelaInstanciaRecursal, função removida — a lógica de colunas/ordenação e a
+    // observação ao final vieram de lá sem mudança).
     function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
@@ -8732,81 +8868,45 @@
         const uw = pw - 2 * m;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const r = dados || [];
 
-        const maisDe2Anos = processosEnviadosHaMaisDeXAnos(dados, 2);
+        const maisDe2Anos = processosEnviadosHaMaisDeXAnos(r, 2);
 
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em instância recursal`, m, rotuloInfo.y);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) em instância recursal`, m, rotuloInfo.y);
         const yLinha = rotuloInfo.y + 4.2;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
         const gap = 6;
         const kY = yLinha + 5;
         const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(r.length), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
 
-        // Gráfico "remetidos por faixa de tempo desde o envio" (item b).
-        const graficoY = kY + 24 + gap;
-        const graficoH = 46;
-        desenharBarras(doc, m, graficoY, uw, graficoH, 'Processos por Faixa de Tempo desde o Envio', faixasTempoInstanciaRecursal(dados), (v) => String(v), COR.aqua);
-
-        // Lista dos processos enviados há mais de 2 anos — mini-tabela (não card: a
-        // quantidade de processos pode ser grande, e desenharCardLista/medirAlturaCardLista
-        // não paginam sozinhos; doc.autoTable já pagina e nunca corta o número do processo).
-        const listaY = graficoY + graficoH + gap;
-        tituloSecao(doc, m, listaY, uw, 'Processos enviados há mais de 2 anos');
-        if (maisDe2Anos.length) {
-            doc.autoTable({
-                columns: [
-                    { header: 'Processo', dataKey: 'processo' },
-                    { header: 'Data de Envio', dataKey: 'dataEnvio' },
-                ],
-                body: maisDe2Anos.map(x => ({ processo: x.registro.processo, dataEnvio: x.registro.dataEnvio })),
-                startY: listaY + 4,
-                margin: { left: m, right: m, bottom: 14 },
-                theme: 'grid',
-                styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-                alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: {
-                    processo: { cellWidth: uw * 0.65 },
-                    dataEnvio: { cellWidth: uw * 0.35, halign: 'right' },
-                },
-                didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
-            });
-        } else {
+        // Tabela discriminada embutida direto no resumo (pedido do usuário: sem página
+        // separada) — Processo, Classe, Data de Envio, Competência — ORDENADA por data de
+        // envio CRESCENTE (mais antigo primeiro, pedido do usuário original desta tabela,
+        // mantido). Registros sem data parseável vão ao final.
+        const tabY = kY + 24 + gap;
+        tituloSecao(doc, m, tabY, uw, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
+        const tabInicioY = tabY + 6;
+        if (!r.length) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-            doc.text('Nenhum processo enviado há mais de 2 anos.', m, listaY + 6);
+            doc.text('Nenhum processo em instância recursal.', m, tabInicioY + 2);
             desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
         }
-    }
 
-    // Tabela discriminada — Processo, Classe, Data de Envio — ORDENADA por data de envio
-    // CRESCENTE (mais antigo primeiro, pedido do usuário: "a partir daquele enviado há
-    // mais tempo"). Registros sem data parseável vão ao final.
-    function montarTabelaInstanciaRecursal(doc, dados, comIndice) {
-        const agora = new Date();
-        const pw = doc.internal.pageSize.getWidth();
-        const ph = doc.internal.pageSize.getHeight();
-        const m = 12;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-
-        const ordenados = dados.slice().sort((a, b) => {
+        const ordenados = r.slice().sort((a, b) => {
             const ta = parseDataBR(a.dataEnvio);
             const tb = parseDataBR(b.dataEnvio);
             const va = ta == null ? Infinity : ta;
             const vb = tb == null ? Infinity : tb;
             return va - vb;
         });
-
-        doc.addPage();
-        const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
 
         // Coluna "Competência" (pedido do usuário) — o relatório não divide mais em
         // Resumo Geral + bloco por atribuição, então cada processo precisa indicar a
@@ -8827,7 +8927,7 @@
                 colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
                 return o;
             }),
-            startY: m + 8,
+            startY: tabInicioY,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
@@ -8841,9 +8941,8 @@
         // Observação destacada ao final da tabela (pedido do usuário): só quando há
         // processo em trâmite há mais de 2 anos — recomenda conferência manual pra
         // evitar paralisação por falha na comunicação do julgamento definitivo.
-        const maisDe2AnosTabela = processosEnviadosHaMaisDeXAnos(dados, 2);
-        if (maisDe2AnosTabela.length) {
-            const obs = `Há ${maisDe2AnosTabela.length} processo(s) em trâmite na 2ª instância há mais de 2 anos. `
+        if (maisDe2Anos.length) {
+            const obs = `Há ${maisDe2Anos.length} processo(s) em trâmite na 2ª instância há mais de 2 anos. `
                 + 'Recomenda-se conferência MANUAL da tramitação desses processos, para evitar paralisação no caso '
                 + 'de eventual falha na comunicação do julgamento definitivo.';
             const uwObs = pw - 2 * m;
@@ -8859,8 +8958,6 @@
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             doc.text(linhasObs, m + 3, yObs + 11);
         }
-
-        return paginaInicial;
     }
 
     // ── Interface ───────────────────────────────────────────────────────────────
