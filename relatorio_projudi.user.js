@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.17
-// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos...) e gera o Relatório para Correição Ordinária em PDF/Excel
+// @version      24.19
+// @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
 // @updateURL    https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js
@@ -2820,6 +2820,289 @@
         });
     }
 
+    // ── Processos Arquivados com Saldo (Depósito Eletrônico) ────────────────────────
+    // Portado do userscript standalone `relatorio_arquivados_saldo.user.js` (pedido do
+    // usuário: juntar de volta ao script principal, como último item do Cartório).
+    // Igual a Outros Cumprimentos, NÃO é uma lista paginada de table.resultTable — é um
+    // Relatório Dinâmico do Projudi (administracao/relatorio.do) cujo formulário
+    // (#relatorioForm) só devolve os dados via CSV. Clicar em "Gerar Relatório" de
+    // verdade aciona abrirRelatorio() do próprio Projudi, que abre uma aba nova em
+    // branco (target="relatorio" sem <iframe> correspondente na página) E dispara
+    // download nativo do CSV ao mesmo tempo — isso já causou um bug real no script
+    // standalone (a aba nova/download nativo interferiam na requisição em segundo plano
+    // e o PDF não saía). Por isso este relatório nunca clica em nenhum botão da tela:
+    // pede os MESMOS dados em segundo plano via fetch() (roda na origem/sessão do
+    // próprio documento — nenhum @grant novo é necessário) com tipoExportacao=CSV, e
+    // gera o PDF a partir do CSV interpretado.
+    //
+    // Diferente do standalone: aqui não há GM_xmlhttpRequest de reserva (o script
+    // principal não tem @grant/@connect para isso e não há necessidade clara de
+    // adicionar — fetch() same-origin já é suficiente), nem GM_registerMenuCommand (o
+    // gatilho é só a fila de automação do script principal, via AUTO_ESTADO/
+    // avancarAutomacao) — ver CLAUDE.md sobre não adicionar permissões/dependências sem
+    // necessidade clara.
+
+    const TITULO_ARQUIVADOS_SALDO = 'Processos Arquivados com Saldo (Depósito Eletrônico)';
+
+    const CFG_ARQUIVADOS_SALDO = {
+        prefixo: 'projudi_arqsaldo_',
+        // "Zero processos arquivados com saldo" é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_SUSPENSOS/CFG_OUTROS_CUMPRIMENTOS) — mostra a linha mesmo
+        // vazia, desde que já coletada.
+        mostrarSeVazio: true,
+        // Nunca detectado pelo cabeçalho genérico de table.resultTable — não há tabela
+        // nenhuma na tela (o formulário do Relatório Dinâmico é um form de filtros, os
+        // dados vêm só pelo CSV do fetch). A detecção própria fica em
+        // tratarPaginaArquivadosSaldo()/injetarBotoes (ver abaixo).
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'processos_arquivados_saldo_projudi',
+        rotulos: { coletar: 'Extrair Processos Arquivados com Saldo', baixar: '⬇ Baixar Processos Arquivados com Saldo' },
+        pdfCustom: (dados) => gerarPDFArquivadosSaldo(dados),
+    };
+
+    // Máscara XXXXXXX-XX.XXXX.X.XX.XXXX (padrão CNJ) a partir dos 20 dígitos crus que o
+    // CSV traz sem formatação.
+    function mascararProcesso(digitos) {
+        const d = String(digitos || '').replace(/\D/g, '');
+        if (d.length !== 20) return digitos;
+        return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16, 20)}`;
+    }
+
+    function parseSaldoBR(str) {
+        const limpo = String(str || '').replace(/[^\d,.-]/g, '').trim();
+        if (!limpo) return 0;
+        return parseFloat(limpo.replace(/\./g, '').replace(',', '.')) || 0;
+    }
+
+    function fmtBRL(v) {
+        return (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    }
+
+    // ── CSV: ponto-e-vírgula, campos entre aspas, windows-1252 (mesmo encoding do resto
+    // do Projudi) — colunas fixas: Processo; Dt Arquivamento; Conta Judicial; Dt Última
+    // Atualização CEF; Saldo ──────────────────────────────────────────────────────────
+    function parseLinhaCSV(linha) {
+        return linha.split(';').map(c => c.trim().replace(/^"|"$/g, ''));
+    }
+
+    function parseCSV(texto) {
+        const linhas = String(texto || '').split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim().length);
+        const [, ...corpo] = linhas; // descarta o cabeçalho
+        return corpo.map(linha => {
+            const [processoCru, dtArquivamento, contaJudicial, dtAtualizacaoCEF, saldoStr] = parseLinhaCSV(linha);
+            return {
+                processo: mascararProcesso(processoCru),
+                dtArquivamento, contaJudicial, dtAtualizacaoCEF, saldoStr,
+                saldo: parseSaldoBR(saldoStr),
+            };
+        });
+    }
+
+    // Acha o link do relatório na LISTAGEM de Relatórios Dinâmicos — a URL é a mesma
+    // base de administracao/relatorio.do usada por dezenas de outros relatórios
+    // dinâmicos nessa listagem, por isso a distinção é só pelo TEXTO do link.
+    function acharLinkArquivadosSaldoNaListagem() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (!/administracao\/relatorio\.do/i.test(a.href)) continue;
+                if (/processos\s+arquivados\s+com\s+saldo/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // Reconhece o FORMULÁRIO do relatório pelo conteúdo — o rótulo "Nome:" da tabela de
+    // configuração do relatório dinâmico bate com o nome exato deste relatório no
+    // Projudi. Busca em todos os frames acessíveis (o formulário pode estar num frame de
+    // conteúdo diferente do frame onde o script está rodando neste ciclo).
+    function formularioArquivadosSaldo() {
+        const docs = todosDocumentosAcessiveis();
+        for (const doc of docs) {
+            const form = doc.getElementById && doc.getElementById('relatorioForm');
+            if (!form) continue;
+            const labels = form.querySelectorAll('td.label');
+            for (const label of labels) {
+                if (!/^nome:?$/i.test(label.textContent.trim())) continue;
+                const valorTd = label.nextElementSibling;
+                if (valorTd && /processos\s+arquivados\s+com\s+saldo/i.test(valorTd.textContent)) return form;
+            }
+        }
+        return null;
+    }
+
+    // Remove um BOM UTF-8 (﻿) do início do texto, se houver — TextDecoder não tira isso
+    // sozinho, e um BOM sobrando faria o teste de cabeçalho falhar mesmo com o CSV certo
+    // por trás dele.
+    function semBOM(texto) { return texto.replace(/^﻿/, ''); }
+
+    function pareceCSV(texto) { return /^"?Processo"?\s*;/i.test(texto.trim()); }
+
+    // Decodifica tentando windows-1252 primeiro (encoding do resto do Projudi); se não
+    // bater com o cabeçalho esperado, tenta UTF-8 antes de desistir — não temos como
+    // saber de antemão qual encoding o servidor realmente usou nesta resposta específica
+    // (o CSV de exemplo que validamos era windows-1252, mas não custa checar as duas).
+    function decodificarResposta(buffer) {
+        const tentativas = [];
+        for (const encoding of ['windows-1252', 'utf-8']) {
+            let texto;
+            try {
+                texto = semBOM(new TextDecoder(encoding).decode(buffer));
+            } catch (e) {
+                tentativas.push(`${encoding}: falhou ao decodificar (${e.message})`);
+                continue;
+            }
+            if (pareceCSV(texto)) return { texto, encoding };
+            tentativas.push(`${encoding}: "${texto.slice(0, 150).replace(/\s+/g, ' ')}"`);
+        }
+        return { texto: null, tentativas };
+    }
+
+    // Garante que o rádio "Arquivo CSV" esteja selecionado antes de enviar o
+    // formulário — a tela vem com "PDF" marcado por padrão (checked="checked" no HTML
+    // original, confirmado em capturas reais da tela: table.form > tr > td >
+    // input[name="tipoExportacao"], com valores PDF/Excel/HTML/"Excel (Somente
+    // Planilha)"/"RTF (Word, Writter etc...)"/CSV). Sem isso, corpoFormularioArquivadosSaldo()
+    // serializaria o formulário exatamente como está — ou seja, pediria PDF, não CSV.
+    // Clique real (não checked=true + dispatchEvent — mesma lição já documentada no
+    // resto deste arquivo: telas do Projudi só reagem a clique de verdade).
+    function selecionarFormatoCSV(form) {
+        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCSV && !radioCSV.checked) radioCSV.click();
+        else if (!radioCSV) console.warn('[Projudi Arquivados c/ Saldo] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        return radioCSV;
+    }
+
+    // Marca o checkbox do formulário (equivalente ao passo do trace puppeteer usado
+    // pra mapear a navegação até esta tela) se ele existir e ainda não estiver marcado —
+    // precisa do MESMO estado do formulário que um clique real deixaria, pra requisição
+    // em segundo plano replicar fielmente a que de fato funciona (ver corpoFormularioArquivadosSaldo).
+    function marcarCheckboxDoRelatorio(form) {
+        const checkbox = form.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) checkbox.click();
+        else if (!checkbox) console.warn('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário; confira manualmente se o relatório depende dele.');
+        return checkbox;
+    }
+
+    // Serializa o FormData REAL do formulário (depois de selecionarFormatoCSV/
+    // marcarCheckboxDoRelatorio terem ajustado seu estado) — não um punhado de campos
+    // chutados: os campos reais (idRelatorio, numeroColunas, descricaoUser, tipoUser,
+    // tamanhoUser, entre outros específicos deste relatório dinâmico) são o que faz a
+    // diferença entre a resposta vir com o CSV de verdade ou vir vazia (0 bytes).
+    function corpoFormularioArquivadosSaldo(form) {
+        return new URLSearchParams(new FormData(form));
+    }
+
+    // Interpreta o ArrayBuffer da resposta (0 bytes / não parece CSV / CSV reconhecido).
+    function interpretarResposta(buffer, origem) {
+        if (!buffer || buffer.byteLength === 0) {
+            throw new Error(`[${origem}] a resposta veio vazia (0 bytes) — sessão pode ter expirado, ou a sessão usada nesta via não é a mesma da aba.`);
+        }
+        const { texto, encoding, tentativas } = decodificarResposta(buffer);
+        if (!texto) {
+            console.warn(`[Projudi Arquivados c/ Saldo] [${origem}] nenhuma decodificação pareceu CSV:`, tentativas);
+            throw new Error(`[${origem}] a resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`);
+        }
+        console.log(`[Projudi Arquivados c/ Saldo] [${origem}] CSV reconhecido (encoding ${encoding})`);
+        return texto;
+    }
+
+    // fetch() da PRÓPRIA página — roda na origem/sessão do documento (mesmo "mundo" de
+    // cookies que um clique real do usuário). Sem X-Requested-With: o diagnóstico ao
+    // vivo (feito no script standalone antes deste merge) confirmou que o endpoint é um
+    // form POST comum, não uma rota pensada pra AJAX — copiar fielmente um submit real
+    // (sem cabeçalhos extras) é o que faz a resposta vir com o CSV de verdade. Sem via de
+    // reserva (ver comentário no topo desta seção sobre não reintroduzir GM_xmlhttpRequest).
+    async function coletarViaFetch(urlAction, corpo) {
+        const resp = await fetch(urlAction, {
+            method: 'POST',
+            body: corpo,
+            credentials: 'same-origin',
+        });
+        // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
+        // (302) para uma URL de download gerada.
+        console.log('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
+        if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
+        const buffer = await resp.arrayBuffer();
+        return interpretarResposta(buffer, 'fetch');
+    }
+
+    let coletaArquivadosSaldoEmAndamento = false;
+
+    // Ponto de entrada da coleta — chamado pela automação (via tratarPaginaArquivadosSaldo).
+    // Trava contra chamadas concorrentes (mesmo padrão de coletaOutrosCumprimentosEmAndamento):
+    // mais de um frame de projudi2.tjpr.jus.br pode achar o mesmo formulário ao mesmo
+    // tempo (ver todosDocumentosAcessiveis) e disparar a extração em paralelo.
+    async function extrairArquivadosSaldoAgora(form) {
+        if (coletaArquivadosSaldoEmAndamento) {
+            console.log('[Projudi Arquivados c/ Saldo] extração já em andamento — ignorando novo disparo');
+            return;
+        }
+        coletaArquivadosSaldoEmAndamento = true;
+        // Mesmo papel de marcarAtividade() no coletor genérico — evita que o watchdog
+        // (verificarTravamentoAutomacao) marque falso travamento enquanto o fetch está
+        // em voo.
+        store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'ts', String(Date.now()));
+        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
+        try {
+            selecionarFormatoCSV(form);
+            marcarCheckboxDoRelatorio(form);
+            const corpo = corpoFormularioArquivadosSaldo(form);
+            const texto = await coletarViaFetch(form.action, corpo);
+            const dados = parseCSV(texto);
+            console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — salvando e avançando a automação`);
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', JSON.stringify(dados));
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'num_paginas', '1');
+            store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'coletado', '1');
+            avancarAutomacao(CFG_ARQUIVADOS_SALDO);
+        } catch (err) {
+            // Sem alert() aqui de propósito — bloquearia a automação rodando sem
+            // supervisão. O watchdog (WATCHDOG_STALL_MS/verificarTravamentoAutomacao)
+            // acaba pulando este item depois de ~8min sem progresso, mesma rede de
+            // segurança usada pelos demais relatórios.
+            console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
+        } finally {
+            coletaArquivadosSaldoEmAndamento = false;
+        }
+    }
+
+    // Página-driver: chamada de injetarBotoes() a cada carregamento de página, só quando
+    // o estado da automação indica que estamos nesta fila (preenchendo_/coletando_
+    // arquivadosaldo — ver injetarBotoes). Decide o próximo passo olhando o que TEM na
+    // tela atual, do mais específico pro mais genérico:
+    //   a) formulário do relatório encontrado -> extrai;
+    //   b) link do relatório na listagem de Relatórios Dinâmicos -> clica;
+    //   c) nenhum dos dois -> não faz nada (o primeiro salto, menu -> listagem, já é
+    //      coberto por navegarMenu('arquivadosaldo') dentro de passoAutomacao(), que já
+    //      tem sua própria lógica de retry — não duplicar aqui).
+    function tratarPaginaArquivadosSaldo() {
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        if (estadoAtual !== 'preenchendo_arquivadosaldo' && estadoAtual !== 'coletando_arquivadosaldo') return;
+
+        const form = formularioArquivadosSaldo();
+        if (form) {
+            if (coletaArquivadosSaldoEmAndamento) return;
+            // Transição preenchendo_ -> coletando_ ANTES de chamar a extração — mesmo
+            // padrão de Tempo Médio/Conclusões (ver injetarBotoes) — avancarAutomacao()
+            // só aceita avançar a partir do estado 'coletando_arquivadosaldo'.
+            if (estadoAtual === 'preenchendo_arquivadosaldo') {
+                store.setItem(AUTO_ESTADO, 'coletando_arquivadosaldo');
+            }
+            extrairArquivadosSaldoAgora(form);
+            return;
+        }
+
+        const linkListagem = acharLinkArquivadosSaldoNaListagem();
+        if (linkListagem) {
+            console.log('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
+            linkListagem.click();
+            return;
+        }
+        // Nem formulário nem listagem — provavelmente ainda estamos na tela anterior
+        // (menu) ou o conteúdo ainda está carregando; nada a fazer neste ciclo.
+    }
+
     // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
     // Mesma armadilha de Outros Cumprimentos: a aba é um <a> SEM href (só reage a clique
     // real, não a eventos sintéticos) e fica restrita ao container da barra de abas
@@ -4863,6 +5146,15 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaOutrosCumprimentos(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_ARQUIVADOS_SALDO) {
+            return {
+                rotulo: TITULO_ARQUIVADOS_SALDO,
+                // Tabela discriminada embutida direto no resumo (pedido do usuário) —
+                // sem passo de tabela separado (ver secaoTemTabela/montarResumoArquivadosSaldo).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: null,
+            };
+        }
         if (cfg === CFG_CUMPRIMENTO_MEDIDAS) {
             return {
                 rotulo: TITULO_CUMPRIMENTO_MEDIDAS,
@@ -5210,6 +5502,10 @@
         // Cumprimento de Medidas é só os 3 contadores agregados — nunca tem tabela
         // discriminada de processos (ver montarTabela: null em descreverSecaoPDF).
         if (s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS) return false;
+        // Processos Arquivados com Saldo desenha a tabela dentro do próprio resumo
+        // (pedido do usuário: sem página de tabela separada ao final) — nunca entra no
+        // passo de tabela separado.
+        if (s.cfgOriginal === CFG_ARQUIVADOS_SALDO) return false;
         if (s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS) {
             const resumo = s.dados && s.dados[0];
             return !!(resumo && resumo.tabela && resumo.tabela.length);
@@ -5440,6 +5736,7 @@
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
+        const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
         const secaoInstanciaRecursal = secoes.find(s => s.cfgOriginal === CFG_INSTANCIA_RECURSAL);
 
@@ -5800,6 +6097,20 @@
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+            });
+        }
+        // "Processos Arquivados com Saldo" — mesmo padrão de Outros Cumprimentos: sem
+        // classificação por situação/aging (a métrica é monetária, não dias parado), por
+        // isso semSituacao: true. Empilhado por ÚLTIMO de propósito (depois de Bens
+        // Apreendidos/Cumprimento de Medidas), por pedido explícito do usuário: último
+        // item da tabela "Outros"/do Cartório no PDF conjunto.
+        if (secaoArquivadosSaldo) {
+            const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
+            itensOutros.push({
+                nome: 'Processos Arquivados com Saldo',
+                indicador: `${secaoArquivadosSaldo.dados.length} processo(s)`,
+                detalhamento: `Saldo total: ${fmtBRL(saldoTotal)}`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -7355,6 +7666,192 @@
         return pagina;
     }
 
+    // ── PDF do relatório de Processos Arquivados com Saldo (Depósito Eletrônico) ─────
+    // Lista por processo de verdade (diferente de Outros Cumprimentos), mas com colunas
+    // fixas e específicas (Processo/Dt Arquivamento/Conta Judicial/Dt Atualização CEF/
+    // Saldo) que não batem com o formato genérico de cfg.cabecalhos/cfg.linha/
+    // cfg.pdf.colunas (montarResumoGenerico/montarTabelaGenerico pressupõem um
+    // p.dataCampo/p.processoCampo configurável — aqui as colunas já vêm fixas do CSV, e o
+    // "aging" que interessa é por dinheiro parado, não por dias de tramitação padrão), por
+    // isso resumo e tabela dedicados, iguais em estrutura aos de Outros Cumprimentos.
+    // Diferente do gerarPDF/montarResumo/montarTabela do userscript standalone que deu
+    // origem a este relatório: aqui montarTabela SEMPRE começa em página própria
+    // (doc.addPage() no início), em vez de continuar na mesma página do resumo — a capa
+    // unificada (gerarPDFConjunto) monta TODOS os resumos primeiro e só depois TODAS as
+    // tabelas (páginas não ficam mais adjacentes nesse ponto), o mesmo padrão de
+    // Outros Cumprimentos/Paralisados/etc.; "uma única página quando tudo couber" não é
+    // possível de garantir nesse pipeline.
+
+    // Balão de observação (pedido do usuário, herdado do standalone): mesmo estilo
+    // visual dos cards de totais (caixa arredondada + barra de destaque à esquerda), mas
+    // com um parágrafo corrido em vez de um valor/título centralizados — por isso não
+    // reaproveita desenharCard() diretamente. Fonte Helvetica (pedido explícito do
+    // usuário) e texto justificado numa ÚNICA chamada de doc.text() com o parágrafo
+    // inteiro (não pré-quebrado em linhas) — o jsPDF só aplica o espaçamento extra entre
+    // palavras (justificação de verdade) quando é ELE MESMO que quebra o texto via
+    // maxWidth; passando uma linha pré-quebrada por vez, cada chamada vira um "array de 1
+    // linha" e a lógica de justify nunca dispara. Altura calculada via
+    // doc.getLineHeight()/scaleFactor (métrica real de espaçamento entre linhas do jsPDF,
+    // em pt, convertida pra mm) e devolvida (não fixa) porque o texto é sempre o mesmo,
+    // mas a robustez de calcular > chutar vale o custo.
+    function desenharCardObservacaoArquivadosSaldo(doc, x, y, w, texto) {
+        const padX = 6, padTop = 8, gapRotuloTexto = 5, padBottom = 4;
+        const larguraTexto = w - 2 * padX;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+        const linhas = doc.splitTextToSize(texto, larguraTexto);
+        const alturaLinha = doc.getLineHeight() / doc.internal.scaleFactor;
+        const yRotulo = y + padTop;
+        const yTexto = yRotulo + gapRotuloTexto;
+        const h = padTop + gapRotuloTexto + (linhas.length - 1) * alturaLinha + padBottom;
+
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.azul);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text('OBSERVAÇÃO', x + padX, yRotulo);
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+        doc.text(texto, x + padX, yTexto, { align: 'justify', maxWidth: larguraTexto });
+
+        return h;
+    }
+
+    const OBSERVACAO_ARQUIVADOS_SALDO = 'Verificou-se, a partir de dados extraídos do Sistema Projudi, a existência de '
+        + 'processos arquivados com saldo em conta judicial. A secretaria deverá promover a análise '
+        + 'dos processos indicados e adotar as medidas cabíveis para o levantamento dos valores '
+        + 'depositados, em estrita observância ao Código de Normas do Foro Judicial e ao Decreto '
+        + 'Judiciário nº 626/2018.';
+
+    function gerarPDFArquivadosSaldo(dados) {
+        const doc = novoDocPDF();
+        // Tabela discriminada embutida direto no resumo (pedido do usuário) — não há
+        // mais um passo de "tabela detalhada" separado nem bookmark próprio para ela.
+        montarResumoArquivadosSaldo(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        baixarBlob(doc.output('blob'), `processos_arquivados_saldo_projudi_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoArquivadosSaldo(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const r = dados || [];
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+
+        // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
+        // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
+        const kY = yLinha + 6;
+        const kpis = [
+            { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
+            { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
+        ];
+        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
+
+        const aY = kY + 28 + gap;
+        let maisAntigo = null;
+        r.forEach(d => {
+            const ts = parseDataBR(d.dtArquivamento);
+            if (ts == null) return;
+            if (!maisAntigo || ts < maisAntigo.ts) maisAntigo = { ts, d };
+        });
+        let valAntigo = '—', subsAntigo = ['Data não disponível'];
+        if (maisAntigo) {
+            const dias = Math.max(0, Math.floor((Date.now() - maisAntigo.ts) / DIA_MS));
+            valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
+            subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
+        }
+        desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+
+        // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
+        // relatório efetivamente lista algum processo.
+        let proximoY = aY + 28 + gap;
+        if (r.length) {
+            const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, OBSERVACAO_ARQUIVADOS_SALDO);
+            proximoY += alturaObs + gap;
+        }
+
+        // Tabela discriminada direto no resumo (pedido do usuário: sem página separada
+        // ao final) — mesmo padrão de montarResumoAudiencias, embutindo a tabela na
+        // mesma página quando couber e deixando o autoTable paginar sozinho quando não
+        // couber. Sem tabela nenhuma (0 processos), só desenha o rodapé e encerra.
+        if (!r.length) {
+            desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            return;
+        }
+
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
+        const tabInicioY = proximoY + 6;
+
+        const colunas = [
+            { header: 'Processo', width: 26, get: d => d.processo },
+            { header: 'Dt Arquivamento', width: 12, get: d => d.dtArquivamento },
+            { header: 'Conta Judicial', width: 15, get: d => d.contaJudicial },
+            { header: 'Dt Últ. Atualização CEF', width: 13, get: d => d.dtAtualizacaoCEF },
+            { header: 'Saldo', width: 12, get: d => fmtBRL(d.saldo) },
+        ];
+        const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
+        const fatorLargura = uw / somaLarguras;
+        const columnStyles = {};
+        // Saldo alinhado à esquerda, igual às demais colunas (pedido do usuário — antes
+        // só ela tinha halign:'right', destoando do resto da tabela).
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width * fatorLargura }; });
+        const idxSaldo = colunas.findIndex(c => c.header === 'Saldo');
+
+        const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
+        const corpo = ordenados.map(d => {
+            const o = {};
+            colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+            return o;
+        });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: corpo,
+            startY: tabInicioY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            // TOTAL só na última página da tabela (pedido do usuário) — o padrão do
+            // autoTable repete o `foot` em toda página (bug relatado num PDF real de
+            // 2 páginas: a linha TOTAL aparecia ao final de CADA uma).
+            showFoot: 'lastPage',
+            // Fonte Helvetica (não PublicSans) — bug relatado pelo usuário: os números
+            // desta tabela (Processo, datas, Conta Judicial, Saldo) saíam com espaços
+            // estranhos entre os caracteres. Causa: a fonte PublicSans embutida
+            // (FONTE_PUBLIC_SANS_REGULAR) declara larguras de glifo que não batem
+            // exatamente com o desenho real de certos glifos neste peso/tamanho — o
+            // CONTEÚDO do texto sai correto (copiar/colar do PDF funciona normalmente),
+            // só o posicionamento visual de cada caractere fica errado. Helvetica é fonte
+            // padrão do PDF (não embutida), sem esse risco — mesma solução usada no balão
+            // de observação acima.
+            styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            foot: [{ k0: 'TOTAL', k1: '', k2: '', k3: '', [`k${idxSaldo}`]: fmtBRL(saldoTotal) }],
+            footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
+            didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+    }
+
     // ── Gargalo por "Último Movimento" (Paralisados e Remessas) ────────────────
     // Paralisados e Remessas são a MESMA tela do Projudi com filtros diferentes, e seus
     // resumos são espelhos exatos um do outro — por isso a página complementar vive aqui,
@@ -8877,6 +9374,22 @@
             return;
         }
 
+        // Processos Arquivados com Saldo: mesma razão de Outros Cumprimentos acima —
+        // nem a listagem de Relatórios Dinâmicos nem o formulário do relatório
+        // (#relatorioForm) têm table.buttonBar, então cairiam no fallback genérico "sem
+        // buttonBar = 0 registros" logo abaixo se não fossem tratados antes. Aqui a
+        // detecção é só pelo ESTADO da automação (sem sinal de URL/conteúdo) porque o
+        // driver do relatório (tratarPaginaArquivadosSaldo) já resolve sozinho, a cada
+        // carregamento, o que fazer com a tela atual (form encontrado -> extrai; senão
+        // procura o link da listagem) — não há uma "espera ativa" própria como em Outros
+        // Cumprimentos porque não há tabela nenhuma pra estabilizar aqui.
+        const pareceTelaArquivadosSaldo = estadoAutoNoInicio === 'preenchendo_arquivadosaldo'
+            || estadoAutoNoInicio === 'coletando_arquivadosaldo';
+        if (pareceTelaArquivadosSaldo) {
+            tratarPaginaArquivadosSaldo();
+            return;
+        }
+
         // Página de Cumprimento de Medidas — mesmo tratamento de Outros Cumprimentos
         // acima (painel sem table.buttonBar, conteúdo carregado via AJAX). paginaCumprimen
         // toMedidas() (span já no DOM) só cobre "já carregou"; a URL de destino do clique
@@ -10058,6 +10571,15 @@
         // painel, e como uma linha própria na tabela unificada do Cartório do PDF conjunto
         // (ver linhasCartorio em gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
+        // Relatório Dinâmico do Projudi (administracao/relatorio.do), sem tabela de
+        // resultados nem paginação — os dados vêm de um CSV pedido via fetch() em
+        // segundo plano (ver CFG_ARQUIVADOS_SALDO/tratarPaginaArquivadosSaldo). Entra no
+        // grupo "Outros" do Cartório junto com Outros Cumprimentos, e por pedido
+        // explícito do usuário fica como o ÚLTIMO item do Cartório (mergeado de volta do
+        // userscript standalone relatorio_arquivados_saldo.user.js). precisaPreencher:
+        // true porque passa por 2 saltos de navegação (menu -> listagem -> formulário)
+        // antes de qualquer coleta de verdade começar.
+        { key: 'arquivadosaldo', cfg: CFG_ARQUIVADOS_SALDO, navAlvo: 'arquivadosaldo', rotulo: 'Processos Arquivados com Saldo', curto: 'Arq. c/ Saldo', dominio: 'cartorio', precisaPreencher: true },
         // ── Gabinete ────────────────────────────────────────────────────────────────
         { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: true },
         // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
@@ -10260,6 +10782,10 @@
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
+        // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
+        // do Projudi — o link específico do relatório é achado depois, na listagem (ver
+        // acharLinkArquivadosSaldoNaListagem, chamada por tratarPaginaArquivadosSaldo).
+        else if (alvo === 'arquivadosaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
@@ -11027,6 +11553,21 @@
             r.map(d => [d.tipo, d.pendentes, d.urgentes, d.origem === 'bnmp' ? 'BNMP' : 'Cumprimento']));
         return html;
     }
+    // Não usa secaoWordGenerica (a cfg não tem cabecalhos/linha — mesma razão de Outros
+    // Cumprimentos, ver comentário em CFG_ARQUIVADOS_SALDO), mas diferente daquele é uma
+    // lista por processo de verdade, então a tabela sai ordenada por data de
+    // arquivamento (mais antigo primeiro), com uma linha de TOTAL ao final.
+    function secaoWordArquivadosSaldo(dados) {
+        const r = dados || [];
+        let html = `<h2>${escaparHTML(TITULO_ARQUIVADOS_SALDO)}</h2>`;
+        const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+        html += `<p class="subtitulo">${r.length} processo(s) • Saldo total: ${escaparHTML(fmtBRL(saldoTotal))}</p>`;
+        const ordenados = r.slice().sort((a, b) => (parseDataBR(a.dtArquivamento) || 0) - (parseDataBR(b.dtArquivamento) || 0));
+        const linhas = ordenados.map(d => [d.processo, d.dtArquivamento, d.contaJudicial, d.dtAtualizacaoCEF, fmtBRL(d.saldo)]);
+        linhas.push(['TOTAL', '', '', '', fmtBRL(saldoTotal)]);
+        html += tabelaHTMLWord(['Processo', 'Dt Arquivamento', 'Conta Judicial', 'Dt Últ. Atualização CEF', 'Saldo'], linhas);
+        return html;
+    }
 
     const ESTILO_WORD = `
         body { font-family: Calibri, Arial, sans-serif; color: #1A1A1A; font-size: 11pt; }
@@ -11057,7 +11598,11 @@
 
             const linhasSumario = secoes.map(({ dados, cfg }) => {
                 const rotulo = descreverSecaoPDF(cfg, false).rotulo;
-                const total = (cfg.linha && cfg.cabecalhos) ? dados.length
+                // Arquivados com Saldo também não tem cfg.linha/cfg.cabecalhos (mesmo
+                // "esquema" de Outros Cumprimentos), mas é uma lista por processo de
+                // verdade — dados.length é a contagem certa aqui, diferente do fallback
+                // genérico abaixo (pensado para os resumos agregados sem lista).
+                const total = (cfg.linha && cfg.cabecalhos) || cfg === CFG_ARQUIVADOS_SALDO ? dados.length
                     : (dados[0] && (dados[0].totalGeral ?? dados[0].totalDesignadas ?? dados.reduce((s, d) => s + (d.pendentes || 0), 0))) || 0;
                 return [rotulo, String(total)];
             });
@@ -11067,6 +11612,7 @@
                 if (cfg === CFG_AUDIENCIAS_DESIGNADAS) { corpo += secaoWordAudienciasDesignadas(dados[0]); return; }
                 if (cfg === CFG_AUDIENCIAS_REALIZADAS) { corpo += secaoWordAudienciasRealizadas(dados[0]); return; }
                 if (cfg === CFG_OUTROS_CUMPRIMENTOS) { corpo += secaoWordOutrosCumprimentos(dados); return; }
+                if (cfg === CFG_ARQUIVADOS_SALDO) { corpo += secaoWordArquivadosSaldo(dados); return; }
                 corpo += secaoWordGenerica(cfg, dados);
             });
 
