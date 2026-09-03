@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.23
+// @version      24.24
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5233,225 +5233,301 @@
         };
     }
 
-    // Desenha uma caixa de domínio (Cartório ou Gabinete) na página "Situação da
-    // Unidade": cabeçalho, KPIs e uma mini-tabela por item (tarefa do Cartório, ou
-    // magistrado(a) do Gabinete) — a situação (Crítico/Atenção/Regular) só aparece por
-    // item, na última coluna da tabela, nunca como veredito agregado do domínio inteiro.
-    // Retorna o Y logo abaixo da tabela.
-    function desenharBlocoDominio(doc, x, y, w, cfg) {
-        const pw = doc.internal.pageSize.getWidth();
+    // ═══ Redesign da capa "Situação da Unidade" (pedido do usuário, aprovado por design,
+    // MENOS a faixa de KPIs que o mockup tinha — descartada explicitamente) ═══
+    // Cada subgrupo (Cartório) ou o bloco inteiro (Gabinete) agora é um CARTÃO com borda
+    // arredondada própria (não mais uma única autoTable contínua cortada por linhas de
+    // faixa) — ver desenharCardComLinhas, o motor genérico de paginação usado pelos dois
+    // domínios. Linhas viram "pill" de situação (fundo tintado + texto colorido, não só
+    // texto colorido) e ganham um chevron "›" (afetação puramente visual de "toque para
+    // detalhe" — aparece em toda linha de item, mesmo nas sem link real).
+    const CARD_HEADER_H = 7.5; // altura da faixa de cabeçalho de cada cartão (mm)
+    const CARD_PAD = 4; // respiro lateral interno do cartão (mm)
 
-        const headH = 15;
-        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3); doc.setFillColor(...COR.cartao);
-        doc.rect(x, y, w, headH, 'FD');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
-        doc.text(cfg.titulo, x + 6, y + 9.5);
+    // Clareia "cor" misturando com branco na proporção 1-alpha — usado pro fundo tintado
+    // do chip de situação (~14% da cor sólida). GState/opacity real existe no jsPDF 2.5.1
+    // bundlado, mas pré-calcular a cor evita ter que gerenciar estado de opacidade entre
+    // desenhos (mais simples, sem efeito colateral em desenhos vizinhos).
+    function corClara(cor, alpha) { return cor.map(c => Math.round(c * alpha + 255 * (1 - alpha))); }
 
-        let yy = y + headH + 5;
-        // Observação (substitui o antigo subtítulo com a lista de tarefas) — explica o
-        // critério de situação usado especificamente neste domínio.
-        if (cfg.observacao) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-            const linhasObs = doc.splitTextToSize(cfg.observacao, w - 12);
-            doc.text(linhasObs, x + 6, yy);
-            yy += linhasObs.length * 3.4 + 5;
+    // Chip/pill de situação: fundo arredondado tintado (cor sólida a ~14%) + texto em
+    // versalete negrito na cor sólida quando `comCor`; senão (situação inaplicável —
+    // "—", ex. Tempo Médio) fundo neutro (COR.cartao) e texto COR.muted. Alinhado pela
+    // borda direita em `rightX` (a largura do pill se ajusta ao texto).
+    function desenharChip(doc, rightX, yCenter, texto, cor, comCor, larguraMax) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.6);
+        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraMax - 4);
+        const padX = 2, h = 4.4;
+        const wChip = Math.min(larguraMax, doc.getTextWidth(label) + padX * 2);
+        const xChip = rightX - wChip;
+        doc.setFillColor(...(comCor ? corClara(cor, 0.16) : COR.cartao));
+        doc.roundedRect(xChip, yCenter - h / 2, wChip, h, 1.3, 1.3, 'F');
+        doc.setTextColor(...(comCor ? cor : COR.muted));
+        doc.text(label, xChip + wChip / 2, yCenter + 1.05, { align: 'center' });
+    }
+
+    // Chevron "›" — afetação visual de "há detalhe/link aqui", desenhado com 2 traços
+    // (evita depender de um glifo ">" existir na fonte embutida em todo tamanho/estilo).
+    function desenharChevron(doc, cx, cy) {
+        doc.setDrawColor(...corClara(COR.muted, 0.5)); doc.setLineWidth(0.55);
+        doc.line(cx - 1.1, cy - 1.7, cx + 1.1, cy);
+        doc.line(cx + 1.1, cy, cx - 1.1, cy + 1.7);
+    }
+
+    // Geometria das colunas à direita de um cartão (contador, [extra], chip, chevron) —
+    // compartilhada pelas linhas do Cartório (1 contador) e do Gabinete (2, quando há
+    // colunaExtra). `labelX/labelW` sobra pro título+subtítulo à esquerda.
+    function colunasCartao(x, w, comExtra) {
+        const GAP = 2, CHEVRON_W = 5, CHIP_W = 22, NUM_W = 20;
+        const x1 = x + w - CARD_PAD;
+        const chevronCX = x1 - CHEVRON_W / 2;
+        const chipRightX = x1 - CHEVRON_W - GAP;
+        const extraRightX = comExtra ? chipRightX - CHIP_W - GAP : null;
+        const numRightX = (comExtra ? extraRightX : chipRightX) - NUM_W - GAP;
+        const labelX = x + CARD_PAD;
+        return { labelX, labelW: numRightX - GAP - labelX, numRightX, numW: NUM_W, extraRightX, chipRightX, chevronCX, CHIP_W };
+    }
+
+    // Cabeçalho do domínio (faixa "Cartório"/"Gabinete" + linha de acento azul embaixo).
+    // opts.legenda: bolinhas coloridas com o critério de situação (Cartório — substitui
+    // o antigo parágrafo em itálico). opts.observacao: legenda em texto simples alinhada
+    // à direita (Gabinete — mesmo texto de antes, só reposicionado/restilizado).
+    function desenharCabecalhoDominio(doc, x, y, w, titulo, opts) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13.5); doc.setTextColor(...COR.tinta);
+        doc.text(titulo, x, y + 4.6);
+        if (opts && opts.legenda) {
+            let lx = x + w;
+            opts.legenda.slice().reverse().forEach(p => {
+                doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.muted);
+                lx -= doc.getTextWidth(p.rotulo);
+                doc.text(p.rotulo, lx, y + 4.4);
+                const dotX = lx - 2.6;
+                doc.setFillColor(...p.cor); doc.circle(dotX, y + 3.1, 0.9, 'F');
+                lx = dotX - 3.4;
+            });
+        } else if (opts && opts.observacao) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
+            doc.text(textoTruncadoParaLargura(doc, opts.observacao, w * 0.6), x + w, y + 4.4, { align: 'right' });
         }
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.6);
+        doc.line(x, y + 7, x + w, y + 7);
+        return y + 7 + 5;
+    }
+
+    // Motor genérico de cartão-com-linhas: desenha a borda arredondada + faixa de
+    // cabeçalho (conteúdo do cabeçalho delegado a `desenharCabecalhoFn`, chamada como
+    // (doc,x,y,w,ehContinuacao)) e as linhas de `itens` (altura por `alturaFn`, desenho
+    // por `desenharLinhaFn(doc,x,y,w,h,item)`), com hairline entre linhas. Pagina
+    // sozinho: se as linhas restantes não cabem no espaço até `ph-mBottom`, fecha o
+    // cartão nesta página e reabre um cartão de CONTINUAÇÃO (cabeçalho repetido com
+    // "(cont.)") na página seguinte a partir de `topo`. Simplificação conhecida: cada
+    // "parte" do cartão é uma unidade só (uma linha nunca é cortada ao meio), então o
+    // corte de página cai sempre numa borda de linha — nunca no meio de uma.
+    function desenharCardComLinhas(doc, x, yStart, w, desenharCabecalhoFn, itens, alturaFn, desenharLinhaFn, ph, mBottom, topo) {
+        let y = yStart, restantes = itens.slice(), parteIdx = 0;
+        while (true) {
+            let hAcc = CARD_HEADER_H;
+            const parte = [];
+            for (const it of restantes) {
+                const hl = alturaFn(it);
+                if (y + hAcc + hl > ph - mBottom && parte.length > 0) break;
+                hAcc += hl; parte.push(it);
+            }
+            if (!parte.length && restantes.length) { doc.addPage(); y = topo; continue; }
+            doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
+            doc.roundedRect(x, y, w, hAcc, 1.4, 1.4, 'D');
+            doc.setFillColor(...COR.azulTint);
+            doc.rect(x + 0.3, y + 0.3, w - 0.6, CARD_HEADER_H - 0.3, 'F');
+            desenharCabecalhoFn(doc, x, y, w, parteIdx > 0);
+            let ry = y + CARD_HEADER_H;
+            parte.forEach((it, i) => {
+                const hl = alturaFn(it);
+                desenharLinhaFn(doc, x, ry, w, hl, it);
+                if (i < parte.length - 1) {
+                    doc.setDrawColor(236, 236, 232); doc.setLineWidth(0.15);
+                    doc.line(x + CARD_PAD, ry + hl, x + w - CARD_PAD, ry + hl);
+                }
+                ry += hl;
+            });
+            y += hAcc;
+            restantes = restantes.slice(parte.length);
+            if (!restantes.length) break;
+            doc.addPage(); y = topo; parteIdx++;
+        }
+        return y;
+    }
+
+    // Agrupa cfg.linhas (array achatado) pelos marcadores subgrupoCabecalho — cada
+    // segmento vira um cartão próprio em desenharBlocoCartorioUnificado.
+    function segmentarSubgruposCartorio(linhas) {
+        const segs = [];
+        let atual = null;
+        linhas.forEach(l => {
+            if (l.subgrupoCabecalho) { atual = { titulo: l.nome, contagem: l.contagem, itens: [] }; segs.push(atual); }
+            else if (atual) atual.itens.push(l);
+        });
+        return segs;
+    }
+
+    // Altura de uma linha do cartão do Cartório: sub-linha de atribuição (menor, sem
+    // chip/chevron) < item de 1 linha (sem detalhamento, ou cabeçalho de grupo) < item de
+    // 2 linhas (título + subtítulo de detalhamento).
+    function alturaLinhaCartorio(l) {
+        if (l.subAtribuicao) return 5.4;
+        if (l.grupoCabecalho) return 7;
+        return (l.detalhamento && l.detalhamento !== '—') ? 9.6 : 7;
+    }
+
+    // Desenha uma linha do cartão do Cartório. 3 variantes, preservando a semântica já
+    // documentada onde as linhas são MONTADAS (linhaSubAtribuicao/linhaGrupo/linhaTarefa,
+    // em gerarPDFConjunto — não mexido aqui, só o desenho):
+    //  - subAtribuicao: detalhe indentado do item logo acima ("– Vara Cível..."), sem
+    //    chip/chevron (nunca vira link — sem cfgOriginal).
+    //  - grupoCabecalho: pai de um grupo (ex. "Mandados"), fundo levemente tintado,
+    //    negrito, sem indicador/detalhamento próprios (chip "—", chevron só por afetação
+    //    visual — não vira link).
+    //  - item normal (com ou sem indentação de l.grupoPai): título+indicador+chip+chevron;
+    //    guarda `l._rect` (mesmo mecanismo de antes) pro PASSO 4 de gerarPDFConjunto virar
+    //    link até a página de resumo, quando `l.cfgOriginal` existir.
+    function desenharLinhaCartorio(doc, x, y, w, h, l) {
+        const col = colunasCartao(x, w, false);
+        if (l.subAtribuicao) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
+            doc.text('– ' + l.nome, col.labelX + 5, y + h / 2 + 1.2);
+            if (l.indicador) {
+                doc.setTextColor(...COR.tintaSec);
+                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), col.numRightX, y + h / 2 + 1.2, { align: 'right' });
+            }
+            return;
+        }
+        if (l.grupoCabecalho) {
+            doc.setFillColor(...COR.cartao); doc.rect(x + 0.3, y, w - 0.6, h, 'F');
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
+            doc.text(l.nome, col.labelX, y + h / 2 + 1.3);
+            desenharChip(doc, col.chipRightX, y + h / 2, '—', COR.muted, false, col.CHIP_W);
+            desenharChevron(doc, col.chevronCX, y + h / 2);
+            l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
+            return;
+        }
+        const indent = l.grupoPai ? 5 : 0;
+        const temSub = l.detalhamento && l.detalhamento !== '—';
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(9.2); doc.setTextColor(...COR.tinta);
+        doc.text(textoTruncadoParaLargura(doc, l.nome, col.labelW - indent), col.labelX + indent, temSub ? y + 3.7 : y + h / 2 + 1.3);
+        if (temSub) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.muted);
+            doc.text(textoTruncadoParaLargura(doc, l.detalhamento, col.labelW - indent), col.labelX + indent, y + 7.4);
+        }
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
+        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
+        desenharChip(doc, col.chipRightX, y + h / 2, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
+        desenharChevron(doc, col.chevronCX, y + h / 2);
+        l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
+    }
+
+    // Desenha o cartão do Gabinete (mesmo motor desenharCardComLinhas do Cartório, mas
+    // com layout de colunas fixo: Magistrado(a) | Pendentes | [Pré-analisados] |
+    // Situação — Prioritários/Mais antiga viram o subtítulo cinza da 2ª linha, mesmo
+    // padrão do detalhamento do Cartório, sem perder nenhum dado). Retorna o Y logo
+    // abaixo do cartão (ou da mensagem, se vazio).
+    function desenharBlocoDominio(doc, x, y, w, cfg) {
+        const ph = doc.internal.pageSize.getHeight();
+        const mBottom = 14;
+        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.observacao ? { observacao: cfg.observacao } : null);
 
         if (!cfg.itens.length) {
             if (cfg.mensagemSemItens) {
                 doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-                doc.text(cfg.mensagemSemItens, x + 6, yy + 2);
+                doc.text(cfg.mensagemSemItens, x, yy + 2);
                 yy += 10;
             }
             return yy;
         }
-        // colunaExtra (opcional): coluna adicional entre Prioritários e Mais antiga,
-        // calculada a partir dos dados brutos do item (ex.: pré-analisados no Gabinete).
+
+        // colunaExtra (opcional): coluna adicional (ex.: pré-analisados no Gabinete).
         const temExtra = !!cfg.colunaExtra;
-        const corpo = cfg.itens.map(it => {
+        const linhas = cfg.itens.map(it => {
             const infoIt = SITUACAO_INFO[it.status] || SITUACAO_INFO.regular;
-            const linha = {
-                rotulo: it.rotulo, pendentes: String(it.pendentes), prioritarios: String(it.prioritarios),
-                antiga: it.maisAntiga != null ? `${it.maisAntiga} dias` : '—', situacao: infoIt.rotulo, _cor: infoIt.cor,
+            const detalhes = [];
+            if (it.prioritarios) detalhes.push(`${it.prioritarios} prioritário(s)`);
+            detalhes.push(it.maisAntiga != null ? `Mais antiga: ${it.maisAntiga} dia(s)` : 'Sem pendências');
+            return {
+                it, rotulo: it.rotulo, subtitulo: detalhes.join(' · '), pendentes: String(it.pendentes),
+                extra: temExtra ? String(cfg.colunaExtra.get(it.dados || [])) : null,
+                situacaoLabel: infoIt.rotulo, cor: infoIt.cor,
             };
-            if (temExtra) linha.extra = String(cfg.colunaExtra.get(it.dados || []));
-            return linha;
         });
-        // Linha de total — substitui os KPIs de agregado que existiam acima da tabela (o
-        // resumo inicial agora fica só em tabela, sem cards).
+        // Linha de total — mesmo papel de antes (agregado dos itens do domínio).
         const totalPendentes = cfg.itens.reduce((s, it) => s + it.pendentes, 0);
-        const totalPrioritarios = cfg.itens.reduce((s, it) => s + it.prioritarios, 0);
         const totalExtra = temExtra ? cfg.itens.reduce((s, it) => s + (cfg.colunaExtra.get(it.dados || []) || 0), 0) : 0;
-        const maisAntigaGeral = cfg.itens.reduce((m, it) => (it.maisAntiga != null && (m == null || it.maisAntiga > m) ? it.maisAntiga : m), null);
-        corpo.push({
-            rotulo: 'Total', pendentes: String(totalPendentes), prioritarios: String(totalPrioritarios),
-            extra: temExtra ? String(totalExtra) : undefined,
-            antiga: maisAntigaGeral != null ? `${maisAntigaGeral} dias` : '—', situacao: '', _cor: null, _total: true,
-        });
-        const colunas = [
-            { header: cfg.colunaRotulo, dataKey: 'rotulo' },
-            { header: 'Pendentes', dataKey: 'pendentes' },
-            { header: 'Prioritários', dataKey: 'prioritarios' },
-        ];
-        if (temExtra) colunas.push({ header: cfg.colunaExtra.header, dataKey: 'extra' });
-        colunas.push({ header: 'Mais antiga', dataKey: 'antiga' }, { header: 'Situação', dataKey: 'situacao' });
-        const columnStyles = {
-            rotulo: { cellWidth: w * (temExtra ? 0.28 : 0.34), fontStyle: 'bold', textColor: COR.tinta },
-            pendentes: { cellWidth: w * (temExtra ? 0.13 : 0.16), halign: 'right' },
-            prioritarios: { cellWidth: w * (temExtra ? 0.13 : 0.16), halign: 'right' },
-            antiga: { cellWidth: w * (temExtra ? 0.14 : 0.16), halign: 'right' },
-            situacao: { cellWidth: w * (temExtra ? 0.16 : 0.18) },
+        linhas.push({ _total: true, rotulo: 'Total', pendentes: String(totalPendentes), extra: temExtra ? String(totalExtra) : null });
+
+        const alturaFn = (l) => (l._total ? 7 : 9.6);
+        const desenharLinhaFn = (doc2, cx, cy, cw, ch, l) => {
+            const c = colunasCartao(cx, cw, temExtra);
+            if (l._total) {
+                doc2.setFillColor(...COR.cartao); doc2.rect(cx + 0.3, cy, cw - 0.6, ch, 'F');
+                doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(9); doc2.setTextColor(...COR.tinta);
+                doc2.text(l.rotulo, c.labelX, cy + ch / 2 + 1.3);
+                doc2.text(l.pendentes, c.numRightX, cy + ch / 2 + 1.3, { align: 'right' });
+                if (temExtra) doc2.text(l.extra, c.extraRightX, cy + ch / 2 + 1.3, { align: 'right' });
+                return;
+            }
+            doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(9.2); doc2.setTextColor(...COR.tinta);
+            doc2.text(textoTruncadoParaLargura(doc2, l.rotulo, c.labelW), c.labelX, cy + 3.7);
+            doc2.setFont('PublicSans', 'normal'); doc2.setFontSize(7.4); doc2.setTextColor(...COR.muted);
+            doc2.text(textoTruncadoParaLargura(doc2, l.subtitulo, c.labelW), c.labelX, cy + 7.4);
+            doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(9); doc2.setTextColor(...COR.tinta);
+            doc2.text(l.pendentes, c.numRightX, cy + ch / 2 + 1.3, { align: 'right' });
+            if (temExtra) {
+                doc2.setFont('PublicSans', 'normal'); doc2.setFontSize(8.5); doc2.setTextColor(...COR.tintaSec);
+                doc2.text(l.extra, c.extraRightX, cy + ch / 2 + 1.3, { align: 'right' });
+            }
+            desenharChip(doc2, c.chipRightX, cy + ch / 2, l.situacaoLabel, l.cor, true, c.CHIP_W);
+            desenharChevron(doc2, c.chevronCX, cy + ch / 2);
+            // Pedido do usuário: atalho clicável no nome do magistrado — mesmo mecanismo
+            // _rect/PASSO 4 já usado pelas linhas do Cartório (ver desenharLinhaCartorio).
+            l.it._rect = { x: c.labelX, y: cy, w: c.labelW, h: ch, page: doc2.internal.getCurrentPageInfo().pageNumber };
         };
-        if (temExtra) columnStyles.extra = { cellWidth: w * 0.16, halign: 'right' };
-        doc.autoTable({
-            columns: colunas,
-            body: corpo,
-            startY: yy,
-            margin: { left: x, right: pw - x - w, bottom: 14 },
-            theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-            alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles,
-            didParseCell: (data) => {
-                if (data.section === 'body' && corpo[data.row.index]._total) {
-                    data.cell.styles.fontStyle = 'bold';
-                    data.cell.styles.fillColor = COR.cartao;
-                }
-                if (data.section === 'body' && data.column.dataKey === 'situacao' && !corpo[data.row.index]._total) {
-                    data.cell.styles.textColor = corpo[data.row.index]._cor;
-                    data.cell.styles.fontStyle = 'bold';
-                }
-            },
-            // Pedido do usuário: atalho clicável no nome do magistrado, no resumo geral
-            // (esta tabela), direto para a página onde constam os dados dele — mesmo
-            // mecanismo _rect/PASSO 4 já usado pela tabela unificada do Cartório (ver
-            // didDrawCell logo acima, em desenharBlocoCartorioUnificado). Só chamada para
-            // Gabinete (cfg.itens = gabinete.itens) — a linha "Total" (índice fora de
-            // cfg.itens) fica sem link.
-            didDrawCell: (data) => {
-                if (data.section !== 'body' || data.column.dataKey !== 'rotulo') return;
-                const it = cfg.itens[data.row.index];
-                if (it) it._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
-            },
-        });
-        return doc.lastAutoTable.finalY;
+        const cabecalhoFn = (doc2, cx, cy, cw, cont) => {
+            const c = colunasCartao(cx, cw, temExtra);
+            doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(8.3); doc2.setTextColor(...COR.azul);
+            doc2.text((cfg.colunaRotulo + (cont ? ' (cont.)' : '')).toUpperCase(), cx + CARD_PAD, cy + CARD_HEADER_H / 2 + 1.3);
+            doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(7.2); doc2.setTextColor(...COR.tintaSec);
+            doc2.text('PENDENTES', c.numRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            if (temExtra) doc2.text('PRÉ-ANALISADOS', c.extraRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            doc2.text('SITUAÇÃO', c.chipRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+        };
+        return desenharCardComLinhas(doc, x, yy, w, cabecalhoFn, linhas, alturaFn, desenharLinhaFn, ph, mBottom, x);
     }
 
-    // Bloco do Cartório na "Situação da Unidade": mesmo cabeçalho/KPIs de
-    // desenharBlocoDominio, mas com uma tabela de colunas GENÉRICAS (Tarefa/Indicador/
-    // Detalhamento/Situação) em vez de Pendentes/Prioritários/Mais antiga — precisa disso
-    // porque agora TODOS os relatórios entram como uma linha do Cartório (pedido do
-    // usuário), inclusive Tempo Médio e as três Audiências, que não têm o mesmo formato de
-    // "pendentes" das tarefas clássicas (Juntadas, Retorno, Paralisados, Remessas,
-    // Suspensos). Gabinete continua usando desenharBlocoDominio, sem mudança.
+    // Bloco do Cartório na "Situação da Unidade": cabeçalho (título + legenda de
+    // bolinhas coloridas) seguido de um CARTÃO por subgrupo (Estatísticas Gerais /
+    // Pendências / Audiências / Outros — ver segmentarSubgruposCartorio), cada um com
+    // sua própria borda arredondada e faixa de cabeçalho (nome do subgrupo + contagem).
     function desenharBlocoCartorioUnificado(doc, x, y, w, cfg) {
-        const pw = doc.internal.pageSize.getWidth();
-
-        const headH = 15;
-        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3); doc.setFillColor(...COR.cartao);
-        doc.rect(x, y, w, headH, 'FD');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
-        doc.text(cfg.titulo, x + 6, y + 9.5);
-
-        let yy = y + headH + 5;
-        if (cfg.observacao) {
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.8); doc.setTextColor(...COR.muted);
-            const linhasObs = doc.splitTextToSize(cfg.observacao, w - 12);
-            doc.text(linhasObs, x + 6, yy);
-            yy += linhasObs.length * 3.4 + 5;
-        }
+        const ph = doc.internal.pageSize.getHeight();
+        const mBottom = 14;
+        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.legenda ? { legenda: cfg.legenda } : (cfg.observacao ? { observacao: cfg.observacao } : null));
 
         if (!cfg.linhas.length) return yy;
 
-        doc.autoTable({
-            columns: [
-                { header: 'Tarefa', dataKey: 'nome' },
-                { header: 'Indicador', dataKey: 'indicador' },
-                { header: 'Detalhamento', dataKey: 'detalhamento' },
-                { header: 'Situação', dataKey: 'situacao' },
-            ],
-            // Filha de grupo (l.grupoPai, ex. subitens de "Mandados"): "nome" ganha um
-            // recuo visual (indentação por espaços) — a forma mais robusta no
-            // jspdf-autotable para uma indentação por LINHA (não por coluna inteira), já
-            // que columnStyles/didParseCell não têm um "padding-left por célula" nativo
-            // confiável entre versões. Sub-linha de atribuição (l.subAtribuicao): SEM
-            // indentação (pedido do usuário — "tire a indentação, mantenha alinhados"),
-            // só um marcador "– " antes do nome, texto começa na mesma coluna dos demais.
-            // Faixa de SUBGRUPO (l.subgrupoCabecalho, ex. "Estatísticas Gerais"): ocupa as
-            // 3 primeiras colunas numa célula só (colSpan) com o nome do subgrupo — a
-            // contagem (já formatada por quem montou a linha) fica na coluna "Situação",
-            // reaproveitada só como 4ª coluna alinhada à direita, sem estilo de situação
-            // de verdade (ver didParseCell abaixo).
-            body: cfg.linhas.map(l => l.subgrupoCabecalho
-                ? { nome: { content: l.nome.toUpperCase(), colSpan: 3 }, situacao: l.contagem || '' }
-                : {
-                    nome: (l.subAtribuicao ? '– ' : (l.grupoPai ? '     ' : '')) + l.nome,
-                    indicador: l.indicador,
-                    detalhamento: l.detalhamento,
-                    situacao: l.semSituacao ? '—' : l.situacaoLabel,
-                }),
-            startY: yy,
-            margin: { left: x, right: pw - x - w, bottom: 14 },
-            theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
-            alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                nome: { cellWidth: w * 0.26, fontStyle: 'bold', textColor: COR.tinta },
-                indicador: { cellWidth: w * 0.19 },
-                detalhamento: { cellWidth: w * 0.38 },
-                situacao: { cellWidth: w * 0.17, halign: 'right' },
-            },
-            didParseCell: (data) => {
-                if (data.section !== 'body') return;
-                const l = cfg.linhas[data.row.index];
-                if (!l) return;
-                // Faixa de SUBGRUPO (nível acima de grupoCabecalho) — fundo azul bem claro
-                // (COR.azulTint, distinto do "cartao" neutro do cabeçalho de grupo),
-                // versalete em negrito na cor azul (mesmo acento usado em tituloSecao).
-                if (l.subgrupoCabecalho) {
-                    data.cell.styles.fillColor = COR.azulTint;
-                    data.cell.styles.fontStyle = 'bold';
-                    data.cell.styles.fontSize = 8.2;
-                    data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.azul : COR.tintaSec;
-                    if (data.column.dataKey === 'situacao') data.cell.styles.halign = 'right';
-                    return;
-                }
-                // Cabeçalho de grupo (pai, ex. "Mandados"/"Audiências"): fundo sutil +
-                // negrito em toda a linha, sem cor de situação (não tem situação própria).
-                if (l.grupoCabecalho) {
-                    data.cell.styles.fillColor = COR.cartao;
-                    data.cell.styles.fontStyle = 'bold';
-                    data.cell.styles.textColor = data.column.dataKey === 'nome' ? COR.tinta : COR.tintaSec;
-                    return;
-                }
-                // Sub-linha de atribuição (l.subAtribuicao): texto menor, sem negrito, cor
-                // apagada — deixa claro que é um detalhamento do item logo acima, não uma
-                // tarefa própria (nunca vira link — sem cfgOriginal).
-                if (l.subAtribuicao) {
-                    data.cell.styles.fontStyle = 'normal';
-                    data.cell.styles.fontSize = 8;
-                    data.cell.styles.textColor = COR.muted;
-                    return;
-                }
-                if (data.column.dataKey === 'situacao') {
-                    if (!l.semSituacao) { data.cell.styles.textColor = l.corTexto; data.cell.styles.fontStyle = 'bold'; }
-                    else data.cell.styles.textColor = COR.muted;
-                }
-            },
-            // Guarda a posição/página da célula "Tarefa" de cada linha para poder virar um
-            // link clicável até a seção detalhada do relatório (ver PASSO 4 em
-            // gerarPDFConjunto) — só depois que a página de destino é conhecida. Cabeçalho
-            // de grupo (grupoCabecalho) NUNCA vira link — não tem cfgOriginal/seção própria.
-            didDrawCell: (data) => {
-                if (data.section === 'body' && data.column.dataKey === 'nome') {
-                    const l = cfg.linhas[data.row.index];
-                    if (l && !l.grupoCabecalho && !l.subgrupoCabecalho) l._rect = { x: data.cell.x, y: data.cell.y, w: data.cell.width, h: data.cell.height, page: doc.internal.getCurrentPageInfo().pageNumber };
-                }
-            },
+        segmentarSubgruposCartorio(cfg.linhas).forEach(seg => {
+            if (!seg.itens.length) return;
+            // Mesmo espírito do antigo ALTURA_MIN_CABECALHO_DOMINIO: evita começar um
+            // cartão colado na borda inferior, com só o cabeçalho + 1 linha espremida
+            // antes de o resto pular pra página seguinte — melhor começar o cartão
+            // inteiro numa página nova.
+            const alturaMinima = CARD_HEADER_H + alturaLinhaCartorio(seg.itens[0]) + 3;
+            if (yy + alturaMinima > ph - mBottom) { doc.addPage(); yy = x; }
+            const cabecalhoFn = (doc2, cx, cy, cw, cont) => {
+                doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(8.3); doc2.setTextColor(...COR.azul);
+                doc2.text((seg.titulo + (cont ? ' (cont.)' : '')).toUpperCase(), cx + CARD_PAD, cy + CARD_HEADER_H / 2 + 1.3);
+                doc2.setFont('PublicSans', 'normal'); doc2.setFontSize(7.6); doc2.setTextColor(...COR.tintaSec);
+                doc2.text(seg.contagem || '', cx + cw - CARD_PAD, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            };
+            yy = desenharCardComLinhas(doc, x, yy, w, cabecalhoFn, seg.itens, alturaLinhaCartorio, desenharLinhaCartorio, ph, mBottom, x) + 6;
         });
-        return doc.lastAutoTable.finalY;
+        return yy - 6;
     }
 
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
@@ -5484,9 +5560,15 @@
         // gerarPDFConjunto), não mais um card à parte — resumo inicial ficou só em tabela.
         y = desenharBlocoCartorioUnificado(doc, m, y, uw, {
             titulo: 'Cartório',
-            observacao: 'Pendências clássicas: situação pela pendência mais antiga (Regular até 30 dias, Atenção '
-                + '31–90, Crítico acima de 90). Tempo Médio e Audiências Pendentes/Realizadas são informativos, sem '
-                + 'situação. Audiências Designadas segue a régua de 180/360 dias até a audiência mais distante.',
+            // Legenda de bolinhas coloridas (redesign aprovado pelo usuário) — substitui o
+            // antigo parágrafo em itálico explicando os limiares de dia por situação.
+            // Tempo Médio e Audiências Pendentes/Realizadas continuam informativos (chip
+            // "—"); Audiências Designadas segue a régua própria de 180/360 dias.
+            legenda: [
+                { cor: COR.aqua, rotulo: 'Regular ≤30d' },
+                { cor: COR.ambar, rotulo: 'Atenção 31–90d' },
+                { cor: COR.vermelho, rotulo: 'Crítico >90d' },
+            ],
             linhas: cartorio.linhas,
         });
 
