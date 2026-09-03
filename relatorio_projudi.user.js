@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.19
+// @version      24.20
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -6045,8 +6045,10 @@
         // Pedido do usuário: a ordem da capa unificada precisa bater EXATAMENTE com a
         // ordem do popup de automação (REPORTS_AUTOMACAO) — dentro deste subgrupo sem
         // nome próprio, a ordem declarada lá é Tempo Médio (já empilhado acima), Outros
-        // Cumprimentos, Conclusões (vai para o Gabinete, não aqui), Apreensões,
-        // Cumprimento de Medidas. Estava fora de ordem (Apreensões/Cumprimento de
+        // Cumprimentos, Processos Arquivados com Saldo — ambos da categoria GERAL do
+        // Cartório —, Conclusões (vai para o Gabinete, não aqui), Apreensões, Cumprimento
+        // de Medidas — estes dois últimos da categoria específica Crime, mesmo aparecendo
+        // nesta mesma tabela "Outros". Estava fora de ordem (Apreensões/Cumprimento de
         // Medidas empilhados ANTES de Outros Cumprimentos).
         //
         // "Outros Cumprimentos" — painel de contadores da Mesa do Magistrado. O
@@ -6060,6 +6062,21 @@
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
+            });
+        }
+        // "Processos Arquivados com Saldo" — mesmo padrão de Outros Cumprimentos: sem
+        // classificação por situação/aging (a métrica é monetária, não dias parado), por
+        // isso semSituacao: true. Empilhado logo após Outros Cumprimentos (pedido do
+        // usuário): fica dentro da categoria geral do Cartório (junto com Tempo Médio/
+        // Outros Cumprimentos), ANTES de Bens Apreendidos/Cumprimento de Medidas — que são
+        // da categoria específica Crime, mesmo aparecendo nesta mesma tabela "Outros".
+        if (secaoArquivadosSaldo) {
+            const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
+            itensOutros.push({
+                nome: 'Processos Arquivados com Saldo',
+                indicador: `${secaoArquivadosSaldo.dados.length} processo(s)`,
+                detalhamento: `Saldo total: ${fmtBRL(saldoTotal)}`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
         // "Bens Apreendidos" — linha do Cartório (pedido do usuário), mesmo sendo um
@@ -6097,20 +6114,6 @@
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
-            });
-        }
-        // "Processos Arquivados com Saldo" — mesmo padrão de Outros Cumprimentos: sem
-        // classificação por situação/aging (a métrica é monetária, não dias parado), por
-        // isso semSituacao: true. Empilhado por ÚLTIMO de propósito (depois de Bens
-        // Apreendidos/Cumprimento de Medidas), por pedido explícito do usuário: último
-        // item da tabela "Outros"/do Cartório no PDF conjunto.
-        if (secaoArquivadosSaldo) {
-            const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
-            itensOutros.push({
-                nome: 'Processos Arquivados com Saldo',
-                indicador: `${secaoArquivadosSaldo.dados.length} processo(s)`,
-                detalhamento: `Saldo total: ${fmtBRL(saldoTotal)}`,
-                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
