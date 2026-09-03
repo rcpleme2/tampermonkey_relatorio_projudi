@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.21
+// @version      24.22
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3068,8 +3068,21 @@
             marcarCheckboxDoRelatorio(form);
             const corpo = corpoFormularioArquivadosSaldo(form);
             const texto = await coletarViaFetch(form.action, corpo);
-            const dados = parseCSV(texto);
-            console.log(`[Projudi Arquivados c/ Saldo] ${dados.length} processo(s) — salvando e avançando a automação`);
+            // Marca cada registro com a atuação/competência ATUAIS (mesmo campo usado por
+            // CFG_JUNTADAS e demais) e ACUMULA entre atribuições/unidades diferentes —
+            // mesmo padrão de coletarOutrosCumprimentosAgora. Sem isso, rodar este
+            // relatório numa 2ª unidade (automação em várias unidades, ou reextração
+            // manual) SOBRESCREVIA os dados da 1ª (gravava sempre em 'pagina_0' direto),
+            // em vez de somar e mostrar tudo — bug relatado pelo usuário. Descarta só os
+            // registros da MESMA atuação (evita duplicar se o usuário extrair de novo na
+            // mesma unidade) e junta com os novos.
+            const atuacao = lerAtuacao();
+            const competencia = competenciaDe(atuacao);
+            const dadosDestaAtribuicao = parseCSV(texto).map(r => ({ ...r, atuacao, competencia }));
+            const anteriores = desembrulharArray(store.getItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0')) || [];
+            const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
+            const dados = [...semEstaAtribuicao, ...dadosDestaAtribuicao];
+            console.log(`[Projudi Arquivados c/ Saldo] "${atuacao || '(sem atuação)'}" — ${dadosDestaAtribuicao.length} processo(s) nesta atribuição (${dados.length} no total acumulado) — salvando e avançando a automação`);
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', JSON.stringify(dados));
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'num_paginas', '1');
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'coletado', '1');
