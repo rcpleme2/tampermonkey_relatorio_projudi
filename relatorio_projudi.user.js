@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.0
+// @version      25.1
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7185,6 +7185,24 @@
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             doc.text(linhasObs, m + 3, proximoY + 11);
             proximoY += alturaObs + 6;
+
+            // Tabela com o número do processo de todas as audiências com termo pendente
+            // há mais de 5 dias (pedido do usuário) — aparece SEMPRE no corpo do
+            // relatório, inclusive no modo "Só resumo" do PDF conjunto.
+            tituloSecao(doc, m, proximoY, uw, `Audiências com termo pendente há mais de 5 dias (${vencidasMaisDe5Dias.length})`);
+            doc.autoTable({
+                columns: [{ header: 'Processo', dataKey: 'k0' }],
+                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo })),
+                startY: proximoY + 6,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            proximoY = doc.lastAutoTable.finalY + 6;
         }
 
         if (somenteResumo || !dados.length) {
@@ -8136,6 +8154,50 @@
             proximoY += alturaObs + gap;
         }
 
+        // Tabela completa com Processo / Atribuição / Dt Arquivamento / Saldo (pedido do
+        // usuário) — aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo"
+        // do PDF conjunto, independente da tabela discriminada mais detalhada abaixo
+        // (que só entra no modo "Tabelas Discriminadas"). Mesma ordenação: Saldo
+        // descendente (maior primeiro).
+        if (r.length) {
+            const ordenadosCompleta = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
+            tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length})`);
+            const colunasCompleta = [
+                { header: 'Processo', width: 26, get: d => d.processo },
+                { header: 'Atribuição (Competência)', width: 30, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
+                { header: 'Dt Arquivamento', width: 18, get: d => d.dtArquivamento },
+                { header: 'Saldo', width: 16, get: d => fmtBRL(d.saldo) },
+            ];
+            const somaLarguraCompleta = colunasCompleta.reduce((s, c) => s + c.width, 0);
+            const fatorLarguraCompleta = uw / somaLarguraCompleta;
+            const columnStylesCompleta = {};
+            colunasCompleta.forEach((c, i) => { columnStylesCompleta['k' + i] = { cellWidth: c.width * fatorLarguraCompleta }; });
+            const idxSaldoCompleta = colunasCompleta.findIndex(c => c.header === 'Saldo');
+            doc.autoTable({
+                columns: colunasCompleta.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: ordenadosCompleta.map(d => {
+                    const o = {};
+                    colunasCompleta.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: proximoY + 6,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                showFoot: 'lastPage',
+                // Fonte Helvetica (não PublicSans) — mesmo motivo da tabela detalhada
+                // abaixo: evita o espaçamento estranho entre caracteres na fonte embutida.
+                styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesCompleta,
+                foot: [{ k0: 'TOTAL', k1: '', k2: '', [`k${idxSaldoCompleta}`]: fmtBRL(saldoTotal) }],
+                footStyles: { font: 'helvetica', fontStyle: 'bold', fontSize: 8, fillColor: COR.azulTint, textColor: COR.tinta, lineColor: COR.grade, lineWidth: 0.1 },
+                didDrawPage: () => desenharRodape(doc, TITULO_ARQUIVADOS_SALDO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            proximoY = doc.lastAutoTable.finalY + gap;
+        }
+
         // Tabela discriminada direto no resumo (pedido do usuário: sem página separada
         // ao final) — mesmo padrão de montarResumoAudiencias, embutindo a tabela na
         // mesma página quando couber e deixando o autoTable paginar sozinho quando não
@@ -8819,6 +8881,44 @@
             proximoY += alturaObs + gap;
         }
 
+        // Tabela com até 15 processos suspensos há mais tempo (pedido do usuário) —
+        // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
+        // conjunto, independente da tabela discriminada completa mais abaixo (que só
+        // entra no modo "Tabelas Discriminadas"). Mesmo critério de ordenação da tabela
+        // completa: Início Suspensão ascendente (mais antiga primeiro).
+        if (r.length) {
+            const top15 = r.slice()
+                .sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0))
+                .slice(0, 15);
+            tituloSecao(doc, m, proximoY, uw, `Processos suspensos há mais tempo (até 15 de ${r.length})`);
+            const colunasTop15 = [
+                { header: 'Processo', width: 30, get: d => d.processo },
+                { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
+                { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
+                { header: 'Dias Paralisado', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
+            ];
+            const columnStylesTop15 = {};
+            colunasTop15.forEach((c, i) => { columnStylesTop15['k' + i] = { cellWidth: c.width }; });
+            doc.autoTable({
+                columns: colunasTop15.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: top15.map(d => {
+                    const o = {};
+                    colunasTop15.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: proximoY + 6,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesTop15,
+                didDrawPage: () => desenharRodape(doc, p.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            proximoY = doc.lastAutoTable.finalY + gap;
+        }
+
         // Modo 'resumo' do PDF conjunto (pedido do usuário: "Relatório PDF" nunca traz
         // tabela discriminada, só "Tabelas Discriminadas") — encerra antes da tabela.
         if (somenteResumo) {
@@ -8973,6 +9073,52 @@
             fimMaisLongo ? fimMaisLongo.registro.processo : '—',
             fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
 
+        // Tabela com até 15 processos com maior tempo de suspensão (pedido do usuário) —
+        // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
+        // conjunto, independente da tabela discriminada completa mais abaixo (que só
+        // entra no modo "Tabelas Discriminadas"). Ordenada por Tempo de Suspensão
+        // (duração fim - início) descendente — maior tempo primeiro; registros sem
+        // duração calculável vão ao final.
+        let proximoY = kY + 28 + gap + 4;
+        if (r.length) {
+            const temMotivoTop15 = r.some(d => d.motivo);
+            const top15 = r.slice()
+                .sort((a, b) => {
+                    const da = duracaoSuspensaoDias(a);
+                    const db = duracaoSuspensaoDias(b);
+                    return (db == null ? -Infinity : db) - (da == null ? -Infinity : da);
+                })
+                .slice(0, 15);
+            tituloSecao(doc, m, proximoY, uw, `Processos com maior tempo de suspensão (até 15 de ${r.length})`);
+            const colunasTop15 = [
+                { header: 'Processo', width: 26, get: d => d.processo },
+                { header: 'Atribuição (Competência)', width: 32, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
+                { header: 'Data da Suspensão', width: 22, get: d => d.inicioSuspensao },
+                { header: 'Tempo de Suspensão (dias)', width: 24, get: d => { const dur = duracaoSuspensaoDias(d); return dur == null ? '' : String(dur); } },
+            ];
+            if (temMotivoTop15) colunasTop15.push({ header: 'Motivo da Suspensão', width: 36, get: d => d.motivo || '' });
+            const columnStylesTop15 = {};
+            colunasTop15.forEach((c, i) => { columnStylesTop15['k' + i] = { cellWidth: c.width }; });
+            doc.autoTable({
+                columns: colunasTop15.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: top15.map(d => {
+                    const o = {};
+                    colunasTop15.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: proximoY + 6,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesTop15,
+                didDrawPage: () => desenharRodape(doc, TITULO_SUSPENSOS_PRAZO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            proximoY = doc.lastAutoTable.finalY + gap;
+        }
+
         // Modo 'resumo' do PDF conjunto (pedido do usuário: "Relatório PDF" nunca traz
         // tabela discriminada, só "Tabelas Discriminadas") — encerra antes da tabela.
         if (somenteResumo) {
@@ -8984,9 +9130,8 @@
         // separada) — ORDENADA pela data de Fim Suspensão DESCENDENTE (mais longa
         // primeiro, pedido do usuário original desta tabela, mantido). Registros sem
         // data de fim parseável vão ao final.
-        const tabY = kY + 28 + gap + 4;
-        tituloSecao(doc, m, tabY, uw, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
-        const tabInicioY = tabY + 6;
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_SUSPENSOS_PRAZO}`);
+        const tabInicioY = proximoY + 6;
         if (!r.length) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
             doc.text('Nenhum processo suspenso por prazo determinado.', m, tabInicioY + 2);
@@ -9098,6 +9243,48 @@
         desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(r.length), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
 
+        // Observação + tabela dos processos enviados há mais de 2 anos (pedido do
+        // usuário) — só aparecem quando há algum processo nessa situação, mas SEMPRE no
+        // corpo do relatório (inclusive no modo "Só resumo" do PDF conjunto),
+        // independente da tabela discriminada completa mais abaixo (que só entra no modo
+        // "Tabelas Discriminadas"). Texto literal fornecido pelo usuário.
+        let proximoY = kY + 24 + gap;
+        if (maisDe2Anos.length) {
+            const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
+                + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
+                + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
+                + 'do andamento processual.';
+            const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
+            proximoY += alturaObs2Anos + gap;
+
+            tituloSecao(doc, m, proximoY, uw, `Processos em instância recursal há mais de 2 anos (${maisDe2Anos.length})`);
+            const colunasAntigos = [
+                { header: 'Processo', width: 34, get: x => x.registro.processo },
+                { header: 'Atribuição (Competência)', width: 40, get: x => x.registro.competencia || x.registro.atuacao || '(sem atribuição)' },
+                { header: 'Data da Remessa', width: 26, get: x => x.registro.dataEnvio },
+            ];
+            const columnStylesAntigos = {};
+            colunasAntigos.forEach((c, i) => { columnStylesAntigos['k' + i] = { cellWidth: c.width }; });
+            doc.autoTable({
+                columns: colunasAntigos.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: maisDe2Anos.map(x => {
+                    const o = {};
+                    colunasAntigos.forEach((c, i) => { o['k' + i] = String(c.get(x) ?? ''); });
+                    return o;
+                }),
+                startY: proximoY + 6,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesAntigos,
+                didDrawPage: () => desenharRodape(doc, TITULO_INSTANCIA_RECURSAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            proximoY = doc.lastAutoTable.finalY + gap;
+        }
+
         // Modo 'resumo' do PDF conjunto (pedido do usuário: "Relatório PDF" nunca traz
         // tabela discriminada, só "Tabelas Discriminadas") — encerra antes da tabela.
         if (somenteResumo) {
@@ -9109,9 +9296,8 @@
         // separada) — Processo, Classe, Data de Envio, Competência — ORDENADA por data de
         // envio CRESCENTE (mais antigo primeiro, pedido do usuário original desta tabela,
         // mantido). Registros sem data parseável vão ao final.
-        const tabY = kY + 24 + gap;
-        tituloSecao(doc, m, tabY, uw, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
-        const tabInicioY = tabY + 6;
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_INSTANCIA_RECURSAL}`);
+        const tabInicioY = proximoY + 6;
         if (!r.length) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
             doc.text('Nenhum processo em instância recursal.', m, tabInicioY + 2);
