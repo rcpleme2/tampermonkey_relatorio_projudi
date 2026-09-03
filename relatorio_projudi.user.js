@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      24.25
+// @version      24.26
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5252,8 +5252,9 @@
     // arredondada própria (não mais uma única autoTable contínua cortada por linhas de
     // faixa) — ver desenharCardComLinhas, o motor genérico de paginação usado pelos dois
     // domínios. Linhas viram "pill" de situação (fundo tintado + texto colorido, não só
-    // texto colorido) e ganham um chevron "›" (afetação puramente visual de "toque para
-    // detalhe" — aparece em toda linha de item, mesmo nas sem link real).
+    // texto colorido). O chevron "›" que existia como afetação visual foi removido
+    // (pedido do usuário: não tinha função — não era clicável nem indicava nada que a
+    // própria linha já não indicasse).
     const CARD_HEADER_H = 7.5; // altura da faixa de cabeçalho de cada cartão (mm)
     const CARD_PAD = 4; // respiro lateral interno do cartão (mm)
 
@@ -5279,26 +5280,20 @@
         doc.text(label, xChip + wChip / 2, yCenter + 1.05, { align: 'center' });
     }
 
-    // Chevron "›" — afetação visual de "há detalhe/link aqui", desenhado com 2 traços
-    // (evita depender de um glifo ">" existir na fonte embutida em todo tamanho/estilo).
-    function desenharChevron(doc, cx, cy) {
-        doc.setDrawColor(...corClara(COR.muted, 0.5)); doc.setLineWidth(0.55);
-        doc.line(cx - 1.1, cy - 1.7, cx + 1.1, cy);
-        doc.line(cx + 1.1, cy, cx - 1.1, cy + 1.7);
-    }
-
-    // Geometria das colunas à direita de um cartão (contador, [extra], chip, chevron) —
+    // Geometria das colunas à direita de um cartão (contador, [extra], chip) —
     // compartilhada pelas linhas do Cartório (1 contador) e do Gabinete (2, quando há
-    // colunaExtra). `labelX/labelW` sobra pro título+subtítulo à esquerda.
+    // colunaExtra). `labelX/labelW` sobra pro título+subtítulo à esquerda. NUM_W/EXTRA_W
+    // dimensionados pra caber o texto real sem cortar (pedido do usuário: números como
+    // "5062 ativo(s)" ou o rótulo de cabeçalho "PRÉ-ANALISADOS" ficavam truncados/
+    // sobrepostos com as larguras antigas, mais estreitas).
     function colunasCartao(x, w, comExtra) {
-        const GAP = 2, CHEVRON_W = 5, CHIP_W = 22, NUM_W = 20;
-        const x1 = x + w - CARD_PAD;
-        const chevronCX = x1 - CHEVRON_W / 2;
-        const chipRightX = x1 - CHEVRON_W - GAP;
-        const extraRightX = comExtra ? chipRightX - CHIP_W - GAP : null;
-        const numRightX = (comExtra ? extraRightX : chipRightX) - NUM_W - GAP;
+        const GAP = 2, CHIP_W = 22, NUM_W = 30, EXTRA_W = 32;
+        const chipRightX = x + w - CARD_PAD;
+        const afterChip = chipRightX - CHIP_W - GAP;
+        const extraRightX = comExtra ? afterChip : null;
+        const numRightX = (comExtra ? extraRightX - EXTRA_W - GAP : afterChip);
         const labelX = x + CARD_PAD;
-        return { labelX, labelW: numRightX - GAP - labelX, numRightX, numW: NUM_W, extraRightX, chipRightX, chevronCX, CHIP_W };
+        return { labelX, labelW: numRightX - GAP - labelX, numRightX, numW: NUM_W, extraRightX, extraW: EXTRA_W, chipRightX, CHIP_W };
     }
 
     // Cabeçalho do domínio (faixa "Cartório"/"Gabinete" + linha de acento azul embaixo).
@@ -5383,7 +5378,7 @@
     }
 
     // Altura de uma linha do cartão do Cartório: sub-linha de atribuição (menor, sem
-    // chip/chevron) < item de 1 linha (sem detalhamento, ou cabeçalho de grupo) < item de
+    // chip) < item de 1 linha (sem detalhamento, ou cabeçalho de grupo) < item de
     // 2 linhas (título + subtítulo de detalhamento).
     function alturaLinhaCartorio(l) {
         if (l.subAtribuicao) return 5.4;
@@ -5395,13 +5390,12 @@
     // documentada onde as linhas são MONTADAS (linhaSubAtribuicao/linhaGrupo/linhaTarefa,
     // em gerarPDFConjunto — não mexido aqui, só o desenho):
     //  - subAtribuicao: detalhe indentado do item logo acima ("– Vara Cível..."), sem
-    //    chip/chevron (nunca vira link — sem cfgOriginal).
+    //    chip (nunca vira link — sem cfgOriginal).
     //  - grupoCabecalho: pai de um grupo (ex. "Mandados"), fundo levemente tintado,
-    //    negrito, sem indicador/detalhamento próprios (chip "—", chevron só por afetação
-    //    visual — não vira link).
-    //  - item normal (com ou sem indentação de l.grupoPai): título+indicador+chip+chevron;
-    //    guarda `l._rect` (mesmo mecanismo de antes) pro PASSO 4 de gerarPDFConjunto virar
-    //    link até a página de resumo, quando `l.cfgOriginal` existir.
+    //    negrito, sem indicador/detalhamento próprios (chip "—" — não vira link).
+    //  - item normal (com ou sem indentação de l.grupoPai): título+indicador+chip; guarda
+    //    `l._rect` (mesmo mecanismo de antes) pro PASSO 4 de gerarPDFConjunto virar link
+    //    até a página de resumo, quando `l.cfgOriginal` existir.
     function desenharLinhaCartorio(doc, x, y, w, h, l) {
         const col = colunasCartao(x, w, false);
         if (l.subAtribuicao) {
@@ -5418,7 +5412,6 @@
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
             doc.text(l.nome, col.labelX, y + h / 2 + 1.3);
             desenharChip(doc, col.chipRightX, y + h / 2, '—', COR.muted, false, col.CHIP_W);
-            desenharChevron(doc, col.chevronCX, y + h / 2);
             l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
             return;
         }
@@ -5433,7 +5426,6 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
         desenharChip(doc, col.chipRightX, y + h / 2, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
-        desenharChevron(doc, col.chevronCX, y + h / 2);
         l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
     }
 
@@ -5496,7 +5488,6 @@
                 doc2.text(l.extra, c.extraRightX, cy + ch / 2 + 1.3, { align: 'right' });
             }
             desenharChip(doc2, c.chipRightX, cy + ch / 2, l.situacaoLabel, l.cor, true, c.CHIP_W);
-            desenharChevron(doc2, c.chevronCX, cy + ch / 2);
             // Pedido do usuário: atalho clicável no nome do magistrado — mesmo mecanismo
             // _rect/PASSO 4 já usado pelas linhas do Cartório (ver desenharLinhaCartorio).
             l.it._rect = { x: c.labelX, y: cy, w: c.labelW, h: ch, page: doc2.internal.getCurrentPageInfo().pageNumber };
@@ -5506,9 +5497,9 @@
             doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(8.3); doc2.setTextColor(...COR.azul);
             doc2.text((cfg.colunaRotulo + (cont ? ' (cont.)' : '')).toUpperCase(), cx + CARD_PAD, cy + CARD_HEADER_H / 2 + 1.3);
             doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(7.2); doc2.setTextColor(...COR.tintaSec);
-            doc2.text('PENDENTES', c.numRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
-            if (temExtra) doc2.text('PRÉ-ANALISADOS', c.extraRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
-            doc2.text('SITUAÇÃO', c.chipRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            doc2.text(textoTruncadoParaLargura(doc2, 'PENDENTES', c.numW), c.numRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            if (temExtra) doc2.text(textoTruncadoParaLargura(doc2, 'PRÉ-ANALISADOS', c.extraW), c.extraRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
+            doc2.text(textoTruncadoParaLargura(doc2, 'SITUAÇÃO', c.CHIP_W), c.chipRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
         };
         return desenharCardComLinhas(doc, x, yy, w, cabecalhoFn, linhas, alturaFn, desenharLinhaFn, ph, mBottom, x);
     }
