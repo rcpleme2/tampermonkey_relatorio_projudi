@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.4
+// @version      25.5
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4533,7 +4533,7 @@
         blocos.forEach(b => {
             const opts = { acento: b.acento, rotuloCategoria: b.rotuloCategoria };
             const h = medirTabela(b.itens.length, true);
-            if (b.span !== 2 && yLinha + h <= ph - 18) {
+            if (b.span !== 2 && yLinha + h <= ph - 14) {
                 tabelaCategorias(doc, x + col * (colW + gap), yLinha, colW, b.titulo, b.itens, opts);
                 alturaLinha = Math.max(alturaLinha, h);
                 col++;
@@ -4544,7 +4544,7 @@
             // lado em largura cheia, em vez de espremer ou deixar metade da página vazia.
             fecharLinha();
             const hDupla = medirTabela(Math.ceil(b.itens.length / 2), true);
-            if (yLinha + hDupla > ph - 18) novaPagina();
+            if (yLinha + hDupla > ph - 14) novaPagina();
             tabelaCategoriasDupla(doc, x, yLinha, w, b.titulo, b.itens, opts);
             yLinha += hDupla + 8;
         });
@@ -4769,10 +4769,26 @@
             const wIdade = Math.round(uw * 0.55), wDist = uw - gap - wIdade;
             const primeiraDist = distribuicoes[0];
             const yFaixas = tabelaFaixasIdade(doc, m, y, wIdade, p.agingTitulo, faixas, p.rotuloPrioritarioLegenda, p.rotuloNormalLegenda);
+            const pgFaixas = doc.internal.getCurrentPageInfo().pageNumber;
             const yDist = primeiraDist
                 ? tabelaCategorias(doc, m + wIdade + gap, y, wDist, primeiraDist.titulo, primeiraDist.itens, {})
                 : y;
-            y = Math.max(yFaixas, yDist) + 8;
+            const pgDist = doc.internal.getCurrentPageInfo().pageNumber;
+            // Bug relatado pelo usuário: quando a 1ª distribuição (coluna direita) tem
+            // linhas demais e o autoTable pagina sozinho no meio dela, yFaixas (coluna
+            // esquerda, quase nunca pagina) ainda aponta pra Y da página ANTERIOR — usar
+            // Math.max(yFaixas, yDist) nesse caso comparava posições de páginas
+            // diferentes e escolhia o valor errado (normalmente o da página antiga, bem
+            // mais alto), empurrando o próximo bloco quase até o fim da página atual e
+            // forçando uma quebra desnecessária, com bastante espaço em branco sobrando
+            // acima dele. Só faz sentido comparar os dois Y quando ambas as tabelas
+            // terminaram na MESMA página; quando uma delas pagina, o Y válido é o da
+            // tabela que ficou na página mais recente (a outra já "ficou pra trás").
+            if (pgFaixas === pgDist) {
+                y = Math.max(yFaixas, yDist) + 8;
+            } else {
+                y = (pgDist > pgFaixas ? yDist : yFaixas) + 8;
+            }
             const restantes = distribuicoes.slice(1);
             if (restantes.length) y = desenharGradeTabelas(doc, m, y, uw, restantes, ctx);
         } else {
@@ -6999,7 +7015,7 @@
         let yP1 = k3Y + 26 + gap + 2;
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
-            if (yP1 + medirTabela(top10.length, true) > ph - 18) { ctxP1.rodapeAntesDeVirar(); doc.addPage(); ctxP1.cabecalhoContinuacao(); yP1 = ctxP1.topoContinuacao; }
+            if (yP1 + medirTabela(top10.length, true) > ph - 14) { ctxP1.rodapeAntesDeVirar(); doc.addPage(); ctxP1.cabecalhoContinuacao(); yP1 = ctxP1.topoContinuacao; }
             yP1 = tabelaRanking(doc, m, yP1, uw, 'Processos com cumprimento mais demorado', top10, [
                 { header: 'Processo', get: d => d.processo, width: 40 },
                 { header: 'Classe Processual', get: d => d.classe, width: 40 },
@@ -7008,7 +7024,7 @@
         }
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
         if (porClasse.length) {
-            if (yP1 + medirTabela(porClasse.length, true) > ph - 18) { ctxP1.rodapeAntesDeVirar(); doc.addPage(); ctxP1.cabecalhoContinuacao(); yP1 = ctxP1.topoContinuacao; }
+            if (yP1 + medirTabela(porClasse.length, true) > ph - 14) { ctxP1.rodapeAntesDeVirar(); doc.addPage(); ctxP1.cabecalhoContinuacao(); yP1 = ctxP1.topoContinuacao; }
             tabelaRanking(doc, m, yP1, uw, 'Tempo médio por Classe Processual', porClasse, [
                 { header: 'Classe Processual', get: d => d.label, width: 50 },
                 { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
@@ -8496,7 +8512,7 @@
         let y = k3Y + 26 + gap + 2;
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
-            if (y + medirTabela(top10.length, true) > ph - 18) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             y = tabelaRanking(doc, m, y, uw, 'Processos paralisados há mais tempo', top10, [
                 { header: 'Processo', get: d => d.processo, width: 40 },
                 { header: 'Classe Processual', get: d => d.classe, width: 40 },
@@ -8505,7 +8521,7 @@
         }
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
         if (porClasse.length) {
-            if (y + medirTabela(porClasse.length, true) > ph - 18) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            if (y + medirTabela(porClasse.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             tabelaRanking(doc, m, y, uw, 'Tempo médio paralisado por Classe Processual', porClasse, [
                 { header: 'Classe Processual', get: d => d.label, width: 50 },
                 { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
@@ -8673,7 +8689,7 @@
         let y = k3Y + 26 + gap + 2;
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
-            if (y + medirTabela(top10.length, true) > ph - 18) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             y = tabelaRanking(doc, m, y, uw, 'Processos em remessa há mais tempo', top10, [
                 { header: 'Processo', get: d => d.processo, width: 40 },
                 { header: 'Classe Processual', get: d => d.classe, width: 40 },
@@ -8682,7 +8698,7 @@
         }
         const porClasse = agregarMedia(validos, 'classe', 'dias', 12);
         if (porClasse.length) {
-            if (y + medirTabela(porClasse.length, true) > ph - 18) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            if (y + medirTabela(porClasse.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             tabelaRanking(doc, m, y, uw, 'Tempo médio em remessa por Classe Processual', porClasse, [
                 { header: 'Classe Processual', get: d => d.label, width: 50 },
                 { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
