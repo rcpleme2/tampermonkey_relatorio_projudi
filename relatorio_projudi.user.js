@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.7
+// @version      25.8
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11634,9 +11634,17 @@
     // dispatchEvent não substitui um .click() real nesses elementos do Projudi).
     function acharAbaOutrosCumprimentos() {
         const docs = todosDocumentosAcessiveis();
+        // #tabItemprefix3 é "Outros Cumprimentos" na barra padrão — mas em atribuições
+        // cuja Atuação contém "Acordo de Não Persecução Penal" (unidades VEPMA/ANPP) a
+        // barra ganha 2 abas extras ANTES dela ("Pendências de Incidentes",
+        // "Cumprimentos de Medidas"), empurrando tudo: ali tabItemprefix3 é
+        // "Estatísticas", e "Outros Cumprimentos" vira tabItemprefix6. Mesmo bug (e
+        // mesma correção) de acharAbaAnaliseJuntadas — casar só pelo id sem checar o
+        // texto batia silenciosamente na aba errada. O id só é aceito se o texto do
+        // link bater; caso contrário cai no fallback por texto abaixo.
         for (const d of docs) {
             const porId = d.querySelector('#tabItemprefix3 a');
-            if (porId) return porId;
+            if (porId && /^outros\s+cumprimentos$/i.test((porId.textContent || '').trim())) return porId;
         }
         for (const d of docs) {
             // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
