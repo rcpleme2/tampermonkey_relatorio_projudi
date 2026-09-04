@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.2
+// @version      25.3
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -451,11 +451,11 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
+            // "Pendências por Função" e "Juntadas pendentes por pessoa" removidos (pedido
+            // do usuário).
             distribuicoes: [
-                { titulo: 'Pendências por Função', campo: 'funcao', topN: 10 },
-                // Os três gráficos abaixo vão para a 2ª página do resumo (pagina2), com
-                // mais itens (15) já que ganham a página inteira só para eles.
-                { titulo: 'Juntadas pendentes por pessoa', campo: 'juntadoPor', topN: 15, pagina2: true },
+                // Os gráficos abaixo vão para a 2ª página do resumo (pagina2), com mais
+                // itens (15) já que ganham a página inteira só para eles.
                 // Largura total (span 2) para caber o nome completo do tipo de documento
                 { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o
@@ -4424,8 +4424,9 @@
     // (via contagemPorCompetencia — já zero-preenche competências coletadas sem nenhum
     // registro nesta situação) + linha TOTAL DA UNIDADE em destaque. Só desenha quando há
     // 2+ competências (mesmo gate que subBlocosPorAtribuicao usava).
-    function tabelaComparativoCompetencias(doc, x, y, w, dados, p, now, limites) {
+    function tabelaComparativoCompetencias(doc, x, y, w, dados, p, now, limites, opts) {
         limites = limites || LIMITES_CARTORIO;
+        opts = opts || {};
         const comps = contagemPorCompetencia(dados);
         if (comps.length < 2) return y;
         tituloSecao(doc, x, y + 4, w, 'Resumo geral e por competência', COR.azul);
@@ -4440,13 +4441,19 @@
                 return t != null && Math.floor((now - t) / DIA_MS) > limites.critico;
             }).length;
             const sit = SITUACAO_INFO[classificarSituacaoPorDias(dias, limites.atencao, limites.critico)];
+            // opts.diasNaColunaAntiga (pedido do usuário, resumo de Conclusões por Juiz):
+            // sem coluna "Dias" separada — o número de dias vai entre parênteses depois
+            // da data, na própria coluna "Mais antiga" (ex. "14/07/2026 (51 d)").
+            const dt = antigo
+                ? (opts.diasNaColunaAntiga && dias != null ? `${antigo.dataStr} (${dias} d)` : antigo.dataStr)
+                : '—';
             return {
                 k: rotulo,
                 n: String(sub.length),
                 pc: (dados.length ? (sub.length / dados.length * 100).toFixed(1) : '0.0') + '%',
                 pr: String(prio),
                 ac: String(acimaCritico),
-                dt: antigo ? antigo.dataStr : '—',
+                dt,
                 di: dias == null ? '—' : String(dias),
                 md: p.mediaLabel ? (mediaPorDia(sub, p.dataCampo) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : null,
                 _sit: sit, _total: !!ehTotal,
@@ -4458,7 +4465,7 @@
         // resumo geral de antes — média de médias distorceria o número, erro do tipo
         // Simpson: ver comentário original em montarResumoGenerico).
         const totalRow = linhaDe('TOTAL DA UNIDADE', dados, true);
-        if (p.mediaLabel) {
+        if (p.mediaLabel && !opts.semMedia) {
             totalRow.md = comps
                 .reduce((s, c) => s + mediaPorDia(subDe(c.competencia), p.dataCampo), 0)
                 .toLocaleString('pt-BR', { maximumFractionDigits: 1 });
@@ -4473,9 +4480,11 @@
         addCol('% do total', 'pc', 18);
         if (!p.semPrioridade) addCol(p.rotuloPrioridadeKpi ? 'Urgentes' : 'Priorit.', 'pr', 15);
         addCol(`>${limites.critico}d`, 'ac', 16);
-        addCol('Mais antiga', 'dt', 22);
-        addCol('Dias', 'di', 12);
-        if (p.mediaLabel) addCol('Méd./dia', 'md', 16);
+        addCol('Mais antiga', 'dt', opts.diasNaColunaAntiga ? 30 : 22);
+        // Coluna "Dias" separada (pedido do usuário: some quando os dias já vêm
+        // embutidos na coluna "Mais antiga", ver opts.diasNaColunaAntiga acima).
+        if (!opts.diasNaColunaAntiga) addCol('Dias', 'di', 12);
+        if (p.mediaLabel && !opts.semMedia) addCol('Méd./dia', 'md', 16);
         addCol('Situação', 'st', 22);
 
         const columnStyles = { k: { cellWidth: w - somaFixas, fontStyle: 'bold', textColor: COR.tinta } };
@@ -5054,14 +5063,14 @@
         let gY0 = kY + 28 + gap + 2;
         if (estatisticasTM) {
             const kpisTM = [{
-                titulo: 'Já Analisadas', valor: String(estatisticasTM.total),
-                subs: [`Mag: ${estatisticasTM.peloMagistrado} · Ass: ${estatisticasTM.porOutros}`],
+                titulo: 'Pré-análises pendentes', valor: String(estatisticasTM.total),
+                subs: [`Magistrado: ${estatisticasTM.peloMagistrado} / Assessoria: ${estatisticasTM.porOutros}`],
                 acento: COR.vinho,
             }];
             if (estatisticasTM.media != null) {
                 kpisTM.push({
                     titulo: 'Tempo Médio de Conclusão', valor: `${String(estatisticasTM.media).replace('.', ',')} dia(s)`,
-                    subs: ['Dt. Envio → Dt. Análise'], acento: COR.aqua,
+                    subs: [], acento: COR.aqua,
                 });
             }
             if (estatisticasTM.periodo) {
@@ -5075,7 +5084,8 @@
         // Tabelas no lugar de gráficos (pedido do usuário) — comparativo por competência
         // (só aparece com 2+ competências nas conclusões pendentes DESTE magistrado) mais
         // as distribuições, no lugar das barras horizontais de antes.
-        let y = tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE) + 6;
+        let y = tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
+            { semMedia: true, diasNaColunaAntiga: true }) + 6;
         const blocos = [
             { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -5356,31 +5366,35 @@
             doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.5); doc.line(m, hyCrit, pw - m, hyCrit);
             hyCrit += 6;
 
+            // Larguras explícitas escalando pra largura útil da página (pedido do
+            // usuário: coluna "Atribuição" nova sem estourar a margem).
+            const uwCrit = pw - 2 * m;
+            const colunasCrit = [
+                { header: 'Processo', width: 26, key: 'processo' },
+                { header: 'Atribuição', width: 30, key: 'atribuicao' },
+                { header: 'Oficial de Justiça', width: 26, key: 'oficial' },
+                { header: 'Dt. Expedição', width: 16, key: 'dataExpedicao' },
+                { header: 'Dias', width: 10, key: 'dias' },
+                { header: 'Natureza', width: 20, key: 'natureza' },
+                { header: 'Urgente', width: 12, key: 'urgente' },
+            ];
+            const columnStylesCrit = columnStylesEscalados(colunasCrit.map(c => ({ width: c.width })), uwCrit);
+            colunasCrit.forEach((c, i) => { columnStylesCrit['k' + i] = { ...columnStylesCrit['k' + i], ...(c.key === 'processo' ? { fontStyle: 'bold', textColor: COR.tinta } : {}), ...(c.key === 'dias' ? { halign: 'right', fontStyle: 'bold', textColor: COR.vermelho } : {}), ...(c.key === 'urgente' ? { halign: 'center' } : {}) }; });
+
             doc.autoTable({
-                columns: [
-                    { header: 'Processo', dataKey: 'processo' },
-                    { header: 'Oficial de Justiça', dataKey: 'oficial' },
-                    { header: 'Dt. Expedição', dataKey: 'dataExpedicao' },
-                    { header: 'Dias', dataKey: 'dias' },
-                    { header: 'Natureza', dataKey: 'natureza' },
-                    { header: 'Urgente', dataKey: 'urgente' },
-                ],
+                columns: colunasCrit.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
                 body: criticos.map(d => ({
-                    processo: d.processo || '', oficial: d.oficial || '(sem oficial)',
-                    dataExpedicao: d.dataExpedicao || '', dias: String(d.dias), natureza: d.natureza || '',
-                    urgente: d.urgente ? 'Sim' : 'Não',
+                    k0: d.processo || '', k1: d.competencia || d.atuacao || '(sem atribuição)', k2: d.oficial || '(sem oficial)',
+                    k3: d.dataExpedicao || '', k4: String(d.dias), k5: d.natureza || '',
+                    k6: d.urgente ? 'Sim' : 'Não',
                 })),
                 startY: hyCrit,
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
-                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
+                styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle', overflow: 'linebreak' },
                 headStyles: { fillColor: COR.vermelho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: {
-                    processo: { fontStyle: 'bold', textColor: COR.tinta },
-                    dias: { halign: 'right', fontStyle: 'bold', textColor: COR.vermelho },
-                    urgente: { halign: 'center' },
-                },
+                columnStyles: columnStylesCrit,
                 didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
             });
         }
@@ -5687,7 +5701,11 @@
         const col = colunasCartao(x, w, false);
         if (l.subAtribuicao) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
-            doc.text('– ' + l.nome, col.labelX + 5, y + h / 2 + 1.2);
+            // Truncado à largura da coluna do label (mesma função usada nos demais ramos
+            // desta função) — sem isso, um nome de vara/unidade muito longo invadia o
+            // espaço fixo do número à direita e sobrepunha os dois textos (bug relatado
+            // pelo usuário).
+            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, col.labelW - 5), col.labelX + 5, y + h / 2 + 1.2);
             if (l.indicador) {
                 doc.setTextColor(...COR.tintaSec);
                 doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), col.numRightX, y + h / 2 + 1.2, { align: 'right' });
@@ -6666,6 +6684,13 @@
                 doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: t._pgResumo });
             });
 
+            outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
+                s._pgResumo = renderizarResumo((primeira) => s.montarResumo(doc, s.dados, primeira, false, null));
+                doc.outline.add(null, s.rotulo, { pageNumber: s._pgResumo });
+            });
+
+            // Gabinete/Conclusões SEMPRE por último (pedido do usuário) — depois de
+            // Cartório e de outrasSecoes.
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
                 const estatisticasTM = calcularEstatisticasTMJuiz(info.rotulo, null);
@@ -6673,11 +6698,6 @@
                     (primeira) => montarResumoJuizConclusoes(doc, info.rotulo, info.dados, now, primeira, null, estatisticasTM));
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: info._pgResumo });
                 info._bmJuiz = doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: info._pgResumo });
-            });
-
-            outrasSecoes.filter(s => !secaoVazia(s)).forEach(s => {
-                s._pgResumo = renderizarResumo((primeira) => s.montarResumo(doc, s.dados, primeira, false, null));
-                doc.outline.add(null, s.rotulo, { pageNumber: s._pgResumo });
             });
 
             // Transforma cada linha da tabela unificada do Cartório (na capa) num link
@@ -6764,16 +6784,18 @@
                 doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
             });
 
+            outrasSecoes.forEach(s => {
+                const pg = renderizarViaTabelaOuResumo(s, s.dados);
+                if (pg) doc.outline.add(null, s.rotulo, { pageNumber: pg });
+            });
+
+            // Gabinete/Conclusões SEMPRE por último (pedido do usuário) — depois de
+            // Cartório e de outrasSecoes.
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
                 const pg = usarPaginaTabelas(() => montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null));
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
                 doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
-            });
-
-            outrasSecoes.forEach(s => {
-                const pg = renderizarViaTabelaOuResumo(s, s.dados);
-                if (pg) doc.outline.add(null, s.rotulo, { pageNumber: pg });
             });
         }
 
@@ -8519,14 +8541,16 @@
         const uw = pw - 2 * m;
         tituloSecao(doc, m, m + 3, uw, 'Tabela discriminada — Processos Paralisados');
 
+        // Colunas pedidas pelo usuário: Atribuição / Classe Processual / Processo / Dias
+        // Paralisado (Último Movimento saiu da tabela).
         const colunas = [
-            { header: 'Processo', width: 30, get: (d) => d.processo },
+            { header: 'Atribuição', width: 40, get: (d) => d.competencia || d.atuacao || '(sem atribuição)' },
             { header: 'Classe Processual', width: 56, get: (d) => d.classe },
+            { header: 'Processo', width: 30, get: (d) => d.processo },
             { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
-            { header: 'Último Movimento', width: 70, get: (d) => d.ultimoMovimento },
         ];
         const columnStyles = columnStylesEscalados(colunas, uw);
-        const idxProcesso = 0;
+        const idxProcesso = 2;
 
         doc.autoTable({
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
@@ -8967,7 +8991,7 @@
                 { header: 'Processo', width: 30, get: d => d.processo },
                 { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
                 { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
-                { header: 'Dias Paralisado', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
+                { header: 'Dias Suspenso', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
             ];
             const columnStylesTop15 = columnStylesEscalados(colunasTop15, uw);
             doc.autoTable({
