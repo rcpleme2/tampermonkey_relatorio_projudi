@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.1
+// @version      25.2
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3704,6 +3704,17 @@
         return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0)).getTime();
     }
 
+    const DIAS_SEMANA_PT = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+
+    // Dia da semana (por extenso, em português) de uma data "DD/MM/AAAA" — usado na
+    // tabela discriminada de Audiências Designadas (pedido do usuário: coluna ao lado da
+    // data). '' se a data não puder ser lida.
+    function diaDaSemana(str) {
+        const ts = parseDataBR(str);
+        if (ts == null) return '';
+        return DIAS_SEMANA_PT[new Date(ts).getDay()];
+    }
+
     function diasDecorridos(str, now) {
         const ts = parseDataBR(str);
         if (ts == null) return '';
@@ -4018,6 +4029,21 @@
         doc.text(texto, x, y);
         doc.setDrawColor(...acento); doc.setLineWidth(0.7);
         doc.line(x, y + 1.6, x + Math.min(w, doc.getTextWidth(texto) + 2), y + 1.6);
+    }
+
+    // Escala as larguras de coluna (a propriedade "width" de cada item de `colunas`, um
+    // PESO relativo em mm escolhido olhando o preview — não a largura real da página) de
+    // forma que a SOMA bata exatamente com `uw` (largura útil da página) — evita tabelas
+    // com colunas fixas demais que sobram espaço vazio à direita ou que, somadas,
+    // ultrapassam a margem e cortam colunas (pedido do usuário, mesmo ajuste já usado em
+    // montarTabelaGenerico/tabelaRanking). Retorna um columnStyles pronto para
+    // doc.autoTable ({k0:{cellWidth}, k1:{cellWidth}, ...}).
+    function columnStylesEscalados(colunas, uw) {
+        const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
+        const fator = somaLarguras > 0 ? uw / somaLarguras : 1;
+        const styles = {};
+        colunas.forEach((c, i) => { styles['k' + i] = { cellWidth: c.width * fator }; });
+        return styles;
     }
 
     // Card de destaque (KPI), com uma barra de acento colorida à esquerda indicando o
@@ -6583,21 +6609,18 @@
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
-        // ═══ CAPA: "Situação da Unidade" no modo 'resumo' (processos ativos por
-        // atuação, depois Cartório e Gabinete) — ou uma capa simples no modo 'tabelas'
-        // (só título e data, sem KPIs — não fazem sentido num documento só de tabelas).
-        // Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
+        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas'
+        // (pedido do usuário: ir direto às tabelas, sem folha de rosto) não se desenha
+        // capa nenhuma; a primeira tabela renderizada usa a página 1 que o jsPDF já cria
+        // por padrão (ver usarPaginaTabelas, mais abaixo, que remove essa página 1 só se
+        // ela ficar em branco — caso a 1ª seção use uma função de tabela que sempre
+        // começa com doc.addPage() incondicional). Se o conteúdo passar de uma página,
+        // segue normalmente na próxima. ═══
         if (modo === 'resumo' && temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
             desenharCapaSituacao(doc, cartorio, gabinete, mapaAtivos, agora, primeira);
             doc.outline.add(null, 'Situação da Unidade', { pageNumber: pgCapa });
-            usouPagina1 = true;
-        } else if (modo === 'tabelas') {
-            // Sempre desenhada (mesmo sem nenhum item coletado) — garante que a 1ª
-            // página do documento nunca fique em branco quando o primeiro item chamar
-            // montarTabela (que sempre começa com doc.addPage()).
-            desenharCapaTabelas(doc, agora, !usouPagina1);
             usouPagina1 = true;
         }
 
@@ -6694,16 +6717,34 @@
             // Medidas não têm NENHUM dado discriminado (só totais agregados) — ficam de
             // fora deste modo, como sempre ficaram fora do passo de tabela. ═══
             const CFGS_TABELA_EMBUTIDA = [CFG_AUDIENCIAS, CFG_SUSPENSOS, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL, CFG_ARQUIVADOS_SALDO];
+            // As funções montarTabela* (Paralisados, Juntadas, Ativos por Classe, Gabinete
+            // etc.) sempre começam com um doc.addPage() incondicional — desenhado assim
+            // porque, no modo 'resumo', sempre vêm depois de outra página já existente.
+            // Sem a capa (pedido do usuário: "ir direto às tabelas"), se uma dessas for a
+            // PRIMEIRA coisa do documento, esse addPage() deixaria a página 1 (criada por
+            // padrão pelo próprio jsPDF) em branco. `montarFn` já deve ter chamado
+            // addPage e retornado o número da página onde desenhou; se essa foi a
+            // primeira seção do documento, remove a página 1 em branco e ajusta o número
+            // de página retornado (a numeração de todo o resto do doc, que só é montado
+            // DEPOIS, sai correta porque doc.internal.getNumberOfPages() já reflete a
+            // página removida).
+            const usarPaginaTabelas = (montarFn) => {
+                const eraPrimeira = !usouPagina1;
+                let pg = montarFn();
+                if (eraPrimeira && pg > 1) { doc.deletePage(1); pg -= 1; }
+                usouPagina1 = true;
+                return pg;
+            };
             const renderizarViaTabelaOuResumo = (secao, dados) => {
                 if (secaoTemTabela(secao)) {
-                    const pg = secao.montarTabela(doc, dados, null);
-                    usouPagina1 = true;
-                    return pg;
+                    return usarPaginaTabelas(() => secao.montarTabela(doc, dados, null));
                 }
                 if (CFGS_TABELA_EMBUTIDA.includes(secao.cfgOriginal) && dados.length) {
                     const primeira = !usouPagina1;
                     const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
-                    secao.montarResumo(doc, dados, primeira, false, null);
+                    // último argumento (somenteTabelas=true): sem KPIs/observações neste
+                    // modo (pedido do usuário) — só título curto + tabela(s).
+                    secao.montarResumo(doc, dados, primeira, false, null, null, true);
                     usouPagina1 = true;
                     return pg;
                 }
@@ -6725,8 +6766,7 @@
 
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
-                const pg = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null);
-                usouPagina1 = true;
+                const pg = usarPaginaTabelas(() => montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null));
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
                 doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
             });
@@ -7035,7 +7075,8 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Tempo médio de cumprimento de decisões / sentenças');
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, 'Tabela discriminada — Tempo médio de cumprimento de decisões / sentenças');
 
         const colunas = [
             { header: 'Processo', width: 28, get: (d) => d.processo },
@@ -7046,8 +7087,7 @@
             { header: 'Classe Processual', width: 40, get: (d) => d.classe },
             { header: 'Dias p/ Cumprimento', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
         const idxProcesso = 0;
 
         doc.autoTable({
@@ -7096,7 +7136,7 @@
     // autoTable segue para quantas páginas forem precisas, normalmente. somenteResumo
     // omite a tabela (usado tanto no relatório individual quanto no Relatório PDF conjunto,
     // pela opção "Só resumo").
-    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
+    function montarResumoAudiencias(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco, somenteTabelas) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -7108,23 +7148,7 @@
 
         const prioritarios = dados.filter(d => d.prioritario);
         const prioPct = dados.length ? Math.round(prioritarios.length / dados.length * 100) : 0;
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(TITULO_AUDIENCIAS, m, m + 2);
-        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} audiência(s) pendente(s)`;
-        if (!rotuloInfo.semFrase) {
-            const fraseComp = fraseCompetenciasComContagem(dados);
-            if (fraseComp) subtitulo += `  •  ${fraseComp}`;
-        }
-        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
-        doc.text(linhasSubtitulo, m, rotuloInfo.y);
-        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
-
         const gap = 6;
-        const kY = yLinha + 5;
         // "Vencidas" = data da audiência já passou e o termo continua pendente — ou seja,
         // a audiência foi realizada e o termo nunca foi lançado. diasAteAudiencia já
         // devolve valor NEGATIVO nesse caso; o dado sempre existiu (é a coluna "Dias até a
@@ -7134,57 +7158,87 @@
             const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
             return n != null && n < 0;
         });
-        const maisAntigaVencida = vencidas.reduce((best, d) => {
-            const ts = parseDataBR(d.dataAudiencia);
-            return ts != null && (best === null || ts < best.ts) ? { ts, data: d.dataAudiencia } : best;
-        }, null);
-        // Card "Audiências Pendentes" (total) removido — pedido do usuário, era
-        // redundante com o subtítulo da página (linha logo acima, já mostra
-        // "N audiência(s) pendente(s)"). Só 2 cards agora, em vez de 3, cada um dobra de
-        // largura (mesmo padrão de 2-em-linha usado em outros relatórios) — resolve o
-        // corte de texto que "Vencidas — termo pendente" sofria espremido num terço.
-        const kW2aud = (uw - gap) / 2;
-        desenharCard(doc, m,             kY, kW2aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
-        desenharCard(doc, m + kW2aud + gap, kY, kW2aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
-            [maisAntigaVencida
-                ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
-                : 'nenhuma audiência já realizada sem termo'],
-            true, vencidas.length ? COR.vinho : COR.aqua);
 
-        // Tabela no lugar do gráfico de antes (pedido do usuário) — deixa espaço para a
-        // tabela discriminada logo abaixo, na mesma página quando couber.
-        const chartY = kY + 28 + gap + 2;
-        const porTipo = contarPorCampo(dados, 'tipoAudiencia', 12);
-        let proximoY = chartY;
-        if (porTipo.length) {
-            proximoY = tabelaCategorias(doc, m, chartY, uw, 'Audiências por Tipo', porTipo, { rotuloCategoria: 'Tipo' }) + 6;
+        // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
+        // às tabelas — sem título grande, KPIs, gráfico ou observação, só um cabeçalho
+        // mínimo.
+        let proximoY;
+        if (somenteTabelas) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_AUDIENCIAS, m, m + 4);
+            proximoY = m + 10;
+        } else {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_AUDIENCIAS, m, m + 2);
+            const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} audiência(s) pendente(s)`;
+            if (!rotuloInfo.semFrase) {
+                const fraseComp = fraseCompetenciasComContagem(dados);
+                if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+            }
+            const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+            doc.text(linhasSubtitulo, m, rotuloInfo.y);
+            const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+            const kY = yLinha + 5;
+            const maisAntigaVencida = vencidas.reduce((best, d) => {
+                const ts = parseDataBR(d.dataAudiencia);
+                return ts != null && (best === null || ts < best.ts) ? { ts, data: d.dataAudiencia } : best;
+            }, null);
+            // Card "Audiências Pendentes" (total) removido — pedido do usuário, era
+            // redundante com o subtítulo da página (linha logo acima, já mostra
+            // "N audiência(s) pendente(s)"). Só 2 cards agora, em vez de 3, cada um dobra de
+            // largura (mesmo padrão de 2-em-linha usado em outros relatórios) — resolve o
+            // corte de texto que "Vencidas — termo pendente" sofria espremido num terço.
+            const kW2aud = (uw - gap) / 2;
+            desenharCard(doc, m,             kY, kW2aud, 28, 'Prioritárias', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
+            desenharCard(doc, m + kW2aud + gap, kY, kW2aud, 28, 'Vencidas — termo pendente', String(vencidas.length),
+                [maisAntigaVencida
+                    ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
+                    : 'nenhuma audiência já realizada sem termo'],
+                true, vencidas.length ? COR.vinho : COR.aqua);
+
+            // Tabela no lugar do gráfico de antes (pedido do usuário) — deixa espaço para a
+            // tabela discriminada logo abaixo, na mesma página quando couber.
+            const chartY = kY + 28 + gap + 2;
+            const porTipo = contarPorCampo(dados, 'tipoAudiencia', 12);
+            proximoY = chartY;
+            if (porTipo.length) {
+                proximoY = tabelaCategorias(doc, m, chartY, uw, 'Audiências por Tipo', porTipo, { rotuloCategoria: 'Tipo' }) + 6;
+            }
         }
 
         // Observação destacada (pedido do usuário): quando há audiência com termo
         // pendente há mais de 5 dias (vencida, ou seja, já realizada, mas sem termo
-        // lançado), recomenda que a secretaria observe e regularize a situação.
+        // lançado), recomenda que a secretaria observe e regularize a situação. Some no
+        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só tabelas
+        // ali (a tabela de processos vencidos continua aparecendo).
         const vencidasMaisDe5Dias = vencidas.filter(d => {
             const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
             return n != null && Math.abs(n) > 5;
         });
         if (vencidasMaisDe5Dias.length) {
-            const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
-                + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
-            const linhasObs = doc.splitTextToSize(obs, uw - 4);
-            const alturaObs = linhasObs.length * 3.6 + 10;
-            if (proximoY + alturaObs > ph - m - 10) {
-                doc.addPage();
-                desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
-                proximoY = m + 4;
+            if (!somenteTabelas) {
+                const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
+                    + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
+                const linhasObs = doc.splitTextToSize(obs, uw - 4);
+                const alturaObs = linhasObs.length * 3.6 + 10;
+                if (proximoY + alturaObs > ph - m - 10) {
+                    doc.addPage();
+                    desenharRodape(doc, TITULO_AUDIENCIAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                    proximoY = m + 4;
+                }
+                doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
+                doc.rect(m, proximoY, uw, alturaObs, 'FD');
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+                doc.text('OBSERVAÇÃO', m + 3, proximoY + 6);
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+                doc.text(linhasObs, m + 3, proximoY + 11);
+                proximoY += alturaObs + 6;
             }
-            doc.setDrawColor(...COR.vermelho); doc.setLineWidth(0.4); doc.setFillColor(...COR.cartao);
-            doc.rect(m, proximoY, uw, alturaObs, 'FD');
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
-            doc.text('OBSERVAÇÃO', m + 3, proximoY + 6);
-            doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
-            doc.text(linhasObs, m + 3, proximoY + 11);
-            proximoY += alturaObs + 6;
 
             // Tabela com o número do processo de todas as audiências com termo pendente
             // há mais de 5 dias (pedido do usuário) — aparece SEMPRE no corpo do
@@ -7196,6 +7250,7 @@
                 startY: proximoY + 6,
                 margin: { left: m, right: m, top: m, bottom: 14 },
                 theme: 'grid',
+                tableWidth: uw,
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
                           lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
@@ -7225,8 +7280,7 @@
             { header: 'Data da Audiência', width: 36, get: (d) => d.dataAudiencia },
             { header: 'Dias até a Audiência', width: 24, get: (d) => fmtDiferencaDias(diasAteAudiencia(d.dataAudiencia, agora.getTime())) },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
 
         doc.autoTable({
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
@@ -7465,18 +7519,19 @@
         doc.autoTable({
             columns: [
                 { header: 'Data', dataKey: 'data' },
+                { header: 'Dia da Semana', dataKey: 'diaSemana' },
                 { header: 'Hora', dataKey: 'horario' },
                 { header: 'Processo', dataKey: 'processo' },
                 { header: 'Tipo da Audiência', dataKey: 'tipoAudiencia' },
             ],
-            body: tabela.map(t => ({ data: t.data, horario: t.horario, processo: t.processo || '—', tipoAudiencia: t.tipoAudiencia })),
+            body: tabela.map(t => ({ data: t.data, diaSemana: diaDaSemana(t.data), horario: t.horario, processo: t.processo || '—', tipoAudiencia: t.tipoAudiencia })),
             startY: m + 10,
             margin: { left: m, right: m, bottom: 14 },
             theme: 'grid',
             styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: { data: { cellWidth: uw * 0.14 }, horario: { cellWidth: uw * 0.1 }, processo: { cellWidth: uw * 0.36 }, tipoAudiencia: { cellWidth: uw * 0.4 } },
+            columnStyles: { data: { cellWidth: uw * 0.12 }, diaSemana: { cellWidth: uw * 0.16 }, horario: { cellWidth: uw * 0.08 }, processo: { cellWidth: uw * 0.32 }, tipoAudiencia: { cellWidth: uw * 0.32 } },
             didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
         return pagina;
@@ -8099,7 +8154,7 @@
         baixarBlob(doc.output('blob'), `processos_arquivados_saldo_projudi_${dataArquivo()}.pdf`);
     }
 
-    function montarResumoArquivadosSaldo(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
+    function montarResumoArquivadosSaldo(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco, somenteTabelas) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -8109,49 +8164,58 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const r = dados || [];
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
-        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
-        const yLinha = rotuloInfo.y + 3.5;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
-
         const gap = 6;
         const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
 
-        // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
-        // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
-        const kY = yLinha + 6;
-        const kpis = [
-            { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
-            { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
-        ];
-        const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
-        kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
+        // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
+        // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo.
+        let proximoY;
+        if (somenteTabelas) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 4);
+            proximoY = m + 10;
+        } else {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
+            const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
+            const yLinha = rotuloInfo.y + 3.5;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
-        const aY = kY + 28 + gap;
-        let maisAntigo = null;
-        r.forEach(d => {
-            const ts = parseDataBR(d.dtArquivamento);
-            if (ts == null) return;
-            if (!maisAntigo || ts < maisAntigo.ts) maisAntigo = { ts, d };
-        });
-        let valAntigo = '—', subsAntigo = ['Data não disponível'];
-        if (maisAntigo) {
-            const dias = Math.max(0, Math.floor((Date.now() - maisAntigo.ts) / DIA_MS));
-            valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
-            subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
-        }
-        desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+            // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
+            // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
+            const kY = yLinha + 6;
+            const kpis = [
+                { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
+                { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
+            ];
+            const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
+            kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
 
-        // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
-        // relatório efetivamente lista algum processo.
-        let proximoY = aY + 28 + gap;
-        if (r.length) {
-            const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, OBSERVACAO_ARQUIVADOS_SALDO);
-            proximoY += alturaObs + gap;
+            const aY = kY + 28 + gap;
+            let maisAntigo = null;
+            r.forEach(d => {
+                const ts = parseDataBR(d.dtArquivamento);
+                if (ts == null) return;
+                if (!maisAntigo || ts < maisAntigo.ts) maisAntigo = { ts, d };
+            });
+            let valAntigo = '—', subsAntigo = ['Data não disponível'];
+            if (maisAntigo) {
+                const dias = Math.max(0, Math.floor((Date.now() - maisAntigo.ts) / DIA_MS));
+                valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
+                subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
+            }
+            desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+
+            // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
+            // relatório efetivamente lista algum processo. Some no modo "Tabelas
+            // Discriminadas" (somenteTabelas) — pedido do usuário: só tabelas ali.
+            proximoY = aY + 28 + gap;
+            if (r.length) {
+                const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, OBSERVACAO_ARQUIVADOS_SALDO);
+                proximoY += alturaObs + gap;
+            }
         }
 
         // Tabela completa com Processo / Atribuição / Dt Arquivamento / Saldo (pedido do
@@ -8452,7 +8516,8 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Processos Paralisados');
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, 'Tabela discriminada — Processos Paralisados');
 
         const colunas = [
             { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -8460,8 +8525,7 @@
             { header: 'Dias Paralisado', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
             { header: 'Último Movimento', width: 70, get: (d) => d.ultimoMovimento },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
         const idxProcesso = 0;
 
         doc.autoTable({
@@ -8623,7 +8687,8 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, 'Tabela discriminada — Remessas em Aberto');
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, 'Tabela discriminada — Remessas em Aberto');
 
         const colunas = [
             { header: 'Processo', width: 32, get: (d) => d.processo },
@@ -8631,8 +8696,7 @@
             { header: 'Dias em Remessa', width: 20, get: (d) => (d.dias == null ? '' : String(d.dias)) },
             { header: 'Último Movimento', width: 70, get: (d) => d.ultimoMovimento },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
         const idxProcesso = 0;
 
         doc.autoTable({
@@ -8765,43 +8829,36 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${TITULO_ATIVOS_CLASSE}`);
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, `Tabela discriminada — ${TITULO_ATIVOS_CLASSE}`);
+
+        // Só Classe / Em Andamento / % do Total (pedido do usuário) — as demais colunas
+        // (Ações Novas, Suspensos, Deixaram Suspensão, Arquivados sem/com Baixa,
+        // Desarquivados) saíram da tabela discriminada.
+        const colunas = [
+            { header: 'Classe Processual', width: 56, get: (d) => d.classe },
+            { header: 'Em Andamento', width: 20, get: (d) => String(d.emAndamento) },
+            { header: '% do Total', width: 18, get: (d) => `${totalAtivos ? (d.emAndamento / totalAtivos * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '0'}%` },
+        ];
+        const columnStyles = columnStylesEscalados(colunas, uw);
+        columnStyles.k1 = { ...columnStyles.k1, fontStyle: 'bold', textColor: COR.tinta };
+        columnStyles.k2 = { ...columnStyles.k2, halign: 'right' };
 
         doc.autoTable({
-            columns: [
-                { header: 'Classe Processual', dataKey: 'classe' },
-                { header: 'Ações Novas', dataKey: 'acoesNovas' },
-                { header: 'Em Andamento', dataKey: 'emAndamento' },
-                { header: '% do Total', dataKey: 'percentual' },
-                { header: 'Suspensos', dataKey: 'suspensos' },
-                { header: 'Deixaram Suspensão', dataKey: 'deixaramSuspensao' },
-                { header: 'Arq. sem Baixa', dataKey: 'arquivadosSemBaixa' },
-                { header: 'Arq. com Baixa', dataKey: 'arquivadosComBaixa' },
-                { header: 'Desarquivados', dataKey: 'desarquivados' },
-            ],
-            body: ordenados.map(d => ({
-                classe: d.classe,
-                acoesNovas: String(d.acoesNovas),
-                emAndamento: String(d.emAndamento),
-                percentual: `${totalAtivos ? (d.emAndamento / totalAtivos * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '0'}%`,
-                suspensos: String(d.suspensos),
-                deixaramSuspensao: String(d.deixaramSuspensao),
-                arquivadosSemBaixa: String(d.arquivadosSemBaixa),
-                arquivadosComBaixa: String(d.arquivadosComBaixa),
-                desarquivados: String(d.desarquivados),
-            })),
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
             startY: m + 8,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
-            styles: { font: 'PublicSans', fontSize: 7, cellPadding: 1.5, textColor: COR.tintaSec,
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
                       lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
-            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 7.5 },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                classe: { cellWidth: 56 },
-                emAndamento: { fontStyle: 'bold', textColor: COR.tinta },
-                percentual: { halign: 'right' },
-            },
+            columnStyles,
             didDrawPage: () => desenharRodape(doc, TITULO_ATIVOS_CLASSE, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
 
@@ -8828,7 +8885,7 @@
     // direto no resumo, mesmo padrão de montarResumoArquivadosSaldo. cfg.pdf.observacaoFinal
     // e os rótulos dos KPIs continuam definidos em CFG_SUSPENSOS.pdf (ainda fazem sentido
     // ali como configuração), só deixaram de ser lidos por montarResumoGenerico.
-    function montarResumoSuspensos(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
+    function montarResumoSuspensos(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco, somenteTabelas) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -8839,46 +8896,61 @@
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const p = CFG_SUSPENSOS.pdf;
         const r = dados || [];
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(p.titulo, m, m + 2);
-        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s)`, m, rotuloInfo.y);
-        const yLinha = rotuloInfo.y + 4.2;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
-
         const gap = 6;
-        const kY = yLinha + 5;
-        const prio = contarPrioritarios(r);
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m, kY, kW2, 28, p.atosTitulo, String(r.length), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, p.rotuloPrioridadeKpi || 'Prioritários pendentes', String(prio),
-            [`${r.length ? Math.round(prio / r.length * 100) : 0}% do total`], true, COR.vermelho);
 
-        // KPI da suspensão mais antiga — mesmo cálculo que montarResumoGenerico fazia via
-        // acharMaisAntigo/p.dataCampo, hand-coded aqui porque este relatório saiu do
-        // mecanismo genérico.
-        const aY = kY + 28 + gap;
-        const antigo = acharMaisAntigo(r, p.dataCampo);
-        let valAntigo = '—', subsAntigo = ['Data não disponível'];
-        if (antigo) {
-            const dias = Math.max(0, Math.floor((Date.now() - antigo.ts) / DIA_MS));
-            valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
-            subsAntigo = [
-                `Processo ${antigo.registro.processo || ''}${antigo.registro.prioritario ? '  — PRIORITÁRIO' : ''}`,
-                antigo.registro.classe || '',
-            ];
-        }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+        // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
+        // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo
+        // (mesmo padrão das demais páginas desse PDF, ex. montarTabelaParalisados).
+        let proximoY;
+        if (somenteTabelas) {
+            // Só o nome do relatório como cabeçalho — cada tabela abaixo já tem seu
+            // próprio título (tituloSecao), mesmo padrão das demais páginas do PDF
+            // "Tabelas Discriminadas" (ex. montarTabelaParalisados).
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(p.titulo, m, m + 4);
+            proximoY = m + 10;
+        } else {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(p.titulo, m, m + 2);
+            const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s)`, m, rotuloInfo.y);
+            const yLinha = rotuloInfo.y + 4.2;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
-        // Observação final destacada (texto literal pedido pela Corregedoria) — mantida
-        // mesmo sem os demais gráficos (pedido do usuário: manter o texto, remover só os
-        // gráficos). Mesmo desenho visual do balão de observação de Arquivados com Saldo.
-        let proximoY = aY + 28 + gap;
-        if (p.observacaoFinal) {
-            const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, p.observacaoFinal);
-            proximoY += alturaObs + gap;
+            const kY = yLinha + 5;
+            const prio = contarPrioritarios(r);
+            const kW2 = (uw - gap) / 2;
+            desenharCard(doc, m, kY, kW2, 28, p.atosTitulo, String(r.length), [], true, COR.azul);
+            desenharCard(doc, m + kW2 + gap, kY, kW2, 28, p.rotuloPrioridadeKpi || 'Prioritários pendentes', String(prio),
+                [`${r.length ? Math.round(prio / r.length * 100) : 0}% do total`], true, COR.vermelho);
+
+            // KPI da suspensão mais antiga — mesmo cálculo que montarResumoGenerico fazia
+            // via acharMaisAntigo/p.dataCampo, hand-coded aqui porque este relatório saiu
+            // do mecanismo genérico.
+            const aY = kY + 28 + gap;
+            const antigo = acharMaisAntigo(r, p.dataCampo);
+            let valAntigo = '—', subsAntigo = ['Data não disponível'];
+            if (antigo) {
+                const dias = Math.max(0, Math.floor((Date.now() - antigo.ts) / DIA_MS));
+                valAntigo = `${antigo.dataStr}  (${dias} dias em aberto)`;
+                subsAntigo = [
+                    `Processo ${antigo.registro.processo || ''}${antigo.registro.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                    antigo.registro.classe || '',
+                ];
+            }
+            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+
+            // Observação final destacada (texto literal pedido pela Corregedoria) —
+            // mantida mesmo sem os demais gráficos (pedido do usuário: manter o texto,
+            // remover só os gráficos). Mesmo desenho visual do balão de observação de
+            // Arquivados com Saldo. Some no modo "Tabelas Discriminadas" (somenteTabelas)
+            // — pedido do usuário: só tabelas ali.
+            proximoY = aY + 28 + gap;
+            if (p.observacaoFinal) {
+                const alturaObs = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, p.observacaoFinal);
+                proximoY += alturaObs + gap;
+            }
         }
 
         // Tabela com até 15 processos suspensos há mais tempo (pedido do usuário) —
@@ -8897,8 +8969,7 @@
                 { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
                 { header: 'Dias Paralisado', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
             ];
-            const columnStylesTop15 = {};
-            colunasTop15.forEach((c, i) => { columnStylesTop15['k' + i] = { cellWidth: c.width }; });
+            const columnStylesTop15 = columnStylesEscalados(colunasTop15, uw);
             doc.autoTable({
                 columns: colunasTop15.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
                 body: top15.map(d => {
@@ -8944,8 +9015,7 @@
             { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
             { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
 
         const ordenados = r.slice().sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0));
         const corpo = ordenados.map(d => {
@@ -9034,7 +9104,7 @@
     // função removida) passou a ser desenhada aqui direto, com uma coluna "Atribuição
     // (Competência)" a mais (pedido do usuário) — mesmo padrão de
     // montarResumoArquivadosSaldo/montarResumoSuspensos.
-    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
+    function montarResumoSuspensosPrazo(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco, somenteTabelas) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -9044,34 +9114,45 @@
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         const r = dados || [];
-
-        const porClasse = mediaSuspensaoPorClasse(r);
-        const classeTop = porClasse[0] || null;
-        const fimMaisLongo = acharFimMaisLongo(r);
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
-        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
-        const yLinha = rotuloInfo.y + 4.2;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
-
         const gap = 6;
-        const kY = yLinha + 5;
-        const kW3 = (uw - 2 * gap) / 3;
-        desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(r.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
-            classeTop ? classeTop.classe : '—',
-            classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
-        // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
-        // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
-        // certa (bold, já ativa no momento do desenho); "subs" usa
-        // doc.splitTextToSize(...)[0], que quebra em espaço e descarta o resto da linha
-        // sem aviso — foi isso que sumia com o número (card mostrava só "Processo").
-        desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Fim de Suspensão Mais Distante',
-            fimMaisLongo ? fimMaisLongo.registro.processo : '—',
-            fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
+
+        // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
+        // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo.
+        let proximoY;
+        if (somenteTabelas) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 4);
+            proximoY = m + 10;
+        } else {
+            const porClasse = mediaSuspensaoPorClasse(r);
+            const classeTop = porClasse[0] || null;
+            const fimMaisLongo = acharFimMaisLongo(r);
+
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
+            const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) suspenso(s) por prazo determinado`, m, rotuloInfo.y);
+            const yLinha = rotuloInfo.y + 4.2;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+            const kY = yLinha + 5;
+            const kW3 = (uw - 2 * gap) / 3;
+            desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(r.length), [], true, COR.azul);
+            desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
+                classeTop ? classeTop.classe : '—',
+                classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+            // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
+            // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
+            // certa (bold, já ativa no momento do desenho); "subs" usa
+            // doc.splitTextToSize(...)[0], que quebra em espaço e descarta o resto da linha
+            // sem aviso — foi isso que sumia com o número (card mostrava só "Processo").
+            desenharCard(doc, m + 2 * (kW3 + gap), kY, kW3, 28, 'Fim de Suspensão Mais Distante',
+                fimMaisLongo ? fimMaisLongo.registro.processo : '—',
+                fimMaisLongo ? [`Fim: ${fimMaisLongo.dataStr}`] : [], true, COR.vermelho);
+
+            proximoY = kY + 28 + gap + 4;
+        }
 
         // Tabela com até 15 processos com maior tempo de suspensão (pedido do usuário) —
         // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
@@ -9079,7 +9160,6 @@
         // entra no modo "Tabelas Discriminadas"). Ordenada por Tempo de Suspensão
         // (duração fim - início) descendente — maior tempo primeiro; registros sem
         // duração calculável vão ao final.
-        let proximoY = kY + 28 + gap + 4;
         if (r.length) {
             const temMotivoTop15 = r.some(d => d.motivo);
             const top15 = r.slice()
@@ -9097,8 +9177,7 @@
                 { header: 'Tempo de Suspensão (dias)', width: 24, get: d => { const dur = duracaoSuspensaoDias(d); return dur == null ? '' : String(dur); } },
             ];
             if (temMotivoTop15) colunasTop15.push({ header: 'Motivo da Suspensão', width: 36, get: d => d.motivo || '' });
-            const columnStylesTop15 = {};
-            colunasTop15.forEach((c, i) => { columnStylesTop15['k' + i] = { cellWidth: c.width }; });
+            const columnStylesTop15 = columnStylesEscalados(colunasTop15, uw);
             doc.autoTable({
                 columns: colunasTop15.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
                 body: top15.map(d => {
@@ -9160,8 +9239,7 @@
         ];
         if (temMotivo) colunas.push({ header: 'Motivo da Suspensão', width: 36, get: (d) => d.motivo });
         colunas.push({ header: 'Dias Paralisado', width: 22, get: (d) => (d.dias == null ? '' : String(d.dias)) });
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
 
         doc.autoTable({
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
@@ -9216,7 +9294,7 @@
     // agora é uma única tabela com TODOS os processos (antes em
     // montarTabelaInstanciaRecursal, função removida — a lógica de colunas/ordenação e a
     // observação ao final vieram de lá sem mudança).
-    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco) {
+    function montarResumoInstanciaRecursal(doc, dados, ehPrimeiraSecao, comIndice, somenteResumo, rotuloBloco, somenteTabelas) {
         if (!ehPrimeiraSecao) doc.addPage();
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -9228,34 +9306,47 @@
         const r = dados || [];
 
         const maisDe2Anos = processosEnviadosHaMaisDeXAnos(r, 2);
-
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
-        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) em instância recursal`, m, rotuloInfo.y);
-        const yLinha = rotuloInfo.y + 4.2;
-        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
-
         const gap = 6;
-        const kY = yLinha + 5;
-        const kW2 = (uw - gap) / 2;
-        desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(r.length), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
+
+        // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
+        // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo.
+        let proximoY;
+        if (somenteTabelas) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(13); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 4);
+            proximoY = m + 10;
+        } else {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
+            const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s) em instância recursal`, m, rotuloInfo.y);
+            const yLinha = rotuloInfo.y + 4.2;
+            doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+            const kY = yLinha + 5;
+            const kW2 = (uw - gap) / 2;
+            desenharCard(doc, m, kY, kW2, 24, 'Processos em Instância Recursal', String(r.length), [], true, COR.azul);
+            desenharCard(doc, m + kW2 + gap, kY, kW2, 24, 'Enviados há Mais de 2 Anos', String(maisDe2Anos.length), [], true, COR.vermelho);
+            proximoY = kY + 24 + gap;
+        }
 
         // Observação + tabela dos processos enviados há mais de 2 anos (pedido do
         // usuário) — só aparecem quando há algum processo nessa situação, mas SEMPRE no
         // corpo do relatório (inclusive no modo "Só resumo" do PDF conjunto),
         // independente da tabela discriminada completa mais abaixo (que só entra no modo
-        // "Tabelas Discriminadas"). Texto literal fornecido pelo usuário.
-        let proximoY = kY + 24 + gap;
+        // "Tabelas Discriminadas"). Texto literal fornecido pelo usuário — a observação
+        // (mas não a tabela) some no modo "Tabelas Discriminadas" (somenteTabelas), pedido
+        // do usuário: só tabelas ali.
         if (maisDe2Anos.length) {
-            const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
-                + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
-                + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
-                + 'do andamento processual.';
-            const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
-            proximoY += alturaObs2Anos + gap;
+            if (!somenteTabelas) {
+                const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
+                    + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
+                    + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
+                    + 'do andamento processual.';
+                const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
+                proximoY += alturaObs2Anos + gap;
+            }
 
             tituloSecao(doc, m, proximoY, uw, `Processos em instância recursal há mais de 2 anos (${maisDe2Anos.length})`);
             const colunasAntigos = [
@@ -9263,8 +9354,7 @@
                 { header: 'Atribuição (Competência)', width: 40, get: x => x.registro.competencia || x.registro.atuacao || '(sem atribuição)' },
                 { header: 'Data da Remessa', width: 26, get: x => x.registro.dataEnvio },
             ];
-            const columnStylesAntigos = {};
-            colunasAntigos.forEach((c, i) => { columnStylesAntigos['k' + i] = { cellWidth: c.width }; });
+            const columnStylesAntigos = columnStylesEscalados(colunasAntigos, uw);
             doc.autoTable({
                 columns: colunasAntigos.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
                 body: maisDe2Anos.map(x => {
@@ -9322,8 +9412,7 @@
             { header: 'Data de Envio', width: 26, get: (d) => d.dataEnvio },
             { header: 'Competência', width: 40, get: (d) => d.competencia || '' },
         ];
-        const columnStyles = {};
-        colunas.forEach((c, i) => { columnStyles['k' + i] = { cellWidth: c.width }; });
+        const columnStyles = columnStylesEscalados(colunas, uw);
 
         doc.autoTable({
             columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
