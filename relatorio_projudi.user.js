@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.5
+// @version      25.6
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3924,14 +3924,20 @@
     // fraseCompetenciasComContagem (texto do subtítulo) e subLinhasAtribuicao (sub-linhas
     // indentadas na tabela unificada da capa). Devolve [] quando há só 0 ou 1 competência
     // (nada a detalhar por atribuição, mesmo comportamento de sempre).
-    function contagemPorCompetencia(dados) {
+    // `peso(d)` deixa o chamador decidir o que cada registro vale na contagem — por
+    // padrão 1 por registro (número de processos/itens), mas CFG_ATIVOS_CLASSE precisa
+    // do "Em andamento" de cada linha (cada linha ali é uma CLASSE processual, não um
+    // processo — contar linhas dava o número de classes distintas, não de ativos; bug
+    // relatado pelo usuário).
+    function contagemPorCompetencia(dados, peso) {
+        const pesoFn = typeof peso === 'function' ? peso : () => 1;
         const mapaAtivos = lerMapaAtivos();
         const chavesAtivos = Object.keys(mapaAtivos);
         const contagem = new Map();
         dados.forEach(d => {
             const c = (d.competencia || d.atuacao || '').trim();
             if (!c) return;
-            contagem.set(c, (contagem.get(c) || 0) + 1);
+            contagem.set(c, (contagem.get(c) || 0) + pesoFn(d));
         });
         // Ordem: as atribuições visitadas (ordem do mapa de Ativos, quando coletado —
         // permite mostrar "(0)" para quem não tem nenhum registro aqui), seguidas de
@@ -3943,10 +3949,10 @@
         return ordem.map(c => ({ competencia: c, contagem: contagem.get(c) || 0 }));
     }
 
-    function fraseCompetenciasComContagem(dados) {
+    function fraseCompetenciasComContagem(dados, peso) {
         const mapaAtivos = lerMapaAtivos();
         if (!Object.keys(mapaAtivos).length) return fraseCompetencias(dados);
-        const itens = contagemPorCompetencia(dados);
+        const itens = contagemPorCompetencia(dados, peso);
         if (!itens.length) return fraseCompetencias(dados);
         const partes = itens.map(it => `${it.competencia} (${it.contagem})`);
         return `${itens.length > 1 ? 'Competências' : 'Competência'}: ${partes.join(', ')}`;
@@ -5079,7 +5085,7 @@
         let gY0 = kY + 28 + gap + 2;
         if (estatisticasTM) {
             const kpisTM = [{
-                titulo: 'Pré-análises pendentes', valor: String(estatisticasTM.total),
+                titulo: 'Atos Analisados no Período', valor: String(estatisticasTM.total),
                 subs: [`Magistrado: ${estatisticasTM.peloMagistrado} / Assessoria: ${estatisticasTM.porOutros}`],
                 acento: COR.vinho,
             }];
@@ -5654,7 +5660,7 @@
             let hAcc = CARD_HEADER_H;
             const parte = [];
             for (const it of restantes) {
-                const hl = alturaFn(it);
+                const hl = alturaFn(it, doc, w);
                 if (y + hAcc + hl > ph - mBottom && parte.length > 0) break;
                 hAcc += hl; parte.push(it);
             }
@@ -5666,7 +5672,7 @@
             desenharCabecalhoFn(doc, x, y, w, parteIdx > 0);
             let ry = y + CARD_HEADER_H;
             parte.forEach((it, i) => {
-                const hl = alturaFn(it);
+                const hl = alturaFn(it, doc, w);
                 desenharLinhaFn(doc, x, ry, w, hl, it);
                 if (i < parte.length - 1) {
                     doc.setDrawColor(236, 236, 232); doc.setLineWidth(0.15);
@@ -5697,10 +5703,22 @@
     // Altura de uma linha do cartão do Cartório: sub-linha de atribuição (menor, sem
     // chip) < item de 1 linha (sem detalhamento, ou cabeçalho de grupo) < item de
     // 2 linhas (título + subtítulo de detalhamento).
-    function alturaLinhaCartorio(l) {
+    // `doc`/`w`: opcionais — quando presentes, o detalhamento QUEBRA em várias linhas em
+    // vez de sempre reservar altura de 1 linha só (bug relatado pelo usuário: texto
+    // truncado com "..." no meio de uma palavra, ex. lista de unidades "Prejudicado em
+    // N unidade(s): ..."). Sem `doc`/`w` (chamador antigo) mantém o comportamento de
+    // sempre 1 linha, igual antes.
+    function alturaLinhaCartorio(l, doc, w) {
         if (l.subAtribuicao) return 5.4;
         if (l.grupoCabecalho) return 7;
-        return (l.detalhamento && l.detalhamento !== '—') ? 9.6 : 7;
+        const temSub = l.detalhamento && l.detalhamento !== '—';
+        if (!temSub) return 7;
+        if (!doc || !w) return 9.6;
+        const indent = l.grupoPai ? 5 : 0;
+        const col = colunasCartao(0, w, false);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4);
+        const numLinhas = Math.max(1, Math.min(doc.splitTextToSize(l.detalhamento, col.labelW - indent).length, 8));
+        return 9.6 + (numLinhas - 1) * 3.7;
     }
 
     // Desenha uma linha do cartão do Cartório. 3 variantes, preservando a semântica já
@@ -5742,7 +5760,10 @@
         doc.text(textoTruncadoParaLargura(doc, l.nome, col.labelW - indent), col.labelX + indent, temSub ? y + 3.7 : y + h / 2 + 1.3);
         if (temSub) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.muted);
-            doc.text(textoTruncadoParaLargura(doc, l.detalhamento, col.labelW - indent), col.labelX + indent, y + 7.4);
+            // Quebra em várias linhas (não trunca mais com "...") — a altura da linha
+            // (ver alturaLinhaCartorio) já reserva espaço pra todas elas.
+            const linhasDet = doc.splitTextToSize(l.detalhamento, col.labelW - indent).slice(0, 8);
+            linhasDet.forEach((linha, i) => doc.text(linha, col.labelX + indent, y + 7.4 + i * 3.7));
         }
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
@@ -6496,7 +6517,16 @@
         // detalhamento da linha e marca a situação, em vez de aparecer como "0" (que
         // pareceria um resultado genuíno em vez de uma extração que nem chegou a rodar).
         function prejudicadoInfo(cfg) {
-            const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            let lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            // Bug relatado pelo usuário: esta lista acumula TODAS as unidades já rodadas
+            // em qualquer automação anterior (marcarPrejudicadoEAvancar), sem nunca ser
+            // limpa por atuação — sem filtrar pela seleção do diálogo de checkboxes
+            // (opcoes.atribuicoesSelecionadas), unidades desmarcadas na exportação (ex.:
+            // Antonina/Ampere) continuavam aparecendo no PDF de outra unidade (ex.:
+            // Fazenda Rio Grande).
+            if (opcoes.atribuicoesSelecionadas) {
+                lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
+            }
             if (!lista.length) return null;
             return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
@@ -8810,7 +8840,10 @@
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${r.length} classe(s) processual(is)`;
         if (!rotuloInfo.semFrase) {
-            const frase = fraseCompetenciasComContagem(r);
+            // Peso por "Em andamento" (não 1 por linha): cada linha de `r` é uma classe
+            // processual, então contar linhas dava o nº de classes distintas entre
+            // parênteses, não o nº de processos ativos (pedido do usuário).
+            const frase = fraseCompetenciasComContagem(r, d => d.emAndamento || 0);
             if (frase) subtitulo += `  •  ${frase}`;
         }
         const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
@@ -10994,7 +11027,7 @@
     // relatórios já marcados no painel da página inicial (mesma fonte que #pa-iniciar,
     // ver relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS): o usuário marca os
     // relatórios uma vez no painel, marca as unidades aqui, e os dois ficam combinados.
-    function iniciarAutomacaoMultiUnidade(titulos) {
+    function iniciarAutomacaoMultiUnidade(titulos, periodoTM) {
         if (!titulos || !titulos.length) { alert('Selecione ao menos uma unidade.'); return; }
         const fila = REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
         if (!fila.length) {
@@ -11008,7 +11041,13 @@
         store.setItem(CHAVE_MU_ATIVO, '1');
         store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
-        store.setItem('projudi_auto_periodo_tm', store.getItem('projudi_auto_periodo_tm') || '1m');
+        // Usa o valor lido do <select> NO MOMENTO DO CLIQUE (`periodoTM`, passado pelo
+        // chamador) em vez de só preservar o que já estava salvo — o <select> só disparava
+        // 'change' quando o usuário trocava de opção; se a opção já vinha marcada como
+        // padrão (Último mês) e o localStorage tinha um período diferente de uma rodada
+        // anterior (ex.: 6 meses), o valor salvo antigo prevalecia mesmo com "Último mês"
+        // visivelmente selecionado na tela — bug relatado pelo usuário.
+        store.setItem('projudi_auto_periodo_tm', periodoTM || store.getItem('projudi_auto_periodo_tm') || '1m');
         store.setItem(AUTO_ESTADO, 'trocando_unidade');
         store.setItem('projudi_auto_lock', String(Date.now()));
         console.log(`[Projudi MultiUnidade] unidade 1/${titulos.length}: procurando "${titulos[0]}" na árvore`);
@@ -11055,10 +11094,15 @@
 
         function contarSelecionadas() { return document.querySelectorAll('.projudi-mu-chk:checked').length; }
 
+        // Reflete o período já salvo (de uma rodada anterior), não sempre "Último mês" —
+        // o <select> mostrava "Último mês" marcado mesmo quando o valor salvo era outro,
+        // então "selecionar" a opção já exibida não disparava 'change' e o valor antigo
+        // persistia silenciosamente (bug relatado pelo usuário).
+        const periodoTmSalvo = store.getItem('projudi_auto_periodo_tm') || '1m';
         function linhaRelatorio(r) {
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
-                    PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+                    PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === periodoTmSalvo ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
             const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
@@ -11185,7 +11229,7 @@
 
         painel.querySelector('#projudi-mu-iniciar').onclick = () => {
             const titulos = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
-            iniciarAutomacaoMultiUnidade(titulos);
+            iniciarAutomacaoMultiUnidade(titulos, periodoTmSel ? periodoTmSel.value : null);
         };
         // Mesmo botão "Limpar" do painel da página inicial (#pa-limpar) — pedido do
         // usuário: também precisa existir aqui, no popup secundário.
