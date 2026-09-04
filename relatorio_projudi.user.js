@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.6
+// @version      25.7
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11687,9 +11687,19 @@
     // Retorno de Conclusão continuam navegando pelo link direto de sempre, mais rápido).
     function acharAbaAnaliseJuntadas() {
         const docs = todosDocumentosAcessiveis();
+        // #tabItemprefix2 é "Análise de Juntadas" na barra padrão da home "Mesa do
+        // Magistrado" — mas em atribuições cuja Atuação contém "Acordo de Não
+        // Persecução Penal" (unidades VEPMA/ANPP) a barra ganha 2 abas extras ANTES
+        // dela ("Pendências de Incidentes", "Cumprimentos de Medidas"), empurrando
+        // "Análise de Juntadas" para outro índice (tabItemprefix5, ali) — casar só
+        // pelo id sem checar o texto batia silenciosamente na aba errada (ex.
+        // "Cumprimentos de Medidas"), e a fase 0 de Mandados nunca achava o contador,
+        // pulando a unidade inteira (bug relatado pelo usuário). Por isso o id só é
+        // aceito se o texto do link bater; caso contrário cai no mesmo fallback por
+        // texto usado quando o id nem existe — que já resolve o caso ANPP sozinho.
         for (const d of docs) {
             const porId = d.querySelector('#tabItemprefix2 a');
-            if (porId) return porId;
+            if (porId && /^an[áa]lise\s+de\s+juntadas$/i.test((porId.textContent || '').trim())) return porId;
         }
         for (const d of docs) {
             // Restrito ao container da barra de abas (#tabHorz/.tabCenter) — um "ul li a"
