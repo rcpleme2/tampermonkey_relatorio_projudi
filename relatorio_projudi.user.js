@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.8
+// @version      25.9
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3162,6 +3162,21 @@
         aVencer: 'numeroCumprimentosAVencer',
     };
 
+    // Fallback para unidades ANPP/VEPMA (Atuação com "Acordo de Não Persecução Penal",
+    // home mesaAnalistaVepma.do): a tela "Cumprimentos de Medidas" ali é um template
+    // JSP totalmente diferente — NENHUM dos spans com id acima existe. Os mesmos 3
+    // números aparecem numa tabela comum (table.form), cada um numa linha
+    // <td class="label">Rótulo:</td><td><a>...<u>N</u>...</a></td> — confirmado com
+    // captura real (.mhtml enviado pelo usuário). Sem esse fallback, paginaCumprimento
+    // Medidas() nunca via a tela como "pronta", a automação esperava os ~40s de teto
+    // (CM_TENTATIVAS_MAXIMAS) e desistia extraindo zero em tudo, mesmo com valores
+    // positivos visíveis na tela (bug relatado pelo usuário).
+    const REGEX_LABEL_CM = {
+        atrasados: /cumprimentos?\s+em\s+atraso/i,
+        aVencer: /cumprimentos?\s+a\s+vencer/i,
+        semCumprimento: /medidas\s+sem\s+cumprimentos?\s+gerados/i,
+    };
+
     function acharSpanCumprimentoMedidas(id) {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
@@ -3171,20 +3186,33 @@
         return null;
     }
 
-    function paginaCumprimentoMedidas() {
-        return !!acharSpanCumprimentoMedidas(IDS_CONTADORES_CM.atrasados);
+    function acharValorPorLabelCumprimentoMedidas(regexLabel) {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const td of d.querySelectorAll('td.label')) {
+                if (regexLabel.test((td.textContent || '').trim()) && td.nextElementSibling) {
+                    return td.nextElementSibling;
+                }
+            }
+        }
+        return null;
     }
 
-    function lerContadorCumprimentoMedidas(id) {
-        const el = acharSpanCumprimentoMedidas(id);
-        return parseInt(((el && el.textContent) || '').trim(), 10) || 0;
+    function paginaCumprimentoMedidas() {
+        return !!acharSpanCumprimentoMedidas(IDS_CONTADORES_CM.atrasados)
+            || !!acharValorPorLabelCumprimentoMedidas(REGEX_LABEL_CM.atrasados);
+    }
+
+    function lerContadorCumprimentoMedidas(id, regexLabelFallback) {
+        const el = acharSpanCumprimentoMedidas(id) || acharValorPorLabelCumprimentoMedidas(regexLabelFallback);
+        return parseInt(((el && el.textContent) || '').replace(/\D+/g, ''), 10) || 0;
     }
 
     function lerContadoresCumprimentoMedidas() {
         return {
-            atrasados: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.atrasados),
-            semCumprimento: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.semCumprimento),
-            aVencer: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.aVencer),
+            atrasados: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.atrasados, REGEX_LABEL_CM.atrasados),
+            semCumprimento: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.semCumprimento, REGEX_LABEL_CM.semCumprimento),
+            aVencer: lerContadorCumprimentoMedidas(IDS_CONTADORES_CM.aVencer, REGEX_LABEL_CM.aVencer),
         };
     }
 
