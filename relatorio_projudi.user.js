@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.3
+// @version      25.4
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4673,7 +4673,7 @@
 
         // Cabeçalho: título e a linha de info (data de extração, total, competências)
         let hy = m + 2;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(p.titulo, m, hy);
         hy += 8;
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -5021,7 +5021,7 @@
         const prio = contarPrioritarios(sub);
 
         let hy = m + 2;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_CONCLUSOES_POR_JUIZ, m, hy);
         hy += 8;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
@@ -5214,7 +5214,7 @@
 
         doc.addPage();
         let hy = m + 2;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(titulo, m, hy); hy += 8;
         tituloSecao(doc, m, hy, pw - 2 * m, 'Conclusões por Atribuição');
         hy += 6;
@@ -5293,7 +5293,7 @@
 
         doc.addPage();
         let hy = m + 2;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(p.titulo, m, hy); hy += 8;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.azul);
         doc.text('Mandados por Oficial de Justiça', m, hy); hy += 7;
@@ -5357,7 +5357,7 @@
         if (criticos.length) {
             doc.addPage();
             let hyCrit = m + 2;
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(p.titulo, m, hyCrit); hyCrit += 8;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.vermelho);
             doc.text(`Mandados em Situação Crítica (${criticos.length})`, m, hyCrit); hyCrit += 5;
@@ -6004,7 +6004,7 @@
 
         if (!primeira) doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(titulo, m, m + 2);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         doc.text(`Extraído em ${hoje} às ${hora}  •  ${cruzados.length} processo(s) com 2 ou mais pendências ao mesmo tempo`, m, m + 8);
@@ -6940,7 +6940,7 @@
             return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
         }, null);
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_TEMPOMEDIO, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7028,7 +7028,7 @@
         if (porMes.length > 1) {
             doc.addPage();
             let hyM = m + 2;
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_TEMPOMEDIO, m, hyM);
             hyM += 8;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7058,7 +7058,7 @@
         if (porUsuario.length || porTipo.length) {
             doc.addPage();
             let hy2 = m + 2;
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_TEMPOMEDIO, m, hy2);
             hy2 += 8;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7190,7 +7190,7 @@
             doc.text(TITULO_AUDIENCIAS, m, m + 4);
             proximoY = m + 10;
         } else {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_AUDIENCIAS, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7381,7 +7381,7 @@
 
         const r = resumo || { totalDesignadas: 0, ultimaData: null, processosUltimoDia: [], totalProcessosUltimoDia: 0, porTipo: [], tabela: [], concentracaoDiaSemana: [] };
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_DESIGNADAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7613,7 +7613,7 @@
         const r = resumo || { totalGeral: 0, canceladas: 0, negativas: 0, naoRealizadas: 0, redesignadas: 0, pessoasOuvidas: 0, periodo: { dataInicio: '', dataFim: '' }, porUsuario: [], porAtribuicao: [], totalUsuarios: 0 };
         const periodoTxt = (r.periodo && r.periodo.dataInicio && r.periodo.dataFim) ? `${r.periodo.dataInicio} a ${r.periodo.dataFim}` : '—';
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_AUDIENCIAS_REALIZADAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7853,7 +7853,7 @@
         const semCumprimento = r.reduce((s, d) => s + (d.semCumprimento || 0), 0);
         const aVencer = r.reduce((s, d) => s + (d.aVencer || 0), 0);
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_CUMPRIMENTO_MEDIDAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -7924,7 +7924,7 @@
         const totalPendentes = r.reduce((s, d) => s + (d.pendentes || 0), 0);
         const totalUrgentes = r.reduce((s, d) => s + (d.urgentes || 0), 0);
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_OUTROS_CUMPRIMENTOS, m, m + 2);
         // Pedido do usuário: identificar melhor qual bloco é o resumo geral (todas as
         // atribuições somadas) e qual é de uma atribuição específica — mesmo padrão já
@@ -8197,7 +8197,7 @@
             doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 4);
             proximoY = m + 10;
         } else {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -8390,7 +8390,7 @@
 
         doc.addPage();
         let hy = m + 2;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(titulo, m, hy);
         hy += 8;
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -8440,7 +8440,7 @@
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_PARALISADOS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -8617,7 +8617,7 @@
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -8788,7 +8788,7 @@
         const totalAtivos = r.reduce((s, d) => s + (d.emAndamento || 0), 0);
         const classeComMais = r.length ? [...r].sort((a, b) => b.emAndamento - a.emAndamento)[0] : null;
 
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_ATIVOS_CLASSE, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -8934,7 +8934,7 @@
             doc.text(p.titulo, m, m + 4);
             proximoY = m + 10;
         } else {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(p.titulo, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -9152,7 +9152,7 @@
             const classeTop = porClasse[0] || null;
             const fimMaisLongo = acharFimMaisLongo(r);
 
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_SUSPENSOS_PRAZO, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
@@ -9340,7 +9340,7 @@
             doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 4);
             proximoY = m + 10;
         } else {
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+            doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
             doc.text(TITULO_INSTANCIA_RECURSAL, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
