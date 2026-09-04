@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.9
+// @version      25.10
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3677,6 +3677,44 @@
 
     function dataArquivo() { return new Date().toISOString().slice(0, 10); }
 
+    // Caracteres inválidos em nome de arquivo no Windows (e problemáticos em qualquer SO)
+    // — usado no nome dos PDFs conjuntos, que agora incluem o nome das unidades (pedido
+    // do usuário), e nomes de unidade do Projudi têm barra/hífen mas nunca esses outros.
+    function sanitizarNomeArquivo(s) {
+        return (s || '').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+    }
+
+    // Junta os nomes das unidades num texto pra compor o nome do arquivo — corta com
+    // "…" se ficar longo demais (unidades têm nomes compridos, ex. "Vara de Execução
+    // Penal de Acordo de Não Persecução Penal de X - Anexa à Vara Criminal de X"; 2+
+    // delas juntas facilmente passariam de 150 caracteres).
+    const LIMITE_TEXTO_UNIDADES_ARQUIVO = 120;
+    function rotuloUnidadesParaArquivo(unidades) {
+        if (!unidades.length) return '';
+        let texto = unidades.join(', ');
+        if (texto.length > LIMITE_TEXTO_UNIDADES_ARQUIVO) {
+            texto = texto.slice(0, LIMITE_TEXTO_UNIDADES_ARQUIVO - 1).trim() + '…';
+        }
+        return texto;
+    }
+
+    // Unidades realmente incluídas no PDF conjunto: a seleção do diálogo de checkboxes
+    // (opcoes.atribuicoesSelecionadas — ver gerarPDFConjunto/baixarPDFConjunto) quando
+    // existir, senão as competências/atuações encontradas nos próprios dados, senão (só
+    // Ativos coletado, ainda sem nenhum outro relatório) as chaves do mapa de Ativos.
+    function unidadesDoPDFConjunto(secoesEntrada, opcoes) {
+        if (opcoes && opcoes.atribuicoesSelecionadas && opcoes.atribuicoesSelecionadas.size) {
+            return [...opcoes.atribuicoesSelecionadas].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+        }
+        const unidades = new Set();
+        secoesEntrada.forEach(s => (s.dados || []).forEach(d => {
+            const c = (d && (d.competencia || d.atuacao) || '').trim();
+            if (c) unidades.add(c);
+        }));
+        if (!unidades.size) Object.keys(lerMapaAtivosBruto()).forEach(k => unidades.add(k));
+        return [...unidades].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    }
+
     function baixarBlob(blob, nome) {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -4331,10 +4369,18 @@
                 n: { cellWidth: wQtd, halign: 'right', fontStyle: 'bold', textColor: COR.tinta },
                 p: { cellWidth: wPct, halign: 'right' },
             },
-            body: itens.map(i => ({ k: i.label, n: String(i.valor), p: (i.valor / total * 100).toFixed(1) + '%' })),
+            // _valor vai junto no corpo da linha (não é uma coluna renderizada) só pra
+            // didDrawCell ler o valor de VOLTA da própria linha (d.row.raw) em vez de
+            // reindexar `itens` por d.row.index — quando a tabela combinada de 2+
+            // unidades cresce o bastante pra quebrar em mais de uma página, esse índice
+            // deixa de bater 1:1 com `itens` e itens[d.row.index] vem algumas linhas
+            // some `undefined`, quebrando com "Cannot read properties of undefined
+            // (reading 'valor')" (bug relatado pelo usuário ao exportar 2 unidades
+            // juntas — funcionava para 1 unidade só, cuja tabela cabia numa página).
+            body: itens.map(i => ({ k: i.label, n: String(i.valor), p: (i.valor / total * 100).toFixed(1) + '%', _valor: i.valor })),
             didDrawCell: (d) => {
                 if (d.section !== 'body' || d.column.dataKey !== 'p') return;
-                const v = itens[d.row.index].valor;
+                const v = d.row.raw._valor;
                 const larguraBarra = (v / max) * (d.cell.width - 4);
                 doc.setFillColor(...corClara(opts.acento || COR.aqua, 0.35));
                 doc.rect(d.cell.x + 2, d.cell.y + d.cell.height - 1.9, larguraBarra, 1.1, 'F');
@@ -4530,9 +4576,14 @@
             startY: y + TITULO_TABELA_H,
             columns: colunas,
             columnStyles,
+            // _total/_sit já vêm em `r` (linhaDe) e são preservados pelo spread abaixo —
+            // lidos de volta via d.row.raw (a própria linha), não reindexando `corpo` por
+            // d.row.index: mesmo bug/mesma correção de corpoTabelaCategorias acima —
+            // quando a tabela (2+ unidades combinadas = mais competências = mais linhas)
+            // quebra em mais de uma página, esse índice para de bater 1:1 com `corpo`.
             body: corpo.map(r => ({ ...r, st: '' })),
             didParseCell: (d) => {
-                if (d.section === 'body' && corpo[d.row.index]._total) {
+                if (d.section === 'body' && d.row.raw._total) {
                     d.cell.styles.fillColor = COR.azulTint;
                     d.cell.styles.fontStyle = 'bold';
                     d.cell.styles.textColor = COR.tinta;
@@ -4540,7 +4591,7 @@
             },
             didDrawCell: (d) => {
                 if (d.section !== 'body' || d.column.dataKey !== 'st') return;
-                const sit = corpo[d.row.index]._sit;
+                const sit = d.row.raw._sit;
                 desenharChip(doc, d.cell.x + d.cell.width - 2, d.cell.y + d.cell.height / 2, sit.rotulo, sit.cor, true, d.cell.width - 4);
             },
         });
@@ -6873,8 +6924,14 @@
             });
         }
 
-        const sufixo = modo === 'tabelas' ? '_tabelas' : '_resumo';
-        baixarBlob(doc.output('blob'), `relatorio_conjunto_projudi${sufixo}_${dataArquivo()}.pdf`);
+        // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
+        // [Unidades]" no modo resumo, "Tabelas [Unidades]" no modo tabelas — em vez do
+        // nome genérico de antes (relatorio_conjunto_projudi), que não dizia quais
+        // unidades tinham sido combinadas no PDF.
+        const prefixoNomeArquivo = modo === 'tabelas' ? 'Tabelas' : 'Relatório';
+        const rotuloUnidadesArquivo = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDoPDFConjunto(secoesEntrada, opcoes)));
+        const nomeArquivoConjunto = rotuloUnidadesArquivo ? `${prefixoNomeArquivo} ${rotuloUnidadesArquivo}` : `${prefixoNomeArquivo} Projudi`;
+        baixarBlob(doc.output('blob'), `${nomeArquivoConjunto}_${dataArquivo()}.pdf`);
         overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
         return doc;
     }
