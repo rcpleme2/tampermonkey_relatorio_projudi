@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.12
+// @version      25.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -457,7 +457,7 @@
                 // Os gráficos abaixo vão para a 2ª página do resumo (pagina2), com mais
                 // itens (15) já que ganham a página inteira só para eles.
                 // Largura total (span 2) para caber o nome completo do tipo de documento
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 5, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o
                 // restante). minValor: 2 — só processos com MAIS DE UMA juntada pendente;
                 // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
@@ -5185,8 +5185,15 @@
         // Tabelas no lugar de gráficos (pedido do usuário) — comparativo por competência
         // (só aparece com 2+ competências nas conclusões pendentes DESTE magistrado) mais
         // as distribuições, no lugar das barras horizontais de antes.
-        let y = tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
-            { semMedia: true, diasNaColunaAntiga: true }) + 6;
+        // Com 0 pendentes (magistrado(a) só com dados de Tempo Médio, ver item de Gabinete
+        // em gerarPDFConjunto), o guard interno de tabelaComparativoCompetencias não
+        // basta — ele depende do nº de competências ATIVAS no relatório inteiro, não do
+        // `sub` deste magistrado, então desenharia uma tabela toda zerada. Só chama a
+        // função quando há pelo menos 1 pendência de verdade.
+        let y = sub.length
+            ? tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
+                { semMedia: true, diasNaColunaAntiga: true }) + 6
+            : gY0;
         const blocos = [
             { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -5851,9 +5858,14 @@
             const linhasDet = doc.splitTextToSize(l.detalhamento, col.labelW - indent).slice(0, 8);
             linhasDet.forEach((linha, i) => doc.text(linha, col.labelX + indent, y + 7.4 + i * 3.7));
         }
+        // Mesma posição condicional do título (y + 3.7 quando há detalhamento quebrado em
+        // várias linhas) — sem isso, numa linha "alta" (detalhamento longo), o centro
+        // vertical (h/2) cai no meio do bloco de texto do detalhamento e o indicador/chip
+        // ficam desenhados por cima dele (bug relatado pelo usuário em "Bens Apreendidos").
+        const yIndicadorChip = temSub ? y + 3.7 : y + h / 2 + 1.3;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
-        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
-        desenharChip(doc, col.chipRightX, y + h / 2, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
+        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, yIndicadorChip, { align: 'right' });
+        desenharChip(doc, col.chipRightX, yIndicadorChip, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
         l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
     }
 
@@ -6053,6 +6065,49 @@
         doc.text('Tabelas discriminadas de todos os itens coletados', pw / 2, 22, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 40);
+    }
+
+    // Sumário do modo 'tabelas' (pedido do usuário): lista clicável de cada seção
+    // desenhada (nome + nº de página), na própria página 1 — a mesma que
+    // desenharCapaTabelas usa pro cabeçalho, reaproveitando o espaço abaixo dele. Só
+    // texto plano, sem cards/cores de status (o modo 'tabelas' é justamente "sem KPIs").
+    // Cabe numa página só: como é desenhada DEPOIS de todo o resto do PDF já pronto
+    // (só então se sabe o nº de página de cada seção), não há como abrir uma 2ª página
+    // pro sumário sem reordenar todo o documento — se a lista não couber, os itens que
+    // sobrarem ficam de fora dela (ainda acessíveis pelos marcadores/bookmarks do PDF),
+    // com um aviso no lugar de estourar a margem inferior.
+    function desenharSumarioTabelas(doc, itens) {
+        doc.setPage(1);
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 16;
+        let y = 48;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
+        doc.text('Sumário', m, y);
+        y += 6;
+        let grupoAtual = null;
+        for (let i = 0; i < itens.length; i++) {
+            const it = itens[i];
+            const comCabecalhoGrupo = it.grupo && it.grupo !== grupoAtual;
+            const alturaNecessaria = comCabecalhoGrupo ? 11 : 6;
+            if (y + alturaNecessaria > ph - 14) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
+                doc.text(`+ ${itens.length - i} item(ns) não listado(s) aqui — disponíveis pelos marcadores do PDF.`, m, y);
+                break;
+            }
+            if (comCabecalhoGrupo) {
+                grupoAtual = it.grupo;
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...COR.azul);
+                doc.text(grupoAtual.toUpperCase(), m, y + 4);
+                y += 8;
+            }
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(textoTruncadoParaLargura(doc, it.rotulo, pw - 2 * m - 22), m + 2, y);
+            doc.setFont('PublicSans', 'bold'); doc.setTextColor(...COR.tinta);
+            doc.text(`pág. ${it.pg}`, pw - m, y, { align: 'right' });
+            doc.link(m, y - 4, pw - 2 * m, 5.5, { pageNumber: it.pg });
+            y += 6;
+        }
     }
 
     // PDF único com os relatórios coletados, organizado em duas frentes: CARTÓRIO
@@ -6787,13 +6842,10 @@
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
-        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas'
-        // (pedido do usuário: ir direto às tabelas, sem folha de rosto) não se desenha
-        // capa nenhuma; a primeira tabela renderizada usa a página 1 que o jsPDF já cria
-        // por padrão (ver usarPaginaTabelas, mais abaixo, que remove essa página 1 só se
-        // ela ficar em branco — caso a 1ª seção use uma função de tabela que sempre
-        // começa com doc.addPage() incondicional). Se o conteúdo passar de uma página,
-        // segue normalmente na próxima. ═══
+        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas' a
+        // página 1 que o jsPDF já cria por padrão é reservada pro cabeçalho + sumário
+        // (ver desenharCapaTabelas/desenharSumarioTabelas, mais abaixo) em vez de ficar
+        // em branco. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (modo === 'resumo' && temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
@@ -6893,39 +6945,32 @@
             // mas com dado a discriminar (Audiências Pendentes, Suspensos, Suspensos com
             // Prazo, Instância Recursal, Arquivados com Saldo — ver comentário no topo
             // desta função sobre somenteResumo) mostram o resumo inteiro deles (única
-            // forma de ver a tabela embutida). Audiências Realizadas e Cumprimento de
-            // Medidas não têm NENHUM dado discriminado (só totais agregados) — ficam de
-            // fora deste modo, como sempre ficaram fora do passo de tabela. ═══
+            // forma de ver a tabela embutida, sem KPIs — somenteTabelas=true). Audiências
+            // Realizadas e Cumprimento de Medidas não têm NENHUM dado discriminado (só
+            // totais agregados) — ficam de fora deste modo, como sempre ficaram fora do
+            // passo de tabela. ═══
             const CFGS_TABELA_EMBUTIDA = [CFG_AUDIENCIAS, CFG_SUSPENSOS, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL, CFG_ARQUIVADOS_SALDO];
-            // As funções montarTabela* (Paralisados, Juntadas, Ativos por Classe, Gabinete
-            // etc.) sempre começam com um doc.addPage() incondicional — desenhado assim
-            // porque, no modo 'resumo', sempre vêm depois de outra página já existente.
-            // Sem a capa (pedido do usuário: "ir direto às tabelas"), se uma dessas for a
-            // PRIMEIRA coisa do documento, esse addPage() deixaria a página 1 (criada por
-            // padrão pelo próprio jsPDF) em branco. `montarFn` já deve ter chamado
-            // addPage e retornado o número da página onde desenhou; se essa foi a
-            // primeira seção do documento, remove a página 1 em branco e ajusta o número
-            // de página retornado (a numeração de todo o resto do doc, que só é montado
-            // DEPOIS, sai correta porque doc.internal.getNumberOfPages() já reflete a
-            // página removida).
-            const usarPaginaTabelas = (montarFn) => {
-                const eraPrimeira = !usouPagina1;
-                let pg = montarFn();
-                if (eraPrimeira && pg > 1) { doc.deletePage(1); pg -= 1; }
-                usouPagina1 = true;
-                return pg;
-            };
+            // Pedido do usuário: sumário na página 1 (ao invés de deixá-la em branco ou
+            // removê-la — era o que o código antigo fazia). A página 1 fica reservada
+            // pro cabeçalho (desenharCapaTabelas, reaproveitado — antes desenhado só na
+            // definição, sem call site) + a lista de seções (desenharSumarioTabelas, no
+            // fim, quando já se sabe o nº de página de cada uma). Como a página 1 nunca
+            // mais fica livre pra conteúdo de seção, todo `montarFn` abre sua própria
+            // página normalmente (comportamento padrão dele, sem o hack de deletar a
+            // página 1 que existia antes).
+            desenharCapaTabelas(doc, agora, true);
+            usouPagina1 = true;
+            const sumarioItens = []; // {grupo, rotulo, pg}
+
             const renderizarViaTabelaOuResumo = (secao, dados) => {
                 if (secaoTemTabela(secao)) {
-                    return usarPaginaTabelas(() => secao.montarTabela(doc, dados, null));
+                    return secao.montarTabela(doc, dados, null);
                 }
                 if (CFGS_TABELA_EMBUTIDA.includes(secao.cfgOriginal) && dados.length) {
-                    const primeira = !usouPagina1;
-                    const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                    const pg = doc.internal.getNumberOfPages() + 1;
                     // último argumento (somenteTabelas=true): sem KPIs/observações neste
                     // modo (pedido do usuário) — só título curto + tabela(s).
-                    secao.montarResumo(doc, dados, primeira, false, null, null, true);
-                    usouPagina1 = true;
+                    secao.montarResumo(doc, dados, false, false, null, null, true);
                     return pg;
                 }
                 return null;
@@ -6933,7 +6978,10 @@
 
             if (secaoAtivosClasse) {
                 const pg = renderizarViaTabelaOuResumo(secaoAtivosClasse, secaoAtivosClasse.dados);
-                if (pg) doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: secaoAtivosClasse.rotulo, pg });
+                }
             }
 
             let bmCartorio = null;
@@ -6942,21 +6990,28 @@
                 if (!pg) return;
                 if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
                 doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Cartório', rotulo: `${t.rotulo} (${t.pendentes})`, pg });
             });
 
             outrasSecoes.forEach(s => {
                 const pg = renderizarViaTabelaOuResumo(s, s.dados);
-                if (pg) doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: s.rotulo, pg });
+                }
             });
 
             // Gabinete/Conclusões SEMPRE por último (pedido do usuário) — depois de
             // Cartório e de outrasSecoes.
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
-                const pg = usarPaginaTabelas(() => montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null));
+                const pg = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null);
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
                 doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Gabinete', rotulo: `${info.rotulo} (${info.pendentes})`, pg });
             });
+
+            desenharSumarioTabelas(doc, sumarioItens);
         }
 
         // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
@@ -7085,6 +7140,7 @@
 
         // Período de referência (salvo quando o usuário preencheu o formulário)
         let periodoStr = '';
+        let iniPeriodo = '';
         let fimPeriodo = '';
         {
             // Mesma proteção contra JSON codificado em camadas usada em lerFilaMesesTempoMedio.
@@ -7093,11 +7149,17 @@
             while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { v = {}; break; } t++; }
             const per = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
             if (per.ini || per.fim) periodoStr = `${per.ini || '?'} a ${per.fim || '?'}`;
+            iniPeriodo = per.ini || '';
             fimPeriodo = per.fim || '';
         }
         // "Até dd/mm" (sem o ano — o termo final é sempre dentro do período já mostrado no
         // subtítulo) usado no rótulo do KPI de não cumpridas, ver abaixo.
         const fimCurto = fimPeriodo ? fimPeriodo.slice(0, 5) : '';
+        // Versão curta do período (sem ano nas duas pontas) pro subtítulo do KPI "Registros
+        // analisados" — o período completo (periodoStr) não cabia numa linha só do card e
+        // ficava cortado no meio (bug relatado pelo usuário); o ano completo já aparece no
+        // subtítulo da página, então não se perde informação.
+        const periodoCurto = (iniPeriodo && fimPeriodo) ? `${iniPeriodo.slice(0, 5)} a ${fimPeriodo.slice(0, 5)}` : '';
 
         // Decisões ainda não cumpridas (dtCartorio vazia = cartório não analisou ainda)
         const naoCumpridas = dados.filter(d => !d.dtCartorio);
@@ -7126,7 +7188,7 @@
         const kY = yLinhaTM + 5;
         const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [periodoStr ? `Período: ${periodoStr}` : ''], true, COR.azul);
+        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [periodoCurto ? `Período: ${periodoCurto}` : ''], true, COR.azul);
         desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
         desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, `Não cumpridas${fimCurto ? ` (até ${fimCurto})` : ''}`, String(naoCumpridas.length),
@@ -7433,12 +7495,13 @@
             // relatório, inclusive no modo "Só resumo" do PDF conjunto.
             tituloSecao(doc, m, proximoY, uw, `Audiências com termo pendente há mais de 5 dias (${vencidasMaisDe5Dias.length})`);
             doc.autoTable({
-                columns: [{ header: 'Processo', dataKey: 'k0' }],
-                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo })),
+                columns: [{ header: 'Processo', dataKey: 'k0' }, { header: 'Atribuição', dataKey: 'k1' }],
+                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo, k1: d.competencia || d.atuacao || '(sem atribuição)' })),
                 startY: proximoY + 6,
                 margin: { left: m, right: m, top: m, bottom: 14 },
                 theme: 'grid',
                 tableWidth: uw,
+                columnStyles: { k0: { cellWidth: uw * 0.45 }, k1: { cellWidth: uw * 0.55 } },
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
                           lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
@@ -7824,8 +7887,11 @@
         // atribuição/vara aparece como UMA linha só, com os valores somados — não uma
         // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
         // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
-        // por `usuario` (login, mais estável que o nome) com fallback pro nome.
-        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+        // por `usuario` (login, mais estável que o nome) com fallback pro nome. Pedido do
+        // usuário (rodada seguinte): ignora quem não teve NENHUM resultado em nenhuma
+        // categoria — antes todos apareciam mesmo com tudo zerado.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario)
+            .filter(u => u.quantidade || u.canceladas || u.negativas || u.naoRealizadas || u.redesignadas);
 
         const gap = 6;
         const kY = yLinha + 5;
@@ -7845,8 +7911,9 @@
 
         // Sem gráfico aqui — a mesma informação já está na tabela abaixo (pedido do
         // usuário), com o percentual de cada categoria sobre o total do magistrado(a)
-        // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
-        // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
+        // (realizadas + canceladas + negativas + não realizadas + redesignadas). Só
+        // magistrados com pelo menos 1 resultado em alguma categoria aparecem (ver filtro
+        // em porUsuarioAgrupado acima).
         const tY = k2Y + 24 + gap + 4;
         if (porUsuarioAgrupado.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
