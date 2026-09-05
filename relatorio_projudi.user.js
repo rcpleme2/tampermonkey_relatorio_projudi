@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.14
+// @version      25.15
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1903,16 +1903,19 @@
     // "Urgente" da tabela) é mapeado para "prioritario", o campo que o pipeline genérico já
     // entende — ativa de graça o KPI "Prioritários pendentes"/destaque na tabela.
     // O número de colunas e a posição delas MUDA entre as telas de Mandados (confirmado
-    // com telas reais de cada status): "Aguardando Análise de Retorno" tem uma coluna
-    // "Data retorno" que as outras não têm; "Expedido e Não Lido" (cumprimento pendente)
-    // tem duas colunas a mais ("Distribuição"/"Visualização (Oficial)") que empurram tudo
-    // pra frente. A tela de "Aguardando Distribuição ao Oficial de Justiça" (status=11,
-    // anterior à distribuição) não teve uma amostra real conferida — minTds/colunas dessa
-    // fase (ver CFG_MANDADOS_DISTRIBUICAO) foram estimados por analogia às demais e devem
-    // ser confirmados numa extração real. Extrair por índice fixo de td (como os demais
-    // relatórios fazem, com uma única tela por trás) não funciona aqui — precisa mapear
-    // cada campo pelo TEXTO do cabeçalho, calculado uma vez por página (ver contextoExtra
-    // em coletarPaginaAtual), não por índice fixo.
+    // com telas reais de cada status, .mhtml enviados pelo usuário): "Aguardando Análise
+    // de Retorno" (status=13) tem 16 colunas, com uma coluna "Data retorno" que as outras
+    // não têm. "Aguardando Cumprimento — Lido e Sem Cumprimento" (status=6, não coletado
+    // mais — ver CFG_MANDADOS_CUMPRIMENTO) e "Aguardando Distribuição ao Oficial de
+    // Justiça" (status=11) têm 15 colunas iguais entre si (mesmas da tela de retorno, sem
+    // "Data retorno"). "Expedido e Não Lido" (status=4, cumprimento pendente) ainda não
+    // teve uma amostra real conferida, mas presumivelmente tem 2 colunas a mais
+    // ("Distribuição"/"Visualização (Oficial)" — fazem sentido só nesse status, quando o
+    // mandado já foi distribuído mas ainda não foi lido) — minTds:17 mantido do código
+    // anterior (já em produção antes desta sessão) por esse motivo. Extrair por índice
+    // fixo de td (como os demais relatórios fazem, com uma única tela por trás) não
+    // funciona aqui — precisa mapear cada campo pelo TEXTO do cabeçalho, calculado uma vez
+    // por página (ver contextoExtra em coletarPaginaAtual), não por índice fixo.
     function mapaColunasMandado() {
         const tabela = tabelaMandados();
         const thead = tabela ? tabela.querySelector(':scope > thead') : null;
@@ -2101,22 +2104,14 @@
     };
 
     // Novo relatório pedido pelo usuário: "Aguardando Distribuição ao Oficial de Justiça"
-    // (status=11) — mandado já expedido mas ainda sem oficial de justiça designado. Ainda
-    // sem amostra real da tela conferida (ver comentário em mapaColunasMandado) — minTds
-    // conservador (não filtra por contagem de coluna "extra" nenhuma, só a linha mínima
-    // plausível de uma linha real de dados) para não descartar registros de verdade por
-    // engano; ajustar depois de confirmar com uma extração real.
+    // (status=11) — mandado já expedido mas ainda sem oficial de justiça designado.
+    // 15 colunas confirmado com tela real (.mhtml enviado pelo usuário) — mesma estrutura
+    // de status=6, sem "Data retorno" e sem as colunas extras de status=4 (ver comentário
+    // em mapaColunasMandado).
     const CFG_MANDADOS_DISTRIBUICAO = {
         prefixo: 'projudi_mandadosdistribuicao_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '11',
-        // tabelaMandados() exige a coluna "Oficial de Justiça" no cabeçalho pra reconhecer
-        // QUALQUER tela de Mandados (ver cabecalhoCumprimentoMandado) — ela deve existir
-        // mesmo aqui (em branco, sem oficial designado ainda), então a contagem de colunas
-        // provavelmente fica perto da tela "Aguardando Cumprimento" (17, com Distribuição/
-        // Visualização) ou um pouco menor (essas duas últimas talvez nem apareçam antes da
-        // distribuição). 15 é uma estimativa conservadora — ainda sem amostra real
-        // confirmada (ver comentário em mapaColunasMandado).
         minTds: 15,
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
@@ -2276,6 +2271,22 @@
     // fora da automação, ou coleta normal em andamento — segue para
     // detectarConfig()/criarColetor() como qualquer outro relatório).
     function gateMandados() {
+        // Correção SEMPRE ativa, com ou sem automação rodando: status=6 ("Aguardando
+        // Cumprimento — Lido e Sem Cumprimento") não tem mais relatório associado (pedido
+        // do usuário, ver CFG_MANDADOS_CUMPRIMENTO) — mas é o status em que a tela abre ao
+        // entrar em "Mandados Pendentes de Cumprimento" pelo Projudi (confirmado em tela
+        // real, .mhtml enviado pelo usuário). Sem este redirecionamento a tela ficava
+        // "não reconhecida" (nenhum CFG detecta status=6 mais) e nenhum botão aparecia,
+        // mesmo fora da automação — bug relatado pelo usuário após a exclusão do "Lido".
+        const selStatus6 = document.getElementById('codStatusCumprimentoCartorio');
+        if (selStatus6 && selStatus6.value === '6' && tabelaMandados()) {
+            selStatus6.value = '4';
+            const btnStatus6 = document.getElementById('searchButton');
+            console.log('[Auto Projudi Mandados] status=6 (Lido e Sem Cumprimento) não é mais coletado — filtrando para status=4 (Cumprimento) e clicando Filtrar');
+            setTimeout(() => { if (btnStatus6) btnStatus6.click(); }, 400);
+            return true;
+        }
+
         const estadoAuto = store.getItem(AUTO_ESTADO) || '';
         const chave = keyDoEstadoAtual(estadoAuto);
         const statusEsperado = chave && STATUS_POR_CHAVE_MANDADO[chave];
@@ -11390,8 +11401,10 @@
                     <button id="projudi-mu-rel-marcar" class="pa-link" type="button">Marcar tudo</button>
                     <button id="projudi-mu-rel-desmarcar" class="pa-link" type="button">Desmarcar tudo</button>
                 </div>
-                ${linhasCivel}
-                ${linhasCrime}
+                <div class="pa-checklist">
+                    ${linhasCivel}
+                    ${linhasCrime}
+                </div>
                 <div class="pa-actions">
                     <button id="projudi-mu-iniciar" class="pa-btn pa-btn-primary" type="button">▶ Rodar automação nas unidades marcadas</button>
                     <button id="projudi-mu-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
@@ -12917,10 +12930,12 @@
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
                     <div class="pa-progress-lbl">—</div>
                 </div>
-                ${linhasGrupos}
-                <div class="pa-group pa-group-especifico" style="display:none;">
-                    <p class="pa-group-lbl especifico"></p>
-                    <div class="pa-group-conteudo"></div>
+                <div class="pa-checklist">
+                    ${linhasGrupos}
+                    <div class="pa-group pa-group-especifico" style="display:none;">
+                        <p class="pa-group-lbl especifico"></p>
+                        <div class="pa-group-conteudo"></div>
+                    </div>
                 </div>
                 <div class="pa-links">
                     <button id="pa-marcar-tudo" class="pa-link" type="button">Marcar tudo</button>
@@ -13187,6 +13202,16 @@
         #painel-automacao .pa-progress-lbl , #projudi-mu-painel .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-tempo , #projudi-mu-painel .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
+        /* Checklist de relatórios (pedido do usuário: com Mandados virando 4 itens
+           independentes, ver REPORTS_AUTOMACAO, a lista ficou comprida demais e alguns
+           itens/botões saíam da tela). Rolagem própria, limitada a uma fração da altura
+           da janela, mantendo cabeçalho/abas/estado e os botões de ação sempre visíveis
+           fora da área rolável. Sem borda/fundo próprios — vazio (com a automação em
+           curso, que esconde cada .pa-group por dentro) não deixa nenhum resquício visual. */
+        #painel-automacao .pa-checklist , #projudi-mu-painel .pa-checklist {
+            max-height: min(46vh, 320px); overflow-y: auto; overflow-x: hidden;
+            margin-bottom: 4px; padding-right: 2px;
+        }
         #painel-automacao .pa-group , #projudi-mu-painel .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl , #projudi-mu-painel .pa-group-lbl {
             display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
