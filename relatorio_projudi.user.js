@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.12
+// @version      25.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -12362,7 +12362,15 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            if (rel.categoriaEspecifica === 'crime' && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+            // Exceção pra Prescrições: a aba "Mesa do Escrivão Criminal" carrega o link
+            // "Vencidas" via AJAX só depois do clique (ver navegarMenu) — o carregamento
+            // pode legitimamente levar mais que 3 tentativas rápidas (bug relatado pelo
+            // usuário: a aba abria mas o script desistia antes do AJAX terminar). Só cai
+            // no limite curto de Crime se a PRÓPRIA ABA não existir (unidade sem essa
+            // mesa de verdade, mesmo caso de Apreensões); com a aba presente, usa o
+            // limite genérico de 8 tentativas abaixo, dando tempo pro AJAX responder.
+            const prescricoesComAbaPresente = rel.key === 'prescricoes' && !!acharAbaMesaEscrivaoCriminal();
+            if (rel.categoriaEspecifica === 'crime' && !prescricoesComAbaPresente && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
                 marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
                 return;
