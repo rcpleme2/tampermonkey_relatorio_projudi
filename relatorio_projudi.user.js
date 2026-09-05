@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.14
+// @version      25.15
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3257,6 +3257,49 @@
             for (const a of candidatos) {
                 if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
             }
+        }
+        return null;
+    }
+
+    // Diagnóstico temporário (bug relatado pelo usuário: fica preso na tela "Mesa do
+    // Escrivão Criminal" mesmo depois do fix de reclique/debounce — "Vencidas" nunca é
+    // encontrado mesmo com a aba visivelmente carregada). Loga, sempre que
+    // navegarMenu('prescricoes') não acha "Vencidas": quantos documentos (frames) o
+    // script consegue alcançar, a URL de cada um, se a aba "Mesa do Escrivão Criminal"
+    // aparece em cada um, e todo <a> cujo texto ou href pareça remotamente relacionado
+    // (contém "vencid"/"prescri" ou aponta pra mesaAnalistaEscrivao.do) — inclusive os
+    // que NÃO batem no regex exato usado por acharLinkMenu, pra pegar diferenças sutis de
+    // texto (espaço/quebra de linha/maiúscula) que o .trim()+regex atual não cobre.
+    // Throttle de 4s (chave própria) pra não spammar o console a cada tentativa da
+    // automação.
+    const CHAVE_DIAG_PRESCRICOES = 'projudi_prescricoes_diag_em';
+    function diagnosticarPrescricoes() {
+        const agora = Date.now();
+        const ultimo = parseInt(store.getItem(CHAVE_DIAG_PRESCRICOES) || '0', 10);
+        if (agora - ultimo < 4000) return;
+        store.setItem(CHAVE_DIAG_PRESCRICOES, String(agora));
+        try {
+            const docs = todosDocumentosAcessiveis();
+            console.log(`[Diag Prescrições] ${docs.length} documento(s) acessível(is) a partir deste frame (${location.href})`);
+            docs.forEach((d, i) => {
+                let url = '(sem location)';
+                try { url = d.location ? d.location.href : (d.defaultView && d.defaultView.location ? d.defaultView.location.href : url); } catch (e) { url = '(cross-origin?)'; }
+                const temAba = !!acharAbaEmDoc(d);
+                const candidatosVencidas = [...d.querySelectorAll('a')].filter(a => {
+                    const txt = (a.textContent || '').trim();
+                    const href = a.href || '';
+                    return /vencid/i.test(txt) || /prescri/i.test(txt) || /mesaAnalistaEscrivao\.do/i.test(href);
+                }).map(a => ({ texto: JSON.stringify((a.textContent || '').trim()), href: (a.href || '').slice(0, 90) }));
+                console.log(`[Diag Prescrições]   doc[${i}] url=${url} temAbaMesaEscrivao=${temAba} candidatos=${JSON.stringify(candidatosVencidas)}`);
+            });
+        } catch (e) {
+            console.warn('[Diag Prescrições] erro ao diagnosticar:', e.message);
+        }
+    }
+    function acharAbaEmDoc(d) {
+        const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
+        for (const a of candidatos) {
+            if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
         }
         return null;
     }
@@ -11940,6 +11983,7 @@
         else if (alvo === 'prescricoes') {
             link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
             if (!link) {
+                diagnosticarPrescricoes();
                 const aba = acharAbaMesaEscrivaoCriminal();
                 const ultimoClique = parseInt(store.getItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE) || '0', 10);
                 if (aba && (Date.now() - ultimoClique) > INTERVALO_RECLIQUE_ABA_MESA_ESCRIVAO_MS) {
