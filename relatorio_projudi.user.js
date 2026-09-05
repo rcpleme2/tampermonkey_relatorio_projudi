@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.13
+// @version      25.14
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3259,17 +3259,6 @@
             }
         }
         return null;
-    }
-
-    // A aba ativa tem a classe "currentTab" no <li> pai (ver marcação da home,
-    // tabItemprefix0 "Início" como exemplo) — evita clicar de novo (e reiniciar o AJAX
-    // de carregamento) numa aba que já está ativa.
-    function abaMesaEscrivaoCriminalAtiva() {
-        const link = acharAbaMesaEscrivaoCriminal();
-        if (!link) return false;
-        let li = link.parentElement;
-        while (li && li.tagName !== 'LI') li = li.parentElement;
-        return !!(li && /(^|\s)currentTab(\s|$)/.test(li.className || ''));
     }
 
     // Os 3 contadores só existem no DOM quando a aba "Cumprimentos de Medidas" está
@@ -11883,6 +11872,13 @@
         return false;
     }
 
+    // Debounce do clique na aba "Mesa do Escrivão Criminal" dentro de navegarMenu
+    // ('prescricoes', abaixo) — 6s dá folga de sobra pro AJAX da aba responder mesmo em
+    // conexões lentas, sem deixar a automação "presa" por muito tempo caso a aba
+    // realmente não exista (o limite de tentativas genérico de qualquer forma cobre isso).
+    const CHAVE_ABA_MESA_ESCRIVAO_CLIQUE = 'projudi_prescricoes_aba_clique_em';
+    const INTERVALO_RECLIQUE_ABA_MESA_ESCRIVAO_MS = 6000;
+
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
@@ -11933,21 +11929,26 @@
         // dessa aba (inclusive o bloco "Prescrições") só é carregado via AJAX depois de
         // um clique real nela (mesmo problema já resolvido para "Outros Cumprimentos"/
         // "Cumprimentos de Medidas" — ver acharAbaOutrosCumprimentos). Bug relatado pelo
-        // usuário: com Prescrições marcado sozinho (primeiro/único item da fila), a aba
-        // nunca tinha sido visitada nesta sessão e o link "Vencidas" simplesmente não
-        // existia ainda no DOM. Se ainda não achou o link, ativa a aba (só se não
-        // estiver já ativa) e devolve null — a automação conta como uma tentativa sem
-        // sucesso e tenta de novo no próximo passo, dessa vez com o conteúdo carregado.
-        // Distingue "Vencidas" de "A vencer" (mesma URL base, token diferente) só pelo
-        // TEXTO do link.
+        // usuário (2 rodadas): a 1ª tentativa (checagem por classe "currentTab" no <li>
+        // pra saber se a aba já estava ativa) reclicava a aba a CADA tentativa da
+        // automação — a classe "currentTab" aparentemente só é aplicada quando o AJAX já
+        // terminou de carregar, não no instante do clique, então cada reclique enquanto o
+        // conteúdo ainda estava chegando reiniciava o carregamento do zero,
+        // impedindo o "Vencidas" de aparecer. Troca por um debounce por TEMPO
+        // (CHAVE_ABA_MESA_ESCRIVAO_CLIQUE): só clica de novo depois de alguns segundos
+        // sem sucesso, dando tempo real pro AJAX responder antes de reclicar.
         else if (alvo === 'prescricoes') {
             link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
             if (!link) {
                 const aba = acharAbaMesaEscrivaoCriminal();
-                if (aba && !abaMesaEscrivaoCriminalAtiva()) {
-                    console.log('[Auto Projudi] navegarMenu("prescricoes") — aba "Mesa do Escrivão Criminal" ainda não carregada, clicando (tentativa será refeita no próximo passo)');
+                const ultimoClique = parseInt(store.getItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE) || '0', 10);
+                if (aba && (Date.now() - ultimoClique) > INTERVALO_RECLIQUE_ABA_MESA_ESCRIVAO_MS) {
+                    console.log('[Auto Projudi] navegarMenu("prescricoes") — clicando na aba "Mesa do Escrivão Criminal" pra carregar "Vencidas" (tentativa será refeita no próximo passo)');
+                    store.setItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE, String(Date.now()));
                     aba.click();
                 }
+            } else {
+                store.removeItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE);
             }
         }
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
@@ -12391,8 +12392,20 @@
             // automação "travar" sem alterar nada até o usuário clicar em "Pular"). Volta
             // à início em toda tentativa sem sucesso; o estado continua "ir_X" para tentar
             // de novo assim que a home carregar.
-            console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
-            navegarMenu('inicio');
+            //
+            // Exceção pra Prescrições com a aba já encontrada (prescricoesComAbaPresente):
+            // clicar em "Início" aqui destruía o AJAX que acabara de ser disparado pelo
+            // clique em "Mesa do Escrivão Criminal" (mesma tela, mesmo esquema de abas —
+            // trocar de aba parece descartar o conteúdo carregado, não só escondê-lo),
+            // reiniciando o carregamento do zero a cada tentativa e impedindo o "Vencidas"
+            // de aparecer (2º bug relatado pelo usuário na mesma extração). Já estamos na
+            // página certa (a home, com a aba certa clicada) — só falta esperar o AJAX.
+            if (prescricoesComAbaPresente) {
+                console.log('[Auto Projudi] navegarMenu("prescricoes") — aba já clicada, aguardando o AJAX responder (sem voltar à início)');
+            } else {
+                console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
+                navegarMenu('inicio');
+            }
         }
     }
 
