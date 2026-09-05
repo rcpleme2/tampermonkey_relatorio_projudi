@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.16
+// @version      25.17
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5178,8 +5178,22 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${juiz}`);
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, `Tabela discriminada — ${juiz}`);
         const tabInicioY = m + 8;
+
+        // Larguras escaladas pra preencher uw (pedido do usuário: a tabela ficava com
+        // bastante espaço vazio à direita — cellWidth em mm fixo somava bem menos que a
+        // largura útil da página, mesmo problema já corrigido em montarTabelaGenerico via
+        // columnStylesEscalados). Pesos relativos mantidos (30/24/30/18/14/20).
+        const colunasJuiz = [
+            { key: 'processo', width: 30 }, { key: 'classe', width: 24 }, { key: 'tipo', width: 30 },
+            { key: 'preAnalise', width: 18 }, { key: 'dias', width: 14 }, { key: 'dtRemessa', width: 20 },
+        ];
+        const somaLargurasJuiz = colunasJuiz.reduce((s, c) => s + c.width, 0);
+        const fatorLarguraJuiz = uw / somaLargurasJuiz;
+        const columnStylesJuiz = {};
+        colunasJuiz.forEach(c => { columnStylesJuiz[c.key] = { cellWidth: c.width * fatorLarguraJuiz }; });
 
         doc.autoTable({
             columns: [
@@ -5203,10 +5217,7 @@
                       lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                processo: { cellWidth: 30 }, classe: { cellWidth: 24 }, tipo: { cellWidth: 30 },
-                preAnalise: { cellWidth: 18 }, dias: { cellWidth: 14 }, dtRemessa: { cellWidth: 20 },
-            },
+            columnStyles: columnStylesJuiz,
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'processo' && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
                     data.cell.styles.textColor = COR_PRIORITARIO;
@@ -5622,7 +5633,7 @@
                 // Resumo e tabela sempre juntos (pedido do usuário) — a tabela é desenhada
                 // dentro do próprio montarResumoAudiencias, então não há passo de tabela
                 // separado aqui (ver secaoTemTabela em gerarPDFConjunto).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5654,7 +5665,7 @@
                 rotulo: TITULO_ARQUIVADOS_SALDO,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoArquivadosSaldo).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5679,7 +5690,7 @@
                 rotulo: CFG_SUSPENSOS.pdf.titulo,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensos).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensos(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoSuspensos(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5688,7 +5699,7 @@
                 rotulo: TITULO_SUSPENSOS_PRAZO,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensosPrazo).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5697,7 +5708,7 @@
                 rotulo: TITULO_INSTANCIA_RECURSAL,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoInstanciaRecursal).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -7028,8 +7039,13 @@
                 if (CFGS_TABELA_EMBUTIDA.includes(secao.cfgOriginal) && dados.length) {
                     const pg = doc.internal.getNumberOfPages() + 1;
                     // último argumento (somenteTabelas=true): sem KPIs/observações neste
-                    // modo (pedido do usuário) — só título curto + tabela(s).
-                    secao.montarResumo(doc, dados, false, false, null, null, true);
+                    // modo (pedido do usuário) — só título curto + tabela(s). Bug corrigido
+                    // nesta sessão: o wrapper montarResumo de descreverSecaoPDF só lia os 5
+                    // primeiros argumentos — os wrappers agora aceitam e repassam
+                    // somenteTabelas como 6º argumento (ver CFG_AUDIENCIAS/
+                    // CFG_ARQUIVADOS_SALDO/CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO/
+                    // CFG_INSTANCIA_RECURSAL em descreverSecaoPDF).
+                    secao.montarResumo(doc, dados, false, false, null, true);
                     return pg;
                 }
                 return null;
@@ -7521,15 +7537,16 @@
 
         // Observação destacada (pedido do usuário): quando há audiência com termo
         // pendente há mais de 5 dias (vencida, ou seja, já realizada, mas sem termo
-        // lançado), recomenda que a secretaria observe e regularize a situação. Some no
-        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só tabelas
-        // ali (a tabela de processos vencidos continua aparecendo).
+        // lançado), recomenda que a secretaria observe e regularize a situação. Observação
+        // E esta tabela intermediária (só Processo/Atribuição) somem no modo "Tabelas
+        // Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela completa única
+        // ali (o "Detalhamento" mais abaixo), sem tabelas intermediárias.
         const vencidasMaisDe5Dias = vencidas.filter(d => {
             const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
             return n != null && Math.abs(n) > 5;
         });
-        if (vencidasMaisDe5Dias.length) {
-            if (!somenteTabelas) {
+        if (vencidasMaisDe5Dias.length && !somenteTabelas) {
+            {
                 const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
                     + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
                 doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
@@ -8520,7 +8537,9 @@
                 valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
                 subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
             }
-            desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+            // Pedido do usuário: centralizar o conteúdo deste card (mesmo padrão dos
+            // cards de KPI ao lado, que já usam central=true).
+            desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, true, COR.vermelho);
 
             // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
             // relatório efetivamente lista algum processo. Some no modo "Tabelas
@@ -8534,10 +8553,11 @@
 
         // Tabela completa com Processo / Atribuição / Dt Arquivamento / Saldo (pedido do
         // usuário) — aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo"
-        // do PDF conjunto, independente da tabela discriminada mais detalhada abaixo
-        // (que só entra no modo "Tabelas Discriminadas"). Mesma ordenação: Saldo
-        // descendente (maior primeiro).
-        if (r.length) {
+        // do PDF conjunto, independente da tabela discriminada mais detalhada abaixo. Some
+        // no modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a
+        // tabela completa única ali (mais abaixo), sem esta intermediária. Mesma
+        // ordenação: Saldo descendente (maior primeiro).
+        if (r.length && !somenteTabelas) {
             const ordenadosCompleta = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
             tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length})`);
             const colunasCompleta = [
@@ -9274,10 +9294,11 @@
 
         // Tabela com até 15 processos suspensos há mais tempo (pedido do usuário) —
         // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
-        // conjunto, independente da tabela discriminada completa mais abaixo (que só
-        // entra no modo "Tabelas Discriminadas"). Mesmo critério de ordenação da tabela
-        // completa: Início Suspensão ascendente (mais antiga primeiro).
-        if (r.length) {
+        // conjunto, independente da tabela discriminada completa mais abaixo. Some no
+        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela
+        // completa única ali, sem esta intermediária. Mesmo critério de ordenação da
+        // tabela completa: Início Suspensão ascendente (mais antiga primeiro).
+        if (r.length && !somenteTabelas) {
             const top15 = r.slice()
                 .sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0))
                 .slice(0, 15);
@@ -9475,11 +9496,12 @@
 
         // Tabela com até 15 processos com maior tempo de suspensão (pedido do usuário) —
         // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
-        // conjunto, independente da tabela discriminada completa mais abaixo (que só
-        // entra no modo "Tabelas Discriminadas"). Ordenada por Tempo de Suspensão
+        // conjunto, independente da tabela discriminada completa mais abaixo. Some no
+        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela
+        // completa única ali, sem esta intermediária. Ordenada por Tempo de Suspensão
         // (duração fim - início) descendente — maior tempo primeiro; registros sem
         // duração calculável vão ao final.
-        if (r.length) {
+        if (r.length && !somenteTabelas) {
             const temMotivoTop15 = r.some(d => d.motivo);
             const top15 = r.slice()
                 .sort((a, b) => {
@@ -9653,19 +9675,17 @@
         // Observação + tabela dos processos enviados há mais de 2 anos (pedido do
         // usuário) — só aparecem quando há algum processo nessa situação, mas SEMPRE no
         // corpo do relatório (inclusive no modo "Só resumo" do PDF conjunto),
-        // independente da tabela discriminada completa mais abaixo (que só entra no modo
-        // "Tabelas Discriminadas"). Texto literal fornecido pelo usuário — a observação
-        // (mas não a tabela) some no modo "Tabelas Discriminadas" (somenteTabelas), pedido
-        // do usuário: só tabelas ali.
-        if (maisDe2Anos.length) {
-            if (!somenteTabelas) {
-                const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
-                    + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
-                    + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
-                    + 'do andamento processual.';
-                const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
-                proximoY += alturaObs2Anos + gap;
-            }
+        // independente da tabela discriminada completa mais abaixo. Ambas (observação E
+        // esta tabela intermediária) somem no modo "Tabelas Discriminadas"
+        // (somenteTabelas) — pedido do usuário: só a tabela completa única ali, sem
+        // tabelas intermediárias.
+        if (maisDe2Anos.length && !somenteTabelas) {
+            const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
+                + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
+                + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
+                + 'do andamento processual.';
+            const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
+            proximoY += alturaObs2Anos + gap;
 
             tituloSecao(doc, m, proximoY, uw, `Processos em instância recursal há mais de 2 anos (${maisDe2Anos.length})`);
             const colunasAntigos = [
