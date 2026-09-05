@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.10
+// @version      25.11
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1885,6 +1885,62 @@
         pdfCustom: (dados) => gerarPDFCumprimentoMedidas(dados),
     };
 
+    // ── Prescrições (Mesa do Escrivão Criminal, link "Vencidas" dentro do bloco
+    // "Prescrições") — mesaAnalistaEscrivao.do?actionType=pesquisarPrescricoes. Categoria
+    // Crime, igual Apreensões/Cumprimento de Medidas, mas — ao contrário desses dois —
+    // É uma lista paginada por processo (mesmo esquema de Juntadas/Apreensões), então usa
+    // criarColetor()/cfg.extrai normalmente. Sem Excel (pedido do usuário: NÃO definir
+    // cabecalhos/larguras/linha) — o botão "Baixar Excel" da UI continua aparecendo, mas
+    // cai no mesmo try/catch já existente em criarColetor().baixar() (mesmo comportamento
+    // aceito hoje por CFG_OUTROS_CUMPRIMENTOS/CFG_CUMPRIMENTO_MEDIDAS). PDF dedicado via
+    // pdfCustom (montarResumoPrescricoes, só 2 cards) + montarTabelaGenerico reaproveitado
+    // sem alteração pra tabela discriminada (ver montarResumoPrescricoes/gerarPDFPrescricoes
+    // perto de gerarPDFCumprimentoMedidas).
+    const TITULO_PRESCRICOES = 'Prescrições — Processos com Crimes Prescritos';
+    const CFG_PRESCRICOES = {
+        prefixo: 'projudi_prescricoes_',
+        // Zero prescrições vencidas é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_CUMPRIMENTO_MEDIDAS) — mostra a linha mesmo vazia, desde que
+        // já coletado.
+        mostrarSeVazio: true,
+        detecta: (cab) => /data\s+de\s+prescri[çc][ãa]o\s+m[íi]nima/i.test(cab),
+        minTds: 4,
+        usaAtuacao: false,
+        nomeArquivo: 'prescricoes_projudi',
+        rotulos: { coletar: 'Extrair Prescrições', coletarMais: 'Extrair mais (Prescrições)', baixar: '⬇ Baixar Prescrições' },
+        // Processo (td[0]): número em <em class="normal"/"attention">; Classe (td[1]):
+        // nome da classe + assunto principal entre parênteses, já juntado por textoCelula
+        // (texto multi-linha com <br>); Datas de prescrição mínima/máxima (td[2]/td[3]):
+        // texto simples DD/MM/AAAA.
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                dataPrescricaoMinima: textoCelula(tds[2]),
+                dataPrescricaoMaxima: textoCelula(tds[3]),
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+            };
+        },
+        pdfCustom: (dados, somenteResumo) => gerarPDFPrescricoes(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoPrescricoes
+        // não usa nenhum outro campo de p além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_PRESCRICOES,
+            tabelaTitulo: 'Tabela discriminada dos processos com prescrição pendente',
+            dataCampo: 'dataPrescricaoMinima',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 26, get: (d) => d.processo },
+                { header: 'Classe Processual (Assunto Principal)', width: 46, get: (d) => d.classe },
+                { header: 'Prescrição Mínima', width: 15, get: (d) => d.dataPrescricaoMinima },
+                { header: 'Prescrição Máxima', width: 15, get: (d) => d.dataPrescricaoMaxima },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — TRÊS relatórios derivados
     // da MESMA tela de busca, distinguidos só pelo valor selecionado no
     // <select id="codStatusCumprimentoCartorio"> (13/6/4). A tela é alcançada clicando no
@@ -2421,6 +2477,45 @@
                 console.log(`[Projudi Apreensões] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Apreensões] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de Prescrições (mesaAnalistaEscrivao.do, alcançada pelo link
+    // "Vencidas" da Mesa do Escrivão Criminal) — form + table.resultTable na MESMA
+    // página (mesmo padrão de Apreensões acima). Dois checkboxes precisam ficar
+    // marcados: "Sem sentença anotada" e "Agrupar por processo" — só clica em cada um se
+    // AINDA não estiver marcado (não sabemos se a tela chega com eles desmarcados ou já
+    // marcados por padrão antes da 1ª pesquisa). Clique de verdade via .click() (não
+    // .checked = true + dispatchEvent — armadilha já documentada no CLAUDE.md: checkbox
+    // do Projudi às vezes só reage a clique real do usuário).
+    function formularioPrescricoes() {
+        const form = document.getElementById('mesaAnalistaEscrivaoForm');
+        return form && form.querySelector('#semSentencaAnotada') ? form : null;
+    }
+
+    function preencherEPesquisarPrescricoes() {
+        const form = formularioPrescricoes();
+        if (!form) return;
+
+        const chkSemSentenca = form.querySelector('#semSentencaAnotada');
+        if (chkSemSentenca && !chkSemSentenca.checked) chkSemSentenca.click();
+        const chkAgrupar = form.querySelector('#agruparPorProcesso');
+        if (chkAgrupar && !chkAgrupar.checked) chkAgrupar.click();
+        console.log(`[Projudi Prescrições] semSentencaAnotada=${chkSemSentenca ? chkSemSentenca.checked : 'n/d'} agruparPorProcesso=${chkAgrupar ? chkAgrupar.checked : 'n/d'}`);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Prescrições] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Prescrições] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Prescrições] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Prescrições] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -4134,8 +4229,9 @@
         return t + '…';
     }
 
-    function desenharCard(doc, x, y, w, h, titulo, valor, subs, central, acento) {
+    function desenharCard(doc, x, y, w, h, titulo, valor, subs, central, acento, corValor) {
         acento = acento || COR.azul;
+        corValor = corValor || COR.tinta;
         doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
         doc.setFillColor(...acento);
@@ -4164,7 +4260,7 @@
                 doc.setFontSize(tam);
                 if (doc.getTextWidth(valorTexto) <= w - 10) { fonteValor = tam; break; }
             }
-            doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
+            doc.setFontSize(fonteValor); doc.setTextColor(...corValor);
             doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2; });
@@ -4175,7 +4271,7 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
         doc.text(String(titulo).toUpperCase(), px, y + 6.5);
         const grande = valor.length <= 13;
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(grande ? 20 : 14); doc.setTextColor(...COR.tinta);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(grande ? 20 : 14); doc.setTextColor(...corValor);
         doc.text(textoTruncadoParaLargura(doc, valor, w - 8), px, y + (grande ? 16.5 : 15));
         if (subs.length) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
@@ -5641,6 +5737,16 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaAtivosClasse(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_PRESCRICOES) {
+            return {
+                rotulo: TITULO_PRESCRICOES,
+                // Resumo dedicado (só 2 cards, pedido do usuário) — não usa
+                // montarResumoGenerico; a tabela discriminada reaproveita o genérico sem
+                // alteração (ver CFG_PRESCRICOES.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoPrescricoes(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_PRESCRICOES, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -6293,6 +6399,7 @@
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
+        const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -6681,6 +6788,20 @@
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+            });
+        }
+        // "Prescrições" — ÚLTIMO da categoria Crime (pedido do usuário: ordem cronológica/
+        // seção própria, mesma ordem de REPORTS_AUTOMACAO). Indicador: total de processos
+        // com prescrição; detalhamento compacta a prescrição mais antiga.
+        if (secaoPrescricoes) {
+            const antigo = acharMaisAntigo(secaoPrescricoes.dados, 'dataPrescricaoMinima');
+            const prejudicado = prejudicadoInfo(CFG_PRESCRICOES);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Prescrições',
+                indicador: `${secaoPrescricoes.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -8023,6 +8144,62 @@
         desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, m + padding, ty, uw - 2 * padding, entreLinhas);
 
         desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Prescrições (Mesa do Escrivão Criminal, link "Vencidas") ─────────
+    // Lista paginada por processo (ao contrário de Cumprimento de Medidas/Outros
+    // Cumprimentos, que são painéis agregados) — reaproveita montarTabelaGenerico sem
+    // alteração pra tabela discriminada, mas o resumo é dedicado (só 2 cards, pedido do
+    // usuário) em vez de montarResumoGenerico (que traria KPIs/distribuições que não
+    // fazem sentido aqui).
+    function gerarPDFPrescricoes(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoPrescricoes(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_PRESCRICOES, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_PRESCRICOES.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards (pedido do usuário): total de processos com prescrição (número em
+    // VERMELHO — daí o parâmetro corValor novo em desenharCard) e a prescrição mais
+    // antiga (menor dataPrescricaoMinima entre os processos), com o processo
+    // correspondente como sub-linha.
+    function montarResumoPrescricoes(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_PRESCRICOES, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos com prescrição', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataPrescricaoMinima');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Prescrição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
@@ -9688,6 +9865,7 @@
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
+        else if (CFG_PRESCRICOES.detecta(cab)) cfg = CFG_PRESCRICOES;
         else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
@@ -10608,6 +10786,31 @@
             }
         }
 
+        // Tela de filtros de Prescrições (mesaAnalistaEscrivao.do, link "Vencidas" da Mesa
+        // do Escrivão Criminal) — mesmo padrão de Apreensões acima: decide pelo ESTADO da
+        // automação, não pela presença de resultados.
+        if (formularioPrescricoes()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_prescricoes') {
+                console.log('[Projudi Prescrições] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_prescricoes');
+                preencherEPesquisarPrescricoes();
+                return;
+            }
+            // Uso manual (fora da automação): a tela pode já conviver com resultados de
+            // uma pesquisa anterior, então não há como usar "sem linha nenhuma" para
+            // decidir se o botão deve aparecer.
+            if (estadoAtual !== 'coletando_prescricoes' && mostrarBotoesIndividuais()) {
+                const bPrescricoes = document.createElement('button');
+                bPrescricoes.type = 'button';
+                bPrescricoes.className = 'projudi-btn';
+                bPrescricoes.title = 'Marca "Sem sentença anotada" e "Agrupar por processo" e pesquisa';
+                bPrescricoes.textContent = 'Preencher e Pesquisar (Prescrições)';
+                bPrescricoes.onclick = () => preencherEPesquisarPrescricoes();
+                buttonBar.appendChild(bPrescricoes);
+            }
+        }
+
         // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
         // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
         // automação, não pela presença de resultados).
@@ -11507,6 +11710,10 @@
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
         { key: 'cumprimentomedidas', cfg: CFG_CUMPRIMENTO_MEDIDAS, navAlvo: 'cumprimentomedidas', rotulo: 'Cumprimento de Medidas', curto: 'Cumpr. Medidas', categoriaEspecifica: 'crime', precisaPreencher: false },
+        // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
+        // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
+        // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
+        { key: 'prescricoes', cfg: CFG_PRESCRICOES, navAlvo: 'prescricoes', rotulo: 'Prescrições', curto: 'Prescrições', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -11697,6 +11904,11 @@
         // "Apreensões em..." fica no menu "Mesa do Escrivão" (aba #tabItemprefix6) —
         // basta casar pela URL de destino (o rótulo completo varia com a competência).
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
+        // "Vencidas" (Prescrições) fica na mesma aba "Mesa do Escrivão Criminal" de
+        // Apreensões — já presente no DOM da home sem precisar clicar na aba antes (ver
+        // comentário grande na spec desta feature). Distingue de "A vencer" (mesma URL
+        // base, token diferente) só pelo TEXTO do link.
+        else if (alvo === 'prescricoes') link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
