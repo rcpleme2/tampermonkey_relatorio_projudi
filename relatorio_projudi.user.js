@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.11
+// @version      25.12
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5817,14 +5817,18 @@
         const col = colunasCartao(x, w, false);
         if (l.subAtribuicao) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
-            // Truncado à largura da coluna do label (mesma função usada nos demais ramos
-            // desta função) — sem isso, um nome de vara/unidade muito longo invadia o
-            // espaço fixo do número à direita e sobrepunha os dois textos (bug relatado
-            // pelo usuário).
-            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, col.labelW - 5), col.labelX + 5, y + h / 2 + 1.2);
+            // Truncado à largura REAL disponível — não à de `col` (que reserva espaço de
+            // chip via colunasCartao, mesmo esta linha nunca desenhando chip). Reaproveitar
+            // esse espaço (~CHIP_W+GAP) dá mais respiro pro nome da vara antes do número,
+            // evitando a sobreposição relatada pelo usuário em nomes de vara bem longos
+            // (ex. "Vara de Execução Penal de Acordo de Não Persecução Penal de Astorga -
+            // Anexo à Vara Criminal de Astorga").
+            const numRightXSemChip = x + w - CARD_PAD;
+            const labelWSemChip = numRightXSemChip - col.numW - 2 - (col.labelX + 5);
+            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, labelWSemChip), col.labelX + 5, y + h / 2 + 1.2);
             if (l.indicador) {
                 doc.setTextColor(...COR.tintaSec);
-                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), col.numRightX, y + h / 2 + 1.2, { align: 'right' });
+                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), numRightXSemChip, y + h / 2 + 1.2, { align: 'right' });
             }
             return;
         }
@@ -5861,7 +5865,7 @@
     function desenharBlocoDominio(doc, x, y, w, cfg) {
         const ph = doc.internal.pageSize.getHeight();
         const mBottom = 14;
-        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.observacao ? { observacao: cfg.observacao } : null);
+        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.legenda ? { legenda: cfg.legenda } : (cfg.observacao ? { observacao: cfg.observacao } : null));
 
         if (!cfg.itens.length) {
             if (cfg.mensagemSemItens) {
@@ -6013,8 +6017,14 @@
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
-            observacao: 'Situação calculada pela pendência mais antiga de cada magistrado(a). Regular até 30 '
-                + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.',
+            // Legenda de bolinhas, mesmo padrão do Cartório (era um parágrafo em texto
+            // corrido — pedido do usuário pra uniformizar com a legenda simples que já
+            // existe no Cartório). Limiares vêm de LIMITES_GABINETE — nunca hardcoded aqui.
+            legenda: [
+                { cor: COR.aqua, rotulo: `Regular ≤${LIMITES_GABINETE.atencao}d` },
+                { cor: COR.ambar, rotulo: `Atenção ${LIMITES_GABINETE.atencao + 1}–${LIMITES_GABINETE.critico}d` },
+                { cor: COR.vermelho, rotulo: `Crítico >${LIMITES_GABINETE.critico}d` },
+            ],
             situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
@@ -6555,10 +6565,22 @@
                 const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
                 if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
             }
+            // Mesmo cálculo de "Não cumpridas"/"mais antiga" já usado na página de detalhe
+            // do Tempo Médio (montarResumoTempoMedio) — faltava aqui na capa, deixando essa
+            // linha sem nenhuma informação de "mais antiga" como as demais (pedido do
+            // usuário).
+            const naoCumpridasTM = secaoTempoMedio.dados.filter(d => !d.dtCartorio);
+            const maisAntigaNCTM = naoCumpridasTM.reduce((best, d) => {
+                const ts = parseDataBR(d.dtAnalise);
+                return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
+            }, null);
+            const detalhesTM = [];
+            if (periodoTxt) detalhesTM.push(`Período: ${periodoTxt}`);
+            if (naoCumpridasTM.length) detalhesTM.push(`${naoCumpridasTM.length} não cumprida(s) · mais antiga: ${maisAntigaNCTM ? maisAntigaNCTM.str : '—'}`);
             itensOutros.push({
                 nome: 'Tempo médio de cumprimento de decisões / sentenças',
                 indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
-                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                detalhamento: detalhesTM.length ? detalhesTM.join(' · ') : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
             // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
@@ -6732,6 +6754,16 @@
                 if (!porJuiz.has(nome)) porJuiz.set(nome, []);
                 porJuiz.get(nome).push(d);
             });
+            // Pedido do usuário: magistrado(a) com 0 conclusões pendentes mas com dados de
+            // Tempo Médio (já analisados) não deve ficar de fora do Gabinete — sem esta
+            // entrada (mesmo vazia), o nome nunca aparece em `porJuiz` e a página de
+            // resumo (com calcularEstatisticasTMJuiz) nunca chega a ser gerada pra ele(a).
+            if (secaoTempoMedio) {
+                secaoTempoMedio.dados.forEach(d => {
+                    const nome = (d.responsavel || '').trim() || '(sem responsável)';
+                    if (!porJuiz.has(nome)) porJuiz.set(nome, []);
+                });
+            }
             const itensGabinete = [...porJuiz.entries()].map(([nome, sub]) => {
                 const itens = sub.map(d => ({ dias: diasNum(d.dtRemessa, now), prioritario: !!d.prioritario }));
                 const maisAntiga = maiorDias(itens);
@@ -7094,7 +7126,7 @@
         const kY = yLinhaTM + 5;
         const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [periodoStr ? `Período: ${periodoStr}` : ''], true, COR.azul);
         desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
         desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, `Não cumpridas${fimCurto ? ` (até ${fimCurto})` : ''}`, String(naoCumpridas.length),
