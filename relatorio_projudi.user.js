@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.15
+// @version      25.16
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3257,49 +3257,6 @@
             for (const a of candidatos) {
                 if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
             }
-        }
-        return null;
-    }
-
-    // Diagnóstico temporário (bug relatado pelo usuário: fica preso na tela "Mesa do
-    // Escrivão Criminal" mesmo depois do fix de reclique/debounce — "Vencidas" nunca é
-    // encontrado mesmo com a aba visivelmente carregada). Loga, sempre que
-    // navegarMenu('prescricoes') não acha "Vencidas": quantos documentos (frames) o
-    // script consegue alcançar, a URL de cada um, se a aba "Mesa do Escrivão Criminal"
-    // aparece em cada um, e todo <a> cujo texto ou href pareça remotamente relacionado
-    // (contém "vencid"/"prescri" ou aponta pra mesaAnalistaEscrivao.do) — inclusive os
-    // que NÃO batem no regex exato usado por acharLinkMenu, pra pegar diferenças sutis de
-    // texto (espaço/quebra de linha/maiúscula) que o .trim()+regex atual não cobre.
-    // Throttle de 4s (chave própria) pra não spammar o console a cada tentativa da
-    // automação.
-    const CHAVE_DIAG_PRESCRICOES = 'projudi_prescricoes_diag_em';
-    function diagnosticarPrescricoes() {
-        const agora = Date.now();
-        const ultimo = parseInt(store.getItem(CHAVE_DIAG_PRESCRICOES) || '0', 10);
-        if (agora - ultimo < 4000) return;
-        store.setItem(CHAVE_DIAG_PRESCRICOES, String(agora));
-        try {
-            const docs = todosDocumentosAcessiveis();
-            console.log(`[Diag Prescrições] ${docs.length} documento(s) acessível(is) a partir deste frame (${location.href})`);
-            docs.forEach((d, i) => {
-                let url = '(sem location)';
-                try { url = d.location ? d.location.href : (d.defaultView && d.defaultView.location ? d.defaultView.location.href : url); } catch (e) { url = '(cross-origin?)'; }
-                const temAba = !!acharAbaEmDoc(d);
-                const candidatosVencidas = [...d.querySelectorAll('a')].filter(a => {
-                    const txt = (a.textContent || '').trim();
-                    const href = a.href || '';
-                    return /vencid/i.test(txt) || /prescri/i.test(txt) || /mesaAnalistaEscrivao\.do/i.test(href);
-                }).map(a => ({ texto: JSON.stringify((a.textContent || '').trim()), href: (a.href || '').slice(0, 90) }));
-                console.log(`[Diag Prescrições]   doc[${i}] url=${url} temAbaMesaEscrivao=${temAba} candidatos=${JSON.stringify(candidatosVencidas)}`);
-            });
-        } catch (e) {
-            console.warn('[Diag Prescrições] erro ao diagnosticar:', e.message);
-        }
-    }
-    function acharAbaEmDoc(d) {
-        const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
-        for (const a of candidatos) {
-            if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
         }
         return null;
     }
@@ -10538,6 +10495,28 @@
             return;
         }
 
+        // Aba "Mesa do Escrivão Criminal" com "Vencidas" (Prescrições) carregada — 2º
+        // passo da navegação (1º: clicar na aba, ver
+        // navegarAbaMesaEscrivaoCriminalParaPrescricoes/navegarMenu('prescricoes')).
+        // Mesmo problema de Outros Cumprimentos/Cumprimento de Medidas acima: essa tela
+        // NÃO tem table.buttonBar (é a home/aba, não uma tela de resultados) — sem tratar
+        // isso ANTES do gate "if (!buttonBar)" logo abaixo, a extração nunca chegava a
+        // rodar (bug relatado pelo usuário, 4ª rodada: o log confirmou que o código de
+        // clicar em "Vencidas" nem executava, porque a função inteira retornava antes,
+        // achando que a tela "não tinha resultados"). Detectado só pelo ESTADO da
+        // automação (preenchendo_prescricoes), igual aos outros casos acima — sem
+        // depender de conteúdo que pode ainda não ter carregado.
+        if (estadoAutoNoInicio === 'preenchendo_prescricoes' && !formularioPrescricoes()) {
+            const linkVencidas = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
+            if (linkVencidas) {
+                console.log('[Projudi Prescrições] aba "Mesa do Escrivão Criminal" carregada — clicando em "Vencidas"');
+                linkVencidas.click();
+            } else {
+                console.log('[Projudi Prescrições] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Vencidas" ainda não apareceu)');
+            }
+            return;
+        }
+
         const buttonBar = document.querySelector('table.buttonBar td.buttons');
         if (!buttonBar) {
             // Quando uma busca não encontra NENHUM registro, algumas telas do Projudi
@@ -11915,13 +11894,6 @@
         return false;
     }
 
-    // Debounce do clique na aba "Mesa do Escrivão Criminal" dentro de navegarMenu
-    // ('prescricoes', abaixo) — 6s dá folga de sobra pro AJAX da aba responder mesmo em
-    // conexões lentas, sem deixar a automação "presa" por muito tempo caso a aba
-    // realmente não exista (o limite de tentativas genérico de qualquer forma cobre isso).
-    const CHAVE_ABA_MESA_ESCRIVAO_CLIQUE = 'projudi_prescricoes_aba_clique_em';
-    const INTERVALO_RECLIQUE_ABA_MESA_ESCRIVAO_MS = 6000;
-
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
@@ -11968,33 +11940,19 @@
         // basta casar pela URL de destino (o rótulo completo varia com a competência).
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         // "Vencidas" (Prescrições) fica na mesma aba "Mesa do Escrivão Criminal" de
-        // Apreensões — mas, ao contrário do que a Apreensões deixava supor, o conteúdo
-        // dessa aba (inclusive o bloco "Prescrições") só é carregado via AJAX depois de
-        // um clique real nela (mesmo problema já resolvido para "Outros Cumprimentos"/
-        // "Cumprimentos de Medidas" — ver acharAbaOutrosCumprimentos). Bug relatado pelo
-        // usuário (2 rodadas): a 1ª tentativa (checagem por classe "currentTab" no <li>
-        // pra saber se a aba já estava ativa) reclicava a aba a CADA tentativa da
-        // automação — a classe "currentTab" aparentemente só é aplicada quando o AJAX já
-        // terminou de carregar, não no instante do clique, então cada reclique enquanto o
-        // conteúdo ainda estava chegando reiniciava o carregamento do zero,
-        // impedindo o "Vencidas" de aparecer. Troca por um debounce por TEMPO
-        // (CHAVE_ABA_MESA_ESCRIVAO_CLIQUE): só clica de novo depois de alguns segundos
-        // sem sucesso, dando tempo real pro AJAX responder antes de reclicar.
-        else if (alvo === 'prescricoes') {
-            link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
-            if (!link) {
-                diagnosticarPrescricoes();
-                const aba = acharAbaMesaEscrivaoCriminal();
-                const ultimoClique = parseInt(store.getItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE) || '0', 10);
-                if (aba && (Date.now() - ultimoClique) > INTERVALO_RECLIQUE_ABA_MESA_ESCRIVAO_MS) {
-                    console.log('[Auto Projudi] navegarMenu("prescricoes") — clicando na aba "Mesa do Escrivão Criminal" pra carregar "Vencidas" (tentativa será refeita no próximo passo)');
-                    store.setItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE, String(Date.now()));
-                    aba.click();
-                }
-            } else {
-                store.removeItem(CHAVE_ABA_MESA_ESCRIVAO_CLIQUE);
-            }
-        }
+        // Apreensões — MAS clicar nessa aba é uma NAVEGAÇÃO DE VERDADE (a URL do frame
+        // muda pra mesaAnalista.do?actionType=listaMesaEscrivao, disparando um bootstrap
+        // novo), não uma troca de conteúdo via AJAX na mesma página. Depois de 3 rodadas
+        // de bug relatadas pelo usuário tentando achar+clicar em "Vencidas" dentro da
+        // MESMA chamada de navegarMenu (nunca funcionava, porque a navegação real
+        // interrompia no meio do caminho), a solução foi separar em dois passos
+        // INDEPENDENTES, mesmo esquema de formularioApreensoes/preencherEPesquisarApreensoes:
+        // aqui só clica na aba (sempre com sucesso, se ela existir — mesmo padrão de
+        // navegarAbaOutrosCumprimentos/navegarAbaCumprimentoMedidas); o clique em
+        // "Vencidas" propriamente dito acontece em injetarBotoes, a cada carregamento de
+        // página, assim que o link aparecer no DOM (ver bloco perto de
+        // formularioPrescricoes).
+        else if (alvo === 'prescricoes') return navegarAbaMesaEscrivaoCriminalParaPrescricoes();
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
@@ -12067,6 +12025,26 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaCumprimentoMedidas — clicando na aba "Cumprimentos de Medidas" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
+    // Aba "Mesa do Escrivão Criminal" (Prescrições, link "Vencidas") — mesmo esquema de
+    // navegarAbaCumprimentoMedidas acima: clica e já devolve sucesso, sem esperar o
+    // conteúdo carregar (isso é diferente de Apreensões, que já usa acharLinkMenu direto
+    // porque o link de Apreensões parece estar acessível sem precisar ativar a aba
+    // antes — só o link "Vencidas" de Prescrições exige o clique real). O clique em
+    // "Vencidas" em si é um passo SEPARADO (ver bloco perto de formularioPrescricoes em
+    // injetarBotoes), disparado a cada carregamento de página assim que o link aparecer
+    // — decisão tomada depois de confirmar (log real do usuário) que esse clique é uma
+    // navegação de verdade, não uma atualização em AJAX na mesma página.
+    function navegarAbaMesaEscrivaoCriminalParaPrescricoes() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: prescricoes (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaPrescricoes — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -12407,15 +12385,7 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            // Exceção pra Prescrições: a aba "Mesa do Escrivão Criminal" carrega o link
-            // "Vencidas" via AJAX só depois do clique (ver navegarMenu) — o carregamento
-            // pode legitimamente levar mais que 3 tentativas rápidas (bug relatado pelo
-            // usuário: a aba abria mas o script desistia antes do AJAX terminar). Só cai
-            // no limite curto de Crime se a PRÓPRIA ABA não existir (unidade sem essa
-            // mesa de verdade, mesmo caso de Apreensões); com a aba presente, usa o
-            // limite genérico de 8 tentativas abaixo, dando tempo pro AJAX responder.
-            const prescricoesComAbaPresente = rel.key === 'prescricoes' && !!acharAbaMesaEscrivaoCriminal();
-            if (rel.categoriaEspecifica === 'crime' && !prescricoesComAbaPresente && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+            if (rel.categoriaEspecifica === 'crime' && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
                 marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
                 return;
@@ -12436,20 +12406,8 @@
             // automação "travar" sem alterar nada até o usuário clicar em "Pular"). Volta
             // à início em toda tentativa sem sucesso; o estado continua "ir_X" para tentar
             // de novo assim que a home carregar.
-            //
-            // Exceção pra Prescrições com a aba já encontrada (prescricoesComAbaPresente):
-            // clicar em "Início" aqui destruía o AJAX que acabara de ser disparado pelo
-            // clique em "Mesa do Escrivão Criminal" (mesma tela, mesmo esquema de abas —
-            // trocar de aba parece descartar o conteúdo carregado, não só escondê-lo),
-            // reiniciando o carregamento do zero a cada tentativa e impedindo o "Vencidas"
-            // de aparecer (2º bug relatado pelo usuário na mesma extração). Já estamos na
-            // página certa (a home, com a aba certa clicada) — só falta esperar o AJAX.
-            if (prescricoesComAbaPresente) {
-                console.log('[Auto Projudi] navegarMenu("prescricoes") — aba já clicada, aguardando o AJAX responder (sem voltar à início)');
-            } else {
-                console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
-                navegarMenu('inicio');
-            }
+            console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
+            navegarMenu('inicio');
         }
     }
 
