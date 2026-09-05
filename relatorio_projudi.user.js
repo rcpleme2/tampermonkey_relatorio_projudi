@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.15
+// @version      25.16
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2249,10 +2249,26 @@
                 return;
             }
             console.warn(`[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando "${chave}"`);
+            // Bug relatado pelo usuário: sem isso, avancarAutomacao(cfg) era chamado com
+            // AUTO_ESTADO ainda em "preenchendo_<chave>" — avancarAutomacao() exige
+            // "coletando_<chave>" (ver checagem `estado !== 'coletando_' + rel.key`) e
+            // simplesmente IGNORAVA a chamada, deixando a automação travada pra sempre
+            // nesta chave (nunca avançava, nunca reiniciava — só reentrava aqui do zero a
+            // cada nova tentativa de injetarBotoes, esperando 15s de novo indefinidamente).
+            store.setItem(AUTO_ESTADO, 'coletando_' + chave);
             marcarColetaMandadosVazia(cfg);
             avancarAutomacao(cfg);
             return;
         }
+        // Marca "coletando_<chave>" ANTES de clicar (mesmo padrão de
+        // preencherEPesquisarApreensoes/etc.: "preenchendo_" dura só até o clique que
+        // dispara a busca). Bug relatado pelo usuário: sem isso, AUTO_ESTADO continuava
+        // "preenchendo_mandados*" depois do link.click() navegar pra tela de resultados —
+        // e o gate lá em cima de injetarBotoes ("estadoAutoNoInicio.startsWith('preenchendo_mandados')")
+        // reentrava em tratarPainelMandados() TAMBÉM na tela de resultados, onde o
+        // contador não existe, ficando preso esperando por ~15s repetidamente sem nunca
+        // chegar a corrigir o filtro de status (gateMandados nunca era alcançado).
+        store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         // "Aguardando Análise de Retorno" é a própria fase padrão do link — zero mandados
         // aguardando retorno já é "coletado, zero registros", sem precisar visitar a tela.
         const n = parseInt((span.textContent || '0').trim(), 10) || 0;
@@ -2291,6 +2307,12 @@
         const chave = keyDoEstadoAtual(estadoAuto);
         const statusEsperado = chave && STATUS_POR_CHAVE_MANDADO[chave];
         if (!statusEsperado) return false;
+        // Promove "preenchendo_" para "coletando_" ANTES de qualquer clique (mesmo motivo
+        // do promover em tratarPainelMandados: se a página recarregar ainda com
+        // "preenchendo_mandados*", o gate do topo de injetarBotoes reentra em
+        // tratarPainelMandados() nesta MESMA tela de resultados — que não tem o contador
+        // do painel "Para Realizar" — e fica preso esperando 15s à toa).
+        if (estadoAuto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         const sel = document.getElementById('codStatusCumprimentoCartorio');
         if (sel && sel.value !== statusEsperado) {
             sel.value = statusEsperado;
@@ -2299,7 +2321,6 @@
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
-        if (estadoAuto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         const cfg = cfgMandadoPorChave(chave);
         // Usa tabelaMandados() (busca pela tabela CERTA, pelo cabeçalho dela) em vez de
         // "table.resultTable tbody tr" genérico — a página pode ter outra table.resultTable
