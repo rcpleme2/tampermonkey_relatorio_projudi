@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.16
+// @version      25.17
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1897,6 +1897,13 @@
     // sem alteração pra tabela discriminada (ver montarResumoPrescricoes/gerarPDFPrescricoes
     // perto de gerarPDFCumprimentoMedidas).
     const TITULO_PRESCRICOES = 'Prescrições — Processos com Crimes Prescritos';
+    // Texto fixo do balão de observação (pedido do usuário) — só aparece no PDF quando
+    // há processos listados (ver montarResumoPrescricoes: r.length > 0). "Sem pendência"
+    // não precisa de alerta pra secretaria agir.
+    const PARAGRAFOS_OBSERVACAO_PRESCRICOES = [
+        'A secretaria deverá consultar a planilha detalhada dos processos com prescrição pendente e, sempre que identificar indícios de sua ocorrência, lavrar a respectiva certidão, encaminhando os autos ao Ministério Público para análise e eventual manifestação.',
+        'Sem prejuízo dessa providência, deverá, preliminarmente, verificar a correção do cadastro da infração penal e certificar-se de que eventuais causas suspensivas ou interruptivas da prescrição foram devidamente registradas nos sistemas pertinentes.',
+    ];
     const CFG_PRESCRICOES = {
         prefixo: 'projudi_prescricoes_',
         // Zero prescrições vencidas é uma informação válida (mesmo padrão de
@@ -4300,6 +4307,42 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(11);
         const linhas = doc.splitTextToSize(String(valor || '—'), w - 10);
         return 6.5 + linhas.length * 4.6 + (temSub ? 8 : 0) + 4;
+    }
+
+    // Balão de OBSERVAÇÃO — fonte Helvetica (pedido do usuário; único ponto do arquivo
+    // que usa a fonte padrão do jsPDF em vez da PublicSans embutida usada em todo o
+    // resto) e texto JUSTIFICADO (suportado nativamente pelo jsPDF via
+    // {align:'justify', maxWidth}, sem precisar de biblioteca extra — a última linha de
+    // cada parágrafo fica sem esticar, comportamento padrão de texto justificado). Cor
+    // âmbar/laranja (COR.ambar) — a mesma já usada em todo o arquivo para observação/
+    // atenção (ver p.observacaoFinal em montarResumoGenerico), mantendo a identidade
+    // visual. Cada item de `paragrafos` é um parágrafo próprio. Sempre medir a altura com
+    // medirAlturaCardObservacao ANTES de desenhar (mesmo padrão de medirAlturaCardLista).
+    function medirAlturaCardObservacao(doc, w, paragrafos) {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+        const larguraTexto = w - 10;
+        let linhas = 0;
+        (paragrafos || []).forEach(p => { linhas += doc.splitTextToSize(String(p), larguraTexto).length; });
+        return 10 + linhas * 3.8 + Math.max(0, (paragrafos || []).length - 1) * 2 + 4;
+    }
+
+    function desenharCardObservacao(doc, x, y, w, h, titulo, paragrafos, acento) {
+        acento = acento || COR.ambar;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const px = x + 5;
+        const larguraTexto = w - 10;
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...acento);
+        doc.text(String(titulo).toUpperCase(), px, y + 6.5);
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+        let yy = y + 12;
+        (paragrafos || []).forEach(p => {
+            const linhas = doc.splitTextToSize(String(p), larguraTexto);
+            doc.text(linhas, px, yy, { maxWidth: larguraTexto, align: 'justify' });
+            yy += linhas.length * 3.8 + 2;
+        });
     }
 
     // Variante de desenharCard para um "valor" que pode ser longo (ex.: vários números de
@@ -8211,6 +8254,20 @@
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Prescrição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Balão de observação (pedido do usuário) — só com processos listados; "0
+        // pendências" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
+        // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo.
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_PRESCRICOES);
+            if (yObs + alturaObs > ph - m) {
+                desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                doc.addPage();
+                yObs = m + 4;
+            }
+            desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_PRESCRICOES, COR.ambar);
+        }
 
         desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
