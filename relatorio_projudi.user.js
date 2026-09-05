@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.11
+// @version      25.12
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3246,6 +3246,30 @@
             }
         }
         return null;
+    }
+
+    // Aba "Mesa do Escrivão Criminal" (Apreensões/Prescrições) — mesmo padrão de
+    // acharAbaCumprimentoMedidas acima: <a> sem href, restrito a #tabHorz/.tabCenter.
+    function acharAbaMesaEscrivaoCriminal() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
+            for (const a of candidatos) {
+                if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // A aba ativa tem a classe "currentTab" no <li> pai (ver marcação da home,
+    // tabItemprefix0 "Início" como exemplo) — evita clicar de novo (e reiniciar o AJAX
+    // de carregamento) numa aba que já está ativa.
+    function abaMesaEscrivaoCriminalAtiva() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) return false;
+        let li = link.parentElement;
+        while (li && li.tagName !== 'LI') li = li.parentElement;
+        return !!(li && /(^|\s)currentTab(\s|$)/.test(li.className || ''));
     }
 
     // Os 3 contadores só existem no DOM quando a aba "Cumprimentos de Medidas" está
@@ -11905,10 +11929,27 @@
         // basta casar pela URL de destino (o rótulo completo varia com a competência).
         else if (alvo === 'apreensoes') link = acharLinkMenu(/processo\/criminal\/apreensao\.do/i, /apreens/i) || acharLinkMenu(/processo\/criminal\/apreensao\.do/i, null);
         // "Vencidas" (Prescrições) fica na mesma aba "Mesa do Escrivão Criminal" de
-        // Apreensões — já presente no DOM da home sem precisar clicar na aba antes (ver
-        // comentário grande na spec desta feature). Distingue de "A vencer" (mesma URL
-        // base, token diferente) só pelo TEXTO do link.
-        else if (alvo === 'prescricoes') link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
+        // Apreensões — mas, ao contrário do que a Apreensões deixava supor, o conteúdo
+        // dessa aba (inclusive o bloco "Prescrições") só é carregado via AJAX depois de
+        // um clique real nela (mesmo problema já resolvido para "Outros Cumprimentos"/
+        // "Cumprimentos de Medidas" — ver acharAbaOutrosCumprimentos). Bug relatado pelo
+        // usuário: com Prescrições marcado sozinho (primeiro/único item da fila), a aba
+        // nunca tinha sido visitada nesta sessão e o link "Vencidas" simplesmente não
+        // existia ainda no DOM. Se ainda não achou o link, ativa a aba (só se não
+        // estiver já ativa) e devolve null — a automação conta como uma tentativa sem
+        // sucesso e tenta de novo no próximo passo, dessa vez com o conteúdo carregado.
+        // Distingue "Vencidas" de "A vencer" (mesma URL base, token diferente) só pelo
+        // TEXTO do link.
+        else if (alvo === 'prescricoes') {
+            link = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
+            if (!link) {
+                const aba = acharAbaMesaEscrivaoCriminal();
+                if (aba && !abaMesaEscrivaoCriminalAtiva()) {
+                    console.log('[Auto Projudi] navegarMenu("prescricoes") — aba "Mesa do Escrivão Criminal" ainda não carregada, clicando (tentativa será refeita no próximo passo)');
+                    aba.click();
+                }
+            }
+        }
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
