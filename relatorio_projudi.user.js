@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.10
+// @version      25.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -320,12 +320,12 @@
             // na hora de desenhar, quando COR já está definida.
             kpisExtras: [
                 {
-                    titulo: 'Com pré-análise', acento: 'aqua',
+                    titulo: 'Com pré-análise', acento: 'azul',
                     calc: (sub) => sub.filter(temPreAnalise).length,
                     subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
                 },
                 {
-                    titulo: 'Sem pré-análise', acento: 'ambar',
+                    titulo: 'Sem pré-análise', acento: 'azul',
                     calc: (sub) => sub.length - sub.filter(temPreAnalise).length,
                 },
             ],
@@ -457,7 +457,7 @@
                 // Os gráficos abaixo vão para a 2ª página do resumo (pagina2), com mais
                 // itens (15) já que ganham a página inteira só para eles.
                 // Largura total (span 2) para caber o nome completo do tipo de documento
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 5, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o
                 // restante). minValor: 2 — só processos com MAIS DE UMA juntada pendente;
                 // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
@@ -4096,7 +4096,7 @@
 
     // Título de seção com régua de acento (usado por gráficos e blocos da tabela).
     function tituloSecao(doc, x, y, w, texto, acento) {
-        acento = acento || COR.azul;
+        acento = acento || COR.tinta;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
         doc.text(texto, x, y);
         doc.setDrawColor(...acento); doc.setLineWidth(0.7);
@@ -4268,7 +4268,7 @@
     function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas, rotuloPrioritario, rotuloNormal) {
         rotuloPrioritario = rotuloPrioritario || 'Prioritários';
         rotuloNormal = rotuloNormal || 'Normais';
-        tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const legY = y + 10;
         doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
@@ -4382,7 +4382,7 @@
                 if (d.section !== 'body' || d.column.dataKey !== 'p') return;
                 const v = d.row.raw._valor;
                 const larguraBarra = (v / max) * (d.cell.width - 4);
-                doc.setFillColor(...corClara(opts.acento || COR.aqua, 0.35));
+                doc.setFillColor(...corClara(opts.acento || COR.azul, 0.35));
                 doc.rect(d.cell.x + 2, d.cell.y + d.cell.height - 1.9, larguraBarra, 1.1, 'F');
             },
         });
@@ -4395,7 +4395,7 @@
     // magnitude sem ser um gráfico).
     function tabelaCategorias(doc, x, y, w, titulo, itens, opts) {
         opts = opts || {};
-        tituloSecao(doc, x, y + 4, w, titulo, opts.acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const total = itens.reduce((s, i) => s + i.valor, 0) || 1;
         const max = Math.max(...itens.map(i => i.valor), 1);
         return corpoTabelaCategorias(doc, x, y + TITULO_TABELA_H, w, itens, total, max, opts);
@@ -4406,7 +4406,7 @@
     // cheia deixariam a coluna de rótulo enorme e o resto da linha vazio.
     function tabelaCategoriasDupla(doc, x, y, w, titulo, itens, opts) {
         opts = opts || {};
-        tituloSecao(doc, x, y + 4, w, titulo, opts.acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const gap = 6, colW = (w - gap) / 2;
         const corte = Math.ceil(itens.length / 2);
         const total = itens.reduce((s, i) => s + i.valor, 0) || 1;
@@ -4422,7 +4422,7 @@
     // e sim uma agregação com colunas próprias. colunas: [{header, get(item), width,
     // halign?}] — width é peso relativo, mesmo esquema de montarTabelaGenerico.
     function tabelaRanking(doc, x, y, w, titulo, itens, colunas, acento) {
-        tituloSecao(doc, x, y + 4, w, titulo, acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         if (!itens.length) return y + TITULO_TABELA_H;
         const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
         const fator = w / somaLarguras;
@@ -4450,7 +4450,7 @@
     function tabelaFaixasIdade(doc, x, y, w, titulo, faixas, rotuloPrioritario, rotuloNormal) {
         rotuloPrioritario = rotuloPrioritario || 'Prioritários';
         rotuloNormal = rotuloNormal || 'Demais';
-        tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const total = faixas.reduce((s, f) => s + f.prioritarios + f.normais, 0) || 1;
         const wPrio = 20, wNum = 17, wPct = 16;
         doc.autoTable({
@@ -4509,7 +4509,7 @@
         opts = opts || {};
         const comps = contagemPorCompetencia(dados);
         if (comps.length < 2) return y;
-        tituloSecao(doc, x, y + 4, w, 'Resumo geral e por competência', COR.azul);
+        tituloSecao(doc, x, y + 4, w, 'Resumo geral e por competência');
 
         const subDe = (rotulo) => dados.filter(d => (d.competencia || d.atuacao || '').trim() === rotulo);
         const linhaDe = (rotulo, sub, ehTotal) => {
@@ -4728,7 +4728,7 @@
             const cw = c.pos.span === 2 ? w : colW;
             if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
             else if (c.tipo === 'serie') desenharSerieMensal(doc, cx, cy, cw, chartH, c.titulo, c.pontos, c.campoValor, c.fmt, c.cor);
-            else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
+            else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.azul);
         });
     }
 
@@ -4783,7 +4783,7 @@
         }
         if (p.mediaLabel) {
             const media = mediaPorDia(dados, p.dataCampo);
-            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
+            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.azul });
         }
         // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
         // "Com/Sem pré-análise"). Relatórios que não definem p.kpisExtras ficam
@@ -4791,7 +4791,7 @@
         if (Array.isArray(p.kpisExtras)) {
             p.kpisExtras.forEach(k => {
                 const valor = k.calc(dados);
-                kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.aqua });
+                kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.azul });
             });
         }
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -4811,7 +4811,7 @@
                 reg[p.tipoCampo] || '',
             ];
         }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
         // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
         // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
@@ -4882,7 +4882,7 @@
             // igual já era com desenharBarras/tipo 'barras' antes desta mudança.
             const itensIdade = faixas.map(f => ({ label: f.label, valor: f.prioritarios + f.normais })).filter(i => i.valor);
             const blocos = itensIdade.length
-                ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.ambar }, ...distribuicoes]
+                ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.azul }, ...distribuicoes]
                 : distribuicoes;
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
         }
@@ -5144,8 +5144,8 @@
         const kpis = [
             { titulo: 'Pendentes', valor: String(sub.length), subs: [], acento: COR.azul },
             { titulo: 'Prioritários', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
-            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
-            { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
+            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.azul },
+            { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.azul },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
@@ -5166,12 +5166,12 @@
             const kpisTM = [{
                 titulo: 'Atos Analisados no Período', valor: String(estatisticasTM.total),
                 subs: [`Magistrado: ${estatisticasTM.peloMagistrado} / Assessoria: ${estatisticasTM.porOutros}`],
-                acento: COR.vinho,
+                acento: COR.azul,
             }];
             if (estatisticasTM.media != null) {
                 kpisTM.push({
                     titulo: 'Tempo Médio de Conclusão', valor: `${String(estatisticasTM.media).replace('.', ',')} dia(s)`,
-                    subs: [], acento: COR.aqua,
+                    subs: [], acento: COR.azul,
                 });
             }
             if (estatisticasTM.periodo) {
@@ -5185,8 +5185,15 @@
         // Tabelas no lugar de gráficos (pedido do usuário) — comparativo por competência
         // (só aparece com 2+ competências nas conclusões pendentes DESTE magistrado) mais
         // as distribuições, no lugar das barras horizontais de antes.
-        let y = tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
-            { semMedia: true, diasNaColunaAntiga: true }) + 6;
+        // Com 0 pendentes (magistrado(a) só com dados de Tempo Médio, ver item de Gabinete
+        // em gerarPDFConjunto), o guard interno de tabelaComparativoCompetencias não
+        // basta — ele depende do nº de competências ATIVAS no relatório inteiro, não do
+        // `sub` deste magistrado, então desenharia uma tabela toda zerada. Só chama a
+        // função quando há pelo menos 1 pendência de verdade.
+        let y = sub.length
+            ? tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
+                { semMedia: true, diasNaColunaAntiga: true }) + 6
+            : gY0;
         const blocos = [
             { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -5493,7 +5500,7 @@
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle', overflow: 'linebreak' },
-                headStyles: { fillColor: COR.vermelho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: columnStylesCrit,
                 didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
@@ -5666,20 +5673,23 @@
     // desenhos (mais simples, sem efeito colateral em desenhos vizinhos).
     function corClara(cor, alpha) { return cor.map(c => Math.round(c * alpha + 255 * (1 - alpha))); }
 
-    // Chip/pill de situação: fundo arredondado tintado (cor sólida a ~14%) + texto em
-    // versalete negrito na cor sólida quando `comCor`; senão (situação inaplicável —
-    // "—", ex. Tempo Médio) fundo neutro (COR.cartao) e texto COR.muted. Alinhado pela
-    // borda direita em `rightX` (a largura do pill se ajusta ao texto).
+    // Indicador de situação: sem fundo/pill — um pequeno ponto (~1.6mm) na cor sólida
+    // ao lado do texto em versalete negrito, também na cor sólida, quando `comCor`;
+    // senão (situação inaplicável — "—", ex. Tempo Médio) sem ponto, só texto em
+    // COR.muted. Grupo (ponto + texto) alinhado pela borda direita em `rightX`.
     function desenharChip(doc, rightX, yCenter, texto, cor, comCor, larguraMax) {
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.6);
-        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraMax - 4);
-        const padX = 2, h = 4.4;
-        const wChip = Math.min(larguraMax, doc.getTextWidth(label) + padX * 2);
-        const xChip = rightX - wChip;
-        doc.setFillColor(...(comCor ? corClara(cor, 0.16) : COR.cartao));
-        doc.roundedRect(xChip, yCenter - h / 2, wChip, h, 1.3, 1.3, 'F');
+        const DOT_D = 1.6, DOT_GAP = 1.3;
+        const larguraTexto = comCor ? larguraMax - DOT_D - DOT_GAP : larguraMax;
+        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraTexto);
         doc.setTextColor(...(comCor ? cor : COR.muted));
-        doc.text(label, xChip + wChip / 2, yCenter + 1.05, { align: 'center' });
+        doc.text(label, rightX, yCenter + 1.05, { align: 'right' });
+        if (comCor) {
+            const wTexto = doc.getTextWidth(label);
+            const cx = rightX - wTexto - DOT_GAP - DOT_D / 2;
+            doc.setFillColor(...cor);
+            doc.circle(cx, yCenter, DOT_D / 2, 'F');
+        }
     }
 
     // Geometria das colunas à direita de um cartão (contador, [extra], chip) —
@@ -5814,14 +5824,18 @@
         const col = colunasCartao(x, w, false);
         if (l.subAtribuicao) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
-            // Truncado à largura da coluna do label (mesma função usada nos demais ramos
-            // desta função) — sem isso, um nome de vara/unidade muito longo invadia o
-            // espaço fixo do número à direita e sobrepunha os dois textos (bug relatado
-            // pelo usuário).
-            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, col.labelW - 5), col.labelX + 5, y + h / 2 + 1.2);
+            // Truncado à largura REAL disponível — não à de `col` (que reserva espaço de
+            // chip via colunasCartao, mesmo esta linha nunca desenhando chip). Reaproveitar
+            // esse espaço (~CHIP_W+GAP) dá mais respiro pro nome da vara antes do número,
+            // evitando a sobreposição relatada pelo usuário em nomes de vara bem longos
+            // (ex. "Vara de Execução Penal de Acordo de Não Persecução Penal de Astorga -
+            // Anexo à Vara Criminal de Astorga").
+            const numRightXSemChip = x + w - CARD_PAD;
+            const labelWSemChip = numRightXSemChip - col.numW - 2 - (col.labelX + 5);
+            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, labelWSemChip), col.labelX + 5, y + h / 2 + 1.2);
             if (l.indicador) {
                 doc.setTextColor(...COR.tintaSec);
-                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), col.numRightX, y + h / 2 + 1.2, { align: 'right' });
+                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), numRightXSemChip, y + h / 2 + 1.2, { align: 'right' });
             }
             return;
         }
@@ -5844,9 +5858,14 @@
             const linhasDet = doc.splitTextToSize(l.detalhamento, col.labelW - indent).slice(0, 8);
             linhasDet.forEach((linha, i) => doc.text(linha, col.labelX + indent, y + 7.4 + i * 3.7));
         }
+        // Mesma posição condicional do título (y + 3.7 quando há detalhamento quebrado em
+        // várias linhas) — sem isso, numa linha "alta" (detalhamento longo), o centro
+        // vertical (h/2) cai no meio do bloco de texto do detalhamento e o indicador/chip
+        // ficam desenhados por cima dele (bug relatado pelo usuário em "Bens Apreendidos").
+        const yIndicadorChip = temSub ? y + 3.7 : y + h / 2 + 1.3;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
-        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
-        desenharChip(doc, col.chipRightX, y + h / 2, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
+        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, yIndicadorChip, { align: 'right' });
+        desenharChip(doc, col.chipRightX, yIndicadorChip, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
         l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
     }
 
@@ -5858,7 +5877,7 @@
     function desenharBlocoDominio(doc, x, y, w, cfg) {
         const ph = doc.internal.pageSize.getHeight();
         const mBottom = 14;
-        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.observacao ? { observacao: cfg.observacao } : null);
+        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.legenda ? { legenda: cfg.legenda } : (cfg.observacao ? { observacao: cfg.observacao } : null));
 
         if (!cfg.itens.length) {
             if (cfg.mensagemSemItens) {
@@ -6010,8 +6029,14 @@
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
-            observacao: 'Situação calculada pela pendência mais antiga de cada magistrado(a). Regular até 30 '
-                + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.',
+            // Legenda de bolinhas, mesmo padrão do Cartório (era um parágrafo em texto
+            // corrido — pedido do usuário pra uniformizar com a legenda simples que já
+            // existe no Cartório). Limiares vêm de LIMITES_GABINETE — nunca hardcoded aqui.
+            legenda: [
+                { cor: COR.aqua, rotulo: `Regular ≤${LIMITES_GABINETE.atencao}d` },
+                { cor: COR.ambar, rotulo: `Atenção ${LIMITES_GABINETE.atencao + 1}–${LIMITES_GABINETE.critico}d` },
+                { cor: COR.vermelho, rotulo: `Crítico >${LIMITES_GABINETE.critico}d` },
+            ],
             situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
@@ -6040,6 +6065,49 @@
         doc.text('Tabelas discriminadas de todos os itens coletados', pw / 2, 22, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 40);
+    }
+
+    // Sumário do modo 'tabelas' (pedido do usuário): lista clicável de cada seção
+    // desenhada (nome + nº de página), na própria página 1 — a mesma que
+    // desenharCapaTabelas usa pro cabeçalho, reaproveitando o espaço abaixo dele. Só
+    // texto plano, sem cards/cores de status (o modo 'tabelas' é justamente "sem KPIs").
+    // Cabe numa página só: como é desenhada DEPOIS de todo o resto do PDF já pronto
+    // (só então se sabe o nº de página de cada seção), não há como abrir uma 2ª página
+    // pro sumário sem reordenar todo o documento — se a lista não couber, os itens que
+    // sobrarem ficam de fora dela (ainda acessíveis pelos marcadores/bookmarks do PDF),
+    // com um aviso no lugar de estourar a margem inferior.
+    function desenharSumarioTabelas(doc, itens) {
+        doc.setPage(1);
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 16;
+        let y = 48;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
+        doc.text('Sumário', m, y);
+        y += 6;
+        let grupoAtual = null;
+        for (let i = 0; i < itens.length; i++) {
+            const it = itens[i];
+            const comCabecalhoGrupo = it.grupo && it.grupo !== grupoAtual;
+            const alturaNecessaria = comCabecalhoGrupo ? 11 : 6;
+            if (y + alturaNecessaria > ph - 14) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
+                doc.text(`+ ${itens.length - i} item(ns) não listado(s) aqui — disponíveis pelos marcadores do PDF.`, m, y);
+                break;
+            }
+            if (comCabecalhoGrupo) {
+                grupoAtual = it.grupo;
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...COR.azul);
+                doc.text(grupoAtual.toUpperCase(), m, y + 4);
+                y += 8;
+            }
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(textoTruncadoParaLargura(doc, it.rotulo, pw - 2 * m - 22), m + 2, y);
+            doc.setFont('PublicSans', 'bold'); doc.setTextColor(...COR.tinta);
+            doc.text(`pág. ${it.pg}`, pw - m, y, { align: 'right' });
+            doc.link(m, y - 4, pw - 2 * m, 5.5, { pageNumber: it.pg });
+            y += 6;
+        }
     }
 
     // PDF único com os relatórios coletados, organizado em duas frentes: CARTÓRIO
@@ -6552,10 +6620,22 @@
                 const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
                 if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
             }
+            // Mesmo cálculo de "Não cumpridas"/"mais antiga" já usado na página de detalhe
+            // do Tempo Médio (montarResumoTempoMedio) — faltava aqui na capa, deixando essa
+            // linha sem nenhuma informação de "mais antiga" como as demais (pedido do
+            // usuário).
+            const naoCumpridasTM = secaoTempoMedio.dados.filter(d => !d.dtCartorio);
+            const maisAntigaNCTM = naoCumpridasTM.reduce((best, d) => {
+                const ts = parseDataBR(d.dtAnalise);
+                return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
+            }, null);
+            const detalhesTM = [];
+            if (periodoTxt) detalhesTM.push(`Período: ${periodoTxt}`);
+            if (naoCumpridasTM.length) detalhesTM.push(`${naoCumpridasTM.length} não cumprida(s) · mais antiga: ${maisAntigaNCTM ? maisAntigaNCTM.str : '—'}`);
             itensOutros.push({
                 nome: 'Tempo médio de cumprimento de decisões / sentenças',
                 indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
-                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                detalhamento: detalhesTM.length ? detalhesTM.join(' · ') : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
             // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
@@ -6729,6 +6809,16 @@
                 if (!porJuiz.has(nome)) porJuiz.set(nome, []);
                 porJuiz.get(nome).push(d);
             });
+            // Pedido do usuário: magistrado(a) com 0 conclusões pendentes mas com dados de
+            // Tempo Médio (já analisados) não deve ficar de fora do Gabinete — sem esta
+            // entrada (mesmo vazia), o nome nunca aparece em `porJuiz` e a página de
+            // resumo (com calcularEstatisticasTMJuiz) nunca chega a ser gerada pra ele(a).
+            if (secaoTempoMedio) {
+                secaoTempoMedio.dados.forEach(d => {
+                    const nome = (d.responsavel || '').trim() || '(sem responsável)';
+                    if (!porJuiz.has(nome)) porJuiz.set(nome, []);
+                });
+            }
             const itensGabinete = [...porJuiz.entries()].map(([nome, sub]) => {
                 const itens = sub.map(d => ({ dias: diasNum(d.dtRemessa, now), prioritario: !!d.prioritario }));
                 const maisAntiga = maiorDias(itens);
@@ -6752,13 +6842,10 @@
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
-        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas'
-        // (pedido do usuário: ir direto às tabelas, sem folha de rosto) não se desenha
-        // capa nenhuma; a primeira tabela renderizada usa a página 1 que o jsPDF já cria
-        // por padrão (ver usarPaginaTabelas, mais abaixo, que remove essa página 1 só se
-        // ela ficar em branco — caso a 1ª seção use uma função de tabela que sempre
-        // começa com doc.addPage() incondicional). Se o conteúdo passar de uma página,
-        // segue normalmente na próxima. ═══
+        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas' a
+        // página 1 que o jsPDF já cria por padrão é reservada pro cabeçalho + sumário
+        // (ver desenharCapaTabelas/desenharSumarioTabelas, mais abaixo) em vez de ficar
+        // em branco. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (modo === 'resumo' && temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
@@ -6858,39 +6945,32 @@
             // mas com dado a discriminar (Audiências Pendentes, Suspensos, Suspensos com
             // Prazo, Instância Recursal, Arquivados com Saldo — ver comentário no topo
             // desta função sobre somenteResumo) mostram o resumo inteiro deles (única
-            // forma de ver a tabela embutida). Audiências Realizadas e Cumprimento de
-            // Medidas não têm NENHUM dado discriminado (só totais agregados) — ficam de
-            // fora deste modo, como sempre ficaram fora do passo de tabela. ═══
+            // forma de ver a tabela embutida, sem KPIs — somenteTabelas=true). Audiências
+            // Realizadas e Cumprimento de Medidas não têm NENHUM dado discriminado (só
+            // totais agregados) — ficam de fora deste modo, como sempre ficaram fora do
+            // passo de tabela. ═══
             const CFGS_TABELA_EMBUTIDA = [CFG_AUDIENCIAS, CFG_SUSPENSOS, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL, CFG_ARQUIVADOS_SALDO];
-            // As funções montarTabela* (Paralisados, Juntadas, Ativos por Classe, Gabinete
-            // etc.) sempre começam com um doc.addPage() incondicional — desenhado assim
-            // porque, no modo 'resumo', sempre vêm depois de outra página já existente.
-            // Sem a capa (pedido do usuário: "ir direto às tabelas"), se uma dessas for a
-            // PRIMEIRA coisa do documento, esse addPage() deixaria a página 1 (criada por
-            // padrão pelo próprio jsPDF) em branco. `montarFn` já deve ter chamado
-            // addPage e retornado o número da página onde desenhou; se essa foi a
-            // primeira seção do documento, remove a página 1 em branco e ajusta o número
-            // de página retornado (a numeração de todo o resto do doc, que só é montado
-            // DEPOIS, sai correta porque doc.internal.getNumberOfPages() já reflete a
-            // página removida).
-            const usarPaginaTabelas = (montarFn) => {
-                const eraPrimeira = !usouPagina1;
-                let pg = montarFn();
-                if (eraPrimeira && pg > 1) { doc.deletePage(1); pg -= 1; }
-                usouPagina1 = true;
-                return pg;
-            };
+            // Pedido do usuário: sumário na página 1 (ao invés de deixá-la em branco ou
+            // removê-la — era o que o código antigo fazia). A página 1 fica reservada
+            // pro cabeçalho (desenharCapaTabelas, reaproveitado — antes desenhado só na
+            // definição, sem call site) + a lista de seções (desenharSumarioTabelas, no
+            // fim, quando já se sabe o nº de página de cada uma). Como a página 1 nunca
+            // mais fica livre pra conteúdo de seção, todo `montarFn` abre sua própria
+            // página normalmente (comportamento padrão dele, sem o hack de deletar a
+            // página 1 que existia antes).
+            desenharCapaTabelas(doc, agora, true);
+            usouPagina1 = true;
+            const sumarioItens = []; // {grupo, rotulo, pg}
+
             const renderizarViaTabelaOuResumo = (secao, dados) => {
                 if (secaoTemTabela(secao)) {
-                    return usarPaginaTabelas(() => secao.montarTabela(doc, dados, null));
+                    return secao.montarTabela(doc, dados, null);
                 }
                 if (CFGS_TABELA_EMBUTIDA.includes(secao.cfgOriginal) && dados.length) {
-                    const primeira = !usouPagina1;
-                    const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                    const pg = doc.internal.getNumberOfPages() + 1;
                     // último argumento (somenteTabelas=true): sem KPIs/observações neste
                     // modo (pedido do usuário) — só título curto + tabela(s).
-                    secao.montarResumo(doc, dados, primeira, false, null, null, true);
-                    usouPagina1 = true;
+                    secao.montarResumo(doc, dados, false, false, null, null, true);
                     return pg;
                 }
                 return null;
@@ -6898,7 +6978,10 @@
 
             if (secaoAtivosClasse) {
                 const pg = renderizarViaTabelaOuResumo(secaoAtivosClasse, secaoAtivosClasse.dados);
-                if (pg) doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: secaoAtivosClasse.rotulo, pg });
+                }
             }
 
             let bmCartorio = null;
@@ -6907,21 +6990,28 @@
                 if (!pg) return;
                 if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
                 doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Cartório', rotulo: `${t.rotulo} (${t.pendentes})`, pg });
             });
 
             outrasSecoes.forEach(s => {
                 const pg = renderizarViaTabelaOuResumo(s, s.dados);
-                if (pg) doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: s.rotulo, pg });
+                }
             });
 
             // Gabinete/Conclusões SEMPRE por último (pedido do usuário) — depois de
             // Cartório e de outrasSecoes.
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
-                const pg = usarPaginaTabelas(() => montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null));
+                const pg = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null);
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
                 doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Gabinete', rotulo: `${info.rotulo} (${info.pendentes})`, pg });
             });
+
+            desenharSumarioTabelas(doc, sumarioItens);
         }
 
         // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
@@ -6974,7 +7064,7 @@
     // Lista dos processos mais demorados: linha dupla (processo em negrito + classe em
     // cinza) à esquerda e uma barra proporcional aos dias à direita.
     function desenharTopDemorados(doc, x, y, w, h, titulo, itens) {
-        tituloSecao(doc, x, y + 4, w, titulo, COR.vermelho);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const topo = y + 10;
         const areaH = Math.max(6, h - 10);
         if (!itens.length) return;
@@ -7050,6 +7140,7 @@
 
         // Período de referência (salvo quando o usuário preencheu o formulário)
         let periodoStr = '';
+        let iniPeriodo = '';
         let fimPeriodo = '';
         {
             // Mesma proteção contra JSON codificado em camadas usada em lerFilaMesesTempoMedio.
@@ -7058,11 +7149,17 @@
             while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { v = {}; break; } t++; }
             const per = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
             if (per.ini || per.fim) periodoStr = `${per.ini || '?'} a ${per.fim || '?'}`;
+            iniPeriodo = per.ini || '';
             fimPeriodo = per.fim || '';
         }
         // "Até dd/mm" (sem o ano — o termo final é sempre dentro do período já mostrado no
         // subtítulo) usado no rótulo do KPI de não cumpridas, ver abaixo.
         const fimCurto = fimPeriodo ? fimPeriodo.slice(0, 5) : '';
+        // Versão curta do período (sem ano nas duas pontas) pro subtítulo do KPI "Registros
+        // analisados" — o período completo (periodoStr) não cabia numa linha só do card e
+        // ficava cortado no meio (bug relatado pelo usuário); o ano completo já aparece no
+        // subtítulo da página, então não se perde informação.
+        const periodoCurto = (iniPeriodo && fimPeriodo) ? `${iniPeriodo.slice(0, 5)} a ${fimPeriodo.slice(0, 5)}` : '';
 
         // Decisões ainda não cumpridas (dtCartorio vazia = cartório não analisou ainda)
         const naoCumpridas = dados.filter(d => !d.dtCartorio);
@@ -7091,11 +7188,11 @@
         const kY = yLinhaTM + 5;
         const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [periodoCurto ? `Período: ${periodoCurto}` : ''], true, COR.azul);
+        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
         desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, `Não cumpridas${fimCurto ? ` (até ${fimCurto})` : ''}`, String(naoCumpridas.length),
-            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.ambar);
+            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.azul);
 
         // Linha 2: tempo médio prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
@@ -7172,7 +7269,7 @@
             const disponivelM = ph - m - gY0m - 14;
             const alturaM = Math.max(30, (disponivelM - chartGapM) / 2);
             desenharSerieMensal(doc, m, gY0m, uw, alturaM, 'Volume de cumprimentos por mês', porMes, 'n', (v) => String(v), COR.azul);
-            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.aqua);
+            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.azul);
             desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
 
@@ -7351,7 +7448,7 @@
                 [maisAntigaVencida
                     ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
                     : 'nenhuma audiência já realizada sem termo'],
-                true, vencidas.length ? COR.vinho : COR.aqua);
+                true, vencidas.length ? COR.vinho : COR.azul);
 
             // Tabela no lugar do gráfico de antes (pedido do usuário) — deixa espaço para a
             // tabela discriminada logo abaixo, na mesma página quando couber.
@@ -7398,12 +7495,13 @@
             // relatório, inclusive no modo "Só resumo" do PDF conjunto.
             tituloSecao(doc, m, proximoY, uw, `Audiências com termo pendente há mais de 5 dias (${vencidasMaisDe5Dias.length})`);
             doc.autoTable({
-                columns: [{ header: 'Processo', dataKey: 'k0' }],
-                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo })),
+                columns: [{ header: 'Processo', dataKey: 'k0' }, { header: 'Atribuição', dataKey: 'k1' }],
+                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo, k1: d.competencia || d.atuacao || '(sem atribuição)' })),
                 startY: proximoY + 6,
                 margin: { left: m, right: m, top: m, bottom: 14 },
                 theme: 'grid',
                 tableWidth: uw,
+                columnStyles: { k0: { cellWidth: uw * 0.45 }, k1: { cellWidth: uw * 0.55 } },
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
                           lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
@@ -7540,7 +7638,7 @@
         const kY = yLinha + 5;
         const kW2 = (uw - gap) / 2;
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.aqua);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.azul);
 
         // Dois KPIs (pedido do usuário): 1) só a situação da vara (verde até 180 dias até a
         // audiência mais distante, amarelo de 180 a 360, vermelho acima de 360 — mesma
@@ -7561,7 +7659,7 @@
         desenharCard(doc, m, k2Y, kW2, alturaCard2, 'Situação da Vara', infoStatus.rotulo,
             [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
             true, infoStatus.cor);
-        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.ambar);
+        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.azul);
 
         const tY = k2Y + alturaCard2 + gap + 4;
         if (r.porTipo.length) {
@@ -7617,7 +7715,7 @@
                     margin: { left: m, right: m, bottom: 14 },
                     theme: 'grid',
                     styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                    headStyles: { fillColor: COR.aqua, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                    headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                     alternateRowStyles: { fillColor: COR.cartao },
                     columnStyles: { dia: { cellWidth: uw * 0.25 }, tipo: { cellWidth: uw * 0.5 }, quantidade: { cellWidth: uw * 0.25, halign: 'right' } },
                     didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
@@ -7789,29 +7887,33 @@
         // atribuição/vara aparece como UMA linha só, com os valores somados — não uma
         // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
         // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
-        // por `usuario` (login, mais estável que o nome) com fallback pro nome.
-        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+        // por `usuario` (login, mais estável que o nome) com fallback pro nome. Pedido do
+        // usuário (rodada seguinte): ignora quem não teve NENHUM resultado em nenhuma
+        // categoria — antes todos apareciam mesmo com tudo zerado.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario)
+            .filter(u => u.quantidade || u.canceladas || u.negativas || u.naoRealizadas || u.redesignadas);
 
         const gap = 6;
         const kY = yLinha + 5;
         const kW3top = (uw - 2 * gap) / 3;
         desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.aqua);
-        desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.azul);
+        desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.azul);
 
         // Canceladas/Negativas/Não Realizadas/Redesignadas — extraídas só da pesquisa
         // geral, lado a lado numa segunda linha de KPIs menores.
         const k2Y = kY + 28 + gap;
         const kW4 = (uw - 3 * gap) / 4;
-        desenharCard(doc, m,                   k2Y, kW4, 24, 'Canceladas', String(r.canceladas), [], true, COR.ambar);
+        desenharCard(doc, m,                   k2Y, kW4, 24, 'Canceladas', String(r.canceladas), [], true, COR.azul);
         desenharCard(doc, m + kW4 + gap,       k2Y, kW4, 24, 'Negativas', String(r.negativas), [], true, COR.muted);
         desenharCard(doc, m + 2 * (kW4 + gap), k2Y, kW4, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
         desenharCard(doc, m + 3 * (kW4 + gap), k2Y, kW4, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
 
         // Sem gráfico aqui — a mesma informação já está na tabela abaixo (pedido do
         // usuário), com o percentual de cada categoria sobre o total do magistrado(a)
-        // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
-        // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
+        // (realizadas + canceladas + negativas + não realizadas + redesignadas). Só
+        // magistrados com pelo menos 1 resultado em alguma categoria aparecem (ver filtro
+        // em porUsuarioAgrupado acima).
         const tY = k2Y + 24 + gap + 4;
         if (porUsuarioAgrupado.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
@@ -8002,11 +8104,11 @@
         const kH = 34; // 2 linhas de título + valor + linha de "Situação: Crítico"
         const kW = (uw - 2 * gap) / 3;
         desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), atrasados > LIMIAR_ATRASO_CRITICO, COR.vermelho);
-        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.ambar);
+        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.azul);
         desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
 
         let y = kY + kH + 10;
-        tituloSecao(doc, m, y, uw, 'Observação', COR.azul);
+        tituloSecao(doc, m, y, uw, 'Observação');
         y += 5;
 
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
@@ -8083,7 +8185,7 @@
         // sobra depois de tirar os urgentes.
         const totalNormais = Math.max(0, totalPendentes - totalUrgentes);
         desenharCard(doc, m, kY, kW2, 28, 'Total de Cumprimentos Pendentes', String(totalPendentes),
-            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.ambar);
+            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.azul);
 
         const maisPendencias = r.length ? [...r].sort((a, b) => b.pendentes - a.pendentes)[0] : null;
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Tipo com Mais Pendências',
@@ -8104,7 +8206,7 @@
             const etapas = etapasOutrosCumprimentos(r);
             const somaEtapas = etapas.reduce((s, e) => s + e.valor, 0);
             if (somaEtapas > 0) {
-                y = tabelaCategorias(doc, m, y, uw, 'Em que etapa do fluxo está parado', etapas, { rotuloCategoria: 'Etapa', acento: COR.ambar }) + 3.5;
+                y = tabelaCategorias(doc, m, y, uw, 'Em que etapa do fluxo está parado', etapas, { rotuloCategoria: 'Etapa', acento: COR.azul }) + 3.5;
                 // Aviso obrigatório: as 5 etapas são um SUBCONJUNTO de
                 // CAMPOS_PENDENTES_PRINCIPAL, então a soma delas não fecha com o total
                 // pendente (que inclui aguardando depósito, AR digital etc.), e a tabela
@@ -8341,7 +8443,7 @@
             const kY = yLinha + 6;
             const kpis = [
                 { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
-                { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
+                { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.azul },
             ];
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
             kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
@@ -8529,7 +8631,7 @@
         hy += 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
-        tabelaCategorias(doc, m, hy + 6, uw, tituloTabela, itens, { rotuloCategoria: 'Último Movimento', acento: COR.ambar });
+        tabelaCategorias(doc, m, hy + 6, uw, tituloTabela, itens, { rotuloCategoria: 'Último Movimento', acento: COR.azul });
         desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
@@ -8591,7 +8693,7 @@
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,               kY, kW3, 28, 'Processos paralisados', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
         // Linha 2: tempo médio paralisado prioritários vs não prioritários (centralizados)
@@ -8768,7 +8870,7 @@
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
         // Linha 2: tempo médio em remessa prioritários vs não prioritários (centralizados)
@@ -8949,12 +9051,12 @@
         const alturaClasseMais = classeComMais ? medirAlturaCardLista(doc, kW3, classeComMais.classe, true) : 28;
         const alturaLinha1 = Math.max(28, alturaClasseMais);
         desenharCard(doc, m,               kY, kW3, alturaLinha1, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,   kY, kW3, alturaLinha1, 'Classes Processuais', String(r.length), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, alturaLinha1, 'Classes Processuais', String(r.length), [], true, COR.azul);
         if (classeComMais) {
             desenharCardLista(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos',
-                classeComMais.classe, `${classeComMais.emAndamento} ativo(s)`, COR.ambar);
+                classeComMais.classe, `${classeComMais.emAndamento} ativo(s)`, COR.azul);
         } else {
-            desenharCard(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos', '—', [], true, COR.ambar);
+            desenharCard(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos', '—', [], true, COR.azul);
         }
 
         // Tabela no lugar do gráfico de antes (pedido do usuário): distribuição do acervo
@@ -9097,7 +9199,7 @@
                     antigo.registro.classe || '',
                 ];
             }
-            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
             // Observação final destacada (texto literal pedido pela Corregedoria) —
             // mantida mesmo sem os demais gráficos (pedido do usuário: manter o texto,
@@ -9299,7 +9401,7 @@
             desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(r.length), [], true, COR.azul);
             desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
                 classeTop ? classeTop.classe : '—',
-                classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+                classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.azul);
             // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
             // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
             // certa (bold, já ativa no momento do desenho); "subs" usa
