@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.17
+// @version      25.18
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3349,6 +3349,7 @@
 
         function coletarPaginaAtual() {
             const atuacao = lerAtuacao();
+            const tabelas = document.querySelectorAll('table.resultTable');
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
             // cfg.contextoExtra() (opcional) roda UMA VEZ por página, não por linha — usado
             // por relatórios cuja ordem/presença de colunas muda entre telas (ex.: Mandados,
@@ -3357,19 +3358,45 @@
             // definem contextoExtra simplesmente ignoram esse argumento extra.
             const contexto = cfg.contextoExtra ? cfg.contextoExtra() : undefined;
             const dados = [];
+            // Diagnóstico de linhas descartadas — pedido do usuário depois de um caso onde
+            // o Excel/PDF veio zerado apesar de a tela mostrar dezenas de processos (ver
+            // relato "suspensos com prazo"). Guarda até 5 linhas rejeitadas (por minTds OU
+            // por cfg.extrai devolver null) com a contagem/conteúdo real dos tds, pra dar pra
+            // comparar com o que a tela mostra visualmente sem precisar reproduzir o bug de
+            // novo com o DevTools aberto.
+            const rejeitadas = [];
             linhas.forEach(tr => {
                 // ":scope > td" (só filhos diretos) — não "td" puro, que também pega tds de
                 // QUALQUER tabela aninhada dentro de uma célula (ex.: a coluna "Partes" das
                 // Audiências tem uma table.form própria por dentro), o que bagunçava a
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
-                if (tds.length < cfg.minTds) return;
+                if (tds.length < cfg.minTds) {
+                    if (rejeitadas.length < 5) {
+                        rejeitadas.push({ motivo: 'minTds', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
+                    }
+                    return;
+                }
                 // cfg.extrai pode devolver null para descartar a linha (ex.: Suspensos com
                 // Prazo ignora linhas "Sem Prazo" — não são suspensão por prazo determinado).
                 const d = cfg.extrai(tds, atuacao, contexto);
-                if (d) dados.push(d);
+                if (d) {
+                    dados.push(d);
+                } else if (rejeitadas.length < 5) {
+                    rejeitadas.push({ motivo: 'extrai() devolveu null', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
+                }
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
+            if (dados.length < linhas.length) {
+                console.log(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
+            }
+            if (linhas.length === 0 && tabelas.length > 0) {
+                const cabecalhos = [...tabelas].map((t, i) => {
+                    const th = t.querySelector(':scope > thead');
+                    return `[${i}] ${th ? th.textContent.replace(/\s+/g, ' ').trim() : '(sem thead)'}`;
+                });
+                console.log('[Projudi] coletarPaginaAtual — nenhuma linha em nenhuma table.resultTable; cabeçalhos encontrados:', cabecalhos);
+            }
             return dados;
         }
 
