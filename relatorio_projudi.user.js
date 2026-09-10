@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.24
+// @version      25.25
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11925,29 +11925,31 @@
     // sem arriscar colapsar apreensões distintas presumindo um campo "único" que não é.
     function removerProcessosDuplicados(dados, campo = 'processo') {
         const campos = campo === '*' ? null : (Array.isArray(campo) ? campo : [campo]);
-        const vistos = new Set();
+        const vistos = new Map();
         const removidos = [];
-        const resultado = dados.filter(d => {
+        const resultado = dados.filter((d, i) => {
             if (!d) return true;
-            if (!campos) {
-                const chaveTotal = JSON.stringify(d);
-                if (vistos.has(chaveTotal)) { if (removidos.length < 5) removidos.push(d); return false; }
-                vistos.add(chaveTotal);
-                return true;
+            const chave = campos
+                ? (campos.some(c => !d[c]) ? null : campos.map(c => d[c]).join('\u0001'))
+                : JSON.stringify(d);
+            if (chave === null) return true;
+            if (vistos.has(chave)) {
+                if (removidos.length < 8) removidos.push({ indice: i, primeiraOcorrenciaIndice: vistos.get(chave), registro: d });
+                return false;
             }
-            const valores = campos.map(c => d[c]);
-            if (valores.some(v => !v)) return true;
-            const chave = valores.join(' ');
-            if (vistos.has(chave)) { if (removidos.length < 5) removidos.push(d); return false; }
-            vistos.add(chave);
+            vistos.set(chave, i);
             return true;
         });
         // Diagnóstico: pedido do usuário depois de o total de Apreensões continuar abaixo
-        // do esperado mesmo com dedupe pelo registro inteiro — até 5 exemplos do que foi
-        // removido, pra confirmar se são mesmo duplicatas de reload (ex.: mesma linha nas
-        // bordas de duas páginas por paginação instável do Projudi) ou outra coisa.
+        // do esperado mesmo com dedupe pelo registro inteiro — até 8 exemplos do que foi
+        // removido (índice na lista bruta, índice da 1ª ocorrência e o registro), pra
+        // confirmar se são mesmo duplicatas de reload (ex.: mesma linha nas bordas de duas
+        // páginas por paginação instável do Projudi) ou outra coisa. JSON.stringify (não o
+        // objeto direto) porque console.warn com objeto aninhado vira "Array(n)" colapsado
+        // ao copiar/colar texto do console — assim o log sai completo, legível, sem
+        // precisar expandir nada no DevTools.
         if (resultado.length < dados.length) {
-            console.warn(`[Projudi] removerProcessosDuplicados — ${dados.length - resultado.length} registro(s) removido(s) por duplicata (campo=${JSON.stringify(campo)}); exemplo(s):`, removidos);
+            console.warn(`[Projudi] removerProcessosDuplicados — ${dados.length - resultado.length} registro(s) removido(s) por duplicata (campo=${JSON.stringify(campo)}); exemplo(s):\n` + JSON.stringify(removidos, null, 2));
         }
         return resultado;
     }
