@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.18
+// @version      25.19
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8258,17 +8258,18 @@
         // Tabela discriminada EMBUTIDA nesta mesma página, acima da observação (pedido
         // do usuário) — além da página separada de montarTabelaGenerico (o usuário
         // confirmou que quer as duas: esta cópia embutida no resumo, e a página completa
-        // à parte). Limitada aos 15 primeiros (pedido do usuário), ordenados pela
-        // prescrição mais próxima (dataPrescricaoMinima crescente — os mais urgentes),
-        // mesmo critério de "mais antiga" usado no card acima. Mesmas colunas/estilo de
-        // montarTabelaGenerico, só sem a lógica de agrupamento (Prescrições não usa
-        // p.agruparPor).
-        const LIMITE_TABELA_EMBUTIDA_PRESCRICOES = 15;
+        // à parte). Limitada aos 10 primeiros (reduzido de 15 pra 10 — pedido do
+        // usuário: precisa caber tudo numa única página junto com os cards e a
+        // observação), ordenados pela prescrição mais próxima (dataPrescricaoMinima
+        // crescente — os mais urgentes), mesmo critério de "mais antiga" usado no card
+        // acima. Mesmas colunas/estilo de montarTabelaGenerico, só sem a lógica de
+        // agrupamento (Prescrições não usa p.agruparPor).
+        const LIMITE_TABELA_EMBUTIDA_PRESCRICOES = 10;
         const ordenadosPorPrescricao = r.slice().sort((a, b) => {
             const ta = parseDataBR(a.dataPrescricaoMinima); const tb = parseDataBR(b.dataPrescricaoMinima);
             return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
         });
-        const primeiros15 = ordenadosPorPrescricao.slice(0, LIMITE_TABELA_EMBUTIDA_PRESCRICOES);
+        const primeirosDaLista = ordenadosPorPrescricao.slice(0, LIMITE_TABELA_EMBUTIDA_PRESCRICOES);
         let yObs = kY + kH + gap;
         if (r.length > 0) {
             const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_PRESCRICOES
@@ -8278,7 +8279,7 @@
             const colunas = CFG_PRESCRICOES.pdf.colunas;
             doc.autoTable({
                 columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-                body: primeiros15.map(d => {
+                body: primeirosDaLista.map(d => {
                     const o = {};
                     colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
                     return o;
