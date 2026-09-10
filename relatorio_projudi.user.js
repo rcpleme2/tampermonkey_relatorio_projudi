@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.21
+// @version      25.22
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3308,16 +3308,24 @@
     // <label> com o texto dentro de um <div class="quadroCorregedoriaEven/Odd">
     // (confirmado no .mhtml enviado pelo usuário — o clique é tratado por JS externo não
     // capturado na amostra estática). Confirmado pelo usuário: não existe link tipo
-    // "Vencidas" aqui — é só clicar no próprio card. .click() real no <div> que envolve o
-    // rótulo (mesma lição do CLAUDE.md: checked=true+dispatchEvent não substitui um
-    // clique de verdade nesses elementos do Projudi).
+    // "Vencidas" aqui — é só clicar no próprio card.
+    //
+    // Devolve o próprio <label> — o nó mais profundo, folha da árvore —, NÃO o <div
+    // class="quadroCorregedoria*"> que o envolve. Testado ao vivo (log do usuário): clicar
+    // no <div> (nível acima) não disparava NADA. .click() borbulha só pra CIMA, pelos
+    // ancestrais do elemento clicado — nunca desce pros filhos; se o listener de verdade
+    // estiver no <label>, no <td style="position:relative; z-index:1"> que o envolve mais
+    // de perto, ou em qualquer nó entre eles e o <div>, clicar direto no <div> pula esses
+    // níveis e o clique se perde. Clicar no nó mais profundo garante que o evento
+    // borbulhe por TODA a cadeia de ancestrais (label -> td -> tr interno -> table
+    // interno -> td externo -> div -> tr externo -> #tbMesa -> ...), cobrindo qualquer
+    // nível onde o clique de verdade esteja escutando.
     function acharCardSemInfracaoPenal() {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
             for (const label of d.querySelectorAll('#tbMesa label')) {
                 if (!/^feitos\s+sem\s+infra[çc][ãa]o\s+penal$/i.test((label.textContent || '').trim())) continue;
-                const cartao = label.closest('.quadroCorregedoriaEven, .quadroCorregedoriaOdd');
-                if (cartao) return cartao;
+                return label;
             }
         }
         return null;
