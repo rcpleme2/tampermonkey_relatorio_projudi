@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.21
+// @version      25.22
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1818,13 +1818,15 @@
         // Mostra a linha "Bens Apreendidos" mesmo com zero pendências, desde que já
         // coletado — "zero apreensões pendentes" é uma informação, não um vazio a esconder.
         mostrarSeVazio: true,
-        // Dedupe pelo número da apreensão, não pelo processo (padrão de
-        // removerProcessosDuplicados) — um mesmo processo pode legitimamente ter vários
-        // bens apreendidos (várias linhas com o mesmo número de processo); dedupe por
-        // processo estava descartando essas apreensões extras como se fossem duplicata de
-        // reload, fazendo o total do relatório (164) ficar bem abaixo do total real da
-        // tela do Projudi (470). Ver comentário em removerProcessosDuplicados.
-        chaveDuplicata: 'numero',
+        // Dedupe por chave composta (número da apreensão + processo), não só pelo processo
+        // (padrão de removerProcessosDuplicados) — um mesmo processo pode legitimamente
+        // ter vários bens apreendidos (várias linhas com o mesmo número de processo;
+        // dedupe só por processo derrubava o total de 470 para 164), e um mesmo bem
+        // apreendido pode estar vinculado a mais de um processo (várias linhas com o mesmo
+        // número de apreensão; dedupe só por número derrubava o total de 470 para 448).
+        // Só a combinação numero+processo repetida é de fato duplicata de reload. Ver
+        // comentário em removerProcessosDuplicados.
+        chaveDuplicata: ['numero', 'processo'],
         detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab),
         minTds: 9,
         usaAtuacao: false,
@@ -11904,20 +11906,29 @@
     // reload de página no meio de uma coleta paginada duplicando uma página inteira).
     // Itens sem campo .processo (relatórios "resumo único", ex. Outros Cumprimentos,
     // Audiências Designadas/Realizadas) passam direto, sem filtro.
-    // campo (padrão 'processo'): identificador único usado para deduplicar. Bug corrigido
-    // (relatado em produção — Apreensões mostrava 164 no PDF contra 470 na tela do
-    // Projudi): dedupe por 'processo' presume um registro por processo, mas em Apreensões
-    // um mesmo processo pode legitimamente ter VÁRIOS bens apreendidos (várias linhas com
-    // o mesmo número de processo) — dedupe por processo descartava as demais apreensões
-    // do mesmo processo como se fossem duplicatas de reload. CFG_APREENSOES passa
-    // chaveDuplicata: 'numero' (identificador único da apreensão) para preservar a
-    // proteção contra duplicata de reload sem descartar apreensões legítimas.
+    // campo (padrão 'processo'): identificador único usado para deduplicar — aceita uma
+    // string (um campo) ou um array de campos (chave composta, valores concatenados).
+    // Histórico do bug (relatado em produção — Apreensões mostrava 164 no PDF contra 470
+    // na tela do Projudi): dedupe por 'processo' presume um registro por processo, mas em
+    // Apreensões um mesmo processo pode legitimamente ter VÁRIOS bens apreendidos (várias
+    // linhas com o mesmo número de processo) — dedupe por processo descartava as demais
+    // apreensões do mesmo processo como se fossem duplicatas de reload. Trocar para dedupe
+    // só por 'numero' (identificador da apreensão) ainda descartava 22 registros — porque
+    // um mesmo bem apreendido pode estar vinculado a mais de um processo, aparecendo como
+    // uma linha por processo com o MESMO número de apreensão. CFG_APREENSOES agora passa
+    // chaveDuplicata: ['numero', 'processo'] (chave composta) — só remove duplicata real
+    // de reload (mesmo número DE apreensão E mesmo processo), preservando tanto várias
+    // apreensões de um processo quanto uma apreensão vinculada a vários processos.
     function removerProcessosDuplicados(dados, campo = 'processo') {
+        const campos = Array.isArray(campo) ? campo : [campo];
         const vistos = new Set();
         return dados.filter(d => {
-            if (!d || !d[campo]) return true;
-            if (vistos.has(d[campo])) return false;
-            vistos.add(d[campo]);
+            if (!d) return true;
+            const valores = campos.map(c => d[c]);
+            if (valores.some(v => !v)) return true;
+            const chave = valores.join(' ');
+            if (vistos.has(chave)) return false;
+            vistos.add(chave);
             return true;
         });
     }
