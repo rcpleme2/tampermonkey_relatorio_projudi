@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.25
+// @version      25.26
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1828,6 +1828,12 @@
         // em 3 rodadas), então só um registro idêntico em TODOS os campos é de fato
         // duplicata de reload. Ver comentário em removerProcessosDuplicados.
         chaveDuplicata: '*',
+        // KPI "Apreensões pendentes" sempre mostra o total que o Projudi reportou na 1ª
+        // página da busca (capturado em adicionarPagina), não o total efetivamente
+        // coletado — pedido do usuário: o Projudi é um sistema vivo, então a paginação
+        // pode terminar com um número diferente do identificado no início da busca (ver
+        // histórico de chaveDuplicata acima). Ver uso em montarResumoGenerico.
+        totalIdentificadoNoResumo: true,
         detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab),
         minTds: 9,
         usaAtuacao: false,
@@ -1840,7 +1846,6 @@
         pdf: {
             titulo: 'Bens Apreendidos Pendentes',
             atosTitulo: 'Apreensões pendentes',
-            agingTitulo: 'Apreensões por tempo de registro',
             tabelaTitulo: 'Tabela discriminada das apreensões pendentes',
             dataCampo: 'dataRegistro',
             dataTitulo: 'Registro de apreensão mais antigo',
@@ -1850,6 +1855,19 @@
             // relatório) — some com o KPI "Prioritários pendentes" e com a separação por
             // prioridade no gráfico de aging (vira barra única por faixa).
             semPrioridade: true,
+            // Retira a planilha "Apreensões por tempo de registro" (pedido do usuário) —
+            // substituída pelo KPI "Processos distintos com apreensões" via kpisExtras
+            // abaixo. Sem agingTitulo porque a planilha que o usava não existe mais.
+            semAgingBloco: true,
+            kpisExtras: [
+                { titulo: 'Processos distintos com apreensões', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
+            // Pedido do usuário: avisar que as distribuições abaixo (Tipo/Localização/
+            // Classe) refletem os registros efetivamente coletados nesta extração — o
+            // Projudi pode ter mudado durante a coleta paginada (ver totalIdentificadoNoResumo
+            // acima), então esses totais são uma amostragem, não necessariamente o total
+            // exato do sistema no instante da extração.
+            notaCabecalho: 'Os totais das seções "Apreensões por Tipo", "Apreensões por Localização Interna" e "Apreensões por Classe Processual" refletem os registros efetivamente coletados nesta extração (amostragem) — podem não corresponder exatamente ao total identificado acima, já que o Projudi pode registrar novas apreensões durante a coleta.',
             // Tabela discriminada dividida em subtabelas por Tipo da Apreensão, na mesma
             // ordem do <select name="idTipoApreensaoBusca"> do Projudi.
             agruparPor: 'tipo',
@@ -3413,6 +3431,7 @@
             store.removeItem(KEY_COLETADO);
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
+            store.removeItem(cfg.prefixo + 'total_identificado');
             // Flag pequena usada só por CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO (ver comentário
             // em "get cabecalhos" desses cfgs) — remover aqui também, genericamente, evita
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
@@ -3422,6 +3441,17 @@
 
         async function adicionarPagina(dadosPagina) {
             const idx = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
+            // Captura o "N registro(s) encontrado(s)" mostrado pelo Projudi na 1ª página,
+            // ANTES de qualquer paginação — pedido do usuário (Apreensões): o Projudi é um
+            // sistema vivo, então o total pode mudar durante a coleta paginada (novas
+            // apreensões registradas no meio do caminho). Guardado uma única vez (idx===0)
+            // pra o KPI "Apreensões pendentes" no PDF sempre mostrar esse número, mesmo que
+            // a coleta em si acabe com outra contagem. Opt-in via cfg.totalIdentificadoNoResumo
+            // — outros relatórios continuam sem gravar essa chave.
+            if (idx === 0 && cfg.totalIdentificadoNoResumo) {
+                const totalInicial = totalRegistrosPagina();
+                if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
+            }
             await idbSet(KEY_PAGINA_PREF + idx, dadosPagina);
             store.setItem(KEY_NUM_PAGINAS, String(idx + 1));
             const totalAntes = parseInt(store.getItem(KEY_TOTAL_REGISTROS) || '0', 10);
@@ -4909,11 +4939,33 @@
         hy += (linhasInfo.length - 1) * 4.2 + 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
+        // Anotação opcional logo abaixo do cabeçalho — pedido do usuário (Apreensões): avisar
+        // que os totais das tabelas de distribuição (Tipo/Localização/Classe) refletem
+        // amostragem (os registros efetivamente coletados), não necessariamente o total exato
+        // do sistema no instante da extração. Ponto de extensão genérico — só cfg.pdf que
+        // definir p.notaCabecalho mostra isso; os demais relatórios ficam como estavam.
+        if (p.notaCabecalho) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.2); doc.setTextColor(...COR.tintaSec);
+            const linhasNota = doc.splitTextToSize(p.notaCabecalho, uw);
+            doc.text(linhasNota, m, hy + 4);
+            hy += linhasNota.length * 3.6 + 2;
+        }
+
         // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
         const kY = hy + 6;
         const prio = contarPrioritarios(dados);
+        // "Apreensões pendentes" mostra o total IDENTIFICADO na 1ª página da busca (ver
+        // adicionarPagina/cfg.totalIdentificadoNoResumo), não dados.length — pedido do
+        // usuário: o Projudi é um sistema vivo, então a coleta paginada pode acabar com uma
+        // contagem diferente da que o próprio Projudi reportou no início da busca; o KPI
+        // deve sempre mostrar esse número identificado, mesmo que a coleta em si traga
+        // outro total. Sem esse cfg (demais relatórios), comportamento igual a antes.
+        const totalIdentificado = cfg.totalIdentificadoNoResumo
+            ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
+            : NaN;
+        const valorAtos = Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
         const kpis = [
-            { titulo: p.atosTitulo, valor: String(dados.length), subs: [], acento: COR.azul },
+            { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR.azul },
         ];
         if (!p.semPrioridade) {
             kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`], acento: COR.vermelho });
@@ -5016,11 +5068,17 @@
         } else {
             // Sem prioridade (ex.: Apreensões): o próprio "tempo de pendência" vira só
             // mais uma distribuição categórica (soma prioritários+normais por faixa),
-            // igual já era com desenharBarras/tipo 'barras' antes desta mudança.
-            const itensIdade = faixas.map(f => ({ label: f.label, valor: f.prioritarios + f.normais })).filter(i => i.valor);
-            const blocos = itensIdade.length
-                ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.azul }, ...distribuicoes]
-                : distribuicoes;
+            // igual já era com desenharBarras/tipo 'barras' antes desta mudança. EXCETO
+            // quando p.semAgingBloco (Apreensões, pedido do usuário) — a planilha "por
+            // tempo de registro" foi retirada, substituída pelo KPI de processos distintos
+            // (ver kpisExtras em CFG_APREENSOES).
+            let blocos = distribuicoes;
+            if (!p.semAgingBloco) {
+                const itensIdade = faixas.map(f => ({ label: f.label, valor: f.prioritarios + f.normais })).filter(i => i.valor);
+                blocos = itensIdade.length
+                    ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.azul }, ...distribuicoes]
+                    : distribuicoes;
+            }
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
         }
 
