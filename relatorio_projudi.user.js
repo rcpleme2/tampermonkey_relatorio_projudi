@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.26
+// @version      25.27
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1867,7 +1867,7 @@
             // Projudi pode ter mudado durante a coleta paginada (ver totalIdentificadoNoResumo
             // acima), então esses totais são uma amostragem, não necessariamente o total
             // exato do sistema no instante da extração.
-            notaCabecalho: 'Os totais das seções "Apreensões por Tipo", "Apreensões por Localização Interna" e "Apreensões por Classe Processual" refletem os registros efetivamente coletados nesta extração (amostragem) — podem não corresponder exatamente ao total identificado acima, já que o Projudi pode registrar novas apreensões durante a coleta.',
+            notaCabecalho: 'Os totais das seções "Apreensões por Tipo", "Apreensões por Localização Interna" e "Apreensões por Classe Processual" refletem os registros efetivamente coletados nesta extração (amostragem).',
             // Tabela discriminada dividida em subtabelas por Tipo da Apreensão, na mesma
             // ordem do <select name="idTipoApreensaoBusca"> do Projudi.
             agruparPor: 'tipo',
