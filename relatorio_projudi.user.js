@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.17
+// @version      25.18
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8255,10 +8255,50 @@
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Prescrição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
 
+        // Tabela discriminada EMBUTIDA nesta mesma página, acima da observação (pedido
+        // do usuário) — além da página separada de montarTabelaGenerico (o usuário
+        // confirmou que quer as duas: esta cópia embutida no resumo, e a página completa
+        // à parte). Limitada aos 15 primeiros (pedido do usuário), ordenados pela
+        // prescrição mais próxima (dataPrescricaoMinima crescente — os mais urgentes),
+        // mesmo critério de "mais antiga" usado no card acima. Mesmas colunas/estilo de
+        // montarTabelaGenerico, só sem a lógica de agrupamento (Prescrições não usa
+        // p.agruparPor).
+        const LIMITE_TABELA_EMBUTIDA_PRESCRICOES = 15;
+        const ordenadosPorPrescricao = r.slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataPrescricaoMinima); const tb = parseDataBR(b.dataPrescricaoMinima);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+        const primeiros15 = ordenadosPorPrescricao.slice(0, LIMITE_TABELA_EMBUTIDA_PRESCRICOES);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_PRESCRICOES
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_PRESCRICOES} Processos (prescrição mais próxima)`
+                : 'Lista dos Processos com Prescrição Pendente';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_PRESCRICOES.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeiros15.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
         // Balão de observação (pedido do usuário) — só com processos listados; "0
         // pendências" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
         // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo.
-        let yObs = kY + kH + gap;
         if (r.length > 0) {
             const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_PRESCRICOES);
             if (yObs + alturaObs > ph - m) {
