@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.22
+// @version      25.23
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1962,15 +1962,23 @@
     // acharCardSemInfracaoPenal/navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal.
     //
     // Lista paginada por processo (mesmo esquema de Juntadas/Retorno) — usa
-    // criarColetor()/cfg.extrai normalmente e o pipeline genérico de PDF
-    // (montarResumoGenerico/montarTabelaGenerico), sem pdfCustom: já existe um campo de
-    // data de verdade (Data Último Movimento) para alimentar o gráfico de "tempo de
-    // espera" genérico — mesmo padrão de CFG_RETORNO/CFG_JUNTADAS, que também recalculam
-    // os dias a partir da data em vez de usar um contador pronto da tela.
+    // criarColetor()/cfg.extrai normalmente. Tabela discriminada completa via
+    // montarTabelaGenerico (sem alteração), mas o resumo é dedicado via pdfCustom
+    // (montarResumoSemInfracaoPenal, mesmo padrão de CFG_PRESCRICOES): 2 cards + tabela
+    // embutida com os 5 primeiros processos + balão de observação (pedido do usuário) —
+    // não usa montarResumoGenerico (traria gráfico de distribuição/faixa de idade que o
+    // usuário não pediu aqui).
     //
     // Colunas da tabela real (result.html enviado pelo usuário): [0] Processo [1] Classe
     // Processual (Assunto Principal) [2] Data de Distribuição [3] Data Último Movimento
     // [4] Dias Paralisado.
+    const TITULO_SEM_INFRACAO_PENAL = 'Feitos Ativos Com Pendência De Anotação Da Infração Penal';
+    // Texto fixo do balão de observação (pedido do usuário) — só aparece no PDF quando
+    // há processos listados (mesmo padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES).
+    const PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL = [
+        'A secretaria deverá atentar para a correta atualização do cadastro das infrações penais, providência indispensável para a adequada alimentação dos sistemas e para o correto cálculo dos prazos prescricionais pelo Projudi.',
+        'Deverá, ainda, observar o disposto no art. 630 do Código de Normas do Foro Judicial, mantendo atualizados todos os dados constantes da capa do processo eletrônico. Ressalte-se que compete ao(à) Magistrado(a), em inspeção permanente, fiscalizar a atualização dos campos destinados às anotações processuais, nos termos do referido dispositivo normativo.',
+    ];
     const CFG_SEM_INFRACAO_PENAL = {
         prefixo: 'projudi_seminfracaopenal_',
         // Zero pendências é informação válida (mesmo padrão de CFG_APREENSOES/
@@ -2012,17 +2020,14 @@
             };
         },
         linha: (d) => [d.processo, d.classe, d.dataDistribuicao, d.dataUltimoMovimento, (d.dias == null ? '' : String(d.dias))],
+        pdfCustom: (dados, somenteResumo) => gerarPDFSemInfracaoPenal(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoSemInfracaoPenal
+        // não usa nenhum outro campo de p além do que já é lido aqui).
         pdf: {
-            titulo: 'Feitos Ativos Com Pendência De Anotação Da Infração Penal',
-            atosTitulo: 'Feitos sem infração penal pendentes',
-            agingTitulo: 'Pendências por tempo de espera',
+            titulo: TITULO_SEM_INFRACAO_PENAL,
             tabelaTitulo: 'Tabela discriminada dos feitos sem infração penal cadastrada',
             dataCampo: 'dataUltimoMovimento',
-            dataTitulo: 'Pendência mais antiga',
             processoCampo: 'processo',
-            distribuicoes: [
-                { titulo: 'Processos por Classe Processual', campo: 'classe', topN: 12 },
-            ],
             colunas: [
                 { header: 'Processo', width: 30, get: (d) => d.processo },
                 { header: 'Classe Processual (Assunto Principal)', width: 46, get: (d) => d.classe },
@@ -6022,6 +6027,17 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_PRESCRICOES, comIndice),
             };
         }
+        if (cfg === CFG_SEM_INFRACAO_PENAL) {
+            return {
+                rotulo: TITULO_SEM_INFRACAO_PENAL,
+                // Resumo dedicado (só 2 cards + tabela embutida dos 5 primeiros +
+                // observação, pedido do usuário) — não usa montarResumoGenerico; a tabela
+                // discriminada reaproveita o genérico sem alteração (ver
+                // CFG_SEM_INFRACAO_PENAL.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSemInfracaoPenal(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -8646,6 +8662,106 @@
         }
 
         desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem
+    // infração penal") — mesmo padrão de gerarPDFPrescricoes/montarResumoPrescricoes
+    // acima (mesma aba de origem, mesma categoria Crime).
+    function gerarPDFSemInfracaoPenal(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSemInfracaoPenal(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_SEM_INFRACAO_PENAL.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards (mesmo padrão de Prescrições): total de processos pendentes e a
+    // pendência mais antiga (maior "Dias Paralisado"/menor Data Último Movimento), com o
+    // processo correspondente como sub-linha.
+    function montarResumoSemInfracaoPenal(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SEM_INFRACAO_PENAL, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataUltimoMovimento');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela embutida com os 5 PRIMEIROS processos (pedido do usuário — bem menor
+        // que os 10 de Prescrições de propósito: precisa caber tudo numa única página
+        // junto com os cards e a observação, sem quebra de página). Ordem de chegada
+        // (mesma ordem que o Projudi devolveu, sem reordenar) — mesmas colunas/estilo de
+        // montarTabelaGenerico, só sem a lógica de agrupamento.
+        const LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL} Processos`
+                : 'Lista dos Processos Sem Infração Penal Cadastrada';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_SEM_INFRACAO_PENAL.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_SEM_INFRACAO_PENAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação (pedido do usuário) — só com processos listados; "0
+        // pendências" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
+        // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo.
+        // Diferente de Prescrições: NÃO quebra de página se não couber — a tabela de só 5
+        // linhas (pedido do usuário: precisa caber tudo numa única página) deixa isso
+        // extremamente improvável, mas se ainda assim não couber, a observação
+        // simplesmente não é desenhada em vez de forçar uma 2ª página.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_SEM_INFRACAO_PENAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
