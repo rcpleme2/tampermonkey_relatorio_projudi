@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.23
+// @version      25.24
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11926,21 +11926,30 @@
     function removerProcessosDuplicados(dados, campo = 'processo') {
         const campos = campo === '*' ? null : (Array.isArray(campo) ? campo : [campo]);
         const vistos = new Set();
-        return dados.filter(d => {
+        const removidos = [];
+        const resultado = dados.filter(d => {
             if (!d) return true;
             if (!campos) {
                 const chaveTotal = JSON.stringify(d);
-                if (vistos.has(chaveTotal)) return false;
+                if (vistos.has(chaveTotal)) { if (removidos.length < 5) removidos.push(d); return false; }
                 vistos.add(chaveTotal);
                 return true;
             }
             const valores = campos.map(c => d[c]);
             if (valores.some(v => !v)) return true;
             const chave = valores.join(' ');
-            if (vistos.has(chave)) return false;
+            if (vistos.has(chave)) { if (removidos.length < 5) removidos.push(d); return false; }
             vistos.add(chave);
             return true;
         });
+        // Diagnóstico: pedido do usuário depois de o total de Apreensões continuar abaixo
+        // do esperado mesmo com dedupe pelo registro inteiro — até 5 exemplos do que foi
+        // removido, pra confirmar se são mesmo duplicatas de reload (ex.: mesma linha nas
+        // bordas de duas páginas por paginação instável do Projudi) ou outra coisa.
+        if (resultado.length < dados.length) {
+            console.warn(`[Projudi] removerProcessosDuplicados — ${dados.length - resultado.length} registro(s) removido(s) por duplicata (campo=${JSON.stringify(campo)}); exemplo(s):`, removidos);
+        }
+        return resultado;
     }
 
     // Contagem RÁPIDA e SÍNCRONA de registros acumulados — usada só para exibição (painel
