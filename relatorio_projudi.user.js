@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.20
+// @version      25.23
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1948,6 +1948,96 @@
         },
     };
 
+    // ── Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem infração
+    // penal" dentro do bloco #tbMesa, MESMA aba de Prescrições/Ações Penais Sem Denúncia)
+    // — mesaAnalistaEscrivao.do?actionType=pesquisarProcessosSemInfracaoPenal. Categoria
+    // Crime, igual Apreensões/Cumprimento de Medidas/Prescrições. Diferente de
+    // Prescrições: o card NÃO tem <a href> nenhum (nem sub-link, nem atributo href no
+    // próprio elemento — confirmado nos .mhtml enviados pelo usuário: só um <label> com o
+    // texto dentro de um <div class="quadroCorregedoriaEven/Odd">, clique tratado por JS
+    // externo não capturado na amostra estática) e NÃO tem etapa de filtro/checkbox — ao
+    // contrário de Apreensões/Prescrições, clicar no card já leva DIRETO para a tela de
+    // resultados com table.resultTable pronta (confirmado no .mhtml: a tela de destino já
+    // chega com "7 registro(s) encontrado(s)", sem formulário de filtro visível). Ver
+    // acharCardSemInfracaoPenal/navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal.
+    //
+    // Lista paginada por processo (mesmo esquema de Juntadas/Retorno) — usa
+    // criarColetor()/cfg.extrai normalmente. Tabela discriminada completa via
+    // montarTabelaGenerico (sem alteração), mas o resumo é dedicado via pdfCustom
+    // (montarResumoSemInfracaoPenal, mesmo padrão de CFG_PRESCRICOES): 2 cards + tabela
+    // embutida com os 5 primeiros processos + balão de observação (pedido do usuário) —
+    // não usa montarResumoGenerico (traria gráfico de distribuição/faixa de idade que o
+    // usuário não pediu aqui).
+    //
+    // Colunas da tabela real (result.html enviado pelo usuário): [0] Processo [1] Classe
+    // Processual (Assunto Principal) [2] Data de Distribuição [3] Data Último Movimento
+    // [4] Dias Paralisado.
+    const TITULO_SEM_INFRACAO_PENAL = 'Feitos Ativos Com Pendência De Anotação Da Infração Penal';
+    // Texto fixo do balão de observação (pedido do usuário) — só aparece no PDF quando
+    // há processos listados (mesmo padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES).
+    const PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL = [
+        'A secretaria deverá atentar para a correta atualização do cadastro das infrações penais, providência indispensável para a adequada alimentação dos sistemas e para o correto cálculo dos prazos prescricionais pelo Projudi.',
+        'Deverá, ainda, observar o disposto no art. 630 do Código de Normas do Foro Judicial, mantendo atualizados todos os dados constantes da capa do processo eletrônico. Ressalte-se que compete ao(à) Magistrado(a), em inspeção permanente, fiscalizar a atualização dos campos destinados às anotações processuais, nos termos do referido dispositivo normativo.',
+    ];
+    const CFG_SEM_INFRACAO_PENAL = {
+        prefixo: 'projudi_seminfracaopenal_',
+        // Zero pendências é informação válida (mesmo padrão de CFG_APREENSOES/
+        // CFG_PRESCRICOES) — mostra a linha mesmo vazia, desde que já coletado.
+        mostrarSeVazio: true,
+        // O cabeçalho desta tabela ("Processo/Classe Processual/Data de
+        // Distribuição/Data Último Movimento/Dias Paralisado") também casa com o regex
+        // largo de CFG_PARALISADOS (/dias\s+paralisado/i) — por isso NÃO dá pra detectar
+        // só pelo cabeçalho (cab é ignorado aqui de propósito). Detecção própria pelo
+        // <form id="mesaAnalistaEscrivaoForm"> com o actionType desta tela específica,
+        // igual ao padrão já usado por paginaOutrosCumprimentos()/paginaCumprimentoMedidas()
+        // — precisa ser checada em detectarConfig() ANTES de CFG_PARALISADOS, senão
+        // CFG_PARALISADOS rouba a detecção primeiro (bug confirmado no .mhtml enviado
+        // pelo usuário: a buttonBar chegou rotulada "Paralisados").
+        detecta: () => {
+            const form = document.getElementById('mesaAnalistaEscrivaoForm');
+            return !!(form && /actionType=pesquisarProcessosSemInfracaoPenal/i.test(form.action));
+        },
+        minTds: 5,
+        usaAtuacao: false,
+        nomeArquivo: 'sem_infracao_penal_projudi',
+        rotulos: { coletar: 'Extrair Sem Infração Penal', coletarMais: 'Extrair mais (Sem Infração Penal)', baixar: '⬇ Baixar Sem Infração Penal' },
+        cabecalhos: ['Processo', 'Classe Processual (Assunto Principal)', 'Data de Distribuição', 'Data Último Movimento', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 46 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[4]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                dataDistribuicao: textoCelula(tds[2]),
+                dataUltimoMovimento: textoCelula(tds[3]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.dataDistribuicao, d.dataUltimoMovimento, (d.dias == null ? '' : String(d.dias))],
+        pdfCustom: (dados, somenteResumo) => gerarPDFSemInfracaoPenal(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoSemInfracaoPenal
+        // não usa nenhum outro campo de p além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_SEM_INFRACAO_PENAL,
+            tabelaTitulo: 'Tabela discriminada dos feitos sem infração penal cadastrada',
+            dataCampo: 'dataUltimoMovimento',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe Processual (Assunto Principal)', width: 46, get: (d) => d.classe },
+                { header: 'Data de Distribuição', width: 20, get: (d) => d.dataDistribuicao },
+                { header: 'Data Último Movimento', width: 20, get: (d) => d.dataUltimoMovimento },
+                { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
     // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
     // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
@@ -3212,6 +3302,35 @@
             const candidatos = d.querySelectorAll('#tabHorz a, .tabCenter a');
             for (const a of candidatos) {
                 if (/^mesa\s+do\s+escriv[ãa]o\s+criminal$/i.test((a.textContent || '').trim())) return a;
+            }
+        }
+        return null;
+    }
+
+    // Card "Feitos sem infração penal" (dentro do #tbMesa da aba "Mesa do Escrivão
+    // Criminal", mesmo bloco de Prescrições/Ações Penais Sem Denúncia) — ao contrário de
+    // "Vencidas" (Prescrições), este card NÃO tem <a href> nenhum, nem sub-link: só um
+    // <label> com o texto dentro de um <div class="quadroCorregedoriaEven/Odd">
+    // (confirmado no .mhtml enviado pelo usuário — o clique é tratado por JS externo não
+    // capturado na amostra estática). Confirmado pelo usuário: não existe link tipo
+    // "Vencidas" aqui — é só clicar no próprio card.
+    //
+    // Devolve o próprio <label> — o nó mais profundo, folha da árvore —, NÃO o <div
+    // class="quadroCorregedoria*"> que o envolve. Testado ao vivo (log do usuário): clicar
+    // no <div> (nível acima) não disparava NADA. .click() borbulha só pra CIMA, pelos
+    // ancestrais do elemento clicado — nunca desce pros filhos; se o listener de verdade
+    // estiver no <label>, no <td style="position:relative; z-index:1"> que o envolve mais
+    // de perto, ou em qualquer nó entre eles e o <div>, clicar direto no <div> pula esses
+    // níveis e o clique se perde. Clicar no nó mais profundo garante que o evento
+    // borbulhe por TODA a cadeia de ancestrais (label -> td -> tr interno -> table
+    // interno -> td externo -> div -> tr externo -> #tbMesa -> ...), cobrindo qualquer
+    // nível onde o clique de verdade esteja escutando.
+    function acharCardSemInfracaoPenal() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('#tbMesa label')) {
+                if (!/^feitos\s+sem\s+infra[çc][ãa]o\s+penal$/i.test((label.textContent || '').trim())) continue;
+                return label;
             }
         }
         return null;
@@ -5908,6 +6027,17 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_PRESCRICOES, comIndice),
             };
         }
+        if (cfg === CFG_SEM_INFRACAO_PENAL) {
+            return {
+                rotulo: TITULO_SEM_INFRACAO_PENAL,
+                // Resumo dedicado (só 2 cards + tabela embutida dos 5 primeiros +
+                // observação, pedido do usuário) — não usa montarResumoGenerico; a tabela
+                // discriminada reaproveita o genérico sem alteração (ver
+                // CFG_SEM_INFRACAO_PENAL.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSemInfracaoPenal(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -6618,6 +6748,7 @@
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
+        const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -7035,6 +7166,21 @@
                 indicador: `${secaoPrescricoes.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
+            });
+        }
+        // "Feitos Sem Infração Penal" — logo após Prescrições (mesma ordem do popup:
+        // REPORTS_AUTOMACAO declara seminfracaopenal logo após prescricoes dentro da
+        // categoria Crime). Indicador: total de processos pendentes; detalhamento
+        // compacta a pendência mais antiga (por Data Último Movimento).
+        if (secaoSemInfracaoPenal) {
+            const antigo = acharMaisAntigo(secaoSemInfracaoPenal.dados, 'dataUltimoMovimento');
+            const prejudicado = prejudicadoInfo(CFG_SEM_INFRACAO_PENAL);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Feitos Sem Infração Penal',
+                indicador: `${secaoSemInfracaoPenal.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -8516,6 +8662,106 @@
         }
 
         desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem
+    // infração penal") — mesmo padrão de gerarPDFPrescricoes/montarResumoPrescricoes
+    // acima (mesma aba de origem, mesma categoria Crime).
+    function gerarPDFSemInfracaoPenal(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSemInfracaoPenal(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_SEM_INFRACAO_PENAL.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards (mesmo padrão de Prescrições): total de processos pendentes e a
+    // pendência mais antiga (maior "Dias Paralisado"/menor Data Último Movimento), com o
+    // processo correspondente como sub-linha.
+    function montarResumoSemInfracaoPenal(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SEM_INFRACAO_PENAL, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataUltimoMovimento');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela embutida com os 5 PRIMEIROS processos (pedido do usuário — bem menor
+        // que os 10 de Prescrições de propósito: precisa caber tudo numa única página
+        // junto com os cards e a observação, sem quebra de página). Ordem de chegada
+        // (mesma ordem que o Projudi devolveu, sem reordenar) — mesmas colunas/estilo de
+        // montarTabelaGenerico, só sem a lógica de agrupamento.
+        const LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_SEM_INFRACAO_PENAL} Processos`
+                : 'Lista dos Processos Sem Infração Penal Cadastrada';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_SEM_INFRACAO_PENAL.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_SEM_INFRACAO_PENAL, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação (pedido do usuário) — só com processos listados; "0
+        // pendências" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
+        // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo.
+        // Diferente de Prescrições: NÃO quebra de página se não couber — a tabela de só 5
+        // linhas (pedido do usuário: precisa caber tudo numa única página) deixa isso
+        // extremamente improvável, mas se ainda assim não couber, a observação
+        // simplesmente não é desenhada em vez de forçar uma 2ª página.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_SEM_INFRACAO_PENAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
@@ -10166,6 +10412,10 @@
         else if (CFG_SUSPENSOS.detecta(cab)) cfg = CFG_SUSPENSOS;
         else if (CFG_TEMPOMEDIO.detecta(cab)) cfg = CFG_TEMPOMEDIO;
         else if (CFG_AUDIENCIAS.detecta(cab)) cfg = CFG_AUDIENCIAS;
+        // CFG_SEM_INFRACAO_PENAL vem ANTES de CFG_PARALISADOS: o cabeçalho desta tabela
+        // também casa com o regex largo de CFG_PARALISADOS (/dias\s+paralisado/i) — só a
+        // detecção própria (form#mesaAnalistaEscrivaoForm) distingue as duas.
+        else if (CFG_SEM_INFRACAO_PENAL.detecta(cab)) cfg = CFG_SEM_INFRACAO_PENAL;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
@@ -10823,6 +11073,29 @@
                 linkVencidas.click();
             } else {
                 console.log('[Projudi Prescrições] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Vencidas" ainda não apareceu)');
+            }
+            return;
+        }
+
+        // Aba "Mesa do Escrivão Criminal" com o card "Feitos sem infração penal"
+        // carregado — mesma aba de Prescrições (aberta em
+        // navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal/navegarMenu('seminfracaopenal')),
+        // mas SEM etapa de filtro/checkbox: o card não tem <a href> nem formulário — o
+        // clique nele já leva direto pra tela de resultados (confirmado pelo usuário e no
+        // .mhtml enviado: mesaAnalistaEscrivaoForm?actionType=
+        // pesquisarProcessosSemInfracaoPenal chega com table.resultTable pronta). Por
+        // isso, diferente de Prescrições (que só troca de estado quando a tela de
+        // filtros aparece — ver bloco perto de formularioPrescricoes/preencherEPesquisar
+        // Prescricoes em injetarBotoes), aqui o estado já muda para coletando_ NESTE
+        // clique — não existe uma 2ª tela intermediária esperando o "Pesquisar".
+        if (estadoAutoNoInicio === 'preenchendo_seminfracaopenal' && !document.querySelector('table.resultTable')) {
+            const cartao = acharCardSemInfracaoPenal();
+            if (cartao) {
+                console.log('[Projudi Sem Infração Penal] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos sem infração penal"');
+                store.setItem(AUTO_ESTADO, 'coletando_seminfracaopenal');
+                cartao.click();
+            } else {
+                console.log('[Projudi Sem Infração Penal] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -12061,6 +12334,10 @@
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
         { key: 'prescricoes', cfg: CFG_PRESCRICOES, navAlvo: 'prescricoes', rotulo: 'Prescrições', curto: 'Prescrições', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Feitos Sem Infração Penal" — mesma aba "Mesa do Escrivão Criminal" de
+        // Prescrições (card sem link, ver acharCardSemInfracaoPenal); ÚLTIMO da categoria
+        // Crime, logo após Prescrições (mesma ordem em que os cards aparecem no #tbMesa).
+        { key: 'seminfracaopenal', cfg: CFG_SEM_INFRACAO_PENAL, navAlvo: 'seminfracaopenal', rotulo: 'Feitos Sem Infração Penal', curto: 'Sem Infração Penal', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -12268,6 +12545,11 @@
         // página, assim que o link aparecer no DOM (ver bloco perto de
         // formularioPrescricoes).
         else if (alvo === 'prescricoes') return navegarAbaMesaEscrivaoCriminalParaPrescricoes();
+        // "Feitos Sem Infração Penal" fica na mesma aba "Mesa do Escrivão Criminal" de
+        // Prescrições — abre a aba aqui; o clique no card em si (sem link, ver
+        // acharCardSemInfracaoPenal) acontece em injetarBotoes, a cada carregamento de
+        // página, assim que o card aparecer no DOM.
+        else if (alvo === 'seminfracaopenal') return navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal();
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
@@ -12360,6 +12642,21 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaPrescricoes — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+
+    // Mesmo esquema de navegarAbaMesaEscrivaoCriminalParaPrescricoes acima, mas para
+    // "Feitos Sem Infração Penal" — a aba é a MESMA ("Mesa do Escrivão Criminal"); só o
+    // clique seguinte (no próprio card, ver acharCardSemInfracaoPenal) muda, feito à
+    // parte no gate de injetarBotoes (essa função só abre a aba).
+    function navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: seminfracaopenal (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
