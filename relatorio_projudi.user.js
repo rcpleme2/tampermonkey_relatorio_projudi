@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.20
+// @version      25.21
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1818,6 +1818,13 @@
         // Mostra a linha "Bens Apreendidos" mesmo com zero pendências, desde que já
         // coletado — "zero apreensões pendentes" é uma informação, não um vazio a esconder.
         mostrarSeVazio: true,
+        // Dedupe pelo número da apreensão, não pelo processo (padrão de
+        // removerProcessosDuplicados) — um mesmo processo pode legitimamente ter vários
+        // bens apreendidos (várias linhas com o mesmo número de processo); dedupe por
+        // processo estava descartando essas apreensões extras como se fossem duplicata de
+        // reload, fazendo o total do relatório (164) ficar bem abaixo do total real da
+        // tela do Projudi (470). Ver comentário em removerProcessosDuplicados.
+        chaveDuplicata: 'numero',
         detecta: (cab) => /tipo\s+da\s+apreens[ãa]o/i.test(cab),
         minTds: 9,
         usaAtuacao: false,
@@ -3451,7 +3458,7 @@
             // relatório (ex.: reload de página no meio da coleta duplicando uma página).
             // Exceção: Tempo Médio — ali o mesmo processo pode legitimamente ir e voltar
             // à conclusão mais de uma vez no período (cada ida é um registro válido).
-            if (cfg !== CFG_TEMPOMEDIO) dados = removerProcessosDuplicados(dados);
+            if (cfg !== CFG_TEMPOMEDIO) dados = removerProcessosDuplicados(dados, cfg.chaveDuplicata || 'processo');
             return dados;
         }
 
@@ -11897,12 +11904,20 @@
     // reload de página no meio de uma coleta paginada duplicando uma página inteira).
     // Itens sem campo .processo (relatórios "resumo único", ex. Outros Cumprimentos,
     // Audiências Designadas/Realizadas) passam direto, sem filtro.
-    function removerProcessosDuplicados(dados) {
+    // campo (padrão 'processo'): identificador único usado para deduplicar. Bug corrigido
+    // (relatado em produção — Apreensões mostrava 164 no PDF contra 470 na tela do
+    // Projudi): dedupe por 'processo' presume um registro por processo, mas em Apreensões
+    // um mesmo processo pode legitimamente ter VÁRIOS bens apreendidos (várias linhas com
+    // o mesmo número de processo) — dedupe por processo descartava as demais apreensões
+    // do mesmo processo como se fossem duplicatas de reload. CFG_APREENSOES passa
+    // chaveDuplicata: 'numero' (identificador único da apreensão) para preservar a
+    // proteção contra duplicata de reload sem descartar apreensões legítimas.
+    function removerProcessosDuplicados(dados, campo = 'processo') {
         const vistos = new Set();
         return dados.filter(d => {
-            if (!d || !d.processo) return true;
-            if (vistos.has(d.processo)) return false;
-            vistos.add(d.processo);
+            if (!d || !d[campo]) return true;
+            if (vistos.has(d[campo])) return false;
+            vistos.add(d[campo]);
             return true;
         });
     }
@@ -11936,7 +11951,7 @@
     // gravando direto com store.setItem, sem precisar migrar). Tenta o IndexedDB
     // primeiro; se não achar a chave lá, cai para o localStorage — cobre os dois casos
     // com o mesmo código, sem cada chamador precisar saber onde o dado está.
-    async function lerDadosDe(prefixo) {
+    async function lerDadosDe(prefixo, campoDuplicata = 'processo') {
         const n = parseInt(store.getItem(prefixo + 'num_paginas') || '0', 10);
         let dados = [];
         for (let i = 0; i < n; i++) {
@@ -11949,7 +11964,7 @@
             const legado = desembrulharArray(b);
             if (legado) dados = dados.concat(legado);
         }
-        return removerProcessosDuplicados(dados);
+        return removerProcessosDuplicados(dados, campoDuplicata);
     }
 
     // Relatórios disponíveis para a automação, na ordem padrão de execução. 'precisaPreencher'
@@ -12802,7 +12817,7 @@
     // dois lugares.
     async function secoesColetadas() {
         const cfgs = REPORTS_AUTOMACAO.flatMap(r => cfgsDoRelatorio(r));
-        const secoes = await Promise.all(cfgs.map(async cfg => ({ dados: await lerDadosDe(cfg.prefixo), cfg })));
+        const secoes = await Promise.all(cfgs.map(async cfg => ({ dados: await lerDadosDe(cfg.prefixo, cfg.chaveDuplicata || 'processo'), cfg })));
         return secoes.filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
