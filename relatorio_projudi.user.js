@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.19
+// @version      25.20
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -320,12 +320,12 @@
             // na hora de desenhar, quando COR já está definida.
             kpisExtras: [
                 {
-                    titulo: 'Com pré-análise', acento: 'aqua',
+                    titulo: 'Com pré-análise', acento: 'azul',
                     calc: (sub) => sub.filter(temPreAnalise).length,
                     subs: (sub, v) => [`${sub.length ? Math.round(v / sub.length * 100) : 0}% do total`],
                 },
                 {
-                    titulo: 'Sem pré-análise', acento: 'ambar',
+                    titulo: 'Sem pré-análise', acento: 'azul',
                     calc: (sub) => sub.length - sub.filter(temPreAnalise).length,
                 },
             ],
@@ -457,7 +457,7 @@
                 // Os gráficos abaixo vão para a 2ª página do resumo (pagina2), com mais
                 // itens (15) já que ganham a página inteira só para eles.
                 // Largura total (span 2) para caber o nome completo do tipo de documento
-                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 15, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
+                { titulo: 'Processos por Tipo de Documento', campo: 'tipoDocumento', topN: 5, span: 2, limpar: (s) => s.replace(/^juntada de\s+/i, ''), pagina2: true },
                 // Ranking (sem "Outros" — cada processo é único, não faz sentido agregar o
                 // restante). minValor: 2 — só processos com MAIS DE UMA juntada pendente;
                 // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
@@ -1948,26 +1948,37 @@
         },
     };
 
-    // ── Mandados (processo/cumprimentoCartorioMandado.do) — TRÊS relatórios derivados
-    // da MESMA tela de busca, distinguidos só pelo valor selecionado no
-    // <select id="codStatusCumprimentoCartorio"> (13/6/4). A tela é alcançada clicando no
+    // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
+    // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
+    // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
+    // 11=distribuição, 4=cumprimento, 8=decurso). A tela só é alcançada clicando no
     // contador "Mandados aguardando análise de retorno" da tela "Análise de Juntadas"
-    // (mesma navegação de CFG_JUNTADAS/CFG_RETORNO — ver navegarMenu('mandados')); o
-    // fluxo de 3 fases dentro do MESMO item da fila de automação fica em
-    // avancarOuConcluirFaseMandados/gateFaseMandados/tratarFaseMandadosPendentes, perto
-    // do restante da automação.
+    // (ver navegarAbaAnaliseJuntadas/tratarPainelMandados) — cada um dos 4 relatórios é um
+    // item PRÓPRIO da fila de automação (rotulos "mandadosretorno"/"mandadosdistribuicao"/
+    // "mandadoscumprimento"/"mandadosdecurso", pedido do usuário: seleção independente em
+    // vez de um único item que encadeava as 4 fases sozinho), mas todos passam pelo MESMO
+    // caminho de navegação até a tela de resultados — só então o status é ajustado e
+    // "Filtrar" é clicado quando o alvo não é a fase padrão (retorno). Ver
+    // STATUS_POR_CHAVE_MANDADO/gateMandados/tratarPainelMandados.
     //
     // Todos cabem no pipeline genérico (montarResumoGenerico/montarTabelaGenerico) — são
     // listas por processo com data, como Juntadas/Retorno. "urgente" (extraído da coluna
     // "Urgente" da tabela) é mapeado para "prioritario", o campo que o pipeline genérico já
     // entende — ativa de graça o KPI "Prioritários pendentes"/destaque na tabela.
-    // O número de colunas e a posição delas MUDA entre as 3 telas de Mandados (confirmado
-    // com telas reais de cada status): "Aguardando Análise de Retorno" tem uma coluna
-    // "Data retorno" que as outras não têm; "Expedido e Não Lido" tem duas colunas a mais
-    // ("Distribuição"/"Visualização (Oficial)") que empurram tudo pra frente. Extrair por
-    // índice fixo de td (como os demais relatórios fazem, com uma única tela por trás)
-    // não funciona aqui — precisa mapear cada campo pelo TEXTO do cabeçalho, calculado uma
-    // vez por página (ver contextoExtra em coletarPaginaAtual), não por índice fixo.
+    // O número de colunas e a posição delas MUDA entre as telas de Mandados (confirmado
+    // com telas reais de cada status, .mhtml enviados pelo usuário): "Aguardando Análise
+    // de Retorno" (status=13) tem 16 colunas, com uma coluna "Data retorno" que as outras
+    // não têm. "Aguardando Cumprimento — Lido e Sem Cumprimento" (status=6, não coletado
+    // mais — ver CFG_MANDADOS_CUMPRIMENTO) e "Aguardando Distribuição ao Oficial de
+    // Justiça" (status=11) têm 15 colunas iguais entre si (mesmas da tela de retorno, sem
+    // "Data retorno"). "Expedido e Não Lido" (status=4, cumprimento pendente) ainda não
+    // teve uma amostra real conferida, mas presumivelmente tem 2 colunas a mais
+    // ("Distribuição"/"Visualização (Oficial)" — fazem sentido só nesse status, quando o
+    // mandado já foi distribuído mas ainda não foi lido) — minTds:17 mantido do código
+    // anterior (já em produção antes desta sessão) por esse motivo. Extrair por índice
+    // fixo de td (como os demais relatórios fazem, com uma única tela por trás) não
+    // funciona aqui — precisa mapear cada campo pelo TEXTO do cabeçalho, calculado uma vez
+    // por página (ver contextoExtra em coletarPaginaAtual), não por índice fixo.
     function mapaColunasMandado() {
         const tabela = tabelaMandados();
         const thead = tabela ? tabela.querySelector(':scope > thead') : null;
@@ -1995,17 +2006,12 @@
     }
 
     // "contexto" vem de cfg.contextoExtra(), calculado uma vez por página (ver
-    // coletarPaginaAtual) — nunca índice fixo de td. Formato: { mapa, lido } — "mapa" é o
-    // mapaColunasMandado() de sempre; "lido" (opcional, true/false/undefined) identifica de
-    // qual das duas fases "pendente de cumprimento" (status=6 "lido"/status=4 "não lido")
-    // veio o registro, usado só para a unificação dos dois relatórios num só (ver
-    // CFG_MANDADOS_CUMPRIMENTO/mesclarMandadosCumprimento) — para retorno/decurso fica
-    // undefined e não é usado. Aceita também o "mapa" puro por retrocompatibilidade (ex.
-    // chamada direta em teste). Campo ausente no cabeçalho desta tela em particular (ex.:
-    // "Data retorno" fora da tela de Retorno) vira string vazia, não erro.
+    // coletarPaginaAtual) — nunca índice fixo de td. Formato: { mapa } — "mapa" é o
+    // mapaColunasMandado() de sempre. Aceita também o "mapa" puro por retrocompatibilidade
+    // (ex. chamada direta em teste). Campo ausente no cabeçalho desta tela em particular
+    // (ex.: "Data retorno" fora da tela de Retorno) vira string vazia, não erro.
     function extrairLinhaMandado(tds, atuacao, contexto) {
         const mapa = (contexto && contexto.mapa) || contexto || mapaColunasMandado();
-        const lido = contexto && typeof contexto.lido === 'boolean' ? contexto.lido : undefined;
         const tdCampo = (campo) => (mapa[campo] != null ? tds[mapa[campo]] : null);
         const tdProcesso = tdCampo('processo');
         const emProc = tdProcesso && tdProcesso.querySelector('em');
@@ -2028,7 +2034,6 @@
             urgente: urgenteTexto === 'sim',
             tipoUrgencia: textoCelula(tdCampo('tipoUrgencia')),
             prioritario: urgenteTexto === 'sim',
-            lido,
             // Bug relatado pelo usuário: a contagem por atribuição na capa/subtítulo
             // aparecia zerada ("Vara X (0), Vara Y (0)") mesmo com o total certo — esta
             // função recebia `atuacao` mas nunca gravava no registro, então
@@ -2044,15 +2049,8 @@
         'Ordenação', 'Expedição', 'Dt. Retorno', 'Status', 'Prazo', 'Urgente', 'Tipo de Urgência'];
     const LARGURAS_MANDADO_XLSX = [{ wch: 26 }, { wch: 30 }, { wch: 26 }, { wch: 24 }, { wch: 16 },
         { wch: 16 }, { wch: 16 }, { wch: 34 }, { wch: 14 }, { wch: 9 }, { wch: 20 }];
-    // Relatório final unificado "Mandados Pendentes de Cumprimento" (ver
-    // CFG_MANDADOS_CUMPRIMENTO/mesclarMandadosCumprimento) ganha uma coluna a mais no Excel
-    // indicando se o oficial já tinha lido o mandado (fase status=6) ou não (status=4).
-    const LINHA_MANDADO_CUMPRIMENTO_XLSX = (d) => [...LINHA_MANDADO_XLSX(d), d.lido ? 'Sim' : 'Não'];
-    const CABECALHOS_MANDADO_CUMPRIMENTO_XLSX = [...CABECALHOS_MANDADO_XLSX, 'Lido'];
-    const LARGURAS_MANDADO_CUMPRIMENTO_XLSX = [...LARGURAS_MANDADO_XLSX, { wch: 9 }];
-
-    // Reconhece as três telas de resultado pelo cabeçalho da tabela — não dá pra
-    // distinguir status só pelo cabeçalho (é a MESMA tabela para os três), por isso
+    // Reconhece as telas de resultado pelo cabeçalho da tabela — não dá pra
+    // distinguir status só pelo cabeçalho (é a MESMA tabela para todas), por isso
     // combina com o valor atual do select de status (ver detecta() de cada CFG abaixo).
     function cabecalhoCumprimentoMandado(cab) {
         return /oficial\s+de\s+justi[çc]a/i.test(cab) && /natureza\s+do\s+mandado/i.test(cab);
@@ -2116,67 +2114,27 @@
         },
     };
 
-    // Regra de negócio pedida pelo usuário: "expedido e não lido" (status=4) e "lido e sem
-    // cumprimento" (status=6) são, na prática, os DOIS mandados PENDENTES DE CUMPRIMENTO —
-    // a diferença (o oficial já leu ou não) vira só uma DIMENSÃO a mais dentro de um único
-    // relatório final ("Mandados Pendentes de Cumprimento"), não dois relatórios separados.
-    // A COLETA continua em duas pesquisas distintas (o Projudi não busca os dois status de
-    // uma vez) — CFG_MANDADOS_CUMPRIMENTO_LIDO (status=6) e CFG_MANDADOS_CUMPRIMENTO_NAOLIDO
-    // (status=4) fazem essa coleta bruta, cada um no seu próprio prefixo de storage, com
-    // contextoExtra marcando "lido"/"não lido" em cada registro (ver extrairLinhaMandado).
-    // Ao terminar a segunda dessas duas fases, mesclarMandadosCumprimento() junta os dois
-    // datasets no prefixo do relatório FINAL (CFG_MANDADOS_CUMPRIMENTO, mais abaixo) e limpa
-    // os dois prefixos internos — por isso estes dois CFGs NUNCA entram em
-    // REPORTS_AUTOMACAO/linhasCartorio/CFGS_CARTORIO como relatórios próprios (não têm PDF
-    // individual nem linha na capa) — são só um passo de coleta interno.
-    const CFG_MANDADOS_CUMPRIMENTO_LIDO = {
-        prefixo: 'projudi_mandadoscumplido_',
-        mostrarSeVazio: false, // interno — nunca vira seção própria no PDF (ver comentário acima)
-        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '6',
-        minTds: 15, // sem a coluna "Data retorno" — ver mapaColunasMandado
-        usaAtuacao: false,
-        contextoExtra: () => ({ mapa: mapaColunasMandado(), lido: true }),
-        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
-        nomeArquivo: 'mandados_pendentes_cumprimento_lido_projudi',
-        rotulos: { coletar: 'Extrair Mandados (Cumprimento — Lido)', coletarMais: 'Extrair mais (Mandados Cumprimento — Lido)', baixar: '⬇ Baixar Mandados (Cumprimento — Lido)' },
-        cabecalhos: CABECALHOS_MANDADO_XLSX,
-        larguras: LARGURAS_MANDADO_XLSX,
-        extrai: extrairLinhaMandado,
-        linha: LINHA_MANDADO_XLSX,
-    };
-
-    const CFG_MANDADOS_CUMPRIMENTO_NAOLIDO = {
-        prefixo: 'projudi_mandadoscumpnaolido_',
-        mostrarSeVazio: false, // interno — nunca vira seção própria no PDF (ver comentário acima)
-        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
-        minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
-        usaAtuacao: false,
-        contextoExtra: () => ({ mapa: mapaColunasMandado(), lido: false }),
-        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
-        nomeArquivo: 'mandados_pendentes_cumprimento_naolido_projudi',
-        rotulos: { coletar: 'Extrair Mandados (Cumprimento — Não Lido)', coletarMais: 'Extrair mais (Mandados Cumprimento — Não Lido)', baixar: '⬇ Baixar Mandados (Cumprimento — Não Lido)' },
-        cabecalhos: CABECALHOS_MANDADO_XLSX,
-        larguras: LARGURAS_MANDADO_XLSX,
-        extrai: extrairLinhaMandado,
-        linha: LINHA_MANDADO_XLSX,
-    };
-
-    // Relatório FINAL "Mandados Pendentes de Cumprimento" — nunca é detectado numa tela
-    // ao vivo (detecta sempre false: os dados vêm só da mesclagem das duas fases acima,
-    // ver mesclarMandadosCumprimento). O prefixo é o mesmo usado pelo antigo
-    // CFG_MANDADOS_CUMPRIMENTO (status=6 isolado), preservando nomes de arquivo já
-    // conhecidos dos usuários.
+    // Pedido do usuário: parar de coletar (e de exibir no relatório) os mandados na
+    // situação "Aguardando Cumprimento (Lido e Sem Cumprimento)" (status=6) — antes esta
+    // situação era mesclada com "Expedido e Não Lido" (status=4) num único relatório
+    // "Mandados Pendentes de Cumprimento" (ver mesclarMandadosCumprimento, removida). Agora
+    // esse relatório passa a coletar SÓ o status=4 diretamente, sem mesclagem nem dimensão
+    // "lido"/"não lido" — CFG_MANDADOS_CUMPRIMENTO_LIDO/NAOLIDO e a coluna "Lido" no
+    // Excel/PDF deixaram de existir.
     const CFG_MANDADOS_CUMPRIMENTO = {
         prefixo: 'projudi_mandadoscumprimento_',
         mostrarSeVazio: true,
-        detecta: () => false,
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
+        minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
         usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
+        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
         nomeArquivo: 'mandados_pendentes_cumprimento_projudi',
         rotulos: { coletar: 'Extrair Mandados (Cumprimento)', coletarMais: 'Extrair mais (Mandados Cumprimento)', baixar: '⬇ Baixar Mandados (Cumprimento)' },
-        cabecalhos: CABECALHOS_MANDADO_CUMPRIMENTO_XLSX,
-        larguras: LARGURAS_MANDADO_CUMPRIMENTO_XLSX,
+        cabecalhos: CABECALHOS_MANDADO_XLSX,
+        larguras: LARGURAS_MANDADO_XLSX,
         extrai: extrairLinhaMandado,
-        linha: LINHA_MANDADO_CUMPRIMENTO_XLSX,
+        linha: LINHA_MANDADO_XLSX,
         pdf: {
             titulo: 'Mandados Pendentes de Cumprimento',
             rotuloPrioridadeKpi: 'Urgentes pendentes',
@@ -2191,11 +2149,10 @@
             processoCampo: 'processo',
             tipoCampo: 'oficial',
             // SEM gráfico de distribuição por oficial (pedido do usuário) — o resumo desse
-            // relatório troca esse gráfico por uma TABELA Oficial/Total/Lidos/Não Lidos,
-            // que cruza duas dimensões e por isso foge do mecanismo genérico de
-            // distribuições (só conta ocorrências de UM campo). Ver
-            // montarResumoMandadosCumprimento. O gráfico por Natureza do Mandado continua
-            // normal (uma dimensão só), mesmo padrão dos demais relatórios de Mandados.
+            // relatório troca esse gráfico por uma tabela Oficial/Total/Mandado Mais
+            // Antigo (ver montarResumoMandadosCumprimento). O gráfico por Natureza do
+            // Mandado continua normal (uma dimensão só), mesmo padrão dos demais
+            // relatórios de Mandados.
             distribuicoes: [
                 { titulo: 'Mandados Pendentes de Cumprimento por Natureza', campo: 'natureza', topN: 12 },
             ],
@@ -2204,8 +2161,52 @@
                 { header: 'Oficial de Justiça', width: 26, get: (d) => d.oficial },
                 { header: 'Dt. Expedição', width: 18, get: (d) => d.dataExpedicao },
                 { header: 'Urgente', width: 11, get: (d) => (d.urgente ? 'Sim' : 'Não') },
+                { header: 'Tipo de Urgência', width: 30, get: (d) => d.tipoUrgencia || '—' },
+            ],
+        },
+    };
+
+    // Novo relatório pedido pelo usuário: "Aguardando Distribuição ao Oficial de Justiça"
+    // (status=11) — mandado já expedido mas ainda sem oficial de justiça designado.
+    // 15 colunas confirmado com tela real (.mhtml enviado pelo usuário) — mesma estrutura
+    // de status=6, sem "Data retorno" e sem as colunas extras de status=4 (ver comentário
+    // em mapaColunasMandado).
+    const CFG_MANDADOS_DISTRIBUICAO = {
+        prefixo: 'projudi_mandadosdistribuicao_',
+        mostrarSeVazio: true,
+        detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '11',
+        minTds: 15,
+        usaAtuacao: false,
+        contextoExtra: mapaColunasMandado,
+        pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        nomeArquivo: 'mandados_aguardando_distribuicao_projudi',
+        rotulos: { coletar: 'Extrair Mandados (Aguardando Distribuição)', coletarMais: 'Extrair mais (Mandados Aguardando Distribuição)', baixar: '⬇ Baixar Mandados (Aguardando Distribuição)' },
+        cabecalhos: CABECALHOS_MANDADO_XLSX,
+        larguras: LARGURAS_MANDADO_XLSX,
+        extrai: extrairLinhaMandado,
+        linha: LINHA_MANDADO_XLSX,
+        pdf: {
+            titulo: 'Mandados Aguardando Distribuição ao Oficial de Justiça',
+            rotuloPrioridadeKpi: 'Urgentes pendentes',
+            sufixoPrioridade: 'URGENTE',
+            rotuloPrioritarioLegenda: 'Urgentes',
+            rotuloNormalLegenda: 'Não urgentes',
+            atosTitulo: 'Mandados aguardando distribuição ao oficial de justiça',
+            agingTitulo: 'Mandados por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos mandados aguardando distribuição ao oficial de justiça',
+            dataCampo: 'dataExpedicao',
+            dataTitulo: 'Expedição mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'natureza',
+            distribuicoes: [
+                { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
+            ],
+            colunas: [
+                { header: 'Processo', width: 26, get: (d) => d.processo },
+                { header: 'Dt. Expedição', width: 18, get: (d) => d.dataExpedicao },
+                { header: 'Natureza do Mandado', width: 34, get: (d) => d.natureza },
+                { header: 'Urgente', width: 11, get: (d) => (d.urgente ? 'Sim' : 'Não') },
                 { header: 'Tipo de Urgência', width: 22, get: (d) => d.tipoUrgencia || '—' },
-                { header: 'Lido', width: 11, get: (d) => (d.lido ? 'Sim' : 'Não') },
             ],
         },
     };
@@ -2249,97 +2250,36 @@
         },
     };
 
-    // Ordem das 4 fases dentro do único item de fila "mandados" — status do select
-    // codStatusCumprimentoCartorio em cada uma. "cumprimento" (status=6, lido) e
-    // "naolidos" (status=4, não lido) são as duas metades de "Pendentes de Cumprimento" —
-    // ao concluir "naolidos" (a segunda), avancarOuConcluirFaseMandados mescla as duas no
-    // relatório final antes de seguir para "decurso" (ver mesclarMandadosCumprimento).
-    const FASES_MANDADOS = ['retorno', 'cumprimento', 'naolidos', 'decurso'];
-    // Rótulo de cada fase pro status do painel (ver atualizarPainel) — independente de
-    // cfgMandadosPorFase, porque "cumprimento"/"naolidos" resolvem pra configs só de
-    // coleta interna (sem .pdf).
-    const ROTULOS_FASE_MANDADOS = {
-        retorno: 'Aguardando Análise de Retorno',
-        cumprimento: 'Aguardando Cumprimento (lidos)',
-        naolidos: 'Expedido e Não Lido',
-        decurso: 'Aguardando Análise de Decurso de Prazo',
+    // Mapa "key do item de fila" -> valor do <select id="codStatusCumprimentoCartorio">.
+    // Cada um dos 4 relatórios de Mandados é um item INDEPENDENTE de REPORTS_AUTOMACAO
+    // (pedido do usuário: seleção independente, em vez de um único item "mandados" que
+    // encadeava as 4 fases sozinho) — mas todos chegam pela MESMA tela de "Análise de
+    // Juntadas" (ver tratarPainelMandados) e só depois, já na tela de resultados, o
+    // status é corrigido para o valor certo (ver gateMandados) quando o alvo não é a fase
+    // padrão do link (retorno).
+    const STATUS_POR_CHAVE_MANDADO = {
+        mandadosretorno: '13',
+        mandadosdistribuicao: '11',
+        mandadoscumprimento: '4',
+        mandadosdecurso: '8',
     };
-    function cfgMandadosPorFase(fase) {
-        if (fase === 'cumprimento') return CFG_MANDADOS_CUMPRIMENTO_LIDO;
-        if (fase === 'naolidos') return CFG_MANDADOS_CUMPRIMENTO_NAOLIDO;
-        if (fase === 'decurso') return CFG_MANDADOS_DECURSO;
+    function cfgMandadoPorChave(chave) {
+        if (chave === 'mandadosdistribuicao') return CFG_MANDADOS_DISTRIBUICAO;
+        if (chave === 'mandadoscumprimento') return CFG_MANDADOS_CUMPRIMENTO;
+        if (chave === 'mandadosdecurso') return CFG_MANDADOS_DECURSO;
         return CFG_MANDADOS_RETORNO;
     }
-    function statusValorPorFase(fase) {
-        if (fase === 'cumprimento') return '6';
-        if (fase === 'naolidos') return '4';
-        if (fase === 'decurso') return '8';
-        return '13';
-    }
-    function proximaFaseMandados(fase) {
-        const idx = FASES_MANDADOS.indexOf(fase);
-        return (idx >= 0 && idx < FASES_MANDADOS.length - 1) ? FASES_MANDADOS[idx + 1] : null;
-    }
 
-    // Junta os dois datasets brutos de "pendente de cumprimento" (lido/status=6 + não
-    // lido/status=4) no prefixo do relatório FINAL que o usuário vê (PDF individual, capa,
-    // tabela discriminada), e limpa os dois prefixos internos — eles não devem sobrar como
-    // seções "fantasma" no PDF conjunto (ver baixarPDFConjunto/foiColetado: sem 'coletado'
-    // marcado e sem dados, o filtro de seções os ignora sozinho). Chamada tanto no fluxo
-    // normal (fim da fase "naolidos", ver avancarOuConcluirFaseMandados) quanto no caminho
-    // de "contador nunca apareceu" (ver tratarFaseMandadosPendentes) — sempre o mesmo
-    // caminho de código, mesmo com os dois datasets vazios.
-    async function mesclarMandadosCumprimento() {
-        const lidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_LIDO.prefixo);
-        const naoLidos = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.prefixo);
-        const desteLote = [...lidos, ...naoLidos];
-        // Bug relatado pelo usuário (mesma classe do já corrigido em
-        // marcarColetaMandadosVazia): LIDO/NAOLIDO são apagados logo abaixo ao final de
-        // CADA mesclagem, então na 2ª atribuição eles só têm os dados DESTA vez — sem
-        // reler o resumo final já salvo (CFG_MANDADOS_CUMPRIMENTO.prefixo+'pagina_0'),
-        // este setItem sobrescrevia (perdia) o resultado já mesclado da 1ª atribuição.
-        // Agora lê o que já existe, descarta só os registros da MESMA atribuição (evita
-        // duplicar se a mesma vara for coletada de novo) e junta com os novos.
-        const atuacaoDesteLote = desteLote.length ? (desteLote[0].atuacao || '') : (lerAtuacao() || '');
-        const anteriores = await lerDadosDe(CFG_MANDADOS_CUMPRIMENTO.prefixo);
-        const semEstaAtribuicao = anteriores.filter(d => (d.atuacao || '') !== atuacaoDesteLote);
-        const todos = [...semEstaAtribuicao, ...desteLote];
-        // O resultado mesclado grava no formato "página única" — CFG_MANDADOS_CUMPRIMENTO
-        // não passa pelo coletor paginado, então continua indo pro localStorage como
-        // sempre (lerDadosDe cai pro localStorage quando não acha a chave no IndexedDB —
-        // ver comentário grande em lerDadosDe).
-        store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'pagina_0', JSON.stringify(todos));
-        store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'num_paginas', '1');
-        store.setItem(CFG_MANDADOS_CUMPRIMENTO.prefixo + 'coletado', '1');
-        for (const cfg of [CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO]) {
-            const n = parseInt(store.getItem(cfg.prefixo + 'num_paginas') || '0', 10);
-            for (let i = 0; i < n; i++) {
-                try { await idbDelete(cfg.prefixo + 'pagina_' + i); } catch (e) { /* ignora */ }
-                store.removeItem(cfg.prefixo + 'pagina_' + i); // legado
-            }
-            store.removeItem(cfg.prefixo + 'num_paginas');
-            store.removeItem(cfg.prefixo + 'coletado');
-            store.removeItem(cfg.prefixo + 'erro');
-            store.removeItem(cfg.prefixo + 'total_registros');
-            store.removeItem(cfg.prefixo + 'atuacoes');
-        }
-        console.log(`[Auto Projudi Mandados] mesclagem concluída: ${lidos.length} lido(s) + ${naoLidos.length} não lido(s) = ${todos.length} pendente(s) de cumprimento`);
-    }
-    // Chave que persiste em qual fase (status) a automação de Mandados está, entre
-    // reloads de página — mesmo papel de CHAVE_FILA_MESES_TM para o Tempo Médio.
-    const CHAVE_MANDADOS_FASE = 'projudi_mandados_fase';
-
-    // Marca um dos 3 CFGs de Mandados como "coletado, zero registros" sem passar pelo
-    // coletor genérico — usado quando já se sabe de antemão que não há nada a coletar
-    // (contador zerado na tela de origem, ou tabela/buttonBar ausentes na tela de
-    // resultados) — mesmo padrão de "0 registros" já usado para Juntadas/Retorno/Conclusões
-    // (ver bloco "!buttonBar" em injetarBotoes).
-    // "Zero mandados nesta fase" — mas só grava pagina_0=[] quando NADA foi coletado
-    // ainda (num_paginas ausente). Bug relatado pelo usuário: esta função sempre
-    // sobrescrevia pagina_0/num_paginas incondicionalmente — coletar numa 2ª atribuição
-    // com esta fase vazia APAGAVA os mandados já acumulados de uma atribuição anterior
-    // (que podia ter dados de verdade nesta mesma fase). "Zero NESTA atribuição" não é
-    // "zero no total".
+    // Marca um CFG de Mandados como "coletado, zero registros" sem passar pelo coletor
+    // genérico — usado quando já se sabe de antemão que não há nada a coletar (contador
+    // zerado na tela de origem, ou tabela/buttonBar ausentes na tela de resultados) —
+    // mesmo padrão de "0 registros" já usado para Juntadas/Retorno/Conclusões (ver bloco
+    // "!buttonBar" em injetarBotoes).
+    // Só grava pagina_0=[] quando NADA foi coletado ainda (num_paginas ausente). Bug
+    // relatado pelo usuário: esta função sempre sobrescrevia pagina_0/num_paginas
+    // incondicionalmente — coletar numa 2ª atribuição com este relatório vazio APAGAVA os
+    // mandados já acumulados de uma atribuição anterior (que podia ter dados de verdade).
+    // "Zero NESTA atribuição" não é "zero no total".
     function marcarColetaMandadosVazia(cfg) {
         if (!store.getItem(cfg.prefixo + 'num_paginas')) {
             store.setItem(cfg.prefixo + 'pagina_0', JSON.stringify([]));
@@ -2348,93 +2288,103 @@
         store.setItem(cfg.prefixo + 'coletado', '1');
     }
 
-    // Fase 0 — painel "Para Realizar" (aba "Análise de Juntadas"): lê o contador de
-    // mandados aguardando análise de retorno e clica no link (sempre — mesmo com contador
-    // 0), porque só a partir da tela de resultados é possível trocar o filtro de status e
-    // seguir para as fases 2 e 3 (cumprimento pendente / não lidos), que não dependem
-    // desse contador (podem ter pendências mesmo com "aguardando retorno" zerado).
+    // Painel "Para Realizar" (aba "Análise de Juntadas"): lê o contador de mandados
+    // aguardando análise de retorno e clica no link (sempre — mesmo com contador 0),
+    // porque só a partir da tela de resultados é possível trocar o filtro de status para
+    // os outros 3 relatórios de Mandados (Distribuição/Cumprimento/Decurso), que não
+    // dependem desse contador (podem ter pendências mesmo com "aguardando retorno"
+    // zerado). `chave` vem do AUTO_ESTADO atual ("preenchendo_<key>") — decide qual dos 4
+    // relatórios está em andamento; o link em si é sempre o mesmo.
     //
     // O painel é carregado via AJAX depois do HTML inicial (mesma lição de Outros
     // Cumprimentos) — espera ativa (poll a cada 500ms, teto de ~15s) até o contador
     // aparecer, em vez de checar só uma vez e concluir "não encontrado" cedo demais.
-    function tratarFaseMandadosPendentes(tentativa) {
+    function tratarPainelMandados(tentativa) {
         tentativa = tentativa || 0;
+        const estadoAuto = store.getItem(AUTO_ESTADO) || '';
+        const chave = estadoAuto.startsWith('preenchendo_') ? estadoAuto.slice('preenchendo_'.length) : 'mandadosretorno';
+        const cfg = cfgMandadoPorChave(chave);
         const span = document.getElementById('numeroMandadosAguardandoAnaliseRetorno');
         const link = span && span.closest('a');
         if (!span || !link) {
             if (tentativa < 30) {
-                setTimeout(() => tratarFaseMandadosPendentes(tentativa + 1), 500);
+                setTimeout(() => tratarPainelMandados(tentativa + 1), 500);
                 return;
             }
-            console.warn('[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando os relatórios de Mandados');
-            store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
-            store.setItem(AUTO_ESTADO, 'coletando_mandados');
-            [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO, CFG_MANDADOS_DECURSO].forEach(marcarColetaMandadosVazia);
-            // ambos os datasets vazios -> relatório final também vazio (0 pendentes);
-            // avancarAutomacao só depois da mesclagem terminar, senão a capa/PDF podem
-            // ler o relatório de Mandados ainda sem o 'coletado' marcado.
-            mesclarMandadosCumprimento().then(() => avancarAutomacao(CFG_MANDADOS_RETORNO));
+            console.warn(`[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando "${chave}"`);
+            // Bug relatado pelo usuário: sem isso, avancarAutomacao(cfg) era chamado com
+            // AUTO_ESTADO ainda em "preenchendo_<chave>" — avancarAutomacao() exige
+            // "coletando_<chave>" (ver checagem `estado !== 'coletando_' + rel.key`) e
+            // simplesmente IGNORAVA a chamada, deixando a automação travada pra sempre
+            // nesta chave (nunca avançava, nunca reiniciava — só reentrava aqui do zero a
+            // cada nova tentativa de injetarBotoes, esperando 15s de novo indefinidamente).
+            store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+            marcarColetaMandadosVazia(cfg);
+            avancarAutomacao(cfg);
             return;
         }
-        store.setItem(CHAVE_MANDADOS_FASE, 'retorno');
-        store.setItem(AUTO_ESTADO, 'coletando_mandados');
+        // Marca "coletando_<chave>" ANTES de clicar (mesmo padrão de
+        // preencherEPesquisarApreensoes/etc.: "preenchendo_" dura só até o clique que
+        // dispara a busca). Bug relatado pelo usuário: sem isso, AUTO_ESTADO continuava
+        // "preenchendo_mandados*" depois do link.click() navegar pra tela de resultados —
+        // e o gate lá em cima de injetarBotoes ("estadoAutoNoInicio.startsWith('preenchendo_mandados')")
+        // reentrava em tratarPainelMandados() TAMBÉM na tela de resultados, onde o
+        // contador não existe, ficando preso esperando por ~15s repetidamente sem nunca
+        // chegar a corrigir o filtro de status (gateMandados nunca era alcançado).
+        store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+        // "Aguardando Análise de Retorno" é a própria fase padrão do link — zero mandados
+        // aguardando retorno já é "coletado, zero registros", sem precisar visitar a tela.
         const n = parseInt((span.textContent || '0').trim(), 10) || 0;
-        console.log(`[Auto Projudi Mandados] contador de mandados aguardando retorno = ${n} — abrindo tela de resultados`);
-        if (n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
+        if (chave === 'mandadosretorno' && n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
+        console.log(`[Auto Projudi Mandados] indo para a tela de resultados (alvo="${chave}", contador de aguardando retorno=${n})`);
         link.click();
     }
 
-    // Chamado ao terminar a coleta de uma fase (via cfg.aoTerminarColeta, ver
-    // criarColetor/continuar) — troca o filtro de status e clica Filtrar para a próxima
-    // fase, ou (se já era a última) avança a fila de automação de verdade.
-    async function avancarOuConcluirFaseMandados(faseAtual) {
-        // A fase "naolidos" (status=4) é a SEGUNDA das duas metades de "Pendentes de
-        // Cumprimento" (a primeira é "cumprimento", status=6) — ao concluí-la, mescla os
-        // dois datasets no relatório final antes de seguir (ver mesclarMandadosCumprimento).
-        // Aguarda terminar antes de continuar (chamada via `await cfg.aoTerminarColeta()`
-        // em criarColetor/continuar) — senão o clique em "Filtrar" logo abaixo poderia
-        // navegar/recarregar a página antes da mesclagem salvar tudo.
-        if (faseAtual === 'naolidos') await mesclarMandadosCumprimento();
-        const prox = proximaFaseMandados(faseAtual);
-        if (!prox) {
-            avancarAutomacao(CFG_MANDADOS_RETORNO); // relatorioPorCfg mapeia p/ o item "mandados" da fila
-            return;
-        }
-        store.setItem(CHAVE_MANDADOS_FASE, prox);
-        const sel = document.getElementById('codStatusCumprimentoCartorio');
-        const btn = document.getElementById('searchButton');
-        if (!sel || !btn) {
-            console.warn('[Auto Projudi Mandados] select de status ou botão Filtrar não encontrado ao avançar de fase — automação pode ficar parada nesta tela');
-            return;
-        }
-        sel.value = statusValorPorFase(prox);
-        console.log(`[Auto Projudi Mandados] fase "${faseAtual}" concluída — filtrando para fase "${prox}" (status=${sel.value}) e clicando Filtrar`);
-        setTimeout(() => btn.click(), 500);
-    }
-
     // Gate chamado bem no início de injetarBotoes() quando a URL é a tela de resultados de
-    // Mandados. Cuida de dois casos que o fluxo genérico não trata sozinho: (a) o select de
-    // status ainda não reflete a fase esperada (correção defensiva — o valor deveria já vir
-    // certo do clique em Filtrar/no link da fase 0, mas trata o caso de sobra); (b) zero
-    // resultados nesta fase (sem tabela/buttonBar) — mesmo padrão "0 registros" das demais
-    // telas, mas sem sair da fila (avança só de fase, não do item). Retorna true quando
-    // tratou (o chamador não deve prosseguir com o fluxo genérico nesta passada), false
-    // quando não havia nada a fazer aqui (uso manual fora da automação, ou coleta normal —
-    // segue para detectarConfig()/criarColetor() como qualquer outro relatório).
-    function gateFaseMandados() {
-        const estadoAuto = store.getItem(AUTO_ESTADO);
-        if (estadoAuto !== 'coletando_mandados') return false;
-        const fase = store.getItem(CHAVE_MANDADOS_FASE) || 'retorno';
-        const statusEsperado = statusValorPorFase(fase);
+    // Mandados. O link da fase 0 sempre leva ao status=13 (retorno) — quando o item de
+    // fila em andamento é outro (Distribuição/Cumprimento/Decurso), corrige o filtro e
+    // clica em "Filtrar" antes de deixar o fluxo genérico assumir. Cuida também de "zero
+    // resultados neste relatório" (sem tabela/buttonBar) — mesmo padrão "0 registros" das
+    // demais telas. Retorna true quando tratou (o chamador não deve prosseguir com o
+    // fluxo genérico nesta passada), false quando não havia nada a fazer aqui (uso manual
+    // fora da automação, ou coleta normal em andamento — segue para
+    // detectarConfig()/criarColetor() como qualquer outro relatório).
+    function gateMandados() {
+        // Correção SEMPRE ativa, com ou sem automação rodando: status=6 ("Aguardando
+        // Cumprimento — Lido e Sem Cumprimento") não tem mais relatório associado (pedido
+        // do usuário, ver CFG_MANDADOS_CUMPRIMENTO) — mas é o status em que a tela abre ao
+        // entrar em "Mandados Pendentes de Cumprimento" pelo Projudi (confirmado em tela
+        // real, .mhtml enviado pelo usuário). Sem este redirecionamento a tela ficava
+        // "não reconhecida" (nenhum CFG detecta status=6 mais) e nenhum botão aparecia,
+        // mesmo fora da automação — bug relatado pelo usuário após a exclusão do "Lido".
+        const selStatus6 = document.getElementById('codStatusCumprimentoCartorio');
+        if (selStatus6 && selStatus6.value === '6' && tabelaMandados()) {
+            selStatus6.value = '4';
+            const btnStatus6 = document.getElementById('searchButton');
+            console.log('[Auto Projudi Mandados] status=6 (Lido e Sem Cumprimento) não é mais coletado — filtrando para status=4 (Cumprimento) e clicando Filtrar');
+            setTimeout(() => { if (btnStatus6) btnStatus6.click(); }, 400);
+            return true;
+        }
+
+        const estadoAuto = store.getItem(AUTO_ESTADO) || '';
+        const chave = keyDoEstadoAtual(estadoAuto);
+        const statusEsperado = chave && STATUS_POR_CHAVE_MANDADO[chave];
+        if (!statusEsperado) return false;
+        // Promove "preenchendo_" para "coletando_" ANTES de qualquer clique (mesmo motivo
+        // do promover em tratarPainelMandados: se a página recarregar ainda com
+        // "preenchendo_mandados*", o gate do topo de injetarBotoes reentra em
+        // tratarPainelMandados() nesta MESMA tela de resultados — que não tem o contador
+        // do painel "Para Realizar" — e fica preso esperando 15s à toa).
+        if (estadoAuto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         const sel = document.getElementById('codStatusCumprimentoCartorio');
         if (sel && sel.value !== statusEsperado) {
             sel.value = statusEsperado;
             const btn = document.getElementById('searchButton');
-            console.log(`[Auto Projudi Mandados] corrigindo filtro de status para ${statusEsperado} (fase=${fase}) e clicando Filtrar`);
+            console.log(`[Auto Projudi Mandados] filtrando para status=${statusEsperado} (${chave}) e clicando Filtrar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
-        const cfg = cfgMandadosPorFase(fase);
+        const cfg = cfgMandadoPorChave(chave);
         // Usa tabelaMandados() (busca pela tabela CERTA, pelo cabeçalho dela) em vez de
         // "table.resultTable tbody tr" genérico — a página pode ter outra table.resultTable
         // alheia (visto em produção: um widget não relacionado ficou visível junto com a
@@ -2444,16 +2394,15 @@
         const tabela = tabelaMandados();
         if (!document.querySelector('table.buttonBar td.buttons') && !(tabela && tabela.querySelector('tbody tr'))) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
-            console.log(`[Auto Projudi Mandados] fase "${fase}" sem resultados — avançando`);
-            avancarOuConcluirFaseMandados(fase);
+            console.log(`[Auto Projudi Mandados] "${chave}" sem resultados — avançando`);
+            avancarAutomacao(cfg);
             return true;
         }
         return false; // deixa o fluxo genérico (detectarConfig/criarColetor) coletar normalmente
     }
-    CFG_MANDADOS_RETORNO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('retorno');
-    CFG_MANDADOS_CUMPRIMENTO_LIDO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('cumprimento');
-    CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('naolidos');
-    CFG_MANDADOS_DECURSO.aoTerminarColeta = () => avancarOuConcluirFaseMandados('decurso');
+    // Sem aoTerminarColeta nos 4 CFGs — cada um agora é um item de fila independente e o
+    // comportamento padrão de criarColetor/continuar (avancarAutomacao(cfg) direto) já
+    // basta, sem precisar encadear pra próxima fase.
 
     function formularioApreensoes() {
         const form = document.getElementById('apreensaoForm');
@@ -3515,6 +3464,7 @@
 
         function coletarPaginaAtual() {
             const atuacao = lerAtuacao();
+            const tabelas = document.querySelectorAll('table.resultTable');
             const linhas = document.querySelectorAll('table.resultTable tbody tr');
             // cfg.contextoExtra() (opcional) roda UMA VEZ por página, não por linha — usado
             // por relatórios cuja ordem/presença de colunas muda entre telas (ex.: Mandados,
@@ -3523,19 +3473,45 @@
             // definem contextoExtra simplesmente ignoram esse argumento extra.
             const contexto = cfg.contextoExtra ? cfg.contextoExtra() : undefined;
             const dados = [];
+            // Diagnóstico de linhas descartadas — pedido do usuário depois de um caso onde
+            // o Excel/PDF veio zerado apesar de a tela mostrar dezenas de processos (ver
+            // relato "suspensos com prazo"). Guarda até 5 linhas rejeitadas (por minTds OU
+            // por cfg.extrai devolver null) com a contagem/conteúdo real dos tds, pra dar pra
+            // comparar com o que a tela mostra visualmente sem precisar reproduzir o bug de
+            // novo com o DevTools aberto.
+            const rejeitadas = [];
             linhas.forEach(tr => {
                 // ":scope > td" (só filhos diretos) — não "td" puro, que também pega tds de
                 // QUALQUER tabela aninhada dentro de uma célula (ex.: a coluna "Partes" das
                 // Audiências tem uma table.form própria por dentro), o que bagunçava a
                 // contagem/índice dos tds da linha.
                 const tds = tr.querySelectorAll(':scope > td');
-                if (tds.length < cfg.minTds) return;
+                if (tds.length < cfg.minTds) {
+                    if (rejeitadas.length < 5) {
+                        rejeitadas.push({ motivo: 'minTds', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
+                    }
+                    return;
+                }
                 // cfg.extrai pode devolver null para descartar a linha (ex.: Suspensos com
                 // Prazo ignora linhas "Sem Prazo" — não são suspensão por prazo determinado).
                 const d = cfg.extrai(tds, atuacao, contexto);
-                if (d) dados.push(d);
+                if (d) {
+                    dados.push(d);
+                } else if (rejeitadas.length < 5) {
+                    rejeitadas.push({ motivo: 'extrai() devolveu null', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
+                }
             });
             console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
+            if (dados.length < linhas.length) {
+                console.log(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
+            }
+            if (linhas.length === 0 && tabelas.length > 0) {
+                const cabecalhos = [...tabelas].map((t, i) => {
+                    const th = t.querySelector(':scope > thead');
+                    return `[${i}] ${th ? th.textContent.replace(/\s+/g, ' ').trim() : '(sem thead)'}`;
+                });
+                console.log('[Projudi] coletarPaginaAtual — nenhuma linha em nenhuma table.resultTable; cabeçalhos encontrados:', cabecalhos);
+            }
             return dados;
         }
 
@@ -3675,11 +3651,10 @@
                     store.setItem(AUTO_ESTADO, 'ir_tempomedio');
                     setTimeout(passoAutomacao, 900);
                 } else if (typeof cfg.aoTerminarColeta === 'function') {
-                    // Gancho genérico para relatórios com múltiplas fases dentro do MESMO
-                    // item da fila (ex.: Mandados — status 13 -> 6 -> 4, ver
-                    // avancarOuConcluirFaseMandados) — em vez de avançar direto para o
-                    // próximo item da fila de automação, decide o que fazer a seguir
-                    // (trocar filtro e pesquisar de novo, ou só então avançar a fila).
+                    // Gancho genérico para relatórios que precisam de um passo extra ao
+                    // terminar a coleta antes de avançar a fila (ex.: Ativos por Classe —
+                    // ver gravarTotalAtivosClasseEAvancar) — em vez de avançar direto para
+                    // o próximo item, decide o que fazer a seguir.
                     await cfg.aoTerminarColeta();
                 } else {
                     avancarAutomacao(cfg); // se a automação estiver ativa, segue para o próximo passo
@@ -4211,7 +4186,7 @@
 
     // Título de seção com régua de acento (usado por gráficos e blocos da tabela).
     function tituloSecao(doc, x, y, w, texto, acento) {
-        acento = acento || COR.azul;
+        acento = acento || COR.tinta;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
         doc.text(texto, x, y);
         doc.setDrawColor(...acento); doc.setLineWidth(0.7);
@@ -4420,7 +4395,7 @@
     function desenharBarrasFaixas(doc, x, y, w, h, titulo, faixas, rotuloPrioritario, rotuloNormal) {
         rotuloPrioritario = rotuloPrioritario || 'Prioritários';
         rotuloNormal = rotuloNormal || 'Normais';
-        tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const legY = y + 10;
         doc.setFillColor(...COR_PRIORITARIO); doc.rect(x, legY - 2.4, 3, 3, 'F');
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
@@ -4534,7 +4509,7 @@
                 if (d.section !== 'body' || d.column.dataKey !== 'p') return;
                 const v = d.row.raw._valor;
                 const larguraBarra = (v / max) * (d.cell.width - 4);
-                doc.setFillColor(...corClara(opts.acento || COR.aqua, 0.35));
+                doc.setFillColor(...corClara(opts.acento || COR.azul, 0.35));
                 doc.rect(d.cell.x + 2, d.cell.y + d.cell.height - 1.9, larguraBarra, 1.1, 'F');
             },
         });
@@ -4547,7 +4522,7 @@
     // magnitude sem ser um gráfico).
     function tabelaCategorias(doc, x, y, w, titulo, itens, opts) {
         opts = opts || {};
-        tituloSecao(doc, x, y + 4, w, titulo, opts.acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const total = itens.reduce((s, i) => s + i.valor, 0) || 1;
         const max = Math.max(...itens.map(i => i.valor), 1);
         return corpoTabelaCategorias(doc, x, y + TITULO_TABELA_H, w, itens, total, max, opts);
@@ -4558,7 +4533,7 @@
     // cheia deixariam a coluna de rótulo enorme e o resto da linha vazio.
     function tabelaCategoriasDupla(doc, x, y, w, titulo, itens, opts) {
         opts = opts || {};
-        tituloSecao(doc, x, y + 4, w, titulo, opts.acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const gap = 6, colW = (w - gap) / 2;
         const corte = Math.ceil(itens.length / 2);
         const total = itens.reduce((s, i) => s + i.valor, 0) || 1;
@@ -4574,7 +4549,7 @@
     // e sim uma agregação com colunas próprias. colunas: [{header, get(item), width,
     // halign?}] — width é peso relativo, mesmo esquema de montarTabelaGenerico.
     function tabelaRanking(doc, x, y, w, titulo, itens, colunas, acento) {
-        tituloSecao(doc, x, y + 4, w, titulo, acento || COR.aqua);
+        tituloSecao(doc, x, y + 4, w, titulo);
         if (!itens.length) return y + TITULO_TABELA_H;
         const somaLarguras = colunas.reduce((s, c) => s + c.width, 0);
         const fator = w / somaLarguras;
@@ -4602,7 +4577,7 @@
     function tabelaFaixasIdade(doc, x, y, w, titulo, faixas, rotuloPrioritario, rotuloNormal) {
         rotuloPrioritario = rotuloPrioritario || 'Prioritários';
         rotuloNormal = rotuloNormal || 'Demais';
-        tituloSecao(doc, x, y + 4, w, titulo, COR.ambar);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const total = faixas.reduce((s, f) => s + f.prioritarios + f.normais, 0) || 1;
         const wPrio = 20, wNum = 17, wPct = 16;
         doc.autoTable({
@@ -4661,7 +4636,7 @@
         opts = opts || {};
         const comps = contagemPorCompetencia(dados);
         if (comps.length < 2) return y;
-        tituloSecao(doc, x, y + 4, w, 'Resumo geral e por competência', COR.azul);
+        tituloSecao(doc, x, y + 4, w, 'Resumo geral e por competência');
 
         const subDe = (rotulo) => dados.filter(d => (d.competencia || d.atuacao || '').trim() === rotulo);
         const linhaDe = (rotulo, sub, ehTotal) => {
@@ -4880,7 +4855,7 @@
             const cw = c.pos.span === 2 ? w : colW;
             if (c.tipo === 'faixas') desenharBarrasFaixas(doc, cx, cy, cw, chartH, c.titulo, c.faixas, c.rotuloPrioritario, c.rotuloNormal);
             else if (c.tipo === 'serie') desenharSerieMensal(doc, cx, cy, cw, chartH, c.titulo, c.pontos, c.campoValor, c.fmt, c.cor);
-            else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.aqua);
+            else desenharBarras(doc, cx, cy, cw, chartH, c.titulo, c.itens, undefined, COR.azul);
         });
     }
 
@@ -4935,7 +4910,7 @@
         }
         if (p.mediaLabel) {
             const media = mediaPorDia(dados, p.dataCampo);
-            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.aqua });
+            kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.azul });
         }
         // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
         // "Com/Sem pré-análise"). Relatórios que não definem p.kpisExtras ficam
@@ -4943,7 +4918,7 @@
         if (Array.isArray(p.kpisExtras)) {
             p.kpisExtras.forEach(k => {
                 const valor = k.calc(dados);
-                kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.aqua });
+                kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.azul });
             });
         }
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -4963,7 +4938,7 @@
                 reg[p.tipoCampo] || '',
             ];
         }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
         // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
         // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
@@ -5034,7 +5009,7 @@
             // igual já era com desenharBarras/tipo 'barras' antes desta mudança.
             const itensIdade = faixas.map(f => ({ label: f.label, valor: f.prioritarios + f.normais })).filter(i => i.valor);
             const blocos = itensIdade.length
-                ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.ambar }, ...distribuicoes]
+                ? [{ titulo: p.agingTitulo, itens: itensIdade, rotuloCategoria: 'Faixa de tempo', acento: COR.azul }, ...distribuicoes]
                 : distribuicoes;
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
         }
@@ -5296,8 +5271,8 @@
         const kpis = [
             { titulo: 'Pendentes', valor: String(sub.length), subs: [], acento: COR.azul },
             { titulo: 'Prioritários', valor: String(prio), subs: [`${sub.length ? Math.round(prio / sub.length * 100) : 0}% do total`], acento: COR.vermelho },
-            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.aqua },
-            { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.ambar },
+            { titulo: 'Com pré-análise', valor: String(comPreAnalise.length), subs: [`${sub.length ? Math.round(comPreAnalise.length / sub.length * 100) : 0}% do total`], acento: COR.azul },
+            { titulo: 'Sem pré-análise', valor: String(semPreAnalise), subs: [], acento: COR.azul },
         ];
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
@@ -5318,12 +5293,12 @@
             const kpisTM = [{
                 titulo: 'Atos Analisados no Período', valor: String(estatisticasTM.total),
                 subs: [`Magistrado: ${estatisticasTM.peloMagistrado} / Assessoria: ${estatisticasTM.porOutros}`],
-                acento: COR.vinho,
+                acento: COR.azul,
             }];
             if (estatisticasTM.media != null) {
                 kpisTM.push({
                     titulo: 'Tempo Médio de Conclusão', valor: `${String(estatisticasTM.media).replace('.', ',')} dia(s)`,
-                    subs: [], acento: COR.aqua,
+                    subs: [], acento: COR.azul,
                 });
             }
             if (estatisticasTM.periodo) {
@@ -5337,8 +5312,15 @@
         // Tabelas no lugar de gráficos (pedido do usuário) — comparativo por competência
         // (só aparece com 2+ competências nas conclusões pendentes DESTE magistrado) mais
         // as distribuições, no lugar das barras horizontais de antes.
-        let y = tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
-            { semMedia: true, diasNaColunaAntiga: true }) + 6;
+        // Com 0 pendentes (magistrado(a) só com dados de Tempo Médio, ver item de Gabinete
+        // em gerarPDFConjunto), o guard interno de tabelaComparativoCompetencias não
+        // basta — ele depende do nº de competências ATIVAS no relatório inteiro, não do
+        // `sub` deste magistrado, então desenharia uma tabela toda zerada. Só chama a
+        // função quando há pelo menos 1 pendência de verdade.
+        let y = sub.length
+            ? tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
+                { semMedia: true, diasNaColunaAntiga: true }) + 6
+            : gY0;
         const blocos = [
             { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
             { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
@@ -5375,8 +5357,22 @@
 
         doc.addPage();
         const paginaInicial = doc.internal.getNumberOfPages();
-        tituloSecao(doc, m, m + 3, pw - 2 * m, `Tabela discriminada — ${juiz}`);
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, `Tabela discriminada — ${juiz}`);
         const tabInicioY = m + 8;
+
+        // Larguras escaladas pra preencher uw (pedido do usuário: a tabela ficava com
+        // bastante espaço vazio à direita — cellWidth em mm fixo somava bem menos que a
+        // largura útil da página, mesmo problema já corrigido em montarTabelaGenerico via
+        // columnStylesEscalados). Pesos relativos mantidos (30/24/30/18/14/20).
+        const colunasJuiz = [
+            { key: 'processo', width: 30 }, { key: 'classe', width: 24 }, { key: 'tipo', width: 30 },
+            { key: 'preAnalise', width: 18 }, { key: 'dias', width: 14 }, { key: 'dtRemessa', width: 20 },
+        ];
+        const somaLargurasJuiz = colunasJuiz.reduce((s, c) => s + c.width, 0);
+        const fatorLarguraJuiz = uw / somaLargurasJuiz;
+        const columnStylesJuiz = {};
+        colunasJuiz.forEach(c => { columnStylesJuiz[c.key] = { cellWidth: c.width * fatorLarguraJuiz }; });
 
         doc.autoTable({
             columns: [
@@ -5400,10 +5396,7 @@
                       lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
             headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
             alternateRowStyles: { fillColor: COR.cartao },
-            columnStyles: {
-                processo: { cellWidth: 30 }, classe: { cellWidth: 24 }, tipo: { cellWidth: 30 },
-                preAnalise: { cellWidth: 18 }, dias: { cellWidth: 14 }, dtRemessa: { cellWidth: 20 },
-            },
+            columnStyles: columnStylesJuiz,
             didParseCell: (data) => {
                 if (data.section === 'body' && data.column.dataKey === 'processo' && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
                     data.cell.styles.textColor = COR_PRIORITARIO;
@@ -5510,11 +5503,11 @@
     // relatório (genérico via cfg.pdf, ou o caso especial do Tempo Médio).
     // Resumo do relatório final "Mandados Pendentes de Cumprimento" — o mecanismo genérico
     // de p.distribuicoes só conta ocorrências de UM campo por vez; a tabela pedida pelo
-    // usuário (Oficial de Justiça x Total/Lidos/Não Lidos) cruza DUAS dimensões (oficial e
-    // lido/não-lido), então precisa de código dedicado. Desenha primeiro o resumo padrão
-    // (KPIs, faixas de urgência — via montarResumoGenerico, sem gráfico de distribuição por
-    // oficial, ver CFG_MANDADOS_CUMPRIMENTO.pdf.distribuicoes vazio) e depois acrescenta
-    // esta tabela numa página própria, ordenada por Total decrescente (pedido do usuário).
+    // usuário (Oficial de Justiça x Total/Mandado Mais Antigo) precisa de código dedicado
+    // (agrega por oficial). Desenha primeiro o resumo padrão (KPIs, faixas de urgência —
+    // via montarResumoGenerico, sem gráfico de distribuição por oficial, ver
+    // CFG_MANDADOS_CUMPRIMENTO.pdf.distribuicoes vazio) e depois acrescenta esta tabela
+    // numa página própria, ordenada por Total decrescente (pedido do usuário).
     function montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco) {
         montarResumoGenerico(doc, dados, CFG_MANDADOS_CUMPRIMENTO, primeira, comIndice, rotuloBloco);
         const p = CFG_MANDADOS_CUMPRIMENTO.pdf;
@@ -5528,12 +5521,9 @@
         const porOficial = new Map();
         dados.forEach(d => {
             const nome = (d.oficial || '').trim() || '(sem oficial)';
-            if (!porOficial.has(nome)) porOficial.set(nome, { total: 0, lidos: 0, naoLidos: 0, maisAntigoTs: null, maisAntigoStr: '' });
+            if (!porOficial.has(nome)) porOficial.set(nome, { total: 0, maisAntigoTs: null, maisAntigoStr: '' });
             const o = porOficial.get(nome);
             o.total += 1;
-            if (d.lido) o.lidos += 1; else o.naoLidos += 1;
-            // Mandado mais antigo em posse do oficial — pouco importa se lido ou não
-            // (pedido do usuário): olha a expedição de TODOS os mandados dele.
             const ts = parseDataBR(d.dataExpedicao);
             if (ts != null && (o.maisAntigoTs == null || ts < o.maisAntigoTs)) {
                 o.maisAntigoTs = ts;
@@ -5564,12 +5554,10 @@
             columns: [
                 { header: 'Oficial de Justiça', dataKey: 'oficial' },
                 { header: 'Total', dataKey: 'total' },
-                { header: 'Lidos', dataKey: 'lidos' },
-                { header: 'Não Lidos', dataKey: 'naoLidos' },
                 { header: 'Mandado Mais Antigo', dataKey: 'maisAntigo' },
             ],
             body: linhas.map(l => ({
-                oficial: l.oficial, total: String(l.total), lidos: String(l.lidos), naoLidos: String(l.naoLidos),
+                oficial: l.oficial, total: String(l.total),
                 maisAntigo: l.maisAntigoStr || '—',
             })),
             startY: hy,
@@ -5580,12 +5568,11 @@
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles: {
                 oficial: { fontStyle: 'bold', textColor: COR.tinta },
-                total: { halign: 'right' }, lidos: { halign: 'right' }, naoLidos: { halign: 'right' },
+                total: { halign: 'right' },
                 maisAntigo: { halign: 'right' },
             },
             // Data do mandado mais antigo em posse do oficial, colorida pela idade — preto
-            // até 60 dias, amarelo de 60 a 90, vermelho a partir de 90 (pedido do usuário;
-            // não importa se lido ou não lido, olha todos os mandados do oficial).
+            // até 60 dias, amarelo de 60 a 90, vermelho a partir de 90 (pedido do usuário).
             didParseCell: (data) => {
                 if (data.section !== 'body' || data.column.dataKey !== 'maisAntigo') return;
                 const linha = linhas[data.row.index];
@@ -5645,7 +5632,7 @@
                 margin: { left: m, right: m, bottom: 14 },
                 theme: 'grid',
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle', overflow: 'linebreak' },
-                headStyles: { fillColor: COR.vermelho, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: columnStylesCrit,
                 didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
@@ -5656,7 +5643,7 @@
     // PDF individual (botão "Baixar PDF" na tela/painel, fora do Relatório PDF conjunto) —
     // sem isso, cfg.pdfCustom ficava indefinido e o gerarPDF() genérico (ver
     // injetarBotoes/"if (cfg.pdfCustom) ... else gerarPDF(...)") caía direto em
-    // montarResumoGenerico, PERDENDO a tabela Oficial/Total/Lidos/Não Lidos (só apareceria
+    // montarResumoGenerico, PERDENDO a tabela Oficial/Total/Mandado Mais Antigo (só apareceria
     // no PDF conjunto, via descreverSecaoPDF, não no PDF individual). Mesmo padrão de
     // gerarPDFTempoMedio/gerarPDFParalisados.
     function gerarPDFMandadosCumprimento(dados, somenteResumo) {
@@ -5672,11 +5659,129 @@
     }
     CFG_MANDADOS_CUMPRIMENTO.pdfCustom = (dados, somenteResumo) => gerarPDFMandadosCumprimento(dados, somenteResumo);
 
+    // Card de ALERTA (mesmo esquema visual de desenharCardObservacaoArquivadosSaldo, com
+    // acento âmbar em vez de azul — "alerta" pede mais destaque que uma observação neutra)
+    // usado pelo resumo de "Mandados Aguardando Distribuição ao Oficial de Justiça" (ver
+    // montarResumoMandadosDistribuicao) para orientar o cartório a contatar a Central de
+    // Mandados quando há atraso na distribuição.
+    function desenharCardAlertaMandadosDistribuicao(doc, x, y, w, texto) {
+        const padX = 6, padTop = 8, gapRotuloTexto = 5, padBottom = 4;
+        const larguraTexto = w - 2 * padX;
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5);
+        const linhas = doc.splitTextToSize(texto, larguraTexto);
+        const alturaLinha = doc.getLineHeight() / doc.internal.scaleFactor;
+        const yRotulo = y + padTop;
+        const yTexto = yRotulo + gapRotuloTexto;
+        const h = padTop + gapRotuloTexto + (linhas.length - 1) * alturaLinha + padBottom;
+
+        doc.setDrawColor(...COR.ambar); doc.setFillColor(252, 244, 231); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.ambar);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.ambar);
+        doc.text('ALERTA', x + padX, yRotulo);
+
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...COR.tintaSec);
+        doc.text(texto, x + padX, yTexto, { align: 'justify', maxWidth: larguraTexto });
+
+        return h;
+    }
+
+    // Resumo do relatório "Mandados Aguardando Distribuição ao Oficial de Justiça" — igual
+    // ao genérico (montarResumoGenerico), mas com um ALERTA extra pedido pelo usuário:
+    // havendo mandado nesta situação há mais de LIMITES_CARTORIO.atencao dias (o mesmo
+    // limiar de "atenção" já usado no resto do Cartório — 30 dias, ver desenharCapaSituacao),
+    // desenha uma página própria orientando o cartório a contatar a Central de Mandados
+    // respectiva para pedir informações sobre o atraso, com a lista de mandados afetados.
+    function montarResumoMandadosDistribuicao(doc, dados, primeira, comIndice, rotuloBloco) {
+        montarResumoGenerico(doc, dados, CFG_MANDADOS_DISTRIBUICAO, primeira, comIndice, rotuloBloco);
+
+        const agoraTs = Date.now();
+        const atrasados = dados
+            .map(d => ({ ...d, dias: (() => { const ts = parseDataBR(d.dataExpedicao); return ts != null ? Math.floor((agoraTs - ts) / DIA_MS) : null; })() }))
+            .filter(d => d.dias != null && d.dias > LIMITES_CARTORIO.atencao)
+            .sort((a, b) => b.dias - a.dias);
+        if (!atrasados.length) return;
+
+        const p = CFG_MANDADOS_DISTRIBUICAO.pdf;
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+
+        doc.addPage();
+        let hy = m + 2;
+        doc.setFillColor(...COR.ambar); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(p.titulo, m, hy); hy += 8;
+
+        const texto = `Há ${atrasados.length} mandado(s) aguardando distribuição ao Oficial de Justiça há mais de `
+            + `${LIMITES_CARTORIO.atencao} dias. Recomenda-se que o cartório entre em contato com a Central de `
+            + `Mandados respectiva para obter informações sobre o atraso na distribuição.`;
+        const alturaAlerta = desenharCardAlertaMandadosDistribuicao(doc, m, hy, pw - 2 * m, texto);
+        hy += alturaAlerta + 6;
+
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(11.5); doc.setTextColor(...COR.ambar);
+        doc.text(`Mandados Aguardando Distribuição Há Mais de ${LIMITES_CARTORIO.atencao} Dias (${atrasados.length})`, m, hy); hy += 5;
+        doc.setDrawColor(...COR.ambar); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
+        hy += 6;
+
+        const uw = pw - 2 * m;
+        const colunas = [
+            { header: 'Processo', width: 26, key: 'processo' },
+            { header: 'Atribuição', width: 30, key: 'atribuicao' },
+            { header: 'Dt. Expedição', width: 16, key: 'dataExpedicao' },
+            { header: 'Dias', width: 10, key: 'dias' },
+            { header: 'Natureza', width: 22, key: 'natureza' },
+            { header: 'Urgente', width: 12, key: 'urgente' },
+        ];
+        const columnStyles = columnStylesEscalados(colunas.map(c => ({ width: c.width })), uw);
+        colunas.forEach((c, i) => { columnStyles['k' + i] = { ...columnStyles['k' + i], ...(c.key === 'processo' ? { fontStyle: 'bold', textColor: COR.tinta } : {}), ...(c.key === 'dias' ? { halign: 'right', fontStyle: 'bold', textColor: COR.ambar } : {}), ...(c.key === 'urgente' ? { halign: 'center' } : {}) }; });
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: atrasados.map(d => ({
+                k0: d.processo || '', k1: d.competencia || d.atuacao || '(sem atribuição)',
+                k2: d.dataExpedicao || '', k3: String(d.dias), k4: d.natureza || '',
+                k5: d.urgente ? 'Sim' : 'Não',
+            })),
+            startY: hy,
+            margin: { left: m, right: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle', overflow: 'linebreak' },
+            headStyles: { fillColor: COR.ambar, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didDrawPage: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+        });
+    }
+
+    function gerarPDFMandadosDistribuicao(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoMandadosDistribuicao(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_MANDADOS_DISTRIBUICAO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_MANDADOS_DISTRIBUICAO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+    CFG_MANDADOS_DISTRIBUICAO.pdfCustom = (dados, somenteResumo) => gerarPDFMandadosDistribuicao(dados, somenteResumo);
+
     function descreverSecaoPDF(cfg, somenteResumo) {
         if (cfg === CFG_MANDADOS_CUMPRIMENTO) {
             return {
                 rotulo: cfg.pdf.titulo,
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMandadosCumprimento(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
+            };
+        }
+        if (cfg === CFG_MANDADOS_DISTRIBUICAO) {
+            return {
+                rotulo: cfg.pdf.titulo,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMandadosDistribuicao(doc, dados, primeira, comIndice, rotuloBloco),
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, cfg, comIndice),
             };
         }
@@ -5707,7 +5812,7 @@
                 // Resumo e tabela sempre juntos (pedido do usuário) — a tabela é desenhada
                 // dentro do próprio montarResumoAudiencias, então não há passo de tabela
                 // separado aqui (ver secaoTemTabela em gerarPDFConjunto).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoAudiencias(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5739,7 +5844,7 @@
                 rotulo: TITULO_ARQUIVADOS_SALDO,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoArquivadosSaldo).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoArquivadosSaldo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5764,7 +5869,7 @@
                 rotulo: CFG_SUSPENSOS.pdf.titulo,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensos).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensos(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoSuspensos(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5773,7 +5878,7 @@
                 rotulo: TITULO_SUSPENSOS_PRAZO,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoSuspensosPrazo).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoSuspensosPrazo(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5782,7 +5887,7 @@
                 rotulo: TITULO_INSTANCIA_RECURSAL,
                 // Tabela discriminada embutida direto no resumo (pedido do usuário) —
                 // sem passo de tabela separado (ver secaoTemTabela/montarResumoInstanciaRecursal).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco, somenteTabelas) => montarResumoInstanciaRecursal(doc, dados, primeira, comIndice, somenteResumo, rotuloBloco, somenteTabelas),
                 montarTabela: null,
             };
         }
@@ -5828,20 +5933,23 @@
     // desenhos (mais simples, sem efeito colateral em desenhos vizinhos).
     function corClara(cor, alpha) { return cor.map(c => Math.round(c * alpha + 255 * (1 - alpha))); }
 
-    // Chip/pill de situação: fundo arredondado tintado (cor sólida a ~14%) + texto em
-    // versalete negrito na cor sólida quando `comCor`; senão (situação inaplicável —
-    // "—", ex. Tempo Médio) fundo neutro (COR.cartao) e texto COR.muted. Alinhado pela
-    // borda direita em `rightX` (a largura do pill se ajusta ao texto).
+    // Indicador de situação: sem fundo/pill — um pequeno ponto (~1.6mm) na cor sólida
+    // ao lado do texto em versalete negrito, também na cor sólida, quando `comCor`;
+    // senão (situação inaplicável — "—", ex. Tempo Médio) sem ponto, só texto em
+    // COR.muted. Grupo (ponto + texto) alinhado pela borda direita em `rightX`.
     function desenharChip(doc, rightX, yCenter, texto, cor, comCor, larguraMax) {
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.6);
-        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraMax - 4);
-        const padX = 2, h = 4.4;
-        const wChip = Math.min(larguraMax, doc.getTextWidth(label) + padX * 2);
-        const xChip = rightX - wChip;
-        doc.setFillColor(...(comCor ? corClara(cor, 0.16) : COR.cartao));
-        doc.roundedRect(xChip, yCenter - h / 2, wChip, h, 1.3, 1.3, 'F');
+        const DOT_D = 1.6, DOT_GAP = 1.3;
+        const larguraTexto = comCor ? larguraMax - DOT_D - DOT_GAP : larguraMax;
+        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraTexto);
         doc.setTextColor(...(comCor ? cor : COR.muted));
-        doc.text(label, xChip + wChip / 2, yCenter + 1.05, { align: 'center' });
+        doc.text(label, rightX, yCenter + 1.05, { align: 'right' });
+        if (comCor) {
+            const wTexto = doc.getTextWidth(label);
+            const cx = rightX - wTexto - DOT_GAP - DOT_D / 2;
+            doc.setFillColor(...cor);
+            doc.circle(cx, yCenter, DOT_D / 2, 'F');
+        }
     }
 
     // Geometria das colunas à direita de um cartão (contador, [extra], chip) —
@@ -5976,14 +6084,18 @@
         const col = colunasCartao(x, w, false);
         if (l.subAtribuicao) {
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.muted);
-            // Truncado à largura da coluna do label (mesma função usada nos demais ramos
-            // desta função) — sem isso, um nome de vara/unidade muito longo invadia o
-            // espaço fixo do número à direita e sobrepunha os dois textos (bug relatado
-            // pelo usuário).
-            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, col.labelW - 5), col.labelX + 5, y + h / 2 + 1.2);
+            // Truncado à largura REAL disponível — não à de `col` (que reserva espaço de
+            // chip via colunasCartao, mesmo esta linha nunca desenhando chip). Reaproveitar
+            // esse espaço (~CHIP_W+GAP) dá mais respiro pro nome da vara antes do número,
+            // evitando a sobreposição relatada pelo usuário em nomes de vara bem longos
+            // (ex. "Vara de Execução Penal de Acordo de Não Persecução Penal de Astorga -
+            // Anexo à Vara Criminal de Astorga").
+            const numRightXSemChip = x + w - CARD_PAD;
+            const labelWSemChip = numRightXSemChip - col.numW - 2 - (col.labelX + 5);
+            doc.text(textoTruncadoParaLargura(doc, '– ' + l.nome, labelWSemChip), col.labelX + 5, y + h / 2 + 1.2);
             if (l.indicador) {
                 doc.setTextColor(...COR.tintaSec);
-                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), col.numRightX, y + h / 2 + 1.2, { align: 'right' });
+                doc.text(textoTruncadoParaLargura(doc, l.indicador, col.numW), numRightXSemChip, y + h / 2 + 1.2, { align: 'right' });
             }
             return;
         }
@@ -6006,9 +6118,14 @@
             const linhasDet = doc.splitTextToSize(l.detalhamento, col.labelW - indent).slice(0, 8);
             linhasDet.forEach((linha, i) => doc.text(linha, col.labelX + indent, y + 7.4 + i * 3.7));
         }
+        // Mesma posição condicional do título (y + 3.7 quando há detalhamento quebrado em
+        // várias linhas) — sem isso, numa linha "alta" (detalhamento longo), o centro
+        // vertical (h/2) cai no meio do bloco de texto do detalhamento e o indicador/chip
+        // ficam desenhados por cima dele (bug relatado pelo usuário em "Bens Apreendidos").
+        const yIndicadorChip = temSub ? y + 3.7 : y + h / 2 + 1.3;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
-        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, y + h / 2 + 1.3, { align: 'right' });
-        desenharChip(doc, col.chipRightX, y + h / 2, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
+        doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, yIndicadorChip, { align: 'right' });
+        desenharChip(doc, col.chipRightX, yIndicadorChip, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
         l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
     }
 
@@ -6020,7 +6137,7 @@
     function desenharBlocoDominio(doc, x, y, w, cfg) {
         const ph = doc.internal.pageSize.getHeight();
         const mBottom = 14;
-        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.observacao ? { observacao: cfg.observacao } : null);
+        let yy = desenharCabecalhoDominio(doc, x, y, w, cfg.titulo, cfg.legenda ? { legenda: cfg.legenda } : (cfg.observacao ? { observacao: cfg.observacao } : null));
 
         if (!cfg.itens.length) {
             if (cfg.mensagemSemItens) {
@@ -6172,8 +6289,14 @@
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
-            observacao: 'Situação calculada pela pendência mais antiga de cada magistrado(a). Regular até 30 '
-                + 'dias, Atenção de 31 a 120 dias, Crítico acima de 120 dias.',
+            // Legenda de bolinhas, mesmo padrão do Cartório (era um parágrafo em texto
+            // corrido — pedido do usuário pra uniformizar com a legenda simples que já
+            // existe no Cartório). Limiares vêm de LIMITES_GABINETE — nunca hardcoded aqui.
+            legenda: [
+                { cor: COR.aqua, rotulo: `Regular ≤${LIMITES_GABINETE.atencao}d` },
+                { cor: COR.ambar, rotulo: `Atenção ${LIMITES_GABINETE.atencao + 1}–${LIMITES_GABINETE.critico}d` },
+                { cor: COR.vermelho, rotulo: `Crítico >${LIMITES_GABINETE.critico}d` },
+            ],
             situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
@@ -6202,6 +6325,49 @@
         doc.text('Tabelas discriminadas de todos os itens coletados', pw / 2, 22, { align: 'center' });
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 40);
+    }
+
+    // Sumário do modo 'tabelas' (pedido do usuário): lista clicável de cada seção
+    // desenhada (nome + nº de página), na própria página 1 — a mesma que
+    // desenharCapaTabelas usa pro cabeçalho, reaproveitando o espaço abaixo dele. Só
+    // texto plano, sem cards/cores de status (o modo 'tabelas' é justamente "sem KPIs").
+    // Cabe numa página só: como é desenhada DEPOIS de todo o resto do PDF já pronto
+    // (só então se sabe o nº de página de cada seção), não há como abrir uma 2ª página
+    // pro sumário sem reordenar todo o documento — se a lista não couber, os itens que
+    // sobrarem ficam de fora dela (ainda acessíveis pelos marcadores/bookmarks do PDF),
+    // com um aviso no lugar de estourar a margem inferior.
+    function desenharSumarioTabelas(doc, itens) {
+        doc.setPage(1);
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 16;
+        let y = 48;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
+        doc.text('Sumário', m, y);
+        y += 6;
+        let grupoAtual = null;
+        for (let i = 0; i < itens.length; i++) {
+            const it = itens[i];
+            const comCabecalhoGrupo = it.grupo && it.grupo !== grupoAtual;
+            const alturaNecessaria = comCabecalhoGrupo ? 11 : 6;
+            if (y + alturaNecessaria > ph - 14) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(8); doc.setTextColor(...COR.muted);
+                doc.text(`+ ${itens.length - i} item(ns) não listado(s) aqui — disponíveis pelos marcadores do PDF.`, m, y);
+                break;
+            }
+            if (comCabecalhoGrupo) {
+                grupoAtual = it.grupo;
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(8.5); doc.setTextColor(...COR.azul);
+                doc.text(grupoAtual.toUpperCase(), m, y + 4);
+                y += 8;
+            }
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+            doc.text(textoTruncadoParaLargura(doc, it.rotulo, pw - 2 * m - 22), m + 2, y);
+            doc.setFont('PublicSans', 'bold'); doc.setTextColor(...COR.tinta);
+            doc.text(`pág. ${it.pg}`, pw - m, y, { align: 'right' });
+            doc.link(m, y - 4, pw - 2 * m, 5.5, { pageNumber: it.pg });
+            y += 6;
+        }
     }
 
     // PDF único com os relatórios coletados, organizado em duas frentes: CARTÓRIO
@@ -6368,12 +6534,8 @@
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
-        // CFG_MANDADOS_CUMPRIMENTO_LIDO/NAOLIDO (as duas metades internas da coleta, ver
-        // definição das CFGs de Mandados) ficam de FORA — nunca viram seção própria, seus
-        // dados já foram incorporados ao relatório final CFG_MANDADOS_CUMPRIMENTO pela
-        // mesclagem (mesclarMandadosCumprimento).
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS,
-            CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
+            CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
         // Seções com cfg.mostrarSeVazio (Suspensos, Audiências Pendentes) aparecem mesmo
         // com dados.length === 0, desde que já tenham sido coletadas (ver KEY_COLETADO/
         // foiColetado) — "zero pendências" é um dado, não um vazio a esconder.
@@ -6617,15 +6779,17 @@
         // item PAI com subitens indentados, em vez de linhas soltas — ver
         // desenharBlocoCartorioUnificado (indentação visual + estilo do cabeçalho de
         // grupo) e PASSO 4 em gerarPDFConjunto (link só nas filhas).
-        const CFGS_GRUPO_MANDADOS = [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
+        const CFGS_GRUPO_MANDADOS = [CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
         const rotulosCurtosMandados = new Map([
-            [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
+            [CFG_MANDADOS_RETORNO, 'Retorno'], [CFG_MANDADOS_DISTRIBUICAO, 'Distribuição'],
+            [CFG_MANDADOS_CUMPRIMENTO, 'Cumprimento'], [CFG_MANDADOS_DECURSO, 'Decurso'],
         ]);
         const itensMandados = CFGS_GRUPO_MANDADOS.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
         // Pedido do usuário: cada item de Pendências ganha sub-linhas indentadas por
         // atribuição (mesmo padrão de Estatísticas Gerais acima) — EXCETO os subitens de
-        // Mandados (Retorno/Cumprimento/Decurso), que já têm 1 nível de indentação
-        // (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do usuário.
+        // Mandados (Retorno/Distribuição/Cumprimento/Decurso), que já têm 1 nível de
+        // indentação (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do
+        // usuário.
         const itensPendencias = itensCartorio
             .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
             .flatMap(t => comSubLinhasAtribuicao(
@@ -6635,7 +6799,8 @@
         if (itensMandados.length) {
             // Cabeçalho do grupo "Mandados" sem indicador/detalhamento (pedido do
             // usuário) — o resumo agregado ficava confuso ali; cada subitem (Retorno/
-            // Cumprimento/Decurso) já tem seu próprio indicador/detalhamento via linhaTarefa.
+            // Distribuição/Cumprimento/Decurso) já tem seu próprio indicador/detalhamento
+            // via linhaTarefa.
             itensPendencias.push(linhaGrupo('Mandados', ''));
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
@@ -6715,10 +6880,22 @@
                 const per = desembrulharObjeto(store.getItem('projudi_tempomedio_periodo'));
                 if (per && (per.ini || per.fim)) periodoTxt = `${per.ini || '?'} a ${per.fim || '?'}`;
             }
+            // Mesmo cálculo de "Não cumpridas"/"mais antiga" já usado na página de detalhe
+            // do Tempo Médio (montarResumoTempoMedio) — faltava aqui na capa, deixando essa
+            // linha sem nenhuma informação de "mais antiga" como as demais (pedido do
+            // usuário).
+            const naoCumpridasTM = secaoTempoMedio.dados.filter(d => !d.dtCartorio);
+            const maisAntigaNCTM = naoCumpridasTM.reduce((best, d) => {
+                const ts = parseDataBR(d.dtAnalise);
+                return ts != null && (best === null || ts < best.ts) ? { ts, str: d.dtAnalise } : best;
+            }, null);
+            const detalhesTM = [];
+            if (periodoTxt) detalhesTM.push(`Período: ${periodoTxt}`);
+            if (naoCumpridasTM.length) detalhesTM.push(`${naoCumpridasTM.length} não cumprida(s) · mais antiga: ${maisAntigaNCTM ? maisAntigaNCTM.str : '—'}`);
             itensOutros.push({
                 nome: 'Tempo médio de cumprimento de decisões / sentenças',
                 indicador: media != null ? `${media.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
-                detalhamento: periodoTxt ? `Período: ${periodoTxt}` : '—',
+                detalhamento: detalhesTM.length ? detalhesTM.join(' · ') : '—',
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO,
             });
             // Pedido do usuário: quantas conclusões cada magistrado(a) analisou (dados JÁ
@@ -6906,6 +7083,16 @@
                 if (!porJuiz.has(nome)) porJuiz.set(nome, []);
                 porJuiz.get(nome).push(d);
             });
+            // Pedido do usuário: magistrado(a) com 0 conclusões pendentes mas com dados de
+            // Tempo Médio (já analisados) não deve ficar de fora do Gabinete — sem esta
+            // entrada (mesmo vazia), o nome nunca aparece em `porJuiz` e a página de
+            // resumo (com calcularEstatisticasTMJuiz) nunca chega a ser gerada pra ele(a).
+            if (secaoTempoMedio) {
+                secaoTempoMedio.dados.forEach(d => {
+                    const nome = (d.responsavel || '').trim() || '(sem responsável)';
+                    if (!porJuiz.has(nome)) porJuiz.set(nome, []);
+                });
+            }
             const itensGabinete = [...porJuiz.entries()].map(([nome, sub]) => {
                 const itens = sub.map(d => ({ dias: diasNum(d.dtRemessa, now), prioritario: !!d.prioritario }));
                 const maisAntiga = maiorDias(itens);
@@ -6929,13 +7116,10 @@
         const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
         let usouPagina1 = false;
 
-        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas'
-        // (pedido do usuário: ir direto às tabelas, sem folha de rosto) não se desenha
-        // capa nenhuma; a primeira tabela renderizada usa a página 1 que o jsPDF já cria
-        // por padrão (ver usarPaginaTabelas, mais abaixo, que remove essa página 1 só se
-        // ela ficar em branco — caso a 1ª seção use uma função de tabela que sempre
-        // começa com doc.addPage() incondicional). Se o conteúdo passar de uma página,
-        // segue normalmente na próxima. ═══
+        // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas' a
+        // página 1 que o jsPDF já cria por padrão é reservada pro cabeçalho + sumário
+        // (ver desenharCapaTabelas/desenharSumarioTabelas, mais abaixo) em vez de ficar
+        // em branco. Se o conteúdo passar de uma página, segue normalmente na próxima. ═══
         if (modo === 'resumo' && temConteudo) {
             const primeira = !usouPagina1;
             const pgCapa = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
@@ -7035,39 +7219,37 @@
             // mas com dado a discriminar (Audiências Pendentes, Suspensos, Suspensos com
             // Prazo, Instância Recursal, Arquivados com Saldo — ver comentário no topo
             // desta função sobre somenteResumo) mostram o resumo inteiro deles (única
-            // forma de ver a tabela embutida). Audiências Realizadas e Cumprimento de
-            // Medidas não têm NENHUM dado discriminado (só totais agregados) — ficam de
-            // fora deste modo, como sempre ficaram fora do passo de tabela. ═══
+            // forma de ver a tabela embutida, sem KPIs — somenteTabelas=true). Audiências
+            // Realizadas e Cumprimento de Medidas não têm NENHUM dado discriminado (só
+            // totais agregados) — ficam de fora deste modo, como sempre ficaram fora do
+            // passo de tabela. ═══
             const CFGS_TABELA_EMBUTIDA = [CFG_AUDIENCIAS, CFG_SUSPENSOS, CFG_SUSPENSOS_PRAZO, CFG_INSTANCIA_RECURSAL, CFG_ARQUIVADOS_SALDO];
-            // As funções montarTabela* (Paralisados, Juntadas, Ativos por Classe, Gabinete
-            // etc.) sempre começam com um doc.addPage() incondicional — desenhado assim
-            // porque, no modo 'resumo', sempre vêm depois de outra página já existente.
-            // Sem a capa (pedido do usuário: "ir direto às tabelas"), se uma dessas for a
-            // PRIMEIRA coisa do documento, esse addPage() deixaria a página 1 (criada por
-            // padrão pelo próprio jsPDF) em branco. `montarFn` já deve ter chamado
-            // addPage e retornado o número da página onde desenhou; se essa foi a
-            // primeira seção do documento, remove a página 1 em branco e ajusta o número
-            // de página retornado (a numeração de todo o resto do doc, que só é montado
-            // DEPOIS, sai correta porque doc.internal.getNumberOfPages() já reflete a
-            // página removida).
-            const usarPaginaTabelas = (montarFn) => {
-                const eraPrimeira = !usouPagina1;
-                let pg = montarFn();
-                if (eraPrimeira && pg > 1) { doc.deletePage(1); pg -= 1; }
-                usouPagina1 = true;
-                return pg;
-            };
+            // Pedido do usuário: sumário na página 1 (ao invés de deixá-la em branco ou
+            // removê-la — era o que o código antigo fazia). A página 1 fica reservada
+            // pro cabeçalho (desenharCapaTabelas, reaproveitado — antes desenhado só na
+            // definição, sem call site) + a lista de seções (desenharSumarioTabelas, no
+            // fim, quando já se sabe o nº de página de cada uma). Como a página 1 nunca
+            // mais fica livre pra conteúdo de seção, todo `montarFn` abre sua própria
+            // página normalmente (comportamento padrão dele, sem o hack de deletar a
+            // página 1 que existia antes).
+            desenharCapaTabelas(doc, agora, true);
+            usouPagina1 = true;
+            const sumarioItens = []; // {grupo, rotulo, pg}
+
             const renderizarViaTabelaOuResumo = (secao, dados) => {
                 if (secaoTemTabela(secao)) {
-                    return usarPaginaTabelas(() => secao.montarTabela(doc, dados, null));
+                    return secao.montarTabela(doc, dados, null);
                 }
                 if (CFGS_TABELA_EMBUTIDA.includes(secao.cfgOriginal) && dados.length) {
-                    const primeira = !usouPagina1;
-                    const pg = doc.internal.getNumberOfPages() + (primeira ? 0 : 1);
+                    const pg = doc.internal.getNumberOfPages() + 1;
                     // último argumento (somenteTabelas=true): sem KPIs/observações neste
-                    // modo (pedido do usuário) — só título curto + tabela(s).
-                    secao.montarResumo(doc, dados, primeira, false, null, null, true);
-                    usouPagina1 = true;
+                    // modo (pedido do usuário) — só título curto + tabela(s). Bug corrigido
+                    // nesta sessão: o wrapper montarResumo de descreverSecaoPDF só lia os 5
+                    // primeiros argumentos — os wrappers agora aceitam e repassam
+                    // somenteTabelas como 6º argumento (ver CFG_AUDIENCIAS/
+                    // CFG_ARQUIVADOS_SALDO/CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO/
+                    // CFG_INSTANCIA_RECURSAL em descreverSecaoPDF).
+                    secao.montarResumo(doc, dados, false, false, null, true);
                     return pg;
                 }
                 return null;
@@ -7075,7 +7257,10 @@
 
             if (secaoAtivosClasse) {
                 const pg = renderizarViaTabelaOuResumo(secaoAtivosClasse, secaoAtivosClasse.dados);
-                if (pg) doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, secaoAtivosClasse.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: secaoAtivosClasse.rotulo, pg });
+                }
             }
 
             let bmCartorio = null;
@@ -7084,21 +7269,28 @@
                 if (!pg) return;
                 if (!bmCartorio) bmCartorio = doc.outline.add(null, 'Cartório', { pageNumber: pg });
                 doc.outline.add(bmCartorio, `${t.rotulo} (${t.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Cartório', rotulo: `${t.rotulo} (${t.pendentes})`, pg });
             });
 
             outrasSecoes.forEach(s => {
                 const pg = renderizarViaTabelaOuResumo(s, s.dados);
-                if (pg) doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                if (pg) {
+                    doc.outline.add(null, s.rotulo, { pageNumber: pg });
+                    sumarioItens.push({ grupo: null, rotulo: s.rotulo, pg });
+                }
             });
 
             // Gabinete/Conclusões SEMPRE por último (pedido do usuário) — depois de
             // Cartório e de outrasSecoes.
             let bmGabinete = null;
             gabinete.itens.forEach(info => {
-                const pg = usarPaginaTabelas(() => montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null));
+                const pg = montarTabelaJuizConclusoes(doc, info.rotulo, info.dados, now, null);
                 if (!bmGabinete) bmGabinete = doc.outline.add(null, 'Gabinete', { pageNumber: pg });
                 doc.outline.add(bmGabinete, `${info.rotulo} (${info.pendentes})`, { pageNumber: pg });
+                sumarioItens.push({ grupo: 'Gabinete', rotulo: `${info.rotulo} (${info.pendentes})`, pg });
             });
+
+            desenharSumarioTabelas(doc, sumarioItens);
         }
 
         // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
@@ -7151,7 +7343,7 @@
     // Lista dos processos mais demorados: linha dupla (processo em negrito + classe em
     // cinza) à esquerda e uma barra proporcional aos dias à direita.
     function desenharTopDemorados(doc, x, y, w, h, titulo, itens) {
-        tituloSecao(doc, x, y + 4, w, titulo, COR.vermelho);
+        tituloSecao(doc, x, y + 4, w, titulo);
         const topo = y + 10;
         const areaH = Math.max(6, h - 10);
         if (!itens.length) return;
@@ -7227,6 +7419,7 @@
 
         // Período de referência (salvo quando o usuário preencheu o formulário)
         let periodoStr = '';
+        let iniPeriodo = '';
         let fimPeriodo = '';
         {
             // Mesma proteção contra JSON codificado em camadas usada em lerFilaMesesTempoMedio.
@@ -7235,11 +7428,17 @@
             while (typeof v === 'string' && t < 5) { try { v = JSON.parse(v); } catch (e) { v = {}; break; } t++; }
             const per = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
             if (per.ini || per.fim) periodoStr = `${per.ini || '?'} a ${per.fim || '?'}`;
+            iniPeriodo = per.ini || '';
             fimPeriodo = per.fim || '';
         }
         // "Até dd/mm" (sem o ano — o termo final é sempre dentro do período já mostrado no
         // subtítulo) usado no rótulo do KPI de não cumpridas, ver abaixo.
         const fimCurto = fimPeriodo ? fimPeriodo.slice(0, 5) : '';
+        // Versão curta do período (sem ano nas duas pontas) pro subtítulo do KPI "Registros
+        // analisados" — o período completo (periodoStr) não cabia numa linha só do card e
+        // ficava cortado no meio (bug relatado pelo usuário); o ano completo já aparece no
+        // subtítulo da página, então não se perde informação.
+        const periodoCurto = (iniPeriodo && fimPeriodo) ? `${iniPeriodo.slice(0, 5)} a ${fimPeriodo.slice(0, 5)}` : '';
 
         // Decisões ainda não cumpridas (dtCartorio vazia = cartório não analisou ainda)
         const naoCumpridas = dados.filter(d => !d.dtCartorio);
@@ -7268,11 +7467,11 @@
         const kY = yLinhaTM + 5;
         const kW4 = (uw - 3 * gap) / 4;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m,               kY, kW4, 28, 'Registros analisados', String(dados.length), [periodoCurto ? `Período: ${periodoCurto}` : ''], true, COR.azul);
+        desenharCard(doc, m + kW4 + gap,   kY, kW4, 28, 'Tempo médio geral', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW4+gap), kY, kW4, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
         desenharCard(doc, m + 3*(kW4+gap), kY, kW4, 28, `Não cumpridas${fimCurto ? ` (até ${fimCurto})` : ''}`, String(naoCumpridas.length),
-            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.ambar);
+            [maisAntigaNC ? `mais antiga: ${maisAntigaNC.str}` : ''], true, COR.azul);
 
         // Linha 2: tempo médio prioritários vs não prioritários (centralizados)
         const k2Y = kY + 28 + gap;
@@ -7349,7 +7548,7 @@
             const disponivelM = ph - m - gY0m - 14;
             const alturaM = Math.max(30, (disponivelM - chartGapM) / 2);
             desenharSerieMensal(doc, m, gY0m, uw, alturaM, 'Volume de cumprimentos por mês', porMes, 'n', (v) => String(v), COR.azul);
-            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.aqua);
+            desenharSerieMensal(doc, m, gY0m + alturaM + chartGapM, uw, alturaM, 'Tempo médio de cumprimento por mês', porMes, 'media', (v) => fmtDias(v), COR.azul);
             desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice);
         }
 
@@ -7528,7 +7727,7 @@
                 [maisAntigaVencida
                     ? `mais antiga: ${maisAntigaVencida.data} (${Math.abs(diasAteAudiencia(maisAntigaVencida.data, agora.getTime()))} dias)`
                     : 'nenhuma audiência já realizada sem termo'],
-                true, vencidas.length ? COR.vinho : COR.aqua);
+                true, vencidas.length ? COR.vinho : COR.azul);
 
             // Tabela no lugar do gráfico de antes (pedido do usuário) — deixa espaço para a
             // tabela discriminada logo abaixo, na mesma página quando couber.
@@ -7542,15 +7741,16 @@
 
         // Observação destacada (pedido do usuário): quando há audiência com termo
         // pendente há mais de 5 dias (vencida, ou seja, já realizada, mas sem termo
-        // lançado), recomenda que a secretaria observe e regularize a situação. Some no
-        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só tabelas
-        // ali (a tabela de processos vencidos continua aparecendo).
+        // lançado), recomenda que a secretaria observe e regularize a situação. Observação
+        // E esta tabela intermediária (só Processo/Atribuição) somem no modo "Tabelas
+        // Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela completa única
+        // ali (o "Detalhamento" mais abaixo), sem tabelas intermediárias.
         const vencidasMaisDe5Dias = vencidas.filter(d => {
             const n = diasAteAudiencia(d.dataAudiencia, agora.getTime());
             return n != null && Math.abs(n) > 5;
         });
-        if (vencidasMaisDe5Dias.length) {
-            if (!somenteTabelas) {
+        if (vencidasMaisDe5Dias.length && !somenteTabelas) {
+            {
                 const obs = `Há ${vencidasMaisDe5Dias.length} audiência(s) com termo pendente há mais de 5 dias. `
                     + 'Recomenda-se que a secretaria observe as audiências com termo pendente e regularize a situação.';
                 doc.setFont('PublicSans', 'italic'); doc.setFontSize(8);
@@ -7575,12 +7775,13 @@
             // relatório, inclusive no modo "Só resumo" do PDF conjunto.
             tituloSecao(doc, m, proximoY, uw, `Audiências com termo pendente há mais de 5 dias (${vencidasMaisDe5Dias.length})`);
             doc.autoTable({
-                columns: [{ header: 'Processo', dataKey: 'k0' }],
-                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo })),
+                columns: [{ header: 'Processo', dataKey: 'k0' }, { header: 'Atribuição', dataKey: 'k1' }],
+                body: vencidasMaisDe5Dias.map(d => ({ k0: d.processo, k1: d.competencia || d.atuacao || '(sem atribuição)' })),
                 startY: proximoY + 6,
                 margin: { left: m, right: m, top: m, bottom: 14 },
                 theme: 'grid',
                 tableWidth: uw,
+                columnStyles: { k0: { cellWidth: uw * 0.45 }, k1: { cellWidth: uw * 0.55 } },
                 styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
                           lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
@@ -7717,7 +7918,7 @@
         const kY = yLinha + 5;
         const kW2 = (uw - gap) / 2;
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
-        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.aqua);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.azul);
 
         // Dois KPIs (pedido do usuário): 1) só a situação da vara (verde até 180 dias até a
         // audiência mais distante, amarelo de 180 a 360, vermelho acima de 360 — mesma
@@ -7738,7 +7939,7 @@
         desenharCard(doc, m, k2Y, kW2, alturaCard2, 'Situação da Vara', infoStatus.rotulo,
             [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
             true, infoStatus.cor);
-        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.ambar);
+        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.azul);
 
         const tY = k2Y + alturaCard2 + gap + 4;
         if (r.porTipo.length) {
@@ -7794,7 +7995,7 @@
                     margin: { left: m, right: m, bottom: 14 },
                     theme: 'grid',
                     styles: { font: 'PublicSans', fontSize: 8.5, cellPadding: 2.2, textColor: COR.tintaSec, lineColor: COR.grade, lineWidth: 0.1, valign: 'middle' },
-                    headStyles: { fillColor: COR.aqua, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                    headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                     alternateRowStyles: { fillColor: COR.cartao },
                     columnStyles: { dia: { cellWidth: uw * 0.25 }, tipo: { cellWidth: uw * 0.5 }, quantidade: { cellWidth: uw * 0.25, halign: 'right' } },
                     didDrawPage: () => desenharRodape(doc, TITULO_AUDIENCIAS_DESIGNADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
@@ -7966,29 +8167,33 @@
         // atribuição/vara aparece como UMA linha só, com os valores somados — não uma
         // linha por atribuição (isso continua disponível, sem prejuízo, em r.porAtribuicao/
         // r.porUsuario granular, usados só internamente pra conferência de soma). Agrupa
-        // por `usuario` (login, mais estável que o nome) com fallback pro nome.
-        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario);
+        // por `usuario` (login, mais estável que o nome) com fallback pro nome. Pedido do
+        // usuário (rodada seguinte): ignora quem não teve NENHUM resultado em nenhuma
+        // categoria — antes todos apareciam mesmo com tudo zerado.
+        const porUsuarioAgrupado = agruparAudienciasRealizadasPorUsuario(r.porUsuario)
+            .filter(u => u.quantidade || u.canceladas || u.negativas || u.naoRealizadas || u.redesignadas);
 
         const gap = 6;
         const kY = yLinha + 5;
         const kW3top = (uw - 2 * gap) / 3;
         desenharCard(doc, m,                     kY, kW3top, 28, 'Total de Audiências Realizadas', String(r.totalGeral), [], true, COR.azul);
-        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.aqua);
-        desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.ambar);
+        desenharCard(doc, m + kW3top + gap,       kY, kW3top, 28, 'Total de Magistrados', String(porUsuarioAgrupado.length), [], true, COR.azul);
+        desenharCard(doc, m + 2 * (kW3top + gap), kY, kW3top, 28, 'Total de Pessoas Ouvidas', String(r.pessoasOuvidas), [], true, COR.azul);
 
         // Canceladas/Negativas/Não Realizadas/Redesignadas — extraídas só da pesquisa
         // geral, lado a lado numa segunda linha de KPIs menores.
         const k2Y = kY + 28 + gap;
         const kW4 = (uw - 3 * gap) / 4;
-        desenharCard(doc, m,                   k2Y, kW4, 24, 'Canceladas', String(r.canceladas), [], true, COR.ambar);
+        desenharCard(doc, m,                   k2Y, kW4, 24, 'Canceladas', String(r.canceladas), [], true, COR.azul);
         desenharCard(doc, m + kW4 + gap,       k2Y, kW4, 24, 'Negativas', String(r.negativas), [], true, COR.muted);
         desenharCard(doc, m + 2 * (kW4 + gap), k2Y, kW4, 24, 'Não Realizadas', String(r.naoRealizadas), [], true, COR.vermelho);
         desenharCard(doc, m + 3 * (kW4 + gap), k2Y, kW4, 24, 'Redesignadas', String(r.redesignadas), [], true, COR.muted);
 
         // Sem gráfico aqui — a mesma informação já está na tabela abaixo (pedido do
         // usuário), com o percentual de cada categoria sobre o total do magistrado(a)
-        // (realizadas + canceladas + negativas + não realizadas + redesignadas). TODOS os
-        // magistrados aparecem, mesmo com 0 (pedido do usuário — sem filtro de mínimo).
+        // (realizadas + canceladas + negativas + não realizadas + redesignadas). Só
+        // magistrados com pelo menos 1 resultado em alguma categoria aparecem (ver filtro
+        // em porUsuarioAgrupado acima).
         const tY = k2Y + 24 + gap + 4;
         if (porUsuarioAgrupado.length) {
             tituloSecao(doc, m, tY, uw, 'Detalhamento por usuário');
@@ -8179,11 +8384,11 @@
         const kH = 34; // 2 linhas de título + valor + linha de "Situação: Crítico"
         const kW = (uw - 2 * gap) / 3;
         desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), atrasados > LIMIAR_ATRASO_CRITICO, COR.vermelho);
-        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.ambar);
+        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.azul);
         desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
 
         let y = kY + kH + 10;
-        tituloSecao(doc, m, y, uw, 'Observação', COR.azul);
+        tituloSecao(doc, m, y, uw, 'Observação');
         y += 5;
 
         doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
@@ -8371,7 +8576,7 @@
         // sobra depois de tirar os urgentes.
         const totalNormais = Math.max(0, totalPendentes - totalUrgentes);
         desenharCard(doc, m, kY, kW2, 28, 'Total de Cumprimentos Pendentes', String(totalPendentes),
-            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.ambar);
+            [`${totalNormais} normal(is)  •  ${totalUrgentes} urgente(s)`], true, COR.azul);
 
         const maisPendencias = r.length ? [...r].sort((a, b) => b.pendentes - a.pendentes)[0] : null;
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Tipo com Mais Pendências',
@@ -8392,7 +8597,7 @@
             const etapas = etapasOutrosCumprimentos(r);
             const somaEtapas = etapas.reduce((s, e) => s + e.valor, 0);
             if (somaEtapas > 0) {
-                y = tabelaCategorias(doc, m, y, uw, 'Em que etapa do fluxo está parado', etapas, { rotuloCategoria: 'Etapa', acento: COR.ambar }) + 3.5;
+                y = tabelaCategorias(doc, m, y, uw, 'Em que etapa do fluxo está parado', etapas, { rotuloCategoria: 'Etapa', acento: COR.azul }) + 3.5;
                 // Aviso obrigatório: as 5 etapas são um SUBCONJUNTO de
                 // CAMPOS_PENDENTES_PRINCIPAL, então a soma delas não fecha com o total
                 // pendente (que inclui aguardando depósito, AR digital etc.), e a tabela
@@ -8629,7 +8834,7 @@
             const kY = yLinha + 6;
             const kpis = [
                 { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
-                { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.aqua },
+                { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.azul },
             ];
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
             kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, [], true, k.acento));
@@ -8647,7 +8852,9 @@
                 valAntigo = `${maisAntigo.d.dtArquivamento}  (${dias} dias arquivado)`;
                 subsAntigo = [`Processo ${maisAntigo.d.processo}`, `Saldo: ${fmtBRL(maisAntigo.d.saldo)}`];
             }
-            desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, false, COR.vermelho);
+            // Pedido do usuário: centralizar o conteúdo deste card (mesmo padrão dos
+            // cards de KPI ao lado, que já usam central=true).
+            desenharCard(doc, m, aY, uw, 28, 'Arquivamento Mais Antigo Com Saldo', valAntigo, subsAntigo, true, COR.vermelho);
 
             // Observação (pedido do usuário): só faz sentido alertar a secretaria quando o
             // relatório efetivamente lista algum processo. Some no modo "Tabelas
@@ -8661,10 +8868,11 @@
 
         // Tabela completa com Processo / Atribuição / Dt Arquivamento / Saldo (pedido do
         // usuário) — aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo"
-        // do PDF conjunto, independente da tabela discriminada mais detalhada abaixo
-        // (que só entra no modo "Tabelas Discriminadas"). Mesma ordenação: Saldo
-        // descendente (maior primeiro).
-        if (r.length) {
+        // do PDF conjunto, independente da tabela discriminada mais detalhada abaixo. Some
+        // no modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a
+        // tabela completa única ali (mais abaixo), sem esta intermediária. Mesma
+        // ordenação: Saldo descendente (maior primeiro).
+        if (r.length && !somenteTabelas) {
             const ordenadosCompleta = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
             tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length})`);
             const colunasCompleta = [
@@ -8817,7 +9025,7 @@
         hy += 3;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, hy, pw - m, hy);
 
-        tabelaCategorias(doc, m, hy + 6, uw, tituloTabela, itens, { rotuloCategoria: 'Último Movimento', acento: COR.ambar });
+        tabelaCategorias(doc, m, hy + 6, uw, tituloTabela, itens, { rotuloCategoria: 'Último Movimento', acento: COR.azul });
         desenharRodape(doc, titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
@@ -8879,7 +9087,7 @@
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,               kY, kW3, 28, 'Processos paralisados', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, 28, 'Tempo médio paralisado', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap), kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
         // Linha 2: tempo médio paralisado prioritários vs não prioritários (centralizados)
@@ -9056,7 +9264,7 @@
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
         desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
         // Linha 2: tempo médio em remessa prioritários vs não prioritários (centralizados)
@@ -9237,12 +9445,12 @@
         const alturaClasseMais = classeComMais ? medirAlturaCardLista(doc, kW3, classeComMais.classe, true) : 28;
         const alturaLinha1 = Math.max(28, alturaClasseMais);
         desenharCard(doc, m,               kY, kW3, alturaLinha1, 'Processos Ativos (Em andamento)', String(totalAtivos), [], true, COR.azul);
-        desenharCard(doc, m + kW3 + gap,   kY, kW3, alturaLinha1, 'Classes Processuais', String(r.length), [], true, COR.aqua);
+        desenharCard(doc, m + kW3 + gap,   kY, kW3, alturaLinha1, 'Classes Processuais', String(r.length), [], true, COR.azul);
         if (classeComMais) {
             desenharCardLista(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos',
-                classeComMais.classe, `${classeComMais.emAndamento} ativo(s)`, COR.ambar);
+                classeComMais.classe, `${classeComMais.emAndamento} ativo(s)`, COR.azul);
         } else {
-            desenharCard(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos', '—', [], true, COR.ambar);
+            desenharCard(doc, m + 2*(kW3+gap), kY, kW3, alturaLinha1, 'Classe com Mais Ativos', '—', [], true, COR.azul);
         }
 
         // Tabela no lugar do gráfico de antes (pedido do usuário): distribuição do acervo
@@ -9385,7 +9593,7 @@
                     antigo.registro.classe || '',
                 ];
             }
-            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.ambar);
+            desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
             // Observação final destacada (texto literal pedido pela Corregedoria) —
             // mantida mesmo sem os demais gráficos (pedido do usuário: manter o texto,
@@ -9401,10 +9609,11 @@
 
         // Tabela com até 15 processos suspensos há mais tempo (pedido do usuário) —
         // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
-        // conjunto, independente da tabela discriminada completa mais abaixo (que só
-        // entra no modo "Tabelas Discriminadas"). Mesmo critério de ordenação da tabela
-        // completa: Início Suspensão ascendente (mais antiga primeiro).
-        if (r.length) {
+        // conjunto, independente da tabela discriminada completa mais abaixo. Some no
+        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela
+        // completa única ali, sem esta intermediária. Mesmo critério de ordenação da
+        // tabela completa: Início Suspensão ascendente (mais antiga primeiro).
+        if (r.length && !somenteTabelas) {
             const top15 = r.slice()
                 .sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0))
                 .slice(0, 15);
@@ -9587,7 +9796,7 @@
             desenharCard(doc, m, kY, kW3, 28, 'Processos Suspensos', String(r.length), [], true, COR.azul);
             desenharCard(doc, m + kW3 + gap, kY, kW3, 28, 'Classe com Mais Suspensões',
                 classeTop ? classeTop.classe : '—',
-                classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.aqua);
+                classeTop ? [`${classeTop.quantidade} processo(s)`] : [], true, COR.azul);
             // O número do processo (sem espaços de sobra pra quebrar) vai na LINHA DE VALOR
             // do card, não em "subs" — desenharCard trunca "valor" internamente com a fonte
             // certa (bold, já ativa no momento do desenho); "subs" usa
@@ -9602,11 +9811,12 @@
 
         // Tabela com até 15 processos com maior tempo de suspensão (pedido do usuário) —
         // aparece SEMPRE no corpo do relatório, inclusive no modo "Só resumo" do PDF
-        // conjunto, independente da tabela discriminada completa mais abaixo (que só
-        // entra no modo "Tabelas Discriminadas"). Ordenada por Tempo de Suspensão
+        // conjunto, independente da tabela discriminada completa mais abaixo. Some no
+        // modo "Tabelas Discriminadas" (somenteTabelas) — pedido do usuário: só a tabela
+        // completa única ali, sem esta intermediária. Ordenada por Tempo de Suspensão
         // (duração fim - início) descendente — maior tempo primeiro; registros sem
         // duração calculável vão ao final.
-        if (r.length) {
+        if (r.length && !somenteTabelas) {
             const temMotivoTop15 = r.some(d => d.motivo);
             const top15 = r.slice()
                 .sort((a, b) => {
@@ -9780,19 +9990,17 @@
         // Observação + tabela dos processos enviados há mais de 2 anos (pedido do
         // usuário) — só aparecem quando há algum processo nessa situação, mas SEMPRE no
         // corpo do relatório (inclusive no modo "Só resumo" do PDF conjunto),
-        // independente da tabela discriminada completa mais abaixo (que só entra no modo
-        // "Tabelas Discriminadas"). Texto literal fornecido pelo usuário — a observação
-        // (mas não a tabela) some no modo "Tabelas Discriminadas" (somenteTabelas), pedido
-        // do usuário: só tabelas ali.
-        if (maisDe2Anos.length) {
-            if (!somenteTabelas) {
-                const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
-                    + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
-                    + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
-                    + 'do andamento processual.';
-                const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
-                proximoY += alturaObs2Anos + gap;
-            }
+        // independente da tabela discriminada completa mais abaixo. Ambas (observação E
+        // esta tabela intermediária) somem no modo "Tabelas Discriminadas"
+        // (somenteTabelas) — pedido do usuário: só a tabela completa única ali, sem
+        // tabelas intermediárias.
+        if (maisDe2Anos.length && !somenteTabelas) {
+            const obs2Anos = 'Constatou-se a existência de processos em trâmite na instância recursal há mais de dois '
+                + 'anos. Recomenda-se que seja realizada verificação manual, em especial daqueles recursos que '
+                + 'tramitavam na forma física, para verificar se não foram implementadas as hipóteses para retomada '
+                + 'do andamento processual.';
+            const alturaObs2Anos = desenharCardObservacaoArquivadosSaldo(doc, m, proximoY, uw, obs2Anos);
+            proximoY += alturaObs2Anos + gap;
 
             tituloSecao(doc, m, proximoY, uw, `Processos em instância recursal há mais de 2 anos (${maisDe2Anos.length})`);
             const colunasAntigos = [
@@ -9961,17 +10169,17 @@
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
-        // As 3 telas de Mandados vêm ANTES de CFG_RETORNO de propósito: a coluna "Data
+        // As telas de Mandados vêm ANTES de CFG_RETORNO de propósito: a coluna "Data
         // retorno" da tabela de Mandados também casa com o regex (largo, só "/retorno/i")
         // de CFG_RETORNO, então checar Mandados primeiro evita depender só da checagem
         // extra que CFG_RETORNO.detecta ganhou por causa dessa colisão (defesa em
         // profundidade — cada detecta() aqui deveria ser específico o bastante pra não
-        // precisar de ordem, mas ordem importa quando um deles é largo demais). As 3 telas
+        // precisar de ordem, mas ordem importa quando um deles é largo demais). As telas
         // de Mandados compartilham o mesmo cabeçalho entre si — distinguem-se pelo valor
         // do select de status (ver detecta() de cada CFG_MANDADOS_*).
         else if (CFG_MANDADOS_RETORNO.detecta(cab)) cfg = CFG_MANDADOS_RETORNO;
-        else if (CFG_MANDADOS_CUMPRIMENTO_LIDO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO_LIDO;
-        else if (CFG_MANDADOS_CUMPRIMENTO_NAOLIDO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO_NAOLIDO;
+        else if (CFG_MANDADOS_DISTRIBUICAO.detecta(cab)) cfg = CFG_MANDADOS_DISTRIBUICAO;
+        else if (CFG_MANDADOS_CUMPRIMENTO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO;
         else if (CFG_MANDADOS_DECURSO.detecta(cab)) cfg = CFG_MANDADOS_DECURSO;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
@@ -10335,10 +10543,12 @@
     // estamos mesmo na página certa antes de considerar "0 registros" (ver injetarBotoes).
     function urlEsperadaRelatorio(navAlvo) {
         if (navAlvo === 'juntadas') return /analisarJuntada\.do/i;
-        // 'mandados' não entra aqui de propósito: a fase 0 fica na MESMA URL de Juntadas
-        // (analisarJuntada.do), então usar essa URL aqui faria o fallback "sem buttonBar
-        // = 0 registros" reagir também durante a fase 0 de Mandados — que tem seu próprio
-        // gate (ver tratarFaseMandadosPendentes/gateFaseMandados em injetarBotoes).
+        // Os 4 navAlvo de Mandados (mandadosretorno/mandadosdistribuicao/
+        // mandadoscumprimento/mandadosdecurso) não entram aqui de propósito: o painel de
+        // onde partem fica na MESMA URL de Juntadas (analisarJuntada.do), então usar essa
+        // URL aqui faria o fallback "sem buttonBar = 0 registros" reagir também durante o
+        // painel de Mandados — que tem seu próprio gate (ver
+        // tratarPainelMandados/gateMandados em injetarBotoes).
         if (navAlvo === 'retorno') return /conclusao\.do/i;
         // Conclusões migrou para a mesma URL de Tempo Médio (conclusao/estatistica.do,
         // ver comentário acima de situacaoConclusaoSelecionada).
@@ -10571,25 +10781,27 @@
             return;
         }
 
-        // Fase 0 de Mandados: painel "Para Realizar" da aba "Análise de Juntadas"
+        // Painel de Mandados: "Para Realizar" da aba "Análise de Juntadas"
         // (mesaAnalista.do?actionType=listaAnaliseJuntadas — NÃO é a mesma tela de
         // Juntadas/Retorno, que ficam em analisarJuntada.do/conclusao.do; é o painel com
-        // vários contadores, incluindo "Mandados aguardando análise de retorno"). Só o
-        // estado da automação já é sinal suficiente pra tentar (evita depender de URL, que
-        // pode variar, e de conteúdo que ainda pode não ter carregado — mesma lição de
-        // Outros Cumprimentos); tratarFaseMandadosPendentes() espera ativamente o contador
-        // aparecer antes de decidir.
-        if (estadoAutoNoInicio === 'preenchendo_mandados') {
-            tratarFaseMandadosPendentes();
+        // vários contadores, incluindo "Mandados aguardando análise de retorno"). Os 4
+        // relatórios de Mandados (mandadosretorno/mandadosdistribuicao/
+        // mandadoscumprimento/mandadosdecurso) passam todos por aqui — só o estado da
+        // automação já é sinal suficiente pra tentar (evita depender de URL, que pode
+        // variar, e de conteúdo que ainda pode não ter carregado — mesma lição de Outros
+        // Cumprimentos); tratarPainelMandados() espera ativamente o contador aparecer
+        // antes de decidir.
+        if (estadoAutoNoInicio && estadoAutoNoInicio.startsWith('preenchendo_mandados')) {
+            tratarPainelMandados();
             return;
         }
 
-        // Tela de resultados de Mandados (as 3 fases, status 13/6/4): gateFaseMandados()
-        // cuida dos casos que o fluxo genérico não trata sozinho (correção de filtro fora
-        // de fase, zero resultados numa fase) — quando ela não tratou nada (uso manual, ou
-        // coleta normal em andamento), o fluxo genérico abaixo (detectarConfig/
-        // criarColetor) segue cuidando da paginação normalmente.
-        if (/cumprimentoCartorioMandado\.do/i.test(location.pathname) && gateFaseMandados()) {
+        // Tela de resultados de Mandados (os 4 relatórios, status 13/11/4/8):
+        // gateMandados() cuida dos casos que o fluxo genérico não trata sozinho (correção
+        // de filtro para o relatório errado, zero resultados) — quando ela não tratou nada
+        // (uso manual, ou coleta normal em andamento), o fluxo genérico abaixo
+        // (detectarConfig/criarColetor) segue cuidando da paginação normalmente.
+        if (/cumprimentoCartorioMandado\.do/i.test(location.pathname) && gateMandados()) {
             return;
         }
 
@@ -11593,8 +11805,10 @@
                     <button id="projudi-mu-rel-marcar" class="pa-link" type="button">Marcar tudo</button>
                     <button id="projudi-mu-rel-desmarcar" class="pa-link" type="button">Desmarcar tudo</button>
                 </div>
-                ${linhasCivel}
-                ${linhasCrime}
+                <div class="pa-checklist">
+                    ${linhasCivel}
+                    ${linhasCrime}
+                </div>
                 <div class="pa-actions">
                     <button id="projudi-mu-iniciar" class="pa-btn pa-btn-primary" type="button">▶ Rodar automação nas unidades marcadas</button>
                     <button id="projudi-mu-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
@@ -11779,20 +11993,20 @@
         // preencher+pesquisar antes de coletar.
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
-        // Mandados — UM item de fila, TRÊS relatórios internos (fases status 13 -> 6 -> 4
-        // -> 8, ver avancarOuConcluirFaseMandados). "cfg" aponta para a primeira fase
-        // (Retorno) — usado como cfg "representante" do item pelo código que assume um cfg
-        // só por item (ex. querColetarAuto em injetarBotoes); "cfgs" lista TODOS os
-        // prefixos envolvidos — inclusive as CFGs internas de coleta (LIDO/NAOLIDO, ver
-        // definição das CFGs de Mandados) — usado onde o item precisa expandir para seus
-        // prefixos de armazenamento (relatorioPorCfg, limparTudoAutomacao,
-        // pularRelatorioAtual). baixarPDFConjunto lê de TODAS elas também, mas as internas
-        // normalmente já estão vazias/sem 'coletado' nesse ponto (a mesclagem já rodou e
-        // limpou os prefixos — ver mesclarMandadosCumprimento), então não aparecem como
-        // seções duplicadas. precisaPreencher: true porque a fase 0 (leitura do contador
-        // na tela "Análise de Juntadas") precisa rodar antes de qualquer coleta, mesmo
-        // landing direto nos resultados depois.
-        { key: 'mandados', cfg: CFG_MANDADOS_RETORNO, cfgs: [CFG_MANDADOS_RETORNO, CFG_MANDADOS_CUMPRIMENTO_LIDO, CFG_MANDADOS_CUMPRIMENTO_NAOLIDO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO], navAlvo: 'mandados', rotulo: 'Mandados', curto: 'Mandados', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
+        // Mandados — 4 itens de fila INDEPENDENTES (pedido do usuário: seleção
+        // independente, cada fase é um relatório próprio, marcável/desmarcável sozinho —
+        // não mais um único item "mandados" que encadeava as 4 fases sozinho). Todos
+        // navegam pelo mesmo caminho (navAlvo aponta para o painel "Para Realizar" da aba
+        // "Análise de Juntadas" — ver navegarMenu/navegarAbaAnaliseJuntadas) e usam o
+        // mesmo mecanismo de status/filtro (ver STATUS_POR_CHAVE_MANDADO/gateMandados/
+        // tratarPainelMandados). precisaPreencher: true porque o painel "Para Realizar"
+        // precisa rodar antes de qualquer coleta, mesmo landing direto nos resultados
+        // depois. subgrupo 'Mandados' próprio (mesmo esquema de "Audiências" com
+        // rotuloChecklist) — "destrincha" as 4 opções no popup em vez de uma linha só.
+        { key: 'mandadosretorno', cfg: CFG_MANDADOS_RETORNO, navAlvo: 'mandadosretorno', rotulo: 'Mandados Aguardando Análise de Retorno', rotuloChecklist: 'Aguardando Retorno', curto: 'Mand. Retorno', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
+        { key: 'mandadosdistribuicao', cfg: CFG_MANDADOS_DISTRIBUICAO, navAlvo: 'mandadosdistribuicao', rotulo: 'Mandados Aguardando Distribuição ao Oficial de Justiça', rotuloChecklist: 'Aguardando Distribuição', curto: 'Mand. Distribuição', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
+        { key: 'mandadoscumprimento', cfg: CFG_MANDADOS_CUMPRIMENTO, navAlvo: 'mandadoscumprimento', rotulo: 'Mandados Pendentes de Cumprimento', rotuloChecklist: 'Pendentes de Cumprimento', curto: 'Mand. Cumprimento', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
+        { key: 'mandadosdecurso', cfg: CFG_MANDADOS_DECURSO, navAlvo: 'mandadosdecurso', rotulo: 'Mandados Aguardando Análise de Decurso de Prazo', rotuloChecklist: 'Decurso de Prazo', curto: 'Mand. Decurso', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
         // ── Audiências (movida do Crime pro Cartório/Cível-Geral — pedido do usuário:
         // fica visível em qualquer categoria/aba, não só Crime, igual aos demais itens
         // acima) ─────────────────────────────────────────────────────────────────────
@@ -11854,10 +12068,11 @@
     ];
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     // Considera tanto r.cfg (cfg "representante" do item) quanto r.cfgs (lista completa,
-    // ver item "mandados" em REPORTS_AUTOMACAO) — necessário porque avancarAutomacao()/
-    // querColetarAuto (em injetarBotoes) recebem qualquer uma das 3 CFGs de Mandados
-    // (Retorno/Cumprimento/NãoLidos) dependendo da fase em que a automação está, e todas
-    // precisam resolver para o mesmo item de fila ("mandados").
+    // opcional) — suporte genérico para um item de fila que precise agrupar mais de um
+    // cfg/prefixo de armazenamento sob a mesma entrada de REPORTS_AUTOMACAO. Nenhum item
+    // usa r.cfgs atualmente (cada relatório de Mandados, por exemplo, é seu próprio item
+    // independente — ver REPORTS_AUTOMACAO), mas o fallback fica pronto para o próximo
+    // caso que precisar.
     function relatorioPorCfg(cfg) {
         return REPORTS_AUTOMACAO.find(r => r.cfg === cfg || (r.cfgs && r.cfgs.includes(cfg)));
     }
@@ -11995,14 +12210,16 @@
     function navegarMenu(alvo) {
         let link = null;
         if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
-        // A fase 0 de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
+        // O painel de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
         // conclusao.do, alcançadas por link direto) — é o painel "Para Realizar" da aba
         // "Análise de Juntadas" (mesaAnalista.do?actionType=listaAnaliseJuntadas), que só
         // se chega clicando na aba #tabItemprefix2 (mesmo padrão de Outros Cumprimentos:
         // <a> sem href, precisa de clique de verdade — ver navegarAbaAnaliseJuntadas). O
         // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
-        // painel (ver tratarFaseMandadosPendentes).
-        else if (alvo === 'mandados') return navegarAbaAnaliseJuntadas();
+        // painel (ver tratarPainelMandados) — os 4 relatórios de Mandados (seleção
+        // independente, ver REPORTS_AUTOMACAO) passam todos por aqui.
+        else if (alvo === 'mandadosretorno' || alvo === 'mandadosdistribuicao'
+            || alvo === 'mandadoscumprimento' || alvo === 'mandadosdecurso') return navegarAbaAnaliseJuntadas();
         // Conclusões migrou para a tela "Estatísticas de Conclusões" (mesmo link de
         // Tempo Médio) — a tela antiga "Para Realizar" (conclusao.do) ficava incompleta
         // (só refletia a fila do cartório, não pegava tudo que estava pendente com o
@@ -12250,7 +12467,6 @@
         if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
-        if (rel.key === 'mandados') store.removeItem(CHAVE_MANDADOS_FASE);
 
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
@@ -12569,7 +12785,6 @@
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
         store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
-        store.removeItem(CHAVE_MANDADOS_FASE);
         atualizarPainel();
     }
 
@@ -12936,19 +13151,6 @@
                     const prog = lerProgressoAR();
                     if (prog && prog.total > 0) txt += ` (${prog.processados}/${prog.total} usuário(s))`;
                 }
-                // Mandados são 4 fases encadeadas num único item de fila (status
-                // 13 -> 6 -> 4 -> 8, mesma tela) — sem indicar a fase, "Coletando
-                // Mandados…" fica parado no mesmo texto por bastante tempo, sem dar pra
-                // saber em qual das 4 está. Rótulo próprio por fase (NÃO
-                // cfgMandadosPorFase(fase).pdf.titulo — as fases "cumprimento"/"naolidos"
-                // resolvem pra CFG_MANDADOS_CUMPRIMENTO_LIDO/NAOLIDO, que são configs só
-                // de coleta INTERNA, sem `.pdf` — ler `.pdf.titulo` delas lançava
-                // exceção e derrubava a atualização do painel inteira nessas duas fases).
-                if (chave === 'mandados') {
-                    const fase = store.getItem(CHAVE_MANDADOS_FASE);
-                    const rotuloFase = ROTULOS_FASE_MANDADOS[fase];
-                    if (rotuloFase) txt += ` — fase: <strong>${rotuloFase}</strong>`;
-                }
                 // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — sem
                 // indicar qual mês e quantos faltam, "Coletando Tempo Médio…" fica parado
                 // no mesmo texto por várias buscas seguidas, sem dar pra saber se está
@@ -13170,10 +13372,12 @@
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
                     <div class="pa-progress-lbl">—</div>
                 </div>
-                ${linhasGrupos}
-                <div class="pa-group pa-group-especifico" style="display:none;">
-                    <p class="pa-group-lbl especifico"></p>
-                    <div class="pa-group-conteudo"></div>
+                <div class="pa-checklist">
+                    ${linhasGrupos}
+                    <div class="pa-group pa-group-especifico" style="display:none;">
+                        <p class="pa-group-lbl especifico"></p>
+                        <div class="pa-group-conteudo"></div>
+                    </div>
                 </div>
                 <div class="pa-links">
                     <button id="pa-marcar-tudo" class="pa-link" type="button">Marcar tudo</button>
@@ -13440,6 +13644,16 @@
         #painel-automacao .pa-progress-lbl , #projudi-mu-painel .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-tempo , #projudi-mu-painel .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
+        /* Checklist de relatórios (pedido do usuário: com Mandados virando 4 itens
+           independentes, ver REPORTS_AUTOMACAO, a lista ficou comprida demais e alguns
+           itens/botões saíam da tela). Rolagem própria, limitada a uma fração da altura
+           da janela, mantendo cabeçalho/abas/estado e os botões de ação sempre visíveis
+           fora da área rolável. Sem borda/fundo próprios — vazio (com a automação em
+           curso, que esconde cada .pa-group por dentro) não deixa nenhum resquício visual. */
+        #painel-automacao .pa-checklist , #projudi-mu-painel .pa-checklist {
+            max-height: min(46vh, 320px); overflow-y: auto; overflow-x: hidden;
+            margin-bottom: 4px; padding-right: 2px;
+        }
         #painel-automacao .pa-group , #projudi-mu-painel .pa-group { margin-bottom: 10px; }
         #painel-automacao .pa-group-lbl , #projudi-mu-painel .pa-group-lbl {
             display: flex; align-items: center; gap: 6px; font-size: .66em; font-weight: 700;
