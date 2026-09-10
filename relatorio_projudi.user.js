@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.28
+// @version      25.29
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -407,6 +407,16 @@
 
     const CFG_JUNTADAS = {
         prefixo: 'projudi_juntadas_',
+        // KPI "Juntadas pendentes" deve somar as DUAS filas do painel "Análise de
+        // Juntadas" da página inicial — "Com Urgência" e "Para Realizar" (pedido do
+        // usuário) — não só dados.length, que reflete apenas a fila "Para Realizar" (é a
+        // única que o script efetivamente navega/coleta; "Com Urgência" é uma fila
+        // separada no Projudi, sem lista própria coletada). Reaproveita o mesmo mecanismo
+        // de CFG_APREENSOES (totalIdentificadoNoResumo + prefixo+'total_identificado'),
+        // só que aqui quem grava o valor é capturarContadoresPainelJuntadas() (rodando a
+        // cada carregamento de página, via bootstrap) em vez de adicionarPagina — os dois
+        // contadores só existem no painel da página inicial, não na tela de resultados.
+        totalIdentificadoNoResumo: true,
         detecta: (cab) => /juntado\s+por/i.test(cab),
         minTds: 9,                              // linhas têm 10 tds (0=checkbox, 1=expandir, 2=semáforo)
         usaAtuacao: false,
@@ -12515,6 +12525,36 @@
         return docs;
     }
 
+    // Painel "Análise de Juntadas" da página inicial (mesaAnalista.do?actionType=
+    // listaAnaliseJuntadas) mostra duas filas separadas de juntadas — "Com Urgência" e
+    // "Para Realizar" — cada uma com sua própria contagem (spans
+    // #numeroPeticoesFazerJuntadaPedidoUrgencia e #numeroPeticoesFazerJuntada). O script
+    // só navega/coleta a fila "Para Realizar" (não existe uma tela própria de resultados
+    // pra "Com Urgência" que valha a pena coletar linha a linha), mas o KPI "Juntadas
+    // pendentes" do PDF precisa refletir a SOMA das duas (pedido do usuário). Roda a cada
+    // carregamento de página (bootstrap) e grava a soma em prefixo+'total_identificado' —
+    // mesma chave que CFG_APREENSOES usa via totalIdentificadoNoResumo (ver
+    // montarResumoGenerico), só que ali quem grava é adicionarPagina.
+    function capturarContadoresPainelJuntadas() {
+        const docs = todosDocumentosAcessiveis();
+        let urgencia = null, realizar = null;
+        for (const d of docs) {
+            const spUrg = d.getElementById && d.getElementById('numeroPeticoesFazerJuntadaPedidoUrgencia');
+            const spReal = d.getElementById && d.getElementById('numeroPeticoesFazerJuntada');
+            if (spUrg && urgencia === null) {
+                const n = parseInt((spUrg.textContent || '').trim(), 10);
+                if (Number.isFinite(n)) urgencia = n;
+            }
+            if (spReal && realizar === null) {
+                const n = parseInt((spReal.textContent || '').trim(), 10);
+                if (Number.isFinite(n)) realizar = n;
+            }
+            if (urgencia !== null && realizar !== null) break;
+        }
+        if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
+        store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
+    }
+
     function acharLinkMenu(urlRe, textoRe) {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
@@ -14244,6 +14284,7 @@
         chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
+        chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
         // comentário grande acima de CHAVE_MU_ATIVO).
@@ -14257,6 +14298,7 @@
         setInterval(() => {
             chamarSeguro(atualizarPainel, 'atualizarPainel');
             chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
+            chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
         }, 2000);
