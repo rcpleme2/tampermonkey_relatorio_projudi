@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.29
+// @version      25.30
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -352,6 +352,14 @@
 
     const CFG_RETORNO = {
         prefixo: 'projudi_retorno_',
+        // KPI "Retornos de conclusão pendentes" deve somar as DUAS filas do painel
+        // "Retorno de Conclusão" da página inicial — "Com Urgência" e "Para Realizar"
+        // (pedido do usuário) — não só dados.length, que reflete apenas a fila "Para
+        // Realizar" (é a única que o script efetivamente navega/coleta; "Com Urgência" é
+        // uma fila separada no Projudi, sem lista própria coletada). Mesmo mecanismo de
+        // CFG_JUNTADAS (totalIdentificadoNoResumo + prefixo+'total_identificado'), com
+        // captura própria em capturarContadoresPainelRetorno() (bootstrap).
+        totalIdentificadoNoResumo: true,
         // "retorno" sozinho também casa com a tabela de Mandados (coluna "Data retorno") —
         // exige também "agrupador" (coluna real e exclusiva desta tabela, ver tds[9] em
         // "extrai" abaixo) pra não colidir.
@@ -12555,6 +12563,31 @@
         store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
+    // Mesma ideia de capturarContadoresPainelJuntadas, para o painel "Retorno de
+    // Conclusão" da página inicial: "Com Pedido de Urgência" tem sua própria contagem
+    // (#numeroRetornoConclusoesPedidoUrgencia) separada de "Para Realizar"
+    // (#numeroRetornoConclusoes) — a coleta só navega/pagina a fila "Para Realizar", mas o
+    // KPI "Retornos de conclusão pendentes" do PDF precisa da soma das duas.
+    function capturarContadoresPainelRetorno() {
+        const docs = todosDocumentosAcessiveis();
+        let urgencia = null, realizar = null;
+        for (const d of docs) {
+            const spUrg = d.getElementById && d.getElementById('numeroRetornoConclusoesPedidoUrgencia');
+            const spReal = d.getElementById && d.getElementById('numeroRetornoConclusoes');
+            if (spUrg && urgencia === null) {
+                const n = parseInt((spUrg.textContent || '').trim(), 10);
+                if (Number.isFinite(n)) urgencia = n;
+            }
+            if (spReal && realizar === null) {
+                const n = parseInt((spReal.textContent || '').trim(), 10);
+                if (Number.isFinite(n)) realizar = n;
+            }
+            if (urgencia !== null && realizar !== null) break;
+        }
+        if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
+        store.setItem(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
+    }
+
     function acharLinkMenu(urlRe, textoRe) {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
@@ -14285,6 +14318,7 @@
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
+        chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
         // comentário grande acima de CHAVE_MU_ATIVO).
@@ -14299,6 +14333,7 @@
             chamarSeguro(atualizarPainel, 'atualizarPainel');
             chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+            chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
         }, 2000);
