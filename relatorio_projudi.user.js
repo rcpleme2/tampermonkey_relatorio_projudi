@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.30
+// @version      25.40
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -628,6 +628,12 @@
         detecta: (cab) => /dias\s+paralisado/i.test(cab) && opcaoBuscaParalisadoSelecionada() === '3',
         minTds: 8,
         usaAtuacao: false,
+        // Pedido do usuário: o total do card "Em Remessa" (Por destino da remessa) deve
+        // usar o "N registro(s) encontrado(s)" que o Projudi reportou na 1ª página, não a
+        // contagem de linhas coletadas — mesmo mecanismo já usado por Apreensões/Juntadas/
+        // Retorno (ver adicionarPagina/cfg.totalIdentificadoNoResumo e o uso em
+        // montarResumoRemessas).
+        totalIdentificadoNoResumo: true,
         nomeArquivo: 'remessas_abertas_projudi',
         rotulos: { coletar: 'Extrair Remessas', coletarMais: 'Extrair mais (Remessas)', baixar: '⬇ Baixar Remessas' },
         // "Dias em Remessa", não "Dias Paralisado" (pedido do usuário: não confundir com
@@ -935,15 +941,15 @@
     // usuário se refere a ele como "Em Instância Recursal" — mantemos o rótulo amigável
     // na interface/PDF e o nome técnico só nas variáveis internas. Alcançado pelo menu
     // "Em Instância Superior" > "Remetidos" (ver navegarMenu) — ATENÇÃO: existe outro
-    // link de menu com o MESMO texto "Remetidos" mas href diferente
-    // (processosRemetidos.do, sem "Busca"/"Instancia"/"Superior" — é outro relatório do
-    // Projudi); a regex de URL usada em acharLinkMenu já é específica o bastante para não
-    // confundir os dois. A tela cai direto no form (situação "Em Instância Superior" já
-    // vem marcada por padrão) convivendo com a table.resultTable, mesmo padrão de
-    // Apreensões/Paralisados/Suspensos com Prazo — ver formularioInstanciaRecursal/
-    // preencherEPesquisarInstanciaRecursal. Colunas da tabela: [0]Processo
-    // [1]Classe Processual [2]Partes (tabela aninhada — ignorada) [3]Enviado [4]Recebido
-    // (vazio nesta situação — ignorado).
+    // link de menu com o MESMO texto "Remetidos" mas href diferente (processosRemetidos.do,
+    // sem "Busca"/"Instancia"/"Superior" — é o relatório "Processos Remetidos", ver
+    // CFG_PROCESSOS_REMETIDOS abaixo); a regex de URL usada em acharLinkMenu já é
+    // específica o bastante para não confundir os dois NA NAVEGAÇÃO. A tela cai direto no
+    // form (situação "Em Instância Superior" já vem marcada por padrão) convivendo com a
+    // table.resultTable, mesmo padrão de Apreensões/Paralisados/Suspensos com Prazo — ver
+    // formularioInstanciaRecursal/preencherEPesquisarInstanciaRecursal. Colunas da tabela:
+    // [0]Processo [1]Classe Processual [2]Partes (tabela aninhada — ignorada) [3]Enviado
+    // [4]Recebido (vazio nesta situação — ignorado).
     const CFG_INSTANCIA_RECURSAL = {
         prefixo: 'projudi_instanciarecursal_',
         // "Zero processos em instância recursal" é informação válida (mesmo racional dos
@@ -951,8 +957,14 @@
         mostrarSeVazio: true,
         // "Enviado"/"Recebido" sozinhos são genéricos demais (poderiam colidir com outras
         // telas de remessa/mandado) — exige as duas colunas MAIS "Classe Processual" no
-        // mesmo cabeçalho, o que é específico desta tela.
-        detecta: (cab) => /classe\s+processual/i.test(cab) && /\benviado\b/i.test(cab) && /\brecebido\b/i.test(cab),
+        // mesmo cabeçalho, o que é específico desta tela. MAS essas 3 colunas TAMBÉM
+        // aparecem em "Processos Remetidos" (processosRemetidos.do, CFG_PROCESSOS_REMETIDOS
+        // abaixo) — que também tem "Destino da Remessa" e "Dias em aberto"; exclui essas
+        // duas para não detectar a tela errada (bug real: sem essa exclusão, a automação
+        // tratava a tela de Processos Remetidos como Em Instância Recursal e extraía as
+        // colunas erradas — "Destino da Remessa" lido como se fosse "Enviado").
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /\benviado\b/i.test(cab) && /\brecebido\b/i.test(cab)
+            && !/destino\s+da\s+remessa/i.test(cab) && !/dias\s+em\s+aberto/i.test(cab),
         minTds: 5,
         usaAtuacao: false,
         nomeArquivo: 'instancia_recursal_projudi',
@@ -980,6 +992,101 @@
         // genérico — ver gerarPDFInstanciaRecursal.
         pdfCustom: (dados, somenteResumo) => gerarPDFInstanciaRecursal(dados, somenteResumo),
     };
+
+    // ── Processos Remetidos (processo/processosRemetidos.do) ───────────────────────────
+    // Tela nova (amostra real cedida pelo usuário), menu "Processos" > "Remetidos" (link
+    // de topo, FORA do submenu "Em Instância Superior" — não confundir com
+    // CFG_INSTANCIA_RECURSAL acima, mesmo texto de link "Remetidos" mas href diferente).
+    // Existe tanto em unidades Cível quanto Criminal (confirmado pelo usuário). Rádio
+    // "situacao" do form já vem em "P" (Aguardando Retorno) por padrão — exatamente o
+    // filtro de "em aberto" que o relatório quer, não precisa alterar nenhum campo, só
+    // clicar em Filtrar (mesmo padrão de CFG_INSTANCIA_RECURSAL — ver
+    // formularioProcessosRemetidos/preencherEPesquisarProcessosRemetidos). Colunas da
+    // tabela: [0]Processo [1]Classe Processual [2]Partes (tabela aninhada — ignorada)
+    // [3]Destino da Remessa [4]Enviado [5]Recebido [6]Dias em aberto.
+    //
+    // Pedido do usuário: os dados daqui NÃO viram um card próprio na capa unificada —
+    // entram como fonte extra do relatório "Remessas em Aberto" (CFG_REMESSAS), para que
+    // o KPI "Processo em remessa há mais tempo" (e o ranking/média por classe) considerem
+    // também os processos remetidos aguardando retorno, não só os pegos pela tela de
+    // Processos Paralisados filtrada em "Em remessa" (ver mapRemetidoParaFormatoRemessas/
+    // secoesColetadas). Ainda assim entra em REPORTS_AUTOMACAO (fila normal de navegação/
+    // coleta) e tem exportação Excel própria (cabecalhos/linha nativos desta tela).
+    const CFG_PROCESSOS_REMETIDOS = {
+        prefixo: 'projudi_remetidos_',
+        // Mesmo sinal de "Classe Processual"+"Enviado"+"Recebido" de CFG_INSTANCIA_RECURSAL,
+        // mas só esta tela tem "Destino da Remessa"/"Dias em aberto" — ver exclusão
+        // simétrica em CFG_INSTANCIA_RECURSAL.detecta acima.
+        detecta: (cab) => /classe\s+processual/i.test(cab) && /\benviado\b/i.test(cab) && /\brecebido\b/i.test(cab)
+            && (/destino\s+da\s+remessa/i.test(cab) || /dias\s+em\s+aberto/i.test(cab)),
+        minTds: 7,
+        usaAtuacao: false,
+        nomeArquivo: 'processos_remetidos_projudi',
+        rotulos: { coletar: 'Extrair Remetidos', coletarMais: 'Extrair mais (Remetidos)', baixar: '⬇ Baixar Remetidos' },
+        cabecalhos: ['Processo', 'Classe Processual', 'Destino da Remessa', 'Enviado', 'Recebido', 'Dias em Aberto', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 34 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 11 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[6]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            // A coluna "Destino da Remessa" da TABELA costuma vir vazia (confirmado nas
+            // amostras reais cedidas pelo usuário — só o campo de filtro "Remetidos para"
+            // tem o nome do destinatário; a coluna às vezes traz um destino mais específico,
+            // às vezes nada). Como a busca já é feita um destino de cada vez (ver
+            // preencherEPesquisarProcessosRemetidos/CHAVE_DESTINO_ATUAL_REMETIDOS), usa o
+            // destino que está sendo pesquisado AGORA — muito mais confiável pros KPIs "Por
+            // destino da remessa" — e só cai pra coluna da tabela se não houver essa
+            // informação (ex.: coleta manual/avulsa fora do loop de destinos).
+            const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+            const destino = (destinoAtual && destinoAtual.rotulo) || textoCelula(tds[3]);
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                destino,
+                enviado: textoCelula(tds[4]),
+                recebido: textoCelula(tds[5]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.destino, d.enviado, d.recebido, (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
+        // Sem PDF/resumo próprios — feito para ser mesclado em Remessas em Aberto (ver
+        // mapRemetidoParaFormatoRemessas/gerarPDFRemessas). Se usado avulso (botão manual
+        // nesta tela, fora da automação), reaproveita o mesmo PDF de Remessas em Aberto.
+        pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados.map(mapRemetidoParaFormatoRemessas), somenteResumo),
+        // O campo "Remetidos para" (select #alvoRemessa) não é um filtro único — precisa
+        // ser pesquisado destino por destino (fila montada em tempo de execução, ver
+        // preencherEPesquisarProcessosRemetidos/CHAVE_FILA_DESTINOS_REMETIDOS). Ao terminar
+        // a coleta de CADA destino, decide se volta pro próximo ou avança a automação, em
+        // vez de avançar direto (mesmo padrão de CFG_ATIVOS_CLASSE.aoTerminarColeta).
+        aoTerminarColeta: () => avancarOuProximoDestinoRemetidos(),
+    };
+
+    // Mapeia um registro de CFG_PROCESSOS_REMETIDOS para o formato de CFG_REMESSAS
+    // (processo/classe/dias/ultimoMovimento/prioritario) — usado para mesclar as duas
+    // fontes no KPI "Processo em remessa há mais tempo" (ver secoesColetadas).
+    function mapRemetidoParaFormatoRemessas(d) {
+        const ultimoMovimento = d.recebido
+            ? `Recebido em ${d.recebido}`
+            : (d.enviado ? `Enviado em ${d.enviado}${d.destino ? ' — ' + d.destino : ''}` : '');
+        return {
+            processo: d.processo,
+            classe: d.classe,
+            dias: d.dias,
+            ultimoMovimento,
+            prioritario: d.prioritario,
+            atuacao: d.atuacao,
+            competencia: d.competencia,
+            // Só existe em registros vindos de Processos Remetidos (campo "Destino da
+            // Remessa") — usado pelos KPIs "Por destino da remessa" em montarResumoRemessas;
+            // registros de CFG_REMESSAS (Paralisados/"Em remessa") não têm essa noção e
+            // ficam de fora desse agrupamento.
+            destino: d.destino || '',
+        };
+    }
 
     // Verifica qual "Situação" está marcada no formulário de Audiências (audienciaForm) —
     // a tela mostra o form e a table.resultTable juntos, sempre com as mesmas colunas
@@ -2678,6 +2785,137 @@
         }, 1500);
     }
 
+    // Tela de filtros de "Processos Remetidos" (processo/processosRemetidos.do) — mesmo
+    // padrão de Em Instância Recursal acima: form + table.resultTable juntos desde o
+    // primeiro carregamento, rádio "situacao" já vem em "P" (Aguardando Retorno) por
+    // padrão, botão de pesquisa é #searchButton ("Filtrar").
+    function formularioProcessosRemetidos() {
+        const form = document.getElementById('processosRemetidosForm');
+        return form && form.querySelector('input[name="situacao"]') ? form : null;
+    }
+
+    // Fila de destinos (campo "Remetidos para" / select #alvoRemessa) a pesquisar, um de
+    // cada vez — pedido do usuário: as opções desse campo variam por vara/comarca (não dá
+    // pra fixar uma lista no código, ver amostras reais anexadas com opções diferentes
+    // entre uma unidade Criminal e uma Cível), então a fila só pode ser montada em tempo
+    // de execução, lendo o próprio <select> na tela. Mesmo padrão de fila de
+    // CHAVE_FILA_MESES_TM (Tempo Médio), mas construída sob demanda (lazy): sempre que a
+    // fila lida do storage estiver vazia, opcoesDestinoRemetidos() a reconstrói a partir
+    // do DOM — cobre tanto a 1ª busca (fila nunca existiu) quanto o início de uma rodada
+    // nova depois da anterior ter esgotado a fila (ver avancarOuProximoDestinoRemetidos).
+    const CHAVE_FILA_DESTINOS_REMETIDOS = 'projudi_remetidos_fila_destinos';
+    // Destino atualmente em busca (já removido da fila) — só pra exibição de progresso no
+    // painel, ver atualizarPainel/chave==='remetidos'.
+    const CHAVE_DESTINO_ATUAL_REMETIDOS = 'projudi_remetidos_destino_atual';
+
+    // {destino: total} com o "N registro(s) encontrado(s)" que o Projudi reportou na 1ª
+    // página de CADA busca por destino (pedido do usuário: o total de cada KPI "Por
+    // destino da remessa" deve usar esse número, não a contagem de linhas efetivamente
+    // coletadas/deduplicadas — ver montarResumoRemessas). Capturado em adicionarPagina
+    // (genérico, ver criarColetor) só quando CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_
+    // REMETIDOS está setada — flag marcada aqui, em preencherEPesquisarProcessosRemetidos,
+    // logo ao escolher o próximo destino da fila, e consumida (removida) na 1ª página
+    // coletada depois disso, então cada busca por destino contribui exatamente 1 entrada.
+    const CHAVE_TOTAIS_POR_DESTINO_REMETIDOS = 'projudi_remetidos_totais_por_destino';
+    const CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS = 'projudi_remetidos_precisa_capturar_total';
+
+    function lerFilaDestinosRemetidos() {
+        return desembrulharArray(store.getItem(CHAVE_FILA_DESTINOS_REMETIDOS)) || [];
+    }
+
+    // Destinos que o usuário pediu pra IGNORAR na busca (não entram na fila, não são
+    // pesquisados) — pedido explícito: "ignore MINISTÉRIO PÚBLICO, mas deixe no código
+    // caso eu mude de ideia". Pra reativar um destino, só tirar o rótulo desta lista
+    // (comparação por texto, sem acento/maiúsculas — ver normalizarTextoDestino).
+    const DESTINOS_REMETIDOS_IGNORADOS = ['MINISTÉRIO PÚBLICO'];
+
+    // Normaliza texto de destino pra comparação (maiúsculas + sem acento) — evita falhar a
+    // comparação por causa de variação de acentuação entre unidades do Projudi.
+    function normalizarTextoDestino(s) {
+        return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
+    }
+
+    // Lê as opções reais do select #alvoRemessa (ignora o placeholder "-1"/"-- CLIQUE
+    // AQUI..." e os destinos em DESTINOS_REMETIDOS_IGNORADOS). Se a tela não tiver nenhum
+    // destino cadastrado (select vazio) ou todos os destinos reais estiverem na lista de
+    // ignorados, devolve [] — preencherEPesquisarProcessosRemetidos trata isso como "busca
+    // única sem filtro de destino" (comportamento antigo, antes desta mudança), em vez de
+    // travar.
+    function opcoesDestinoRemetidos(form) {
+        const select = form.querySelector('#alvoRemessa');
+        if (!select) return [];
+        const ignorados = DESTINOS_REMETIDOS_IGNORADOS.map(normalizarTextoDestino);
+        return [...select.options]
+            .filter(o => o.value && o.value !== '-1')
+            .map(o => ({ value: o.value, rotulo: (o.textContent || '').trim() }))
+            .filter(o => !ignorados.includes(normalizarTextoDestino(o.rotulo)));
+    }
+
+    // Marca "situacao"="P" (Aguardando Retorno, já vem assim por padrão) e pesquisa UM
+    // destino da fila de cada vez — quando a fila (lida do storage) estiver vazia, monta
+    // ela de novo a partir do <select> #alvoRemessa desta tela (ver
+    // CHAVE_FILA_DESTINOS_REMETIDOS acima) e pesquisa o primeiro. Ao terminar a coleta
+    // deste destino, avancarOuProximoDestinoRemetidos (CFG_PROCESSOS_REMETIDOS.
+    // aoTerminarColeta) decide se volta pra cá pro próximo destino ou avança a automação.
+    function preencherEPesquisarProcessosRemetidos() {
+        const form = formularioProcessosRemetidos();
+        if (!form) return;
+
+        let fila = lerFilaDestinosRemetidos();
+        if (!fila.length) {
+            fila = opcoesDestinoRemetidos(form);
+            console.log(`[Projudi Processos Remetidos] fila de destinos preparada a partir do campo "Remetidos para" — ${fila.length} destino(s): ${fila.map(d => d.rotulo).join(', ') || '(nenhum — busca única sem filtro de destino)'}`);
+        }
+        const destino = fila[0] || null;
+        store.setItem(CHAVE_FILA_DESTINOS_REMETIDOS, JSON.stringify(fila.slice(1)));
+        store.setItem(CHAVE_DESTINO_ATUAL_REMETIDOS, JSON.stringify(destino));
+        // Marca que a 1ª página da busca por ESTE destino ainda não teve o "N
+        // registro(s) encontrado(s)" capturado — ver adicionarPagina/
+        // CHAVE_TOTAIS_POR_DESTINO_REMETIDOS.
+        store.setItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS, '1');
+
+        const selectAlvo = form.querySelector('#alvoRemessa');
+        if (selectAlvo && destino) selectAlvo.value = destino.value;
+
+        // Sinaliza a próxima página de resultados a iniciar a coleta automaticamente só
+        // depois de o resultado estabilizar (mesmo bug já corrigido em Tempo Médio: várias
+        // buscas seguidas no MESMO formulário podiam deixar coletarPaginaAtual() ler a
+        // tabela ainda com o resultado do destino ANTERIOR — ver
+        // aguardarResultadoTMEstabilizarEIniciar/CHAVE_ASSINATURA_ANTERIOR_TM, reaproveitado
+        // aqui porque a lógica é genérica, apesar do nome ligado a Tempo Médio).
+        store.setItem('projudi_remetidos_auto_iniciar', '1');
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Processos Remetidos] destino="${destino ? destino.rotulo : '(nenhum)'}" (${fila.length - (destino ? 1 : 0)} restante(s) na fila) — botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Processos Remetidos] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Processos Remetidos] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Processos Remetidos] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Chamado via CFG_PROCESSOS_REMETIDOS.aoTerminarColeta ao final da coleta de UM
+    // destino — se ainda restam destinos na fila, volta para a tela de filtros e pesquisa
+    // o próximo (mesmo mecanismo genérico "ir_<key>" de passoAutomacao usado por Tempo
+    // Médio para os meses) em vez de avançar para o próximo relatório da automação.
+    function avancarOuProximoDestinoRemetidos() {
+        if (lerFilaDestinosRemetidos().length > 0) {
+            console.log('[Projudi Processos Remetidos] destino concluído — ainda restam destinos na fila, buscando o próximo');
+            store.setItem(AUTO_ESTADO, 'ir_remetidos');
+            setTimeout(passoAutomacao, 900);
+        } else {
+            avancarAutomacao(CFG_PROCESSOS_REMETIDOS);
+        }
+    }
+
     // Tela de filtros de "Movimento Forense" (processo/movimentoForense.do) — form +
     // table.resultTable (com o resultado da pesquisa anterior/padrão do Projudi) juntos
     // desde o primeiro carregamento, mesmo padrão de Suspensos com Prazo/Instância
@@ -3569,6 +3807,12 @@
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
             store.removeItem(cfg.prefixo + 'total_identificado');
+            if (cfg === CFG_PROCESSOS_REMETIDOS) {
+                store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+                store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
+                store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+                store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+            }
             // Flag pequena usada só por CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO (ver comentário
             // em "get cabecalhos" desses cfgs) — remover aqui também, genericamente, evita
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
@@ -3588,6 +3832,22 @@
             if (idx === 0 && cfg.totalIdentificadoNoResumo) {
                 const totalInicial = totalRegistrosPagina();
                 if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
+            }
+            // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
+            // preencherEPesquisarProcessosRemetidos) — o mecanismo acima (idx===0) só
+            // capturaria o total do 1º destino da fila inteira. Aqui, captura 1 vez por
+            // DESTINO (flag setada ao escolher cada destino, consumida na 1ª página
+            // coletada depois disso) — ver CHAVE_TOTAIS_POR_DESTINO_REMETIDOS.
+            if (cfg === CFG_PROCESSOS_REMETIDOS && store.getItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS) === '1') {
+                const totalDestino = totalRegistrosPagina();
+                if (totalDestino != null) {
+                    const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+                    const chaveDestino = (destinoAtual && destinoAtual.rotulo) || '(sem destino)';
+                    const mapaTotais = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
+                    mapaTotais[chaveDestino] = totalDestino;
+                    store.setItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS, JSON.stringify(mapaTotais));
+                }
+                store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
             }
             await idbSet(KEY_PAGINA_PREF + idx, dadosPagina);
             store.setItem(KEY_NUM_PAGINAS, String(idx + 1));
@@ -3858,7 +4118,7 @@
                 atualizarStatus('Lendo dados coletados...');
                 const dados = await lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
-                if (cfg.pdfCustom) cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
+                if (cfg.pdfCustom) await cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
                 // Após exportar o PDF, limpa os dados acumulados automaticamente — evita
                 // que uma coleta antiga fique acumulada/misturada com a próxima.
                 await limparTudo();
@@ -4450,6 +4710,74 @@
             let yy = y + (grande ? 22 : 20);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 8)[0], px, yy); yy += 4; });
         }
+    }
+
+    // Faixa de severidade pelos dias em aberto (pedido do usuário, seção "Por destino da
+    // remessa" de Remessas em Aberto): ≤15 dias regular, 16–30 atenção, >30 crítico — ver
+    // desenharCardDestino/desenharLegendaQuadrados.
+    const LIMITE_REGULAR_DESTINO = 15;
+    const LIMITE_ATENCAO_DESTINO = 30;
+    function corSeveridadeDestino(dias) {
+        if (dias == null) return COR.muted;
+        if (dias <= LIMITE_REGULAR_DESTINO) return COR.aqua;
+        if (dias <= LIMITE_ATENCAO_DESTINO) return COR.ambar;
+        return COR.vermelho;
+    }
+
+    // Card do KPI "Por destino da remessa" (Remessas em Aberto) — versão dedicada de
+    // desenharCard: além de título/total, mostra (pedido do usuário) o total de processos
+    // com mais de 30 dias em aberto, em vermelho, e um quadrado colorido junto ao "Mais
+    // antigo" indicando a faixa de severidade (ver corSeveridadeDestino/
+    // desenharLegendaQuadrados). Não generalizado para desenharCard porque esses dois
+    // elementos (contagem >30d, quadrado de severidade) são específicos desta seção — as
+    // outras ~30 chamadas de desenharCard no arquivo não precisam disso.
+    function desenharCardDestino(doc, x, y, w, h, destino, total, total30dias, maisAntigo) {
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.azul);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const cx = x + w / 2;
+        let yy = y + 6.5;
+        // Título QUEBRA em várias linhas em vez de truncar (pedido do usuário: nomes
+        // longos como "EM REMESSA (EXCETO PROCESSOS CONCLUSOS)" devem aparecer por
+        // inteiro) — mesma ideia de desenharCardLista, mas o resto do card (total, contagem
+        // >30d, "Mais antigo") desce conforme o número de linhas do título.
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        const linhasTitulo = doc.splitTextToSize(String(destino).toUpperCase(), w - 10);
+        linhasTitulo.forEach((linha, i) => doc.text(linha, cx, yy + i * 3.4, { align: 'center' }));
+        yy += linhasTitulo.length * 3.4 + 3.6;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(...COR.tinta);
+        doc.text(String(total), cx, yy, { align: 'center' });
+        yy += 5.5;
+        if (total30dias > 0) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text(`${total30dias} há mais de 30 dias`, cx, yy, { align: 'center' });
+            yy += 4.2;
+        }
+        if (maisAntigo) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text('Mais antigo:', cx, yy, { align: 'center' }); yy += 4.2;
+            doc.text(doc.splitTextToSize(maisAntigo.processo, w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2;
+            const textoDias = `${maisAntigo.dias} dia(s) em aberto`;
+            const larguraTexto = doc.getTextWidth(textoDias);
+            doc.text(textoDias, cx, yy, { align: 'center' });
+            doc.setFillColor(...corSeveridadeDestino(maisAntigo.dias));
+            doc.rect(cx + larguraTexto / 2 + 2.2, yy - 2.6, 2.4, 2.4, 'F');
+        }
+    }
+
+    // Legenda de quadrados coloridos (pedido do usuário) — mesmo critério de
+    // corSeveridadeDestino, usada uma vez no topo da seção "Por destino da remessa".
+    function desenharLegendaQuadrados(doc, x, y, itens) {
+        let lx = x;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4);
+        itens.forEach(it => {
+            doc.setFillColor(...it.cor);
+            doc.rect(lx, y - 2.6, 2.4, 2.4, 'F');
+            doc.setTextColor(...COR.tintaSec);
+            doc.text(it.rotulo, lx + 4, y);
+            lx += 4 + doc.getTextWidth(it.rotulo) + 6;
+        });
     }
 
     // Mede a altura que desenharCardLista precisaria para "valor" — chamar ANTES de
@@ -9544,12 +9872,44 @@
 
     const TITULO_REMESSAS = 'Remessas em Aberto';
 
-    function gerarPDFRemessas(dados, somenteResumo) {
+    // Texto fixo do balão de OBSERVAÇÃO do resumo de Remessas em Aberto (pedido do
+    // usuário, texto literal fornecido) — sempre presente, mesmo padrão de
+    // medirAlturaCardObservacao/desenharCardObservacao (Helvetica, justificado, acento
+    // âmbar) já usado nos outros balões de observação do arquivo.
+    const PARAGRAFOS_OBSERVACAO_REMESSAS = [
+        'A secretaria deverá manter rigoroso controle das remessas pendentes, especialmente daquelas que ultrapassem os prazos legais ou os previstos no Código de Normas do Foro Judicial. Nessas hipóteses, deverá adotar as providências necessárias junto aos destinatários das remessas, promovendo a cobrança do cumprimento das determinações pendentes e a consequente devolução dos autos à unidade judicial.',
+    ];
+
+    // Busca o que já foi coletado das DUAS fontes de "Remessas em Aberto" (CFG_REMESSAS —
+    // Paralisados/"Em remessa" — e CFG_PROCESSOS_REMETIDOS) e devolve tudo mesclado, sem
+    // duplicar processos. Chamado de dentro de gerarPDFRemessas para que o botão "Baixar
+    // PDF"/"Baixar" manual funcione IGUAL rodando em QUALQUER uma das duas telas — sem
+    // isso, gerar o PDF parado na tela de Processos Remetidos mostrava só os dados de
+    // Remetidos (e vice-versa), fazendo parecer que uma das duas fontes "parou de
+    // coletar" quando na verdade cada botão só via a própria tela onde foi clicado (bug
+    // relatado pelo usuário: "a tela tem processos, mas o relatório final não mostra
+    // nenhum deles" — o relatório final era gerado a partir da tela de Remetidos, que
+    // nunca teve acesso aos dados de CFG_REMESSAS). O fluxo do PDF/Excel CONJUNTO
+    // (secoesColetadas) já fazia essa mesma mesclagem à parte — mantém-se assim porque
+    // ali as duas fontes vêm prontas de lerDadosDe, sem depender de qual tela gerou o clique.
+    async function dadosRemessasConsolidados(dadosBase) {
+        let extrasRemessas = [];
+        let extrasRemetidos = [];
+        try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
+        try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
+        return removerProcessosDuplicados(
+            [...dadosBase, ...extrasRemessas, ...extrasRemetidos.map(mapRemetidoParaFormatoRemessas)],
+            'processo',
+        );
+    }
+
+    async function gerarPDFRemessas(dados, somenteResumo) {
+        const consolidado = await dadosRemessasConsolidados(dados);
         const doc = novoDocPDF();
-        montarResumoRemessas(doc, dados, true, false);
+        montarResumoRemessas(doc, consolidado, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
         if (!somenteResumo) {
-            const pgTabela = montarTabelaRemessas(doc, dados, false);
+            const pgTabela = montarTabelaRemessas(doc, consolidado, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
@@ -9576,11 +9936,62 @@
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
 
+        // KPIs "Por destino da remessa" (pedido do usuário) — calculados AQUI, antes dos
+        // KPIs gerais, porque o card "Processos em remessa" (topo) precisa mostrar a SOMA
+        // dos totais por destino (pedido do usuário: "o total do card Processos em
+        // remessa deve corresponder à soma dos demais"), não a contagem de linhas
+        // coletadas. Um card por destinatário do campo "Remetidos para" (só quem tem >=1
+        // processo — não dá pra listar destinos com zero, já que só sabemos quais
+        // destinos existem pelos próprios registros coletados de CFG_PROCESSOS_REMETIDOS;
+        // ver mapRemetidoParaFormatoRemessas), com o processo remetido há mais tempo
+        // (maior "Dias em aberto") NAQUELE destino. Registros vindos de CFG_REMESSAS
+        // (Paralisados/"Em remessa") não têm campo "destino" — entram num card à parte,
+        // rotulado "Em Remessa" (pergunta do usuário: por que o processo há mais tempo em
+        // remessa, vindo dessa tela, não aparecia em nenhum card de destino — ficava só no
+        // KPI geral) em vez de sumir da seção.
+        //
+        // O TOTAL de cada card (pedido do usuário) não conta as linhas efetivamente
+        // coletadas — usa o "N registro(s) encontrado(s)" que o próprio Projudi reportou
+        // na 1ª página de CADA busca por destino (mais confiável que contar linhas: a
+        // coleta paginada pode ter menos, por causa de dedupe entre destinos ou de uma
+        // página que não deu tempo de carregar) — ver
+        // CHAVE_TOTAIS_POR_DESTINO_REMETIDOS/capturarTotalDestinoAtualRemetidos para
+        // Processos Remetidos, e cfg.totalIdentificadoNoResumo (mesmo mecanismo já usado
+        // por Apreensões/Juntadas/Retorno) para CFG_REMESSAS. Cai para a contagem de
+        // linhas só quando esse número não foi capturado (coleta antiga, ou avulsa fora
+        // do fluxo de automação).
+        const totaisPorDestinoRemetidos = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
+        const totalIdentificadoRemessas = parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
+        const porDestino = new Map();
+        const semDestino = [];
+        validos.forEach(d => {
+            if (!d.destino) { semDestino.push(d); return; }
+            if (!porDestino.has(d.destino)) porDestino.set(d.destino, []);
+            porDestino.get(d.destino).push(d);
+        });
+        const destinos = [...porDestino.entries()]
+            .map(([destino, lista]) => ({
+                destino,
+                total: totaisPorDestinoRemetidos[destino] != null ? totaisPorDestinoRemetidos[destino] : lista.length,
+                total30dias: lista.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
+                maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0],
+            }))
+            .sort((a, b) => b.total - a.total);
+        if (semDestino.length) {
+            destinos.push({
+                destino: 'Em Remessa (exceto processos conclusos)',
+                total: Number.isFinite(totalIdentificadoRemessas) && totalIdentificadoRemessas > 0 ? totalIdentificadoRemessas : semDestino.length,
+                total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
+                maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
+            });
+        }
+        const totalGeralRemessas = destinos.length ? destinos.reduce((s, d) => s + d.total, 0) : dados.length;
+
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`;
+        let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${totalGeralRemessas} processo(s) em remessa`;
         if (!rotuloInfo.semFrase) {
             const fraseCompRemessas = fraseCompetenciasComContagem(dados);
             if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
@@ -9595,7 +10006,7 @@
         const kY = yLinhaRemessas + 5;
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(totalGeralRemessas), [], true, COR.azul);
         desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
@@ -9620,6 +10031,9 @@
         // Tabelas no lugar dos dois gráficos empilhados de antes (pedido do usuário):
         // ranking dos processos mais demorados, depois o tempo médio por Classe
         // Processual — cada uma abre página nova se não couber no que resta da página 1.
+        // Movido pra ANTES do bloco de KPIs por destino (abaixo) porque esse bloco também
+        // precisa paginar (a quantidade de destinos varia por vara, ver
+        // opcoesDestinoRemetidos/CFG_PROCESSOS_REMETIDOS).
         const ctx = {
             rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             topoContinuacao: m + 14,
@@ -9630,6 +10044,41 @@
             },
         };
         let y = k3Y + 26 + gap + 2;
+
+        // Bloco de KPIs "Por destino da remessa" — dados (destinos/semDestino/totais) já
+        // calculados no topo da função, ver comentário grande lá.
+        if (destinos.length) {
+            if (y + 15 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            tituloSecao(doc, m, y, uw, 'Por destino da remessa');
+            y += 6;
+            desenharLegendaQuadrados(doc, m, y, [
+                { cor: COR.aqua, rotulo: `Até ${LIMITE_REGULAR_DESTINO} dias (regular)` },
+                { cor: COR.ambar, rotulo: `${LIMITE_REGULAR_DESTINO + 1} a ${LIMITE_ATENCAO_DESTINO} dias (atenção)` },
+                { cor: COR.vermelho, rotulo: `Mais de ${LIMITE_ATENCAO_DESTINO} dias (crítico)` },
+            ]);
+            y += 5;
+            const kWDestino = (uw - 2 * gap) / 3;
+            // 42 (não 36) dá espaço pro título quebrar em até 2 linhas (ex.: "EM REMESSA
+            // (EXCETO PROCESSOS CONCLUSOS)") sem cortar o resto do card — ver
+            // desenharCardDestino.
+            const hDestino = 42;
+            destinos.forEach((d, i) => {
+                const col = i % 3;
+                if (col === 0 && i > 0) y += hDestino + gap;
+                if (col === 0 && y + hDestino > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+                const x = m + col * (kWDestino + gap);
+                desenharCardDestino(doc, x, y, kWDestino, hDestino, d.destino, d.total, d.total30dias, d.maisAntigo);
+            });
+            y += hDestino + gap + 2;
+        }
+
+        // Balão de OBSERVAÇÃO (pedido do usuário) — abaixo dos KPIs, acima das tabelas;
+        // tenta ficar na mesma página dos KPIs (só vira página se não couber mesmo).
+        const hObsRemessas = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_REMESSAS);
+        if (y + hObsRemessas > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+        desenharCardObservacao(doc, m, y, uw, hObsRemessas, 'Observação', PARAGRAFOS_OBSERVACAO_REMESSAS);
+        y += hObsRemessas + gap;
+
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
             if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
@@ -10491,6 +10940,12 @@
         // casaria com ela por engano), mas só ela tem "Fim Suspensão" — regex mais
         // específico primeiro.
         if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
+        // CFG_PROCESSOS_REMETIDOS vem antes de CFG_INSTANCIA_RECURSAL: as duas telas
+        // compartilham "Classe Processual"+"Enviado"+"Recebido" no cabeçalho, mas só
+        // Processos Remetidos tem "Destino da Remessa"/"Dias em aberto" (CFG_INSTANCIA_
+        // RECURSAL.detecta já exclui essas duas, então a ordem aqui é só defesa em
+        // profundidade — ver comentário em CFG_INSTANCIA_RECURSAL.detecta).
+        else if (CFG_PROCESSOS_REMETIDOS.detecta(cab)) cfg = CFG_PROCESSOS_REMETIDOS;
         else if (CFG_INSTANCIA_RECURSAL.detecta(cab)) cfg = CFG_INSTANCIA_RECURSAL;
         // CFG_SUSPENSOS vem antes de CFG_PARALISADOS: a tabela de Suspensos por Prazo
         // Indeterminado também tem a coluna "Dias Paralisado" (o regex de Paralisados
@@ -10532,6 +10987,7 @@
         else if (/analisarJuntada\.do/i.test(location.pathname + location.search)) cfg = CFG_JUNTADAS;
         else if (/processoBuscaSuspenso\.do/i.test(location.pathname + location.search)) cfg = CFG_SUSPENSOS;
         else if (/processoBuscaInstanciaSuperior\.do/i.test(location.pathname + location.search)) cfg = CFG_INSTANCIA_RECURSAL;
+        else if (/\/processo\/processosRemetidos\.do/i.test(location.pathname + location.search)) cfg = CFG_PROCESSOS_REMETIDOS;
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
@@ -11564,6 +12020,31 @@
             }
         }
 
+        // Tela de filtros de "Processos Remetidos" (processosRemetidos.do, alcançada pelo
+        // menu "Processos" > "Remetidos") — mesmo padrão de Em Instância Recursal acima:
+        // decide pelo ESTADO da automação, não pela presença de resultados; botão de
+        // pesquisa é "Filtrar" (#searchButton).
+        if (formularioProcessosRemetidos()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_remetidos') {
+                console.log('[Projudi Processos Remetidos] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_remetidos');
+                preencherEPesquisarProcessosRemetidos();
+                return;
+            }
+            // Uso manual (fora da automação): botão avulso para filtrar com os padrões da
+            // tela (situação "Aguardando Retorno" já vem marcada).
+            if (estadoAtual !== 'coletando_remetidos' && mostrarBotoesIndividuais()) {
+                const bProcessosRemetidos = document.createElement('button');
+                bProcessosRemetidos.type = 'button';
+                bProcessosRemetidos.className = 'projudi-btn';
+                bProcessosRemetidos.title = 'Filtra com os padrões da tela (Aguardando Retorno) — não altera nenhum campo';
+                bProcessosRemetidos.textContent = 'Preencher e Pesquisar (Processos Remetidos)';
+                bProcessosRemetidos.onclick = () => preencherEPesquisarProcessosRemetidos();
+                buttonBar.appendChild(bProcessosRemetidos);
+            }
+        }
+
         // Tela de filtros de "Movimento Forense"/Ativos por Classe Processual
         // (processo/movimentoForense.do) — mesmo padrão de Suspensos com Prazo/Instância
         // Recursal acima: decide pelo ESTADO da automação, não pela presença de
@@ -11649,12 +12130,16 @@
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const relAtual = relatorioPorCfg(cfg);
-        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO;
+        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO && cfg !== CFG_PROCESSOS_REMETIDOS;
         const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
         const chaveAutoIniciarParalisado = store.getItem('projudi_paralisado_auto_iniciar');
         const autoIniciarParalisado = !!chaveAutoIniciarParalisado && !!relAtual && relAtual.key === chaveAutoIniciarParalisado;
+        // Mesmo motivo de autoIniciarTM: cada destino é uma nova busca no MESMO
+        // formulário (ver preencherEPesquisarProcessosRemetidos) — espera o resultado
+        // estabilizar antes de coletar, em vez de confiar em "resultTable existe".
+        const autoIniciarRemetidos = cfg === CFG_PROCESSOS_REMETIDOS && store.getItem('projudi_remetidos_auto_iniciar') === '1';
 
-        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado}`);
+        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado} autoIniciarRemetidos=${autoIniciarRemetidos}`);
 
         if (coletor.rodando() && !coletor.obsoleta()) {
             console.log('[Projudi] retomando coleta após reload de paginação');
@@ -11673,6 +12158,10 @@
             store.removeItem('projudi_paralisado_auto_iniciar');
             console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
             coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
+        } else if (autoIniciarRemetidos) {
+            store.removeItem('projudi_remetidos_auto_iniciar');
+            console.log('[Projudi Processos Remetidos] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else {
             console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
@@ -12389,6 +12878,12 @@
         // preencher+pesquisar antes de coletar.
         { key: 'paralisados', cfg: CFG_PARALISADOS, navAlvo: 'paralisados', rotulo: 'Processos Paralisados',  curto: 'Paralisados', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
         { key: 'remessas',    cfg: CFG_REMESSAS,    navAlvo: 'remessas',    rotulo: 'Remessas em Aberto',     curto: 'Remessas',    dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
+        // "Processos Remetidos" (tela nova, existe em unidades Cível e Criminal) — não
+        // vira card próprio na capa unificada; seus dados entram como fonte extra do KPI
+        // "Processo em remessa há mais tempo" de Remessas em Aberto (ver
+        // mapRemetidoParaFormatoRemessas/secoesColetadas). Mesmo assim é um passo normal
+        // da fila de automação/painel, com Excel próprio.
+        { key: 'remetidos',   cfg: CFG_PROCESSOS_REMETIDOS, navAlvo: 'remetidos', rotulo: 'Processos Remetidos (mescla no KPI de Remessas)', curto: 'Remetidos',   dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
         // Mandados — 4 itens de fila INDEPENDENTES (pedido do usuário: seleção
         // independente, cada fase é um relatório próprio, marcável/desmarcável sozinho —
         // não mais um único item "mandados" que encadeava as 4 fases sozinho). Todos
@@ -12697,6 +13192,11 @@
         // (SEM "Busca"/"Instancia"/"Superior") — relatório diferente; a regex de URL abaixo
         // já é específica o bastante pra não confundir os dois.
         else if (alvo === 'instanciarecursal') link = acharLinkMenu(/processoBuscaInstanciaSuperior\.do/i, /^remetidos$/i);
+        // "Processos Remetidos" (menu "Processos" > "Remetidos", link de topo) — MESMO
+        // texto de link "Remetidos" do item acima, mas href diferente
+        // (processosRemetidos.do, sem "Busca"/"Instancia"/"Superior"); a regex de URL já é
+        // específica o bastante para não confundir os dois.
+        else if (alvo === 'remetidos') link = acharLinkMenu(/\/processo\/processosRemetidos\.do/i, /^remetidos$/i);
         // "Movimento Forense" — NÃO "Movimento Forense - Juiz" (href
         // movimentoForenseJuiz.do, relatório diferente). A regex de URL já não casa com
         // esse outro link (".do" precisa vir logo após "movimentoForense", sem "Juiz" no
@@ -12940,6 +13440,13 @@
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
         if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
+        if (rel.key === 'remetidos') {
+            store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+            store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+            store.removeItem('projudi_remetidos_auto_iniciar');
+            store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+            store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
+        }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
 
@@ -13255,6 +13762,11 @@
         store.removeItem(CHAVE_MES_ATUAL_TM);
         store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
+        store.removeItem('projudi_remetidos_auto_iniciar');
+        store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+        store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+        store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+        store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
@@ -13278,7 +13790,20 @@
     async function secoesColetadas() {
         const cfgs = REPORTS_AUTOMACAO.flatMap(r => cfgsDoRelatorio(r));
         const secoes = await Promise.all(cfgs.map(async cfg => ({ dados: await lerDadosDe(cfg.prefixo, cfg.chaveDuplicata || 'processo'), cfg })));
-        return secoes.filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
+        // Processos Remetidos (CFG_PROCESSOS_REMETIDOS) não vira seção própria — pedido do
+        // usuário: consolidar as duas buscas no KPI "Processo em remessa há mais tempo" de
+        // Remessas em Aberto. Mescla os dados aqui (único lugar usado tanto pelo PDF quanto
+        // pelo Excel conjunto) e remove a seção isolada da lista devolvida.
+        const secaoRemetidos = secoes.find(s => s.cfg === CFG_PROCESSOS_REMETIDOS);
+        const secaoRemessas = secoes.find(s => s.cfg === CFG_REMESSAS);
+        if (secaoRemetidos && secaoRemessas) {
+            secaoRemessas.dados = removerProcessosDuplicados(
+                [...secaoRemessas.dados, ...secaoRemetidos.dados.map(mapRemetidoParaFormatoRemessas)],
+                'processo',
+            );
+        }
+        return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
+            .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
     // Restringe as seções às atribuições MARCADAS pelo usuário no diálogo do PDF
@@ -13636,6 +14161,17 @@
                     if (mesAtual && mesAtual.rotulo) {
                         txt += ` — mês <strong>${mesAtual.rotulo}</strong>`;
                         txt += restantes > 0 ? ` (${restantes} mês(es) restante(s) depois deste)` : ' (último mês da fila)';
+                    }
+                }
+                // Processos Remetidos busca destino a destino (campo "Remetidos para", ver
+                // preencherEPesquisarProcessosRemetidos) — mesma ideia de progresso de
+                // Tempo Médio acima.
+                if (chave === 'remetidos') {
+                    const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+                    const restantes = lerFilaDestinosRemetidos().length;
+                    if (destinoAtual && destinoAtual.rotulo) {
+                        txt += ` — destino <strong>${destinoAtual.rotulo}</strong>`;
+                        txt += restantes > 0 ? ` (${restantes} destino(s) restante(s) depois deste)` : ' (último destino da fila)';
                     }
                 }
                 return txt;
