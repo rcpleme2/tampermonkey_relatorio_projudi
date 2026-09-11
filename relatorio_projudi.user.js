@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.32
+// @version      25.33
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1064,6 +1064,11 @@
             prioritario: d.prioritario,
             atuacao: d.atuacao,
             competencia: d.competencia,
+            // Só existe em registros vindos de Processos Remetidos (campo "Destino da
+            // Remessa") — usado pelos KPIs "Por destino da remessa" em montarResumoRemessas;
+            // registros de CFG_REMESSAS (Paralisados/"Em remessa") não têm essa noção e
+            // ficam de fora desse agrupamento.
+            destino: d.destino || '',
         };
     }
 
@@ -2791,16 +2796,32 @@
         return desembrulharArray(store.getItem(CHAVE_FILA_DESTINOS_REMETIDOS)) || [];
     }
 
+    // Destinos que o usuário pediu pra IGNORAR na busca (não entram na fila, não são
+    // pesquisados) — pedido explícito: "ignore MINISTÉRIO PÚBLICO, mas deixe no código
+    // caso eu mude de ideia". Pra reativar um destino, só tirar o rótulo desta lista
+    // (comparação por texto, sem acento/maiúsculas — ver normalizarTextoDestino).
+    const DESTINOS_REMETIDOS_IGNORADOS = ['MINISTÉRIO PÚBLICO'];
+
+    // Normaliza texto de destino pra comparação (maiúsculas + sem acento) — evita falhar a
+    // comparação por causa de variação de acentuação entre unidades do Projudi.
+    function normalizarTextoDestino(s) {
+        return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
+    }
+
     // Lê as opções reais do select #alvoRemessa (ignora o placeholder "-1"/"-- CLIQUE
-    // AQUI..."). Se a tela não tiver nenhum destino cadastrado (select vazio), devolve []
-    // — preencherEPesquisarProcessosRemetidos trata isso como "busca única sem filtro de
-    // destino" (comportamento antigo, antes desta mudança), em vez de travar.
+    // AQUI..." e os destinos em DESTINOS_REMETIDOS_IGNORADOS). Se a tela não tiver nenhum
+    // destino cadastrado (select vazio) ou todos os destinos reais estiverem na lista de
+    // ignorados, devolve [] — preencherEPesquisarProcessosRemetidos trata isso como "busca
+    // única sem filtro de destino" (comportamento antigo, antes desta mudança), em vez de
+    // travar.
     function opcoesDestinoRemetidos(form) {
         const select = form.querySelector('#alvoRemessa');
         if (!select) return [];
+        const ignorados = DESTINOS_REMETIDOS_IGNORADOS.map(normalizarTextoDestino);
         return [...select.options]
             .filter(o => o.value && o.value !== '-1')
-            .map(o => ({ value: o.value, rotulo: (o.textContent || '').trim() }));
+            .map(o => ({ value: o.value, rotulo: (o.textContent || '').trim() }))
+            .filter(o => !ignorados.includes(normalizarTextoDestino(o.rotulo)));
     }
 
     // Marca "situacao"="P" (Aguardando Retorno, já vem assim por padrão) e pesquisa UM
@@ -4044,7 +4065,7 @@
                 atualizarStatus('Lendo dados coletados...');
                 const dados = await lerTudo();
                 if (!dados.length) { atualizarStatus('Nenhum registro coletado para exportar.'); return; }
-                if (cfg.pdfCustom) cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
+                if (cfg.pdfCustom) await cfg.pdfCustom(dados, somenteResumo); else gerarPDF(dados, cfg, somenteResumo);
                 // Após exportar o PDF, limpa os dados acumulados automaticamente — evita
                 // que uma coleta antiga fique acumulada/misturada com a próxima.
                 await limparTudo();
@@ -9730,12 +9751,36 @@
 
     const TITULO_REMESSAS = 'Remessas em Aberto';
 
-    function gerarPDFRemessas(dados, somenteResumo) {
+    // Busca o que já foi coletado das DUAS fontes de "Remessas em Aberto" (CFG_REMESSAS —
+    // Paralisados/"Em remessa" — e CFG_PROCESSOS_REMETIDOS) e devolve tudo mesclado, sem
+    // duplicar processos. Chamado de dentro de gerarPDFRemessas para que o botão "Baixar
+    // PDF"/"Baixar" manual funcione IGUAL rodando em QUALQUER uma das duas telas — sem
+    // isso, gerar o PDF parado na tela de Processos Remetidos mostrava só os dados de
+    // Remetidos (e vice-versa), fazendo parecer que uma das duas fontes "parou de
+    // coletar" quando na verdade cada botão só via a própria tela onde foi clicado (bug
+    // relatado pelo usuário: "a tela tem processos, mas o relatório final não mostra
+    // nenhum deles" — o relatório final era gerado a partir da tela de Remetidos, que
+    // nunca teve acesso aos dados de CFG_REMESSAS). O fluxo do PDF/Excel CONJUNTO
+    // (secoesColetadas) já fazia essa mesma mesclagem à parte — mantém-se assim porque
+    // ali as duas fontes vêm prontas de lerDadosDe, sem depender de qual tela gerou o clique.
+    async function dadosRemessasConsolidados(dadosBase) {
+        let extrasRemessas = [];
+        let extrasRemetidos = [];
+        try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
+        try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
+        return removerProcessosDuplicados(
+            [...dadosBase, ...extrasRemessas, ...extrasRemetidos.map(mapRemetidoParaFormatoRemessas)],
+            'processo',
+        );
+    }
+
+    async function gerarPDFRemessas(dados, somenteResumo) {
+        const consolidado = await dadosRemessasConsolidados(dados);
         const doc = novoDocPDF();
-        montarResumoRemessas(doc, dados, true, false);
+        montarResumoRemessas(doc, consolidado, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
         if (!somenteResumo) {
-            const pgTabela = montarTabelaRemessas(doc, dados, false);
+            const pgTabela = montarTabelaRemessas(doc, consolidado, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
@@ -9806,6 +9851,9 @@
         // Tabelas no lugar dos dois gráficos empilhados de antes (pedido do usuário):
         // ranking dos processos mais demorados, depois o tempo médio por Classe
         // Processual — cada uma abre página nova se não couber no que resta da página 1.
+        // Movido pra ANTES do bloco de KPIs por destino (abaixo) porque esse bloco também
+        // precisa paginar (a quantidade de destinos varia por vara, ver
+        // opcoesDestinoRemetidos/CFG_PROCESSOS_REMETIDOS).
         const ctx = {
             rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_REMESSAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             topoContinuacao: m + 14,
@@ -9816,6 +9864,43 @@
             },
         };
         let y = k3Y + 26 + gap + 2;
+
+        // KPIs por destino da remessa (pedido do usuário): um card por destinatário do
+        // campo "Remetidos para" (só quem tem >=1 processo — não dá pra listar destinos
+        // com zero, já que só sabemos quais destinos existem pelos próprios registros
+        // coletados de CFG_PROCESSOS_REMETIDOS; ver mapRemetidoParaFormatoRemessas), com o
+        // total e o processo remetido há mais tempo (maior "Dias em aberto") NAQUELE
+        // destino. Registros vindos de CFG_REMESSAS (Paralisados/"Em remessa") não têm
+        // campo "destino" — ficam de fora deste agrupamento, sem afetar os KPIs gerais
+        // acima (que continuam somando as duas fontes).
+        const porDestino = new Map();
+        validos.forEach(d => {
+            if (!d.destino) return;
+            if (!porDestino.has(d.destino)) porDestino.set(d.destino, []);
+            porDestino.get(d.destino).push(d);
+        });
+        const destinos = [...porDestino.entries()]
+            .map(([destino, lista]) => ({ destino, total: lista.length, maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0] }))
+            .sort((a, b) => b.total - a.total);
+        if (destinos.length) {
+            if (y + 10 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            tituloSecao(doc, m, y, uw, 'Por destino da remessa');
+            y += 6;
+            const kWDestino = (uw - 2 * gap) / 3;
+            const hDestino = 24;
+            destinos.forEach((d, i) => {
+                const col = i % 3;
+                if (col === 0 && i > 0) y += hDestino + gap;
+                if (col === 0 && y + hDestino > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+                const x = m + col * (kWDestino + gap);
+                const subs = d.maisAntigo
+                    ? [`Mais antigo: ${d.maisAntigo.processo}`, `${d.maisAntigo.dias} dia(s) em aberto`]
+                    : [];
+                desenharCard(doc, x, y, kWDestino, hDestino, d.destino, String(d.total), subs, true, COR.azul);
+            });
+            y += hDestino + gap + 2;
+        }
+
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
             if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
