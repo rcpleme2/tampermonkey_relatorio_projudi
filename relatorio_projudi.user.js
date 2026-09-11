@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.39
+// @version      25.40
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4738,9 +4738,14 @@
         doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
         const cx = x + w / 2;
         let yy = y + 6.5;
+        // Título QUEBRA em várias linhas em vez de truncar (pedido do usuário: nomes
+        // longos como "EM REMESSA (EXCETO PROCESSOS CONCLUSOS)" devem aparecer por
+        // inteiro) — mesma ideia de desenharCardLista, mas o resto do card (total, contagem
+        // >30d, "Mais antigo") desce conforme o número de linhas do título.
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
-        doc.text(textoTruncadoParaLargura(doc, String(destino).toUpperCase(), w - 10), cx, yy, { align: 'center' });
-        yy += 7;
+        const linhasTitulo = doc.splitTextToSize(String(destino).toUpperCase(), w - 10);
+        linhasTitulo.forEach((linha, i) => doc.text(linha, cx, yy + i * 3.4, { align: 'center' }));
+        yy += linhasTitulo.length * 3.4 + 3.6;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(...COR.tinta);
         doc.text(String(total), cx, yy, { align: 'center' });
         yy += 5.5;
@@ -9974,7 +9979,7 @@
             .sort((a, b) => b.total - a.total);
         if (semDestino.length) {
             destinos.push({
-                destino: 'Em Remessa',
+                destino: 'Em Remessa (exceto processos conclusos)',
                 total: Number.isFinite(totalIdentificadoRemessas) && totalIdentificadoRemessas > 0 ? totalIdentificadoRemessas : semDestino.length,
                 total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
                 maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
@@ -10053,7 +10058,10 @@
             ]);
             y += 5;
             const kWDestino = (uw - 2 * gap) / 3;
-            const hDestino = 36;
+            // 42 (não 36) dá espaço pro título quebrar em até 2 linhas (ex.: "EM REMESSA
+            // (EXCETO PROCESSOS CONCLUSOS)") sem cortar o resto do card — ver
+            // desenharCardDestino.
+            const hDestino = 42;
             destinos.forEach((d, i) => {
                 const col = i % 3;
                 if (col === 0 && i > 0) y += hDestino + gap;
