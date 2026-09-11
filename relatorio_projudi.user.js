@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.41
+// @version      25.42
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5542,10 +5542,32 @@
             },
         };
 
+        let y = aY + 28 + gap + 2;
+
+        // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
+        // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
+        // — logo abaixo do card "JUNTADA PENDENTE MAIS ANTIGA" (pedido do usuário: ficar
+        // junto dos demais KPIs no topo do resumo, não numa página separada) — só aparece
+        // se houver pelo menos um indicador capturado com valor > 0.
+        if (p.painelExtraTitulo) {
+            const extras = (() => {
+                try {
+                    const raw = store.getItem(cfg.prefixo + 'outros_indicadores');
+                    const lista = raw ? JSON.parse(raw) : [];
+                    return (lista || [])
+                        .filter(it => (it.valor || 0) > 0)
+                        .map(it => ({ titulo: it.label, valor: it.valor }));
+                } catch (e) { return []; }
+            })();
+            if (extras.length) {
+                tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
+                y = desenharGradeCardsIndicadores(doc, m, y + TITULO_TABELA_H, uw, extras, ctx) + 2;
+            }
+        }
+
         // Comparativo geral × competência (só aparece com 2+ competências nos dados —
         // ver tabelaComparativoCompetencias), faixas de idade e as distribuições de
         // cfg.pdf.distribuicoes, todas em tabela.
-        let y = aY + 28 + gap + 2;
         y = tabelaComparativoCompetencias(doc, m, y, uw, dados, p, now, LIMITES_CARTORIO) + 6;
 
         const faixas = faixasPorPrioridade(dados, p.dataCampo, now);
@@ -5605,30 +5627,6 @@
                     : distribuicoes;
             }
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
-        }
-
-        // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
-        // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
-        // — sempre em página própria (a lista pode ter até ~14 itens) e só aparece se
-        // houver pelo menos um indicador capturado com valor > 0.
-        if (p.painelExtraTitulo) {
-            const extras = (() => {
-                try {
-                    const raw = store.getItem(cfg.prefixo + 'outros_indicadores');
-                    const lista = raw ? JSON.parse(raw) : [];
-                    return (lista || [])
-                        .filter(it => (it.valor || 0) > 0)
-                        .map(it => ({ titulo: it.label, valor: it.valor }));
-                } catch (e) { return []; }
-            })();
-            if (extras.length) {
-                ctx.rodapeAntesDeVirar();
-                doc.addPage();
-                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
-                doc.text(p.painelExtraTitulo, m, m + 4);
-                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
-                y = desenharGradeCardsIndicadores(doc, m, m + 14, uw, extras, ctx);
-            }
         }
 
         // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
