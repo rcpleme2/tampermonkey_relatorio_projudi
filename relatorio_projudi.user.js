@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.40
+// @version      25.41
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -481,6 +481,13 @@
                 // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
                 { titulo: 'Processos com mais de uma juntada pendente (15 maiores)', campo: 'processo', topN: 15, span: 2, semOutros: true, minValor: 2, pagina2: true },
             ],
+            // Demais indicadores do painel "Mesa do Analista Judiciário" (aba "Análise de
+            // Juntadas") além de Juntadas/Retorno de Conclusão (já viram KPI próprio) —
+            // pedido do usuário. Cada um vira um card só se o valor capturado for > 0 (ver
+            // capturarOutrosIndicadoresPainelJuntadas/INDICADORES_EXTRA_JUNTADAS); se o
+            // painel da tela não tiver o indicador (ex. tela de outra competência), ele
+            // simplesmente não aparece na lista capturada.
+            painelExtraTitulo: 'Outros indicadores pendentes (painel da Mesa do Analista)',
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
                 { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -4847,6 +4854,59 @@
         }
     }
 
+    // Card de indicador simples (rótulo + contador), pensado para grades com muitos itens
+    // pequenos lado a lado (ex.: painelExtraTitulo em montarResumoGenerico). Ao contrário
+    // de desenharCardLista (valor longo, título curto), aqui é o TÍTULO que pode ser longo
+    // (rótulos de indicador do Projudi chegam a ~80 caracteres) e o valor é sempre um
+    // número curto — por isso quebra o título em várias linhas em vez do valor. Sempre
+    // medir a altura com medirAlturaCardIndicador antes de desenhar.
+    function medirAlturaCardIndicador(doc, w, titulo) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2);
+        const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
+        return 5 + linhas.length * 3.3 + 8 + 4;
+    }
+
+    function desenharCardIndicador(doc, x, y, w, h, titulo, valor, acento) {
+        acento = acento || COR.azul;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const px = x + 5;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
+        const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
+        doc.text(linhas, px, y + 5);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(...COR.tinta);
+        doc.text(String(valor), px, y + 5 + linhas.length * 3.3 + 6);
+    }
+
+    // Distribui uma lista de cards de indicador (ver desenharCardIndicador) numa grade de
+    // 3 colunas, com altura de linha variável (cada linha usa a altura do card mais alto
+    // nela) e paginação automática — mesmo padrão de desenharGradeTabelas (ctx.
+    // rodapeAntesDeVirar/cabecalhoContinuacao/topoContinuacao). Retorna o Y final.
+    function desenharGradeCardsIndicadores(doc, x, y, w, itens, ctx) {
+        const ph = doc.internal.pageSize.getHeight();
+        const gap = 5, cols = 3, colW = (w - gap * (cols - 1)) / cols;
+        let yLinha = y, col = 0, alturaLinha = 0;
+        const fecharLinha = () => { if (col !== 0) { yLinha += alturaLinha + gap; col = 0; alturaLinha = 0; } };
+        const novaPagina = () => {
+            if (ctx.rodapeAntesDeVirar) ctx.rodapeAntesDeVirar();
+            doc.addPage();
+            ctx.cabecalhoContinuacao();
+            yLinha = ctx.topoContinuacao; col = 0; alturaLinha = 0;
+        };
+        itens.forEach(it => {
+            const h = medirAlturaCardIndicador(doc, colW, it.titulo);
+            if (col === 0 && yLinha + h > ph - 14) novaPagina();
+            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento);
+            alturaLinha = Math.max(alturaLinha, h);
+            col++;
+            if (col >= cols) fecharLinha();
+        });
+        fecharLinha();
+        return yLinha;
+    }
+
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
     // cor: cor padrão das barras (acento semântico do gráfico); item.cor sobrepõe se definida.
     function desenharBarras(doc, x, y, w, h, titulo, itens, fmt, cor) {
@@ -5545,6 +5605,30 @@
                     : distribuicoes;
             }
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
+        }
+
+        // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
+        // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
+        // — sempre em página própria (a lista pode ter até ~14 itens) e só aparece se
+        // houver pelo menos um indicador capturado com valor > 0.
+        if (p.painelExtraTitulo) {
+            const extras = (() => {
+                try {
+                    const raw = store.getItem(cfg.prefixo + 'outros_indicadores');
+                    const lista = raw ? JSON.parse(raw) : [];
+                    return (lista || [])
+                        .filter(it => (it.valor || 0) > 0)
+                        .map(it => ({ titulo: it.label, valor: it.valor }));
+                } catch (e) { return []; }
+            })();
+            if (extras.length) {
+                ctx.rodapeAntesDeVirar();
+                doc.addPage();
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(p.painelExtraTitulo, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+                y = desenharGradeCardsIndicadores(doc, m, m + 14, uw, extras, ctx);
+            }
         }
 
         // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
@@ -13058,6 +13142,51 @@
         store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
+    // Demais indicadores (spans #id + rótulo) do mesmo painel "Mesa do Analista
+    // Judiciário" (aba "Análise de Juntadas"), além de Juntadas/Retorno de Conclusão (que
+    // já têm KPI próprio — ver capturarContadoresPainelJuntadas/capturarContadoresPainel
+    // Retorno). Pedido do usuário: cada um desses vira um card no PDF de Juntadas, desde
+    // que o valor seja > 0. "Mandados aguardando análise de retorno" fica de fora desta
+    // lista de propósito — já tem relatório dedicado próprio (ver CFG_MANDADOS_RETORNO);
+    // "Fianças com prazo excedido" também fica de fora (fila "Com Urgência" só existe em
+    // varas de Infância e Juventude, fora do escopo pedido pelo usuário).
+    const INDICADORES_EXTRA_JUNTADAS = [
+        { id: 'numeroCartasPrecatoriasAguardandoAnaliseRetorno', label: 'Cartas Eletrônicas aguardando análise de retorno' },
+        { id: 'numeroDiligenciasPendentes', label: 'Diligências aguardando retorno' },
+        { id: 'numeroRemessasFisicasMinisterioPublico', label: 'Remessas Físicas ao Ministério Público aguardando retorno' },
+        { id: 'numeroRetornoAssessoriaMilitar', label: 'Retornos da Assessoria Militar aguardando análise' },
+        { id: 'numeroPedidoProvidenciasAgendados', label: 'Pedidos de Providências (Exército) agendados' },
+        { id: 'numeroAutuacaoGuiaExecucao', label: 'Autuação da Guia de Execução pendente (Exportação Criminal)' },
+        { id: 'numeroMultaFupenPendenteQuitada', label: 'Multas Fupen quitadas e pendentes de juntada de quitação' },
+        { id: 'numeroMultaFupenPendenteVencida', label: 'Multas Fupen vencidas e pendentes de ordenação' },
+        { id: 'numeroMultaFupenPendenteReenvio', label: 'Multas Fupen vencidas e pendentes de reenvio ao Fupen' },
+        { id: 'atoOrdinatorioAutoridadePolicialAguardandoJuntada', label: 'Atos ordinatórios praticados pela autoridade policial aguardando análise de juntada' },
+        { id: 'numeroPrestacoesPecuniariasEmAtraso', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em atraso' },
+        { id: 'numeroPrestacoesPecuniariasEmAnalise', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em análise' },
+        { id: 'cumprimentosComunicacaoRecursalNaoEncaminhadas', label: 'Comunicações Recursais Pendentes de Encaminhamento' },
+        { id: 'processosNaoAtendidosJG', label: 'Processos com suspeita de incompetência - Juiz das Garantias' },
+    ];
+    // Só grava quando encontra o painel na página (pelo menos um dos spans presente) —
+    // mesma cautela de capturarContadoresPainelJuntadas: não mexe no valor já gravado
+    // quando o usuário está noutra tela. Indicadores ausentes na tela (não fazem parte da
+    // competência atual) ficam de fora do array salvo, não entram como zero.
+    function capturarOutrosIndicadoresPainelJuntadas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            if (!d.getElementById) continue;
+            const encontrados = [];
+            for (const ind of INDICADORES_EXTRA_JUNTADAS) {
+                const span = d.getElementById(ind.id);
+                if (!span) continue;
+                const n = parseInt((span.textContent || '').trim(), 10);
+                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0 });
+            }
+            if (!encontrados.length) continue;
+            store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
+            return;
+        }
+    }
+
     // Mesma ideia de capturarContadoresPainelJuntadas, para o painel "Retorno de
     // Conclusão" da página inicial: "Com Pedido de Urgência" tem sua própria contagem
     // (#numeroRetornoConclusoesPedidoUrgencia) separada de "Para Realizar"
@@ -14854,6 +14983,7 @@
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
+        chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas'); // demais cards do mesmo painel
         chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
@@ -14869,6 +14999,7 @@
             chamarSeguro(atualizarPainel, 'atualizarPainel');
             chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+            chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
             chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
