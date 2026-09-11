@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.49
+// @version      25.50
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5571,15 +5571,24 @@
         // observação condicional de p.observacaoIndicadores (ver bloco depois de faixas).
         let temIndicadorCritico = false;
         if (p.painelExtraTitulo) {
+            const chavePainelExtra = cfg.prefixo + 'outros_indicadores';
             const extras = (() => {
                 try {
-                    const raw = store.getItem(cfg.prefixo + 'outros_indicadores');
+                    const raw = store.getItem(chavePainelExtra);
                     const lista = raw ? JSON.parse(raw) : [];
                     return (lista || [])
                         .filter(it => (it.valor || 0) > 0)
                         .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
-                } catch (e) { return []; }
+                } catch (e) {
+                    console.warn(`[Projudi Juntadas] montarResumoGenerico — erro lendo/parseando "${chavePainelExtra}":`, e);
+                    return [];
+                }
             })();
+            // Log de diagnóstico simétrico ao de capturarOutrosIndicadoresPainelJuntadas —
+            // mostra, no momento exato da MONTAGEM do PDF, se o valor gravado por aquela
+            // função ainda está acessível aqui (mesma store, mesma chave) e quantos
+            // indicadores (>0) sobraram depois do filtro.
+            console.log(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": raw=${JSON.stringify(store.getItem(chavePainelExtra))} → ${extras.length} indicador(es) com valor > 0`);
             temIndicadorCritico = extras.some(it => it.critico);
             if (extras.length) {
                 tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
