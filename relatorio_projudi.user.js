@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.44
+// @version      25.45
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4292,6 +4292,11 @@
         aqua:     [82, 116, 103],   // secundário / positivo (verde-acinzentado)
         ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
         vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
+        // Vermelho mais vivo, só para TEXTO de valor onde precisa ler como "vermelho" à
+        // primeira vista num número pequeno em negrito (ex. cards de indicador de
+        // Juntadas) — pedido do usuário: "vermelho" da paleta (terracota escuro, acima)
+        // ficava parecido demais com o preto do título nesse contexto.
+        vermelhoVivo: [196, 46, 46],
         azulTint: [238, 242, 246],  // fundo da faixa de SUBGRUPO na capa unificada (mais claro que "cartao")
         vinho:    [104, 38, 38],    // pior faixa etária (>180 dias) — ver COR_SEVERIDADE
     };
@@ -4902,7 +4907,7 @@
         itens.forEach(it => {
             const h = medirAlturaCardIndicador(doc, colW, it.titulo);
             if (col === 0 && yLinha + h > ph - 14) novaPagina();
-            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento, it.critico ? COR.vermelho : null);
+            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento, it.critico ? COR.vermelhoVivo : null);
             alturaLinha = Math.max(alturaLinha, h);
             col++;
             if (col >= cols) fecharLinha();
