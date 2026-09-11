@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.36
+// @version      25.37
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9824,6 +9824,14 @@
 
     const TITULO_REMESSAS = 'Remessas em Aberto';
 
+    // Texto fixo do balão de OBSERVAÇÃO do resumo de Remessas em Aberto (pedido do
+    // usuário, texto literal fornecido) — sempre presente, mesmo padrão de
+    // medirAlturaCardObservacao/desenharCardObservacao (Helvetica, justificado, acento
+    // âmbar) já usado nos outros balões de observação do arquivo.
+    const PARAGRAFOS_OBSERVACAO_REMESSAS = [
+        'A secretaria deverá manter rigoroso controle das remessas pendentes, especialmente daquelas que ultrapassem os prazos legais ou os previstos no Código de Normas do Foro Judicial. Nessas hipóteses, deverá adotar as providências necessárias junto aos destinatários das remessas, promovendo a cobrança do cumprimento das determinações pendentes e a consequente devolução dos autos à unidade judicial.',
+    ];
+
     // Busca o que já foi coletado das DUAS fontes de "Remessas em Aberto" (CFG_REMESSAS —
     // Paralisados/"Em remessa" — e CFG_PROCESSOS_REMETIDOS) e devolve tudo mesclado, sem
     // duplicar processos. Chamado de dentro de gerarPDFRemessas para que o botão "Baixar
@@ -9992,6 +10000,13 @@
             });
             y += hDestino + gap + 2;
         }
+
+        // Balão de OBSERVAÇÃO (pedido do usuário) — abaixo dos KPIs, acima das tabelas;
+        // tenta ficar na mesma página dos KPIs (só vira página se não couber mesmo).
+        const hObsRemessas = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_REMESSAS);
+        if (y + hObsRemessas > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+        desenharCardObservacao(doc, m, y, uw, hObsRemessas, 'Observação', PARAGRAFOS_OBSERVACAO_REMESSAS);
+        y += hObsRemessas + gap;
 
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
