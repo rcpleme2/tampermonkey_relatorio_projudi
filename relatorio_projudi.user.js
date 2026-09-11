@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.43
+// @version      25.44
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4866,8 +4866,9 @@
         return 5 + linhas.length * 3.3 + 8 + 4;
     }
 
-    function desenharCardIndicador(doc, x, y, w, h, titulo, valor, acento) {
+    function desenharCardIndicador(doc, x, y, w, h, titulo, valor, acento, corValor) {
         acento = acento || COR.azul;
+        corValor = corValor || COR.tinta;
         doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
         doc.setFillColor(...acento);
@@ -4877,7 +4878,9 @@
         const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
         doc.text(linhas, px, y + 5);
         // Valor centralizado no card (pedido do usuário) — título continua à esquerda.
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(...COR.tinta);
+        // corValor (pedido do usuário): vermelho para os indicadores mais críticos — ver
+        // INDICADORES_EXTRA_JUNTADAS/critico.
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(...corValor);
         doc.text(String(valor), x + w / 2, y + 5 + linhas.length * 3.3 + 6, { align: 'center' });
     }
 
@@ -4899,7 +4902,7 @@
         itens.forEach(it => {
             const h = medirAlturaCardIndicador(doc, colW, it.titulo);
             if (col === 0 && yLinha + h > ph - 14) novaPagina();
-            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento);
+            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento, it.critico ? COR.vermelho : null);
             alturaLinha = Math.max(alturaLinha, h);
             col++;
             if (col >= cols) fecharLinha();
@@ -5557,7 +5560,7 @@
                     const lista = raw ? JSON.parse(raw) : [];
                     return (lista || [])
                         .filter(it => (it.valor || 0) > 0)
-                        .map(it => ({ titulo: it.label, valor: it.valor }));
+                        .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
                 } catch (e) { return []; }
             })();
             if (extras.length) {
@@ -13149,21 +13152,23 @@
     // lista de propósito — já tem relatório dedicado próprio (ver CFG_MANDADOS_RETORNO);
     // "Fianças com prazo excedido" também fica de fora (fila "Com Urgência" só existe em
     // varas de Infância e Juventude, fora do escopo pedido pelo usuário).
+    // `critico: true` — pedido do usuário: valor do card em vermelho (indicadores que
+    // pedem atenção mais imediata). Os demais ficam na cor padrão do card.
     const INDICADORES_EXTRA_JUNTADAS = [
         { id: 'numeroCartasPrecatoriasAguardandoAnaliseRetorno', label: 'Cartas Eletrônicas aguardando análise de retorno' },
         { id: 'numeroDiligenciasPendentes', label: 'Diligências aguardando retorno' },
-        { id: 'numeroRemessasFisicasMinisterioPublico', label: 'Remessas Físicas ao Ministério Público aguardando retorno' },
+        { id: 'numeroRemessasFisicasMinisterioPublico', label: 'Remessas Físicas ao Ministério Público aguardando retorno', critico: true },
         { id: 'numeroRetornoAssessoriaMilitar', label: 'Retornos da Assessoria Militar aguardando análise' },
         { id: 'numeroPedidoProvidenciasAgendados', label: 'Pedidos de Providências (Exército) agendados' },
-        { id: 'numeroAutuacaoGuiaExecucao', label: 'Autuação da Guia de Execução pendente (Exportação Criminal)' },
-        { id: 'numeroMultaFupenPendenteQuitada', label: 'Multas Fupen quitadas e pendentes de juntada de quitação' },
-        { id: 'numeroMultaFupenPendenteVencida', label: 'Multas Fupen vencidas e pendentes de ordenação' },
-        { id: 'numeroMultaFupenPendenteReenvio', label: 'Multas Fupen vencidas e pendentes de reenvio ao Fupen' },
+        { id: 'numeroAutuacaoGuiaExecucao', label: 'Autuação da Guia de Execução pendente (Exportação Criminal)', critico: true },
+        { id: 'numeroMultaFupenPendenteQuitada', label: 'Multas Fupen quitadas e pendentes de juntada de quitação', critico: true },
+        { id: 'numeroMultaFupenPendenteVencida', label: 'Multas Fupen vencidas e pendentes de ordenação', critico: true },
+        { id: 'numeroMultaFupenPendenteReenvio', label: 'Multas Fupen vencidas e pendentes de reenvio ao Fupen', critico: true },
         { id: 'atoOrdinatorioAutoridadePolicialAguardandoJuntada', label: 'Atos ordinatórios praticados pela autoridade policial aguardando análise de juntada' },
-        { id: 'numeroPrestacoesPecuniariasEmAtraso', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em atraso' },
+        { id: 'numeroPrestacoesPecuniariasEmAtraso', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em atraso', critico: true },
         { id: 'numeroPrestacoesPecuniariasEmAnalise', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em análise' },
         { id: 'cumprimentosComunicacaoRecursalNaoEncaminhadas', label: 'Comunicações Recursais Pendentes de Encaminhamento' },
-        { id: 'processosNaoAtendidosJG', label: 'Processos com suspeita de incompetência - Juiz das Garantias' },
+        { id: 'processosNaoAtendidosJG', label: 'Processos com suspeita de incompetência - Juiz das Garantias', critico: true },
     ];
     // Só grava quando encontra o painel na página (pelo menos um dos spans presente) —
     // mesma cautela de capturarContadoresPainelJuntadas: não mexe no valor já gravado
@@ -13178,7 +13183,7 @@
                 const span = d.getElementById(ind.id);
                 if (!span) continue;
                 const n = parseInt((span.textContent || '').trim(), 10);
-                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0 });
+                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico });
             }
             if (!encontrados.length) continue;
             store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
