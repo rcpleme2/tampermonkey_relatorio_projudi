@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.46
+// @version      25.47
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11722,6 +11722,18 @@
             return;
         }
 
+        // Mesmo painel acima, agora para JUNTADAS (pedido do usuário: a automação deve
+        // passar por essa tela sozinha, sem depender de visita manual, pra que os
+        // indicadores extras do painel — ver painelExtraTitulo/INDICADORES_EXTRA_JUNTADAS
+        // — sejam capturados). REPORTS_AUTOMACAO marca precisaPreencher:true para
+        // 'juntadas' só por causa disso; tratarPainelAnaliseJuntadasParaJuntadas() espera
+        // o contador "Juntadas" (Para Realizar) aparecer, captura os indicadores e só
+        // então clica para a tela de resultados de verdade.
+        if (estadoAutoNoInicio === 'preenchendo_juntadas') {
+            tratarPainelAnaliseJuntadasParaJuntadas();
+            return;
+        }
+
         // Tela de resultados de Mandados (os 4 relatórios, status 13/11/4/8):
         // gateMandados() cuida dos casos que o fluxo genérico não trata sozinho (correção
         // de filtro para o relatório errado, zero resultados) — quando ela não tratou nada
@@ -13005,7 +13017,12 @@
         // formularioInstanciaRecursal/preencherEPesquisarInstanciaRecursal.
         { key: 'instanciarecursal', cfg: CFG_INSTANCIA_RECURSAL, navAlvo: 'instanciarecursal', rotulo: 'Em Instância Recursal', curto: 'Inst. Recursal', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         // ── Pendências ───────────────────────────────────────────────────────────────
-        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
+        // 'juntadas' tem precisaPreencher:true (embora não preencha filtro nenhum) pelo
+        // mesmo motivo dos 4 relatórios de Mandados abaixo: passa pelo painel "Análise de
+        // Juntadas" antes da tela de resultados (ver navegarMenu/
+        // tratarPainelAnaliseJuntadasParaJuntadas) — "preenchendo_juntadas" é o estado que
+        // o gate de injetarBotoes espera pra saber que ainda está nesse passo intermediário.
+        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
         // situação), não direto nos resultados — por isso também precisam do passo de
@@ -13340,16 +13357,28 @@
 
     function navegarMenu(alvo) {
         let link = null;
-        if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
-        // O painel de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
-        // conclusao.do, alcançadas por link direto) — é o painel "Para Realizar" da aba
-        // "Análise de Juntadas" (mesaAnalista.do?actionType=listaAnaliseJuntadas), que só
-        // se chega clicando na aba #tabItemprefix2 (mesmo padrão de Outros Cumprimentos:
-        // <a> sem href, precisa de clique de verdade — ver navegarAbaAnaliseJuntadas). O
-        // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
-        // painel (ver tratarPainelMandados) — os 4 relatórios de Mandados (seleção
-        // independente, ver REPORTS_AUTOMACAO) passam todos por aqui.
-        else if (alvo === 'mandadosretorno' || alvo === 'mandadosdistribuicao'
+        // Juntadas passa PELO painel "Para Realizar" da aba "Análise de Juntadas"
+        // (mesaAnalista.do?actionType=listaAnaliseJuntadas) antes de ir para a tela de
+        // resultados (analisarJuntada.do) — pedido do usuário: assim a automação captura
+        // sozinha os indicadores extras do painel (ver
+        // capturarOutrosIndicadoresPainelJuntadas/painelExtraTitulo) sem depender de
+        // visita manual a essa tela. Antes ia direto (acharLinkMenu/analisarJuntada.do),
+        // pulando o painel inteiro. O clique de verdade na tela de resultados acontece em
+        // tratarPainelAnaliseJuntadasParaJuntadas, chamado pelo gate em injetarBotoes
+        // (REPORTS_AUTOMACAO marca precisaPreencher:true para 'juntadas' por causa disso —
+        // mesmo padrão dos 4 relatórios de Mandados abaixo, que já passam por essa mesma
+        // aba). O painel é carregado via AJAX (mesmo padrão de Outros Cumprimentos), por
+        // isso o clique real só acontece quando o contador aparecer — ver
+        // tratarPainelAnaliseJuntadasParaJuntadas/tratarPainelMandados.
+        //
+        // O painel de Mandados NÃO é a mesma tela de Retorno (conclusao.do, alcançada por
+        // link direto) — é este mesmo painel "Para Realizar" da aba "Análise de
+        // Juntadas", que só se chega clicando na aba #tabItemprefix2 (mesmo padrão de
+        // Outros Cumprimentos: <a> sem href, precisa de clique de verdade — ver
+        // navegarAbaAnaliseJuntadas). O contador "Mandados aguardando análise de retorno"
+        // e seu link só existem nesse painel (ver tratarPainelMandados) — os 4 relatórios
+        // de Mandados (seleção independente, ver REPORTS_AUTOMACAO) passam todos por aqui.
+        if (alvo === 'juntadas' || alvo === 'mandadosretorno' || alvo === 'mandadosdistribuicao'
             || alvo === 'mandadoscumprimento' || alvo === 'mandadosdecurso') return navegarAbaAnaliseJuntadas();
         // Conclusões migrou para a tela "Estatísticas de Conclusões" (mesmo link de
         // Tempo Médio) — a tela antiga "Para Realizar" (conclusao.do) ficava incompleta
@@ -13565,6 +13594,41 @@
         console.log('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
         link.click();
         return true;
+    }
+
+    // Painel "Para Realizar" da aba "Análise de Juntadas" — 2º passo da navegação
+    // automática de Juntadas (1º: clicar na aba, ver navegarMenu('juntadas')/
+    // navegarAbaAnaliseJuntadas). Pedido do usuário: a automação deve capturar sozinha os
+    // indicadores extras do painel (capturarContadoresPainelJuntadas/
+    // capturarOutrosIndicadoresPainelJuntadas) sem depender de visita manual a essa tela.
+    // Mesmo padrão de tratarPainelMandados: o painel carrega via AJAX (mesma lição de
+    // Outros Cumprimentos), então espera ativamente (poll a cada 500ms, teto de ~15s) o
+    // contador "Juntadas" (Para Realizar) aparecer antes de clicar. Chama as duas funções
+    // de captura diretamente aqui (em vez de confiar no setInterval de 2s do bootstrap)
+    // porque senão o clique abaixo podia disparar ANTES do próximo tick do intervalo —
+    // aqui a captura acontece garantidamente com o painel já carregado, no mesmo instante
+    // da decisão de avançar.
+    function tratarPainelAnaliseJuntadasParaJuntadas(tentativa) {
+        tentativa = tentativa || 0;
+        const span = document.getElementById('numeroPeticoesFazerJuntada');
+        const link = span && span.closest('a');
+        if (!link) {
+            if (tentativa < 30) {
+                setTimeout(() => tratarPainelAnaliseJuntadasParaJuntadas(tentativa + 1), 500);
+                return;
+            }
+            console.warn('[Auto Projudi Juntadas] contador/link de "Juntadas" (Para Realizar) não apareceu em ~15s no painel "Análise de Juntadas" — voltando a tentar do zero');
+            store.setItem(AUTO_ESTADO, 'ir_juntadas');
+            return;
+        }
+        chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+        chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
+        // Promove pra "coletando_" ANTES de clicar (mesmo motivo de tratarPainelMandados:
+        // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
+        // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
+        store.setItem(AUTO_ESTADO, 'coletando_juntadas');
+        console.log('[Auto Projudi Juntadas] indicadores do painel capturados — indo para a tela de resultados de Juntadas');
+        link.click();
     }
 
     // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
