@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.33
+// @version      25.34
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1024,10 +1024,20 @@
             const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
             const diasTexto = textoCelula(tds[6]);
             const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            // A coluna "Destino da Remessa" da TABELA costuma vir vazia (confirmado nas
+            // amostras reais cedidas pelo usuário — só o campo de filtro "Remetidos para"
+            // tem o nome do destinatário; a coluna às vezes traz um destino mais específico,
+            // às vezes nada). Como a busca já é feita um destino de cada vez (ver
+            // preencherEPesquisarProcessosRemetidos/CHAVE_DESTINO_ATUAL_REMETIDOS), usa o
+            // destino que está sendo pesquisado AGORA — muito mais confiável pros KPIs "Por
+            // destino da remessa" — e só cai pra coluna da tabela se não houver essa
+            // informação (ex.: coleta manual/avulsa fora do loop de destinos).
+            const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+            const destino = (destinoAtual && destinoAtual.rotulo) || textoCelula(tds[3]);
             return {
                 processo,
                 classe: textoCelula(tds[1]),
-                destino: textoCelula(tds[3]),
+                destino,
                 enviado: textoCelula(tds[4]),
                 recebido: textoCelula(tds[5]),
                 dias,
