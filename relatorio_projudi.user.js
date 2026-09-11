@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.35
+// @version      25.36
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4667,6 +4667,69 @@
             let yy = y + (grande ? 22 : 20);
             subs.forEach(s => { doc.text(doc.splitTextToSize(String(s), w - 8)[0], px, yy); yy += 4; });
         }
+    }
+
+    // Faixa de severidade pelos dias em aberto (pedido do usuário, seção "Por destino da
+    // remessa" de Remessas em Aberto): ≤15 dias regular, 16–30 atenção, >30 crítico — ver
+    // desenharCardDestino/desenharLegendaQuadrados.
+    const LIMITE_REGULAR_DESTINO = 15;
+    const LIMITE_ATENCAO_DESTINO = 30;
+    function corSeveridadeDestino(dias) {
+        if (dias == null) return COR.muted;
+        if (dias <= LIMITE_REGULAR_DESTINO) return COR.aqua;
+        if (dias <= LIMITE_ATENCAO_DESTINO) return COR.ambar;
+        return COR.vermelho;
+    }
+
+    // Card do KPI "Por destino da remessa" (Remessas em Aberto) — versão dedicada de
+    // desenharCard: além de título/total, mostra (pedido do usuário) o total de processos
+    // com mais de 30 dias em aberto, em vermelho, e um quadrado colorido junto ao "Mais
+    // antigo" indicando a faixa de severidade (ver corSeveridadeDestino/
+    // desenharLegendaQuadrados). Não generalizado para desenharCard porque esses dois
+    // elementos (contagem >30d, quadrado de severidade) são específicos desta seção — as
+    // outras ~30 chamadas de desenharCard no arquivo não precisam disso.
+    function desenharCardDestino(doc, x, y, w, h, destino, total, total30dias, maisAntigo) {
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...COR.azul);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const cx = x + w / 2;
+        let yy = y + 6.5;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
+        doc.text(textoTruncadoParaLargura(doc, String(destino).toUpperCase(), w - 10), cx, yy, { align: 'center' });
+        yy += 7;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(...COR.tinta);
+        doc.text(String(total), cx, yy, { align: 'center' });
+        yy += 5.5;
+        if (total30dias > 0) {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
+            doc.text(`${total30dias} há mais de 30 dias`, cx, yy, { align: 'center' });
+            yy += 4.2;
+        }
+        if (maisAntigo) {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
+            doc.text('Mais antigo:', cx, yy, { align: 'center' }); yy += 4.2;
+            doc.text(doc.splitTextToSize(maisAntigo.processo, w - 10)[0], cx, yy, { align: 'center' }); yy += 4.2;
+            const textoDias = `${maisAntigo.dias} dia(s) em aberto`;
+            const larguraTexto = doc.getTextWidth(textoDias);
+            doc.text(textoDias, cx, yy, { align: 'center' });
+            doc.setFillColor(...corSeveridadeDestino(maisAntigo.dias));
+            doc.rect(cx + larguraTexto / 2 + 2.2, yy - 2.6, 2.4, 2.4, 'F');
+        }
+    }
+
+    // Legenda de quadrados coloridos (pedido do usuário) — mesmo critério de
+    // corSeveridadeDestino, usada uma vez no topo da seção "Por destino da remessa".
+    function desenharLegendaQuadrados(doc, x, y, itens) {
+        let lx = x;
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4);
+        itens.forEach(it => {
+            doc.setFillColor(...it.cor);
+            doc.rect(lx, y - 2.6, 2.4, 2.4, 'F');
+            doc.setTextColor(...COR.tintaSec);
+            doc.text(it.rotulo, lx + 4, y);
+            lx += 4 + doc.getTextWidth(it.rotulo) + 6;
+        });
     }
 
     // Mede a altura que desenharCardLista precisaria para "valor" — chamar ANTES de
@@ -9893,35 +9956,39 @@
             porDestino.get(d.destino).push(d);
         });
         const destinos = [...porDestino.entries()]
-            .map(([destino, lista]) => ({ destino, total: lista.length, maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0] }))
+            .map(([destino, lista]) => ({
+                destino,
+                total: lista.length,
+                total30dias: lista.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
+                maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0],
+            }))
             .sort((a, b) => b.total - a.total);
         if (semDestino.length) {
             destinos.push({
                 destino: 'Sem destino (Paralisados)',
                 total: semDestino.length,
+                total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
                 maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
             });
         }
         if (destinos.length) {
-            if (y + 10 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            if (y + 15 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             tituloSecao(doc, m, y, uw, 'Por destino da remessa');
             y += 6;
+            desenharLegendaQuadrados(doc, m, y, [
+                { cor: COR.aqua, rotulo: `Até ${LIMITE_REGULAR_DESTINO} dias (regular)` },
+                { cor: COR.ambar, rotulo: `${LIMITE_REGULAR_DESTINO + 1} a ${LIMITE_ATENCAO_DESTINO} dias (atenção)` },
+                { cor: COR.vermelho, rotulo: `Mais de ${LIMITE_ATENCAO_DESTINO} dias (crítico)` },
+            ]);
+            y += 5;
             const kWDestino = (uw - 2 * gap) / 3;
-            const hDestino = 30;
+            const hDestino = 36;
             destinos.forEach((d, i) => {
                 const col = i % 3;
                 if (col === 0 && i > 0) y += hDestino + gap;
                 if (col === 0 && y + hDestino > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
                 const x = m + col * (kWDestino + gap);
-                // Número do processo numa linha SÓ DELE (sem prefixo dividindo o espaço) —
-                // "Mais antigo: <processo>" numa linha só estourava a largura do card e
-                // desenharCard corta pegando só a 1ª linha do texto quebrado, cortando o
-                // próprio número fora (bug relatado pelo usuário: "faltou o número único
-                // dos processos").
-                const subs = d.maisAntigo
-                    ? ['Mais antigo:', d.maisAntigo.processo, `${d.maisAntigo.dias} dia(s) em aberto`]
-                    : [];
-                desenharCard(doc, x, y, kWDestino, hDestino, d.destino, String(d.total), subs, true, COR.azul);
+                desenharCardDestino(doc, x, y, kWDestino, hDestino, d.destino, d.total, d.total30dias, d.maisAntigo);
             });
             y += hDestino + gap + 2;
         }
