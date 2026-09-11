@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.38
+// @version      25.39
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -628,6 +628,12 @@
         detecta: (cab) => /dias\s+paralisado/i.test(cab) && opcaoBuscaParalisadoSelecionada() === '3',
         minTds: 8,
         usaAtuacao: false,
+        // Pedido do usuário: o total do card "Em Remessa" (Por destino da remessa) deve
+        // usar o "N registro(s) encontrado(s)" que o Projudi reportou na 1ª página, não a
+        // contagem de linhas coletadas — mesmo mecanismo já usado por Apreensões/Juntadas/
+        // Retorno (ver adicionarPagina/cfg.totalIdentificadoNoResumo e o uso em
+        // montarResumoRemessas).
+        totalIdentificadoNoResumo: true,
         nomeArquivo: 'remessas_abertas_projudi',
         rotulos: { coletar: 'Extrair Remessas', coletarMais: 'Extrair mais (Remessas)', baixar: '⬇ Baixar Remessas' },
         // "Dias em Remessa", não "Dias Paralisado" (pedido do usuário: não confundir com
@@ -2802,6 +2808,17 @@
     // painel, ver atualizarPainel/chave==='remetidos'.
     const CHAVE_DESTINO_ATUAL_REMETIDOS = 'projudi_remetidos_destino_atual';
 
+    // {destino: total} com o "N registro(s) encontrado(s)" que o Projudi reportou na 1ª
+    // página de CADA busca por destino (pedido do usuário: o total de cada KPI "Por
+    // destino da remessa" deve usar esse número, não a contagem de linhas efetivamente
+    // coletadas/deduplicadas — ver montarResumoRemessas). Capturado em adicionarPagina
+    // (genérico, ver criarColetor) só quando CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_
+    // REMETIDOS está setada — flag marcada aqui, em preencherEPesquisarProcessosRemetidos,
+    // logo ao escolher o próximo destino da fila, e consumida (removida) na 1ª página
+    // coletada depois disso, então cada busca por destino contribui exatamente 1 entrada.
+    const CHAVE_TOTAIS_POR_DESTINO_REMETIDOS = 'projudi_remetidos_totais_por_destino';
+    const CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS = 'projudi_remetidos_precisa_capturar_total';
+
     function lerFilaDestinosRemetidos() {
         return desembrulharArray(store.getItem(CHAVE_FILA_DESTINOS_REMETIDOS)) || [];
     }
@@ -2852,6 +2869,10 @@
         const destino = fila[0] || null;
         store.setItem(CHAVE_FILA_DESTINOS_REMETIDOS, JSON.stringify(fila.slice(1)));
         store.setItem(CHAVE_DESTINO_ATUAL_REMETIDOS, JSON.stringify(destino));
+        // Marca que a 1ª página da busca por ESTE destino ainda não teve o "N
+        // registro(s) encontrado(s)" capturado — ver adicionarPagina/
+        // CHAVE_TOTAIS_POR_DESTINO_REMETIDOS.
+        store.setItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS, '1');
 
         const selectAlvo = form.querySelector('#alvoRemessa');
         if (selectAlvo && destino) selectAlvo.value = destino.value;
@@ -3786,6 +3807,12 @@
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
             store.removeItem(cfg.prefixo + 'total_identificado');
+            if (cfg === CFG_PROCESSOS_REMETIDOS) {
+                store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+                store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
+                store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+                store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+            }
             // Flag pequena usada só por CFG_SUSPENSOS/CFG_SUSPENSOS_PRAZO (ver comentário
             // em "get cabecalhos" desses cfgs) — remover aqui também, genericamente, evita
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
@@ -3805,6 +3832,22 @@
             if (idx === 0 && cfg.totalIdentificadoNoResumo) {
                 const totalInicial = totalRegistrosPagina();
                 if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
+            }
+            // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
+            // preencherEPesquisarProcessosRemetidos) — o mecanismo acima (idx===0) só
+            // capturaria o total do 1º destino da fila inteira. Aqui, captura 1 vez por
+            // DESTINO (flag setada ao escolher cada destino, consumida na 1ª página
+            // coletada depois disso) — ver CHAVE_TOTAIS_POR_DESTINO_REMETIDOS.
+            if (cfg === CFG_PROCESSOS_REMETIDOS && store.getItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS) === '1') {
+                const totalDestino = totalRegistrosPagina();
+                if (totalDestino != null) {
+                    const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+                    const chaveDestino = (destinoAtual && destinoAtual.rotulo) || '(sem destino)';
+                    const mapaTotais = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
+                    mapaTotais[chaveDestino] = totalDestino;
+                    store.setItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS, JSON.stringify(mapaTotais));
+                }
+                store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
             }
             await idbSet(KEY_PAGINA_PREF + idx, dadosPagina);
             store.setItem(KEY_NUM_PAGINAS, String(idx + 1));
@@ -9888,11 +9931,62 @@
         const mediaNaoPrio = mediaSimples(naoPrioritarios, 'dias');
         const maisParado = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
 
+        // KPIs "Por destino da remessa" (pedido do usuário) — calculados AQUI, antes dos
+        // KPIs gerais, porque o card "Processos em remessa" (topo) precisa mostrar a SOMA
+        // dos totais por destino (pedido do usuário: "o total do card Processos em
+        // remessa deve corresponder à soma dos demais"), não a contagem de linhas
+        // coletadas. Um card por destinatário do campo "Remetidos para" (só quem tem >=1
+        // processo — não dá pra listar destinos com zero, já que só sabemos quais
+        // destinos existem pelos próprios registros coletados de CFG_PROCESSOS_REMETIDOS;
+        // ver mapRemetidoParaFormatoRemessas), com o processo remetido há mais tempo
+        // (maior "Dias em aberto") NAQUELE destino. Registros vindos de CFG_REMESSAS
+        // (Paralisados/"Em remessa") não têm campo "destino" — entram num card à parte,
+        // rotulado "Em Remessa" (pergunta do usuário: por que o processo há mais tempo em
+        // remessa, vindo dessa tela, não aparecia em nenhum card de destino — ficava só no
+        // KPI geral) em vez de sumir da seção.
+        //
+        // O TOTAL de cada card (pedido do usuário) não conta as linhas efetivamente
+        // coletadas — usa o "N registro(s) encontrado(s)" que o próprio Projudi reportou
+        // na 1ª página de CADA busca por destino (mais confiável que contar linhas: a
+        // coleta paginada pode ter menos, por causa de dedupe entre destinos ou de uma
+        // página que não deu tempo de carregar) — ver
+        // CHAVE_TOTAIS_POR_DESTINO_REMETIDOS/capturarTotalDestinoAtualRemetidos para
+        // Processos Remetidos, e cfg.totalIdentificadoNoResumo (mesmo mecanismo já usado
+        // por Apreensões/Juntadas/Retorno) para CFG_REMESSAS. Cai para a contagem de
+        // linhas só quando esse número não foi capturado (coleta antiga, ou avulsa fora
+        // do fluxo de automação).
+        const totaisPorDestinoRemetidos = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
+        const totalIdentificadoRemessas = parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
+        const porDestino = new Map();
+        const semDestino = [];
+        validos.forEach(d => {
+            if (!d.destino) { semDestino.push(d); return; }
+            if (!porDestino.has(d.destino)) porDestino.set(d.destino, []);
+            porDestino.get(d.destino).push(d);
+        });
+        const destinos = [...porDestino.entries()]
+            .map(([destino, lista]) => ({
+                destino,
+                total: totaisPorDestinoRemetidos[destino] != null ? totaisPorDestinoRemetidos[destino] : lista.length,
+                total30dias: lista.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
+                maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0],
+            }))
+            .sort((a, b) => b.total - a.total);
+        if (semDestino.length) {
+            destinos.push({
+                destino: 'Em Remessa',
+                total: Number.isFinite(totalIdentificadoRemessas) && totalIdentificadoRemessas > 0 ? totalIdentificadoRemessas : semDestino.length,
+                total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
+                maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
+            });
+        }
+        const totalGeralRemessas = destinos.length ? destinos.reduce((s, d) => s + d.total, 0) : dados.length;
+
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
         doc.text(TITULO_REMESSAS, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-        let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${dados.length} processo(s) em remessa`;
+        let subtituloRemessas = `Extraído em ${hoje} às ${hora}  •  ${totalGeralRemessas} processo(s) em remessa`;
         if (!rotuloInfo.semFrase) {
             const fraseCompRemessas = fraseCompetenciasComContagem(dados);
             if (fraseCompRemessas) subtituloRemessas += `  •  ${fraseCompRemessas}`;
@@ -9907,7 +10001,7 @@
         const kY = yLinhaRemessas + 5;
         const kW3 = (uw - 2 * gap) / 3;
         const prioPct = validos.length ? Math.round(prioritarios.length / validos.length * 100) : 0;
-        desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(dados.length), [], true, COR.azul);
+        desenharCard(doc, m,                kY, kW3, 28, 'Processos em remessa', String(totalGeralRemessas), [], true, COR.azul);
         desenharCard(doc, m + kW3 + gap,     kY, kW3, 28, 'Tempo médio em remessa', fmtDias(geral), [], true, COR.azul);
         desenharCard(doc, m + 2*(kW3+gap),   kY, kW3, 28, 'Prioritários', String(prioritarios.length), [`${prioPct}% do total`], true, COR.vermelho);
 
@@ -9946,41 +10040,8 @@
         };
         let y = k3Y + 26 + gap + 2;
 
-        // KPIs por destino da remessa (pedido do usuário): um card por destinatário do
-        // campo "Remetidos para" (só quem tem >=1 processo — não dá pra listar destinos
-        // com zero, já que só sabemos quais destinos existem pelos próprios registros
-        // coletados de CFG_PROCESSOS_REMETIDOS; ver mapRemetidoParaFormatoRemessas), com o
-        // total e o processo remetido há mais tempo (maior "Dias em aberto") NAQUELE
-        // destino. Registros vindos de CFG_REMESSAS (Paralisados/"Em remessa") não têm
-        // campo "destino" — entram num card à parte, rotulado com o nome do próprio
-        // filtro de origem ("Em Remessa (exceto processos conclusos)", pedido do usuário)
-        // (pergunta do usuário: por que o processo há mais tempo em remessa, vindo dessa
-        // tela, não aparecia em nenhum card de destino — ficava só no KPI geral lá em
-        // cima) em vez de sumir da seção, pra a soma dos cards bater com "Processos em
-        // remessa".
-        const porDestino = new Map();
-        const semDestino = [];
-        validos.forEach(d => {
-            if (!d.destino) { semDestino.push(d); return; }
-            if (!porDestino.has(d.destino)) porDestino.set(d.destino, []);
-            porDestino.get(d.destino).push(d);
-        });
-        const destinos = [...porDestino.entries()]
-            .map(([destino, lista]) => ({
-                destino,
-                total: lista.length,
-                total30dias: lista.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
-                maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0],
-            }))
-            .sort((a, b) => b.total - a.total);
-        if (semDestino.length) {
-            destinos.push({
-                destino: 'Em Remessa (exceto processos conclusos)',
-                total: semDestino.length,
-                total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
-                maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
-            });
-        }
+        // Bloco de KPIs "Por destino da remessa" — dados (destinos/semDestino/totais) já
+        // calculados no topo da função, ver comentário grande lá.
         if (destinos.length) {
             if (y + 15 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             tituloSecao(doc, m, y, uw, 'Por destino da remessa');
@@ -13371,7 +13432,13 @@
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
         if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
-        if (rel.key === 'remetidos') { store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS); store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS); store.removeItem('projudi_remetidos_auto_iniciar'); }
+        if (rel.key === 'remetidos') {
+            store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+            store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+            store.removeItem('projudi_remetidos_auto_iniciar');
+            store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+            store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
+        }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
 
@@ -13690,6 +13757,8 @@
         store.removeItem('projudi_remetidos_auto_iniciar');
         store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
         store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
+        store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
+        store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
