@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.34
+// @version      25.35
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9881,30 +9881,45 @@
         // coletados de CFG_PROCESSOS_REMETIDOS; ver mapRemetidoParaFormatoRemessas), com o
         // total e o processo remetido há mais tempo (maior "Dias em aberto") NAQUELE
         // destino. Registros vindos de CFG_REMESSAS (Paralisados/"Em remessa") não têm
-        // campo "destino" — ficam de fora deste agrupamento, sem afetar os KPIs gerais
-        // acima (que continuam somando as duas fontes).
+        // campo "destino" — entram num card "Sem destino (Paralisados)" à parte (pergunta
+        // do usuário: por que o processo há mais tempo em remessa, vindo dessa tela, não
+        // aparecia em nenhum card de destino — ficava só no KPI geral lá em cima) em vez
+        // de sumir da seção, pra a soma dos cards bater com "Processos em remessa".
         const porDestino = new Map();
+        const semDestino = [];
         validos.forEach(d => {
-            if (!d.destino) return;
+            if (!d.destino) { semDestino.push(d); return; }
             if (!porDestino.has(d.destino)) porDestino.set(d.destino, []);
             porDestino.get(d.destino).push(d);
         });
         const destinos = [...porDestino.entries()]
             .map(([destino, lista]) => ({ destino, total: lista.length, maisAntigo: lista.slice().sort((a, b) => b.dias - a.dias)[0] }))
             .sort((a, b) => b.total - a.total);
+        if (semDestino.length) {
+            destinos.push({
+                destino: 'Sem destino (Paralisados)',
+                total: semDestino.length,
+                maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
+            });
+        }
         if (destinos.length) {
             if (y + 10 > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
             tituloSecao(doc, m, y, uw, 'Por destino da remessa');
             y += 6;
             const kWDestino = (uw - 2 * gap) / 3;
-            const hDestino = 24;
+            const hDestino = 30;
             destinos.forEach((d, i) => {
                 const col = i % 3;
                 if (col === 0 && i > 0) y += hDestino + gap;
                 if (col === 0 && y + hDestino > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
                 const x = m + col * (kWDestino + gap);
+                // Número do processo numa linha SÓ DELE (sem prefixo dividindo o espaço) —
+                // "Mais antigo: <processo>" numa linha só estourava a largura do card e
+                // desenharCard corta pegando só a 1ª linha do texto quebrado, cortando o
+                // próprio número fora (bug relatado pelo usuário: "faltou o número único
+                // dos processos").
                 const subs = d.maisAntigo
-                    ? [`Mais antigo: ${d.maisAntigo.processo}`, `${d.maisAntigo.dias} dia(s) em aberto`]
+                    ? ['Mais antigo:', d.maisAntigo.processo, `${d.maisAntigo.dias} dia(s) em aberto`]
                     : [];
                 desenharCard(doc, x, y, kWDestino, hDestino, d.destino, String(d.total), subs, true, COR.azul);
             });
