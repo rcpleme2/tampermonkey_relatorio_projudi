@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.45
+// @version      25.46
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -488,6 +488,15 @@
             // painel da tela não tiver o indicador (ex. tela de outra competência), ele
             // simplesmente não aparece na lista capturada.
             painelExtraTitulo: 'Outros indicadores pendentes (painel da Mesa do Analista)',
+            // Observação condicional (pedido do usuário, texto literal da Corregedoria) —
+            // ver o bloco em montarResumoGenerico logo antes de p.observacaoFinal. Cada
+            // frase só aparece se sua própria condição for verdadeira (ver comentário lá).
+            observacaoPrazo: 'A secretaria deverá adotar as providências necessárias para que todas as juntadas '
+                + 'pendentes sejam analisadas com a máxima brevidade, conferindo prioridade às juntadas urgentes e '
+                + 'prioritárias. Concluída a análise dessas pendências, as demais deverão ser apreciadas '
+                + 'observando-se, preferencialmente, a ordem cronológica de antiguidade.',
+            observacaoIndicadores: 'Os indicadores constantes da seção "Outros Indicadores Pendentes", notadamente '
+                + 'aqueles destacados, deverão ser analisados e regularizados pela unidade.',
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
                 { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -5558,6 +5567,9 @@
         // — logo abaixo do card "JUNTADA PENDENTE MAIS ANTIGA" (pedido do usuário: ficar
         // junto dos demais KPIs no topo do resumo, não numa página separada) — só aparece
         // se houver pelo menos um indicador capturado com valor > 0.
+        // Guarda se algum indicador crítico apareceu (valor > 0) — usado mais abaixo pela
+        // observação condicional de p.observacaoIndicadores (ver bloco depois de faixas).
+        let temIndicadorCritico = false;
         if (p.painelExtraTitulo) {
             const extras = (() => {
                 try {
@@ -5568,6 +5580,7 @@
                         .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
                 } catch (e) { return []; }
             })();
+            temIndicadorCritico = extras.some(it => it.critico);
             if (extras.length) {
                 tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
                 y = desenharGradeCardsIndicadores(doc, m, y + TITULO_TABELA_H, uw, extras, ctx) + 2;
@@ -5636,6 +5649,36 @@
                     : distribuicoes;
             }
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
+        }
+
+        // Observação condicional de Juntadas (pedido do usuário) — duas frases
+        // independentes, cada uma só entra se sua própria condição for verdadeira: a
+        // primeira (p.observacaoPrazo) exige juntada pendente há MAIS DE 30 DIAS (fora da
+        // faixa "Até 30 dias" de faixasPorPrioridade); a segunda (p.observacaoIndicadores)
+        // exige pelo menos um indicador CRÍTICO (ver INDICADORES_EXTRA_JUNTADAS/critico)
+        // com valor > 0. Nenhuma das duas, nenhum balão. Reaproveita desenharCardObservacao/
+        // medirAlturaCardObservacao (Helvetica, texto justificado — pedido do usuário,
+        // mesmo estilo já usado em Prescrições/Sem Infração Penal/Remessas), diferente do
+        // balão itálico simples de p.observacaoFinal logo abaixo.
+        if (p.observacaoPrazo || p.observacaoIndicadores) {
+            const paragrafos = [];
+            if (p.observacaoPrazo && faixas.slice(1).some(f => (f.prioritarios + f.normais) > 0)) {
+                paragrafos.push(p.observacaoPrazo);
+            }
+            if (p.observacaoIndicadores && temIndicadorCritico) {
+                paragrafos.push(p.observacaoIndicadores);
+            }
+            if (paragrafos.length) {
+                const alturaObs = medirAlturaCardObservacao(doc, uw, paragrafos);
+                if (y + alturaObs > ph - m) {
+                    ctx.rodapeAntesDeVirar();
+                    doc.addPage();
+                    ctx.cabecalhoContinuacao();
+                    y = ctx.topoContinuacao;
+                }
+                desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', paragrafos, COR.ambar);
+                y += alturaObs + gap;
+            }
         }
 
         // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
