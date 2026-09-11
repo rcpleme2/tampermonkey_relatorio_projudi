@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.31
+// @version      25.32
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -1041,6 +1041,12 @@
         // mapRemetidoParaFormatoRemessas/gerarPDFRemessas). Se usado avulso (botão manual
         // nesta tela, fora da automação), reaproveita o mesmo PDF de Remessas em Aberto.
         pdfCustom: (dados, somenteResumo) => gerarPDFRemessas(dados.map(mapRemetidoParaFormatoRemessas), somenteResumo),
+        // O campo "Remetidos para" (select #alvoRemessa) não é um filtro único — precisa
+        // ser pesquisado destino por destino (fila montada em tempo de execução, ver
+        // preencherEPesquisarProcessosRemetidos/CHAVE_FILA_DESTINOS_REMETIDOS). Ao terminar
+        // a coleta de CADA destino, decide se volta pro próximo ou avança a automação, em
+        // vez de avançar direto (mesmo padrão de CFG_ATIVOS_CLASSE.aoTerminarColeta).
+        aoTerminarColeta: () => avancarOuProximoDestinoRemetidos(),
     };
 
     // Mapeia um registro de CFG_PROCESSOS_REMETIDOS para o formato de CFG_REMESSAS
@@ -2767,12 +2773,69 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
+    // Fila de destinos (campo "Remetidos para" / select #alvoRemessa) a pesquisar, um de
+    // cada vez — pedido do usuário: as opções desse campo variam por vara/comarca (não dá
+    // pra fixar uma lista no código, ver amostras reais anexadas com opções diferentes
+    // entre uma unidade Criminal e uma Cível), então a fila só pode ser montada em tempo
+    // de execução, lendo o próprio <select> na tela. Mesmo padrão de fila de
+    // CHAVE_FILA_MESES_TM (Tempo Médio), mas construída sob demanda (lazy): sempre que a
+    // fila lida do storage estiver vazia, opcoesDestinoRemetidos() a reconstrói a partir
+    // do DOM — cobre tanto a 1ª busca (fila nunca existiu) quanto o início de uma rodada
+    // nova depois da anterior ter esgotado a fila (ver avancarOuProximoDestinoRemetidos).
+    const CHAVE_FILA_DESTINOS_REMETIDOS = 'projudi_remetidos_fila_destinos';
+    // Destino atualmente em busca (já removido da fila) — só pra exibição de progresso no
+    // painel, ver atualizarPainel/chave==='remetidos'.
+    const CHAVE_DESTINO_ATUAL_REMETIDOS = 'projudi_remetidos_destino_atual';
+
+    function lerFilaDestinosRemetidos() {
+        return desembrulharArray(store.getItem(CHAVE_FILA_DESTINOS_REMETIDOS)) || [];
+    }
+
+    // Lê as opções reais do select #alvoRemessa (ignora o placeholder "-1"/"-- CLIQUE
+    // AQUI..."). Se a tela não tiver nenhum destino cadastrado (select vazio), devolve []
+    // — preencherEPesquisarProcessosRemetidos trata isso como "busca única sem filtro de
+    // destino" (comportamento antigo, antes desta mudança), em vez de travar.
+    function opcoesDestinoRemetidos(form) {
+        const select = form.querySelector('#alvoRemessa');
+        if (!select) return [];
+        return [...select.options]
+            .filter(o => o.value && o.value !== '-1')
+            .map(o => ({ value: o.value, rotulo: (o.textContent || '').trim() }));
+    }
+
+    // Marca "situacao"="P" (Aguardando Retorno, já vem assim por padrão) e pesquisa UM
+    // destino da fila de cada vez — quando a fila (lida do storage) estiver vazia, monta
+    // ela de novo a partir do <select> #alvoRemessa desta tela (ver
+    // CHAVE_FILA_DESTINOS_REMETIDOS acima) e pesquisa o primeiro. Ao terminar a coleta
+    // deste destino, avancarOuProximoDestinoRemetidos (CFG_PROCESSOS_REMETIDOS.
+    // aoTerminarColeta) decide se volta pra cá pro próximo destino ou avança a automação.
     function preencherEPesquisarProcessosRemetidos() {
         const form = formularioProcessosRemetidos();
         if (!form) return;
 
+        let fila = lerFilaDestinosRemetidos();
+        if (!fila.length) {
+            fila = opcoesDestinoRemetidos(form);
+            console.log(`[Projudi Processos Remetidos] fila de destinos preparada a partir do campo "Remetidos para" — ${fila.length} destino(s): ${fila.map(d => d.rotulo).join(', ') || '(nenhum — busca única sem filtro de destino)'}`);
+        }
+        const destino = fila[0] || null;
+        store.setItem(CHAVE_FILA_DESTINOS_REMETIDOS, JSON.stringify(fila.slice(1)));
+        store.setItem(CHAVE_DESTINO_ATUAL_REMETIDOS, JSON.stringify(destino));
+
+        const selectAlvo = form.querySelector('#alvoRemessa');
+        if (selectAlvo && destino) selectAlvo.value = destino.value;
+
+        // Sinaliza a próxima página de resultados a iniciar a coleta automaticamente só
+        // depois de o resultado estabilizar (mesmo bug já corrigido em Tempo Médio: várias
+        // buscas seguidas no MESMO formulário podiam deixar coletarPaginaAtual() ler a
+        // tabela ainda com o resultado do destino ANTERIOR — ver
+        // aguardarResultadoTMEstabilizarEIniciar/CHAVE_ASSINATURA_ANTERIOR_TM, reaproveitado
+        // aqui porque a lógica é genérica, apesar do nome ligado a Tempo Médio).
+        store.setItem('projudi_remetidos_auto_iniciar', '1');
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
+
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Processos Remetidos] botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        console.log(`[Projudi Processos Remetidos] destino="${destino ? destino.rotulo : '(nenhum)'}" (${fila.length - (destino ? 1 : 0)} restante(s) na fila) — botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
             console.log('[Projudi Processos Remetidos] clicando em Filtrar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
@@ -2785,6 +2848,20 @@
                 }
             }, 15000);
         }, 1500);
+    }
+
+    // Chamado via CFG_PROCESSOS_REMETIDOS.aoTerminarColeta ao final da coleta de UM
+    // destino — se ainda restam destinos na fila, volta para a tela de filtros e pesquisa
+    // o próximo (mesmo mecanismo genérico "ir_<key>" de passoAutomacao usado por Tempo
+    // Médio para os meses) em vez de avançar para o próximo relatório da automação.
+    function avancarOuProximoDestinoRemetidos() {
+        if (lerFilaDestinosRemetidos().length > 0) {
+            console.log('[Projudi Processos Remetidos] destino concluído — ainda restam destinos na fila, buscando o próximo');
+            store.setItem(AUTO_ESTADO, 'ir_remetidos');
+            setTimeout(passoAutomacao, 900);
+        } else {
+            avancarAutomacao(CFG_PROCESSOS_REMETIDOS);
+        }
     }
 
     // Tela de filtros de "Movimento Forense" (processo/movimentoForense.do) — form +
@@ -11790,12 +11867,16 @@
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const relAtual = relatorioPorCfg(cfg);
-        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO;
+        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO && cfg !== CFG_PROCESSOS_REMETIDOS;
         const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
         const chaveAutoIniciarParalisado = store.getItem('projudi_paralisado_auto_iniciar');
         const autoIniciarParalisado = !!chaveAutoIniciarParalisado && !!relAtual && relAtual.key === chaveAutoIniciarParalisado;
+        // Mesmo motivo de autoIniciarTM: cada destino é uma nova busca no MESMO
+        // formulário (ver preencherEPesquisarProcessosRemetidos) — espera o resultado
+        // estabilizar antes de coletar, em vez de confiar em "resultTable existe".
+        const autoIniciarRemetidos = cfg === CFG_PROCESSOS_REMETIDOS && store.getItem('projudi_remetidos_auto_iniciar') === '1';
 
-        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado}`);
+        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado} autoIniciarRemetidos=${autoIniciarRemetidos}`);
 
         if (coletor.rodando() && !coletor.obsoleta()) {
             console.log('[Projudi] retomando coleta após reload de paginação');
@@ -11814,6 +11895,10 @@
             store.removeItem('projudi_paralisado_auto_iniciar');
             console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
             coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
+        } else if (autoIniciarRemetidos) {
+            store.removeItem('projudi_remetidos_auto_iniciar');
+            console.log('[Projudi Processos Remetidos] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else {
             console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
@@ -13092,6 +13177,7 @@
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
         if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
+        if (rel.key === 'remetidos') { store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS); store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS); store.removeItem('projudi_remetidos_auto_iniciar'); }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
 
@@ -13407,6 +13493,9 @@
         store.removeItem(CHAVE_MES_ATUAL_TM);
         store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         store.removeItem('projudi_paralisado_auto_iniciar');
+        store.removeItem('projudi_remetidos_auto_iniciar');
+        store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
+        store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
         store.removeItem('projudi_auto_nav_falhas');
         store.removeItem('projudi_estatisticas_ativos');
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
@@ -13801,6 +13890,17 @@
                     if (mesAtual && mesAtual.rotulo) {
                         txt += ` — mês <strong>${mesAtual.rotulo}</strong>`;
                         txt += restantes > 0 ? ` (${restantes} mês(es) restante(s) depois deste)` : ' (último mês da fila)';
+                    }
+                }
+                // Processos Remetidos busca destino a destino (campo "Remetidos para", ver
+                // preencherEPesquisarProcessosRemetidos) — mesma ideia de progresso de
+                // Tempo Médio acima.
+                if (chave === 'remetidos') {
+                    const destinoAtual = desembrulharObjeto(store.getItem(CHAVE_DESTINO_ATUAL_REMETIDOS));
+                    const restantes = lerFilaDestinosRemetidos().length;
+                    if (destinoAtual && destinoAtual.rotulo) {
+                        txt += ` — destino <strong>${destinoAtual.rotulo}</strong>`;
+                        txt += restantes > 0 ? ` (${restantes} destino(s) restante(s) depois deste)` : ' (último destino da fila)';
                     }
                 }
                 return txt;
