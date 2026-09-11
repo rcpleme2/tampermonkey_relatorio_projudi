@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.37
+// @version      25.38
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9952,10 +9952,12 @@
         // coletados de CFG_PROCESSOS_REMETIDOS; ver mapRemetidoParaFormatoRemessas), com o
         // total e o processo remetido há mais tempo (maior "Dias em aberto") NAQUELE
         // destino. Registros vindos de CFG_REMESSAS (Paralisados/"Em remessa") não têm
-        // campo "destino" — entram num card "Sem destino (Paralisados)" à parte (pergunta
-        // do usuário: por que o processo há mais tempo em remessa, vindo dessa tela, não
-        // aparecia em nenhum card de destino — ficava só no KPI geral lá em cima) em vez
-        // de sumir da seção, pra a soma dos cards bater com "Processos em remessa".
+        // campo "destino" — entram num card à parte, rotulado com o nome do próprio
+        // filtro de origem ("Em Remessa (exceto processos conclusos)", pedido do usuário)
+        // (pergunta do usuário: por que o processo há mais tempo em remessa, vindo dessa
+        // tela, não aparecia em nenhum card de destino — ficava só no KPI geral lá em
+        // cima) em vez de sumir da seção, pra a soma dos cards bater com "Processos em
+        // remessa".
         const porDestino = new Map();
         const semDestino = [];
         validos.forEach(d => {
@@ -9973,7 +9975,7 @@
             .sort((a, b) => b.total - a.total);
         if (semDestino.length) {
             destinos.push({
-                destino: 'Sem destino (Paralisados)',
+                destino: 'Em Remessa (exceto processos conclusos)',
                 total: semDestino.length,
                 total30dias: semDestino.filter(d => d.dias > LIMITE_ATENCAO_DESTINO).length,
                 maisAntigo: semDestino.slice().sort((a, b) => b.dias - a.dias)[0],
