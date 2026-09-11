@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.42
+// @version      25.43
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4876,8 +4876,9 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
         const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
         doc.text(linhas, px, y + 5);
+        // Valor centralizado no card (pedido do usuário) — título continua à esquerda.
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(...COR.tinta);
-        doc.text(String(valor), px, y + 5 + linhas.length * 3.3 + 6);
+        doc.text(String(valor), x + w / 2, y + 5 + linhas.length * 3.3 + 6, { align: 'center' });
     }
 
     // Distribui uma lista de cards de indicador (ver desenharCardIndicador) numa grade de
