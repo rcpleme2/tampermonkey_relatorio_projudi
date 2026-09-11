@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.47
+// @version      25.48
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13596,18 +13596,85 @@
         return true;
     }
 
+    // IDs de TODOS os contadores do painel "Análise de Juntadas" que capturarContadores
+    // PainelJuntadas/capturarOutrosIndicadoresPainelJuntadas eventualmente leem — usados
+    // só para montar a assinatura de estabilidade abaixo (ver
+    // aguardarPainelJuntadasEstavelECapturar). Mantido como uma lista própria (em vez de
+    // reaproveitar só INDICADORES_EXTRA_JUNTADAS) porque também precisa dos 4 ids de
+    // Juntadas/Retorno "Com Urgência"/"Para Realizar", que ficam noutra constante.
+    const IDS_PAINEL_ANALISE_JUNTADAS = [
+        'numeroPeticoesFazerJuntadaPedidoUrgencia', 'numeroPeticoesFazerJuntada',
+        'numeroRetornoConclusoesPedidoUrgencia', 'numeroRetornoConclusoes',
+        ...INDICADORES_EXTRA_JUNTADAS.map(ind => ind.id),
+    ];
+
+    // Assinatura do painel (quantos dos IDS_PAINEL_ANALISE_JUNTADAS já existem no DOM +
+    // soma dos valores) — usada só para saber quando o painel "terminou" de carregar (ver
+    // aguardarPainelJuntadasEstavelECapturar). Contar pelos IDs reais que a captura usa
+    // (em vez de um seletor genérico tipo "span.contador") evita falso positivo de outro
+    // contador qualquer da página mudando de valor.
+    function assinaturaPainelAnaliseJuntadas() {
+        let qtd = 0, soma = 0;
+        IDS_PAINEL_ANALISE_JUNTADAS.forEach(id => {
+            const span = document.getElementById(id);
+            if (!span) return;
+            qtd++;
+            soma += parseInt((span.textContent || '').trim(), 10) || 0;
+        });
+        return `${qtd}|${soma}`;
+    }
+
+    let ultimaAssinaturaPainelJuntadas = null;
+
+    // Espera o painel "estabilizar" (duas leituras seguidas com a mesma assinatura, a
+    // cada 500ms) antes de capturar os indicadores e clicar — bug relatado pelo usuário:
+    // sem essa espera, capturarOutrosIndicadoresPainelJuntadas() podia rodar cedo demais
+    // (com só Juntadas/Retorno já carregados) e não achar NENHUM dos 14 indicadores
+    // extras ainda renderizados, deixando "Outros indicadores pendentes" de fora do PDF
+    // mesmo a automação tendo passado pela tela certa. Teto de ~10s (20 tentativas),
+    // depois do qual captura e segue mesmo assim (com aviso), para não travar a
+    // automação para sempre numa tela que por algum motivo nunca estabiliza — mesmo
+    // padrão de aguardarOutrosCumprimentosProntoEExtrair. Chamada só depois de uma folga
+    // fixa (ver tratarPainelAnaliseJuntadasParaJuntadas) — sem essa folga, duas leituras
+    // rápidas demais (500ms de intervalo) podiam bater IGUAIS só porque o restante do
+    // painel ainda nem tinha COMEÇADO a carregar (um "platô falso" logo no início),
+    // disparando a captura cedo demais mesmo com o teste de estabilidade em vigor.
+    function aguardarPainelJuntadasEstavelECapturar(link, tentativa) {
+        tentativa = tentativa || 0;
+        const assinaturaAtual = assinaturaPainelAnaliseJuntadas();
+        const estavel = tentativa > 0 && assinaturaAtual === ultimaAssinaturaPainelJuntadas;
+        if (estavel || tentativa >= 20) {
+            if (!estavel) {
+                console.warn('[Auto Projudi Juntadas] painel "Análise de Juntadas" não estabilizou em ~10s — capturando indicadores mesmo assim (podem estar incompletos)');
+            } else {
+                console.log(`[Auto Projudi Juntadas] painel estável na tentativa ${tentativa} — capturando indicadores`);
+            }
+            chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+            chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
+            // Promove pra "coletando_" ANTES de clicar (mesmo motivo de tratarPainelMandados:
+            // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
+            // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
+            store.setItem(AUTO_ESTADO, 'coletando_juntadas');
+            console.log('[Auto Projudi Juntadas] indo para a tela de resultados de Juntadas');
+            link.click();
+            return;
+        }
+        ultimaAssinaturaPainelJuntadas = assinaturaAtual;
+        setTimeout(() => aguardarPainelJuntadasEstavelECapturar(link, tentativa + 1), 500);
+    }
+
     // Painel "Para Realizar" da aba "Análise de Juntadas" — 2º passo da navegação
     // automática de Juntadas (1º: clicar na aba, ver navegarMenu('juntadas')/
     // navegarAbaAnaliseJuntadas). Pedido do usuário: a automação deve capturar sozinha os
-    // indicadores extras do painel (capturarContadoresPainelJuntadas/
-    // capturarOutrosIndicadoresPainelJuntadas) sem depender de visita manual a essa tela.
-    // Mesmo padrão de tratarPainelMandados: o painel carrega via AJAX (mesma lição de
-    // Outros Cumprimentos), então espera ativamente (poll a cada 500ms, teto de ~15s) o
-    // contador "Juntadas" (Para Realizar) aparecer antes de clicar. Chama as duas funções
-    // de captura diretamente aqui (em vez de confiar no setInterval de 2s do bootstrap)
-    // porque senão o clique abaixo podia disparar ANTES do próximo tick do intervalo —
-    // aqui a captura acontece garantidamente com o painel já carregado, no mesmo instante
-    // da decisão de avançar.
+    // indicadores extras do painel sem depender de visita manual a essa tela. Mesmo
+    // padrão de tratarPainelMandados: o painel carrega via AJAX, então espera ativamente
+    // (poll a cada 500ms, teto de ~15s) o contador "Juntadas" (Para Realizar) aparecer —
+    // ele costuma renderizar ANTES dos outros 14 indicadores extras (bug relatado pelo
+    // usuário: painel visitado, mas só o contador de Juntadas veio no PDF). Por isso, ao
+    // achá-lo, dá 1,5s de folga (mesmo prazo já usado alhures neste arquivo pra esperar o
+    // Projudi processar, ver clique em Pesquisar de Audiências) ANTES de começar a
+    // conferir estabilidade em aguardarPainelJuntadasEstavelECapturar — que ainda espera o
+    // RESTO do painel também estabilizar antes de capturar de verdade e clicar.
     function tratarPainelAnaliseJuntadasParaJuntadas(tentativa) {
         tentativa = tentativa || 0;
         const span = document.getElementById('numeroPeticoesFazerJuntada');
@@ -13621,14 +13688,8 @@
             store.setItem(AUTO_ESTADO, 'ir_juntadas');
             return;
         }
-        chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
-        chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
-        // Promove pra "coletando_" ANTES de clicar (mesmo motivo de tratarPainelMandados:
-        // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
-        // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
-        store.setItem(AUTO_ESTADO, 'coletando_juntadas');
-        console.log('[Auto Projudi Juntadas] indicadores do painel capturados — indo para a tela de resultados de Juntadas');
-        link.click();
+        ultimaAssinaturaPainelJuntadas = null;
+        setTimeout(() => aguardarPainelJuntadasEstavelECapturar(link, 0), 1500);
     }
 
     // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
