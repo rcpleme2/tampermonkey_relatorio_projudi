@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.40
+// @version      25.52
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -481,6 +481,22 @@
                 // se nenhum se qualificar, o gráfico inteiro é omitido (ver montarResumoGenerico).
                 { titulo: 'Processos com mais de uma juntada pendente (15 maiores)', campo: 'processo', topN: 15, span: 2, semOutros: true, minValor: 2, pagina2: true },
             ],
+            // Demais indicadores do painel "Mesa do Analista Judiciário" (aba "Análise de
+            // Juntadas") além de Juntadas/Retorno de Conclusão (já viram KPI próprio) —
+            // pedido do usuário. Cada um vira um card só se o valor capturado for > 0 (ver
+            // capturarOutrosIndicadoresPainelJuntadas/INDICADORES_EXTRA_JUNTADAS); se o
+            // painel da tela não tiver o indicador (ex. tela de outra competência), ele
+            // simplesmente não aparece na lista capturada.
+            painelExtraTitulo: 'Outros indicadores pendentes (painel da Mesa do Analista)',
+            // Observação condicional (pedido do usuário, texto literal da Corregedoria) —
+            // ver o bloco em montarResumoGenerico logo antes de p.observacaoFinal. Cada
+            // frase só aparece se sua própria condição for verdadeira (ver comentário lá).
+            observacaoPrazo: 'A secretaria deverá adotar as providências necessárias para que todas as juntadas '
+                + 'pendentes sejam analisadas com a máxima brevidade, conferindo prioridade às juntadas urgentes e '
+                + 'prioritárias. Concluída a análise dessas pendências, as demais deverão ser apreciadas '
+                + 'observando-se, preferencialmente, a ordem cronológica de antiguidade.',
+            observacaoIndicadores: 'Os indicadores constantes da seção "Outros Indicadores Pendentes", notadamente '
+                + 'aqueles destacados, deverão ser analisados e regularizados pela unidade.',
             // Colunas (retrato): Data de Envio logo antes de Dias
             colunas: [
                 { header: 'Processo', width: 30, get: (d) => d.processo },
@@ -4285,6 +4301,11 @@
         aqua:     [82, 116, 103],   // secundário / positivo (verde-acinzentado)
         ambar:    [156, 116, 46],   // atenção / faixa intermediária (ocre)
         vermelho: [146, 58, 58],    // PRIORITÁRIO / crítico (terracota escuro)
+        // Vermelho mais vivo, só para TEXTO de valor onde precisa ler como "vermelho" à
+        // primeira vista num número pequeno em negrito (ex. cards de indicador de
+        // Juntadas) — pedido do usuário: "vermelho" da paleta (terracota escuro, acima)
+        // ficava parecido demais com o preto do título nesse contexto.
+        vermelhoVivo: [196, 46, 46],
         azulTint: [238, 242, 246],  // fundo da faixa de SUBGRUPO na capa unificada (mais claro que "cartao")
         vinho:    [104, 38, 38],    // pior faixa etária (>180 dias) — ver COR_SEVERIDADE
     };
@@ -4845,6 +4866,63 @@
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(8); doc.setTextColor(...COR.tintaSec);
             doc.text(subLinha, px, y + 12 + linhas.length * 4.6 + 3);
         }
+    }
+
+    // Card de indicador simples (rótulo + contador), pensado para grades com muitos itens
+    // pequenos lado a lado (ex.: painelExtraTitulo em montarResumoGenerico). Ao contrário
+    // de desenharCardLista (valor longo, título curto), aqui é o TÍTULO que pode ser longo
+    // (rótulos de indicador do Projudi chegam a ~80 caracteres) e o valor é sempre um
+    // número curto — por isso quebra o título em várias linhas em vez do valor. Sempre
+    // medir a altura com medirAlturaCardIndicador antes de desenhar.
+    function medirAlturaCardIndicador(doc, w, titulo) {
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2);
+        const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
+        return 5 + linhas.length * 3.3 + 8 + 4;
+    }
+
+    function desenharCardIndicador(doc, x, y, w, h, titulo, valor, acento, corValor) {
+        acento = acento || COR.azul;
+        corValor = corValor || COR.tinta;
+        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
+        doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+        doc.setFillColor(...acento);
+        doc.roundedRect(x, y, 1.8, h, 0.9, 0.9, 'F');
+        const px = x + 5;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
+        const linhas = doc.splitTextToSize(String(titulo).toUpperCase(), w - 10);
+        doc.text(linhas, px, y + 5);
+        // Valor centralizado no card (pedido do usuário) — título continua à esquerda.
+        // corValor (pedido do usuário): vermelho para os indicadores mais críticos — ver
+        // INDICADORES_EXTRA_JUNTADAS/critico.
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(...corValor);
+        doc.text(String(valor), x + w / 2, y + 5 + linhas.length * 3.3 + 6, { align: 'center' });
+    }
+
+    // Distribui uma lista de cards de indicador (ver desenharCardIndicador) numa grade de
+    // 3 colunas, com altura de linha variável (cada linha usa a altura do card mais alto
+    // nela) e paginação automática — mesmo padrão de desenharGradeTabelas (ctx.
+    // rodapeAntesDeVirar/cabecalhoContinuacao/topoContinuacao). Retorna o Y final.
+    function desenharGradeCardsIndicadores(doc, x, y, w, itens, ctx) {
+        const ph = doc.internal.pageSize.getHeight();
+        const gap = 5, cols = 3, colW = (w - gap * (cols - 1)) / cols;
+        let yLinha = y, col = 0, alturaLinha = 0;
+        const fecharLinha = () => { if (col !== 0) { yLinha += alturaLinha + gap; col = 0; alturaLinha = 0; } };
+        const novaPagina = () => {
+            if (ctx.rodapeAntesDeVirar) ctx.rodapeAntesDeVirar();
+            doc.addPage();
+            ctx.cabecalhoContinuacao();
+            yLinha = ctx.topoContinuacao; col = 0; alturaLinha = 0;
+        };
+        itens.forEach(it => {
+            const h = medirAlturaCardIndicador(doc, colW, it.titulo);
+            if (col === 0 && yLinha + h > ph - 14) novaPagina();
+            desenharCardIndicador(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.acento, it.critico ? COR.vermelhoVivo : null);
+            alturaLinha = Math.max(alturaLinha, h);
+            col++;
+            if (col >= cols) fecharLinha();
+        });
+        fecharLinha();
+        return yLinha;
     }
 
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
@@ -5482,10 +5560,42 @@
             },
         };
 
+        let y = aY + 28 + gap + 2;
+
+        // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
+        // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
+        // — logo abaixo do card "JUNTADA PENDENTE MAIS ANTIGA" (pedido do usuário: ficar
+        // junto dos demais KPIs no topo do resumo, não numa página separada) — só aparece
+        // se houver pelo menos um indicador capturado com valor > 0.
+        // Guarda se algum indicador crítico apareceu (valor > 0) — usado mais abaixo pela
+        // observação condicional de p.observacaoIndicadores (ver bloco depois de faixas).
+        let temIndicadorCritico = false;
+        if (p.painelExtraTitulo) {
+            const chavePainelExtra = cfg.prefixo + 'outros_indicadores';
+            // desembrulharArray (não JSON.parse direto) — bug relatado pelo usuário: o
+            // valor às vezes volta do localStorage codificado em MAIS de uma camada de
+            // JSON (JSON.parse de uma vez só devolvia uma STRING, não o array, e
+            // ".filter" quebrava com "is not a function"). Mesma proteção já usada em
+            // Audiências Realizadas (ver CHAVE_ACUMULADO_AR) para o mesmo tipo de valor.
+            const lista = desembrulharArray(store.getItem(chavePainelExtra)) || [];
+            const extras = lista
+                .filter(it => (it.valor || 0) > 0)
+                .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
+            // Log de diagnóstico simétrico ao de capturarOutrosIndicadoresPainelJuntadas —
+            // mostra, no momento exato da MONTAGEM do PDF, se o valor gravado por aquela
+            // função ainda está acessível aqui (mesma store, mesma chave) e quantos
+            // indicadores (>0) sobraram depois do filtro.
+            console.log(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": ${lista.length} indicador(es) no total → ${extras.length} com valor > 0`);
+            temIndicadorCritico = extras.some(it => it.critico);
+            if (extras.length) {
+                tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
+                y = desenharGradeCardsIndicadores(doc, m, y + TITULO_TABELA_H, uw, extras, ctx) + 2;
+            }
+        }
+
         // Comparativo geral × competência (só aparece com 2+ competências nos dados —
         // ver tabelaComparativoCompetencias), faixas de idade e as distribuições de
         // cfg.pdf.distribuicoes, todas em tabela.
-        let y = aY + 28 + gap + 2;
         y = tabelaComparativoCompetencias(doc, m, y, uw, dados, p, now, LIMITES_CARTORIO) + 6;
 
         const faixas = faixasPorPrioridade(dados, p.dataCampo, now);
@@ -5545,6 +5655,36 @@
                     : distribuicoes;
             }
             if (blocos.length) y = desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
+        }
+
+        // Observação condicional de Juntadas (pedido do usuário) — duas frases
+        // independentes, cada uma só entra se sua própria condição for verdadeira: a
+        // primeira (p.observacaoPrazo) exige juntada pendente há MAIS DE 30 DIAS (fora da
+        // faixa "Até 30 dias" de faixasPorPrioridade); a segunda (p.observacaoIndicadores)
+        // exige pelo menos um indicador CRÍTICO (ver INDICADORES_EXTRA_JUNTADAS/critico)
+        // com valor > 0. Nenhuma das duas, nenhum balão. Reaproveita desenharCardObservacao/
+        // medirAlturaCardObservacao (Helvetica, texto justificado — pedido do usuário,
+        // mesmo estilo já usado em Prescrições/Sem Infração Penal/Remessas), diferente do
+        // balão itálico simples de p.observacaoFinal logo abaixo.
+        if (p.observacaoPrazo || p.observacaoIndicadores) {
+            const paragrafos = [];
+            if (p.observacaoPrazo && faixas.slice(1).some(f => (f.prioritarios + f.normais) > 0)) {
+                paragrafos.push(p.observacaoPrazo);
+            }
+            if (p.observacaoIndicadores && temIndicadorCritico) {
+                paragrafos.push(p.observacaoIndicadores);
+            }
+            if (paragrafos.length) {
+                const alturaObs = medirAlturaCardObservacao(doc, uw, paragrafos);
+                if (y + alturaObs > ph - m) {
+                    ctx.rodapeAntesDeVirar();
+                    doc.addPage();
+                    ctx.cabecalhoContinuacao();
+                    y = ctx.topoContinuacao;
+                }
+                desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', paragrafos, COR.ambar);
+                y += alturaObs + gap;
+            }
         }
 
         // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
@@ -11588,6 +11728,18 @@
             return;
         }
 
+        // Mesmo painel acima, agora para JUNTADAS (pedido do usuário: a automação deve
+        // passar por essa tela sozinha, sem depender de visita manual, pra que os
+        // indicadores extras do painel — ver painelExtraTitulo/INDICADORES_EXTRA_JUNTADAS
+        // — sejam capturados). REPORTS_AUTOMACAO marca precisaPreencher:true para
+        // 'juntadas' só por causa disso; tratarPainelAnaliseJuntadasParaJuntadas() espera
+        // o contador "Juntadas" (Para Realizar) aparecer, captura os indicadores e só
+        // então clica para a tela de resultados de verdade.
+        if (estadoAutoNoInicio === 'preenchendo_juntadas') {
+            tratarPainelAnaliseJuntadasParaJuntadas();
+            return;
+        }
+
         // Tela de resultados de Mandados (os 4 relatórios, status 13/11/4/8):
         // gateMandados() cuida dos casos que o fluxo genérico não trata sozinho (correção
         // de filtro para o relatório errado, zero resultados) — quando ela não tratou nada
@@ -12871,7 +13023,12 @@
         // formularioInstanciaRecursal/preencherEPesquisarInstanciaRecursal.
         { key: 'instanciarecursal', cfg: CFG_INSTANCIA_RECURSAL, navAlvo: 'instanciarecursal', rotulo: 'Em Instância Recursal', curto: 'Inst. Recursal', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Estatísticas Gerais' },
         // ── Pendências ───────────────────────────────────────────────────────────────
-        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
+        // 'juntadas' tem precisaPreencher:true (embora não preencha filtro nenhum) pelo
+        // mesmo motivo dos 4 relatórios de Mandados abaixo: passa pelo painel "Análise de
+        // Juntadas" antes da tela de resultados (ver navegarMenu/
+        // tratarPainelAnaliseJuntadasParaJuntadas) — "preenchendo_juntadas" é o estado que
+        // o gate de injetarBotoes espera pra saber que ainda está nesse passo intermediário.
+        { key: 'juntadas',    cfg: CFG_JUNTADAS,    navAlvo: 'juntadas',    rotulo: 'Juntadas',              curto: 'Juntadas',    dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Pendências' },
         { key: 'retorno',     cfg: CFG_RETORNO,     navAlvo: 'retorno',     rotulo: 'Retorno de Conclusos',   curto: 'Retorno',     dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         // Paralisados/Remessas caem na tela de filtros (com o mínimo de dias e o rádio de
         // situação), não direto nos resultados — por isso também precisam do passo de
@@ -13058,6 +13215,55 @@
         store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
+    // Demais indicadores (spans #id + rótulo) do mesmo painel "Mesa do Analista
+    // Judiciário" (aba "Análise de Juntadas"), além de Juntadas/Retorno de Conclusão (que
+    // já têm KPI próprio — ver capturarContadoresPainelJuntadas/capturarContadoresPainel
+    // Retorno). Pedido do usuário: cada um desses vira um card no PDF de Juntadas, desde
+    // que o valor seja > 0. "Mandados aguardando análise de retorno" fica de fora desta
+    // lista de propósito — já tem relatório dedicado próprio (ver CFG_MANDADOS_RETORNO);
+    // "Fianças com prazo excedido" também fica de fora (fila "Com Urgência" só existe em
+    // varas de Infância e Juventude, fora do escopo pedido pelo usuário).
+    // `critico: true` — pedido do usuário: valor do card em vermelho (indicadores que
+    // pedem atenção mais imediata). Os demais ficam na cor padrão do card.
+    const INDICADORES_EXTRA_JUNTADAS = [
+        { id: 'numeroCartasPrecatoriasAguardandoAnaliseRetorno', label: 'Cartas Eletrônicas aguardando análise de retorno' },
+        { id: 'numeroDiligenciasPendentes', label: 'Diligências aguardando retorno' },
+        { id: 'numeroRemessasFisicasMinisterioPublico', label: 'Remessas Físicas ao Ministério Público aguardando retorno', critico: true },
+        { id: 'numeroRetornoAssessoriaMilitar', label: 'Retornos da Assessoria Militar aguardando análise' },
+        { id: 'numeroPedidoProvidenciasAgendados', label: 'Pedidos de Providências (Exército) agendados' },
+        { id: 'numeroAutuacaoGuiaExecucao', label: 'Autuação da Guia de Execução pendente (Exportação Criminal)', critico: true },
+        { id: 'numeroMultaFupenPendenteQuitada', label: 'Multas Fupen quitadas e pendentes de juntada de quitação', critico: true },
+        { id: 'numeroMultaFupenPendenteVencida', label: 'Multas Fupen vencidas e pendentes de ordenação', critico: true },
+        { id: 'numeroMultaFupenPendenteReenvio', label: 'Multas Fupen vencidas e pendentes de reenvio ao Fupen', critico: true },
+        { id: 'atoOrdinatorioAutoridadePolicialAguardandoJuntada', label: 'Atos ordinatórios praticados pela autoridade policial aguardando análise de juntada' },
+        { id: 'numeroPrestacoesPecuniariasEmAtraso', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em atraso', critico: true },
+        { id: 'numeroPrestacoesPecuniariasEmAnalise', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em análise' },
+        { id: 'cumprimentosComunicacaoRecursalNaoEncaminhadas', label: 'Comunicações Recursais Pendentes de Encaminhamento', critico: true },
+        { id: 'processosNaoAtendidosJG', label: 'Processos com suspeita de incompetência - Juiz das Garantias', critico: true },
+    ];
+    // Só grava quando encontra o painel na página (pelo menos um dos spans presente) —
+    // mesma cautela de capturarContadoresPainelJuntadas: não mexe no valor já gravado
+    // quando o usuário está noutra tela. Indicadores ausentes na tela (não fazem parte da
+    // competência atual) ficam de fora do array salvo, não entram como zero.
+    function capturarOutrosIndicadoresPainelJuntadas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            if (!d.getElementById) continue;
+            const encontrados = [];
+            for (const ind of INDICADORES_EXTRA_JUNTADAS) {
+                const span = d.getElementById(ind.id);
+                if (!span) continue;
+                const n = parseInt((span.textContent || '').trim(), 10);
+                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico });
+            }
+            if (!encontrados.length) continue;
+            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores encontrados (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
+            store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
+            return;
+        }
+        console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
+    }
+
     // Mesma ideia de capturarContadoresPainelJuntadas, para o painel "Retorno de
     // Conclusão" da página inicial: "Com Pedido de Urgência" tem sua própria contagem
     // (#numeroRetornoConclusoesPedidoUrgencia) separada de "Para Realizar"
@@ -13159,16 +13365,28 @@
 
     function navegarMenu(alvo) {
         let link = null;
-        if (alvo === 'juntadas') link = acharLinkMenu(/analisarJuntada\.do/i, null);
-        // O painel de Mandados NÃO é a mesma tela de Juntadas/Retorno (analisarJuntada.do/
-        // conclusao.do, alcançadas por link direto) — é o painel "Para Realizar" da aba
-        // "Análise de Juntadas" (mesaAnalista.do?actionType=listaAnaliseJuntadas), que só
-        // se chega clicando na aba #tabItemprefix2 (mesmo padrão de Outros Cumprimentos:
-        // <a> sem href, precisa de clique de verdade — ver navegarAbaAnaliseJuntadas). O
-        // contador "Mandados aguardando análise de retorno" e seu link só existem nesse
-        // painel (ver tratarPainelMandados) — os 4 relatórios de Mandados (seleção
-        // independente, ver REPORTS_AUTOMACAO) passam todos por aqui.
-        else if (alvo === 'mandadosretorno' || alvo === 'mandadosdistribuicao'
+        // Juntadas passa PELO painel "Para Realizar" da aba "Análise de Juntadas"
+        // (mesaAnalista.do?actionType=listaAnaliseJuntadas) antes de ir para a tela de
+        // resultados (analisarJuntada.do) — pedido do usuário: assim a automação captura
+        // sozinha os indicadores extras do painel (ver
+        // capturarOutrosIndicadoresPainelJuntadas/painelExtraTitulo) sem depender de
+        // visita manual a essa tela. Antes ia direto (acharLinkMenu/analisarJuntada.do),
+        // pulando o painel inteiro. O clique de verdade na tela de resultados acontece em
+        // tratarPainelAnaliseJuntadasParaJuntadas, chamado pelo gate em injetarBotoes
+        // (REPORTS_AUTOMACAO marca precisaPreencher:true para 'juntadas' por causa disso —
+        // mesmo padrão dos 4 relatórios de Mandados abaixo, que já passam por essa mesma
+        // aba). O painel é carregado via AJAX (mesmo padrão de Outros Cumprimentos), por
+        // isso o clique real só acontece quando o contador aparecer — ver
+        // tratarPainelAnaliseJuntadasParaJuntadas/tratarPainelMandados.
+        //
+        // O painel de Mandados NÃO é a mesma tela de Retorno (conclusao.do, alcançada por
+        // link direto) — é este mesmo painel "Para Realizar" da aba "Análise de
+        // Juntadas", que só se chega clicando na aba #tabItemprefix2 (mesmo padrão de
+        // Outros Cumprimentos: <a> sem href, precisa de clique de verdade — ver
+        // navegarAbaAnaliseJuntadas). O contador "Mandados aguardando análise de retorno"
+        // e seu link só existem nesse painel (ver tratarPainelMandados) — os 4 relatórios
+        // de Mandados (seleção independente, ver REPORTS_AUTOMACAO) passam todos por aqui.
+        if (alvo === 'juntadas' || alvo === 'mandadosretorno' || alvo === 'mandadosdistribuicao'
             || alvo === 'mandadoscumprimento' || alvo === 'mandadosdecurso') return navegarAbaAnaliseJuntadas();
         // Conclusões migrou para a tela "Estatísticas de Conclusões" (mesmo link de
         // Tempo Médio) — a tela antiga "Para Realizar" (conclusao.do) ficava incompleta
@@ -13384,6 +13602,119 @@
         console.log('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
         link.click();
         return true;
+    }
+
+    // IDs de TODOS os contadores do painel "Análise de Juntadas" que capturarContadores
+    // PainelJuntadas/capturarOutrosIndicadoresPainelJuntadas eventualmente leem — usados
+    // só para montar a assinatura de estabilidade abaixo (ver
+    // aguardarPainelJuntadasEstavelECapturar). Mantido como uma lista própria (em vez de
+    // reaproveitar só INDICADORES_EXTRA_JUNTADAS) porque também precisa dos 4 ids de
+    // Juntadas/Retorno "Com Urgência"/"Para Realizar", que ficam noutra constante.
+    const IDS_PAINEL_ANALISE_JUNTADAS = [
+        'numeroPeticoesFazerJuntadaPedidoUrgencia', 'numeroPeticoesFazerJuntada',
+        'numeroRetornoConclusoesPedidoUrgencia', 'numeroRetornoConclusoes',
+        ...INDICADORES_EXTRA_JUNTADAS.map(ind => ind.id),
+    ];
+
+    // Assinatura do painel (quantos dos IDS_PAINEL_ANALISE_JUNTADAS já existem no DOM +
+    // soma dos valores) — usada só para saber quando o painel "terminou" de carregar (ver
+    // aguardarPainelJuntadasEstavelECapturar). Contar pelos IDs reais que a captura usa
+    // (em vez de um seletor genérico tipo "span.contador") evita falso positivo de outro
+    // contador qualquer da página mudando de valor.
+    function assinaturaPainelAnaliseJuntadas() {
+        let qtd = 0, soma = 0;
+        IDS_PAINEL_ANALISE_JUNTADAS.forEach(id => {
+            const span = document.getElementById(id);
+            if (!span) return;
+            qtd++;
+            soma += parseInt((span.textContent || '').trim(), 10) || 0;
+        });
+        return `${qtd}|${soma}`;
+    }
+
+    let ultimaAssinaturaPainelJuntadas = null;
+    let leiturasEstaveisPainelJuntadas = 0;
+
+    // Leituras estáveis SEGUIDAS exigidas antes de considerar o painel "pronto" — bug
+    // relatado pelo usuário (2ª rodada): exigir só 1 repetição (2 leituras) ainda deixava
+    // passar um "platô falso" — os 14 indicadores extras vêm de bem mais consultas no
+    // banco que os 2 contadores de Juntadas/Retorno, então o painel podia ficar parado
+    // num estado incompleto por MAIS de 500ms (o intervalo de 1 checagem) antes de
+    // finalmente preencher o resto. Exigir 3 leituras iguais seguidas (1,2s de silêncio
+    // total) reduz bastante a chance de aceitar um platô intermediário como "pronto".
+    const LEITURAS_ESTAVEIS_NECESSARIAS = 3;
+
+    // Espera o painel "estabilizar" (LEITURAS_ESTAVEIS_NECESSARIAS leituras seguidas com a
+    // mesma assinatura, a cada 500ms) antes de capturar os indicadores e clicar — bug
+    // relatado pelo usuário: sem essa espera, capturarOutrosIndicadoresPainelJuntadas()
+    // podia rodar cedo demais (com só Juntadas/Retorno já carregados) e não achar NENHUM
+    // dos 14 indicadores extras ainda renderizados, deixando "Outros indicadores
+    // pendentes" de fora do PDF mesmo a automação tendo passado pela tela certa. Teto de
+    // ~17s (35 tentativas), depois do qual captura e segue mesmo assim (com aviso), para
+    // não travar a automação para sempre numa tela que por algum motivo nunca estabiliza
+    // — mesmo padrão de aguardarOutrosCumprimentosProntoEExtrair. Chamada só depois de
+    // uma folga fixa (ver tratarPainelAnaliseJuntadasParaJuntadas) — sem essa folga, as
+    // primeiras leituras já bateriam IGUAIS só porque o restante do painel ainda nem
+    // tinha COMEÇADO a carregar.
+    function aguardarPainelJuntadasEstavelECapturar(link, tentativa) {
+        tentativa = tentativa || 0;
+        const assinaturaAtual = assinaturaPainelAnaliseJuntadas();
+        if (tentativa > 0 && assinaturaAtual === ultimaAssinaturaPainelJuntadas) {
+            leiturasEstaveisPainelJuntadas++;
+        } else {
+            leiturasEstaveisPainelJuntadas = 0;
+        }
+        const estavel = leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
+        console.log(`[Auto Projudi Juntadas] leitura ${tentativa} do painel — assinatura="${assinaturaAtual}" (qtd|soma), estáveis seguidas=${leiturasEstaveisPainelJuntadas}/${LEITURAS_ESTAVEIS_NECESSARIAS}`);
+        if (estavel || tentativa >= 35) {
+            if (!estavel) {
+                console.warn(`[Auto Projudi Juntadas] painel "Análise de Juntadas" não estabilizou em ~17s (última assinatura="${assinaturaAtual}") — capturando indicadores mesmo assim (podem estar incompletos)`);
+            } else {
+                console.log(`[Auto Projudi Juntadas] painel estável (assinatura="${assinaturaAtual}") na tentativa ${tentativa} — capturando indicadores`);
+            }
+            chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+            chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
+            // Promove pra "coletando_" ANTES de clicar (mesmo motivo de tratarPainelMandados:
+            // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
+            // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
+            store.setItem(AUTO_ESTADO, 'coletando_juntadas');
+            console.log('[Auto Projudi Juntadas] indo para a tela de resultados de Juntadas');
+            link.click();
+            return;
+        }
+        ultimaAssinaturaPainelJuntadas = assinaturaAtual;
+        setTimeout(() => aguardarPainelJuntadasEstavelECapturar(link, tentativa + 1), 500);
+    }
+
+    // Painel "Para Realizar" da aba "Análise de Juntadas" — 2º passo da navegação
+    // automática de Juntadas (1º: clicar na aba, ver navegarMenu('juntadas')/
+    // navegarAbaAnaliseJuntadas). Pedido do usuário: a automação deve capturar sozinha os
+    // indicadores extras do painel sem depender de visita manual a essa tela. Mesmo
+    // padrão de tratarPainelMandados: o painel carrega via AJAX, então espera ativamente
+    // (poll a cada 500ms, teto de ~15s) o contador "Juntadas" (Para Realizar) aparecer —
+    // ele costuma renderizar ANTES dos outros 14 indicadores extras (bug relatado pelo
+    // usuário: painel visitado, mas só o contador de Juntadas veio no PDF; 1ª correção com
+    // 1,5s de folga + 1 leitura de confirmação ainda não foi suficiente num caso real).
+    // Por isso, ao achá-lo, dá 3s de folga ANTES de começar a conferir estabilidade em
+    // aguardarPainelJuntadasEstavelECapturar — que agora exige 3 leituras iguais seguidas
+    // (não mais 1) antes de considerar o RESTO do painel pronto pra capturar de verdade e
+    // clicar.
+    function tratarPainelAnaliseJuntadasParaJuntadas(tentativa) {
+        tentativa = tentativa || 0;
+        const span = document.getElementById('numeroPeticoesFazerJuntada');
+        const link = span && span.closest('a');
+        if (!link) {
+            if (tentativa < 30) {
+                setTimeout(() => tratarPainelAnaliseJuntadasParaJuntadas(tentativa + 1), 500);
+                return;
+            }
+            console.warn('[Auto Projudi Juntadas] contador/link de "Juntadas" (Para Realizar) não apareceu em ~15s no painel "Análise de Juntadas" — voltando a tentar do zero');
+            store.setItem(AUTO_ESTADO, 'ir_juntadas');
+            return;
+        }
+        ultimaAssinaturaPainelJuntadas = null;
+        leiturasEstaveisPainelJuntadas = 0;
+        setTimeout(() => aguardarPainelJuntadasEstavelECapturar(link, 0), 3000);
     }
 
     // Chamado ao concluir a coleta de um relatório (pelo coletor). Marca o próximo estado
@@ -14854,6 +15185,7 @@
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
+        chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas'); // demais cards do mesmo painel
         chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
@@ -14869,6 +15201,7 @@
             chamarSeguro(atualizarPainel, 'atualizarPainel');
             chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
+            chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
             chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
