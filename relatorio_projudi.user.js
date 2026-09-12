@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.53
+// @version      25.54
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10550,11 +10550,22 @@
                 .sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0))
                 .slice(0, 15);
             tituloSecao(doc, m, proximoY, uw, `Processos suspensos há mais tempo (até 15 de ${totalHomeSuspensos})`);
+            // Pedido do usuário: duas colunas de dias, lado a lado — "Dias Suspenso"
+            // (calculado por nós: dias corridos entre Início Suspensão e a data atual,
+            // sempre em dia) e "Dias Paralisado" (repete literalmente o que o Projudi
+            // mostra na coluna "Dias Paralisado" — mesmo campo d.dias já usado no card
+            // "Suspensão mais antiga"/totalHomeSuspensos, que pode ficar defasado em
+            // relação à data de início mostrada — ver conversa sobre 919 vs 887 dias).
             const colunasTop15 = [
                 { header: 'Processo', width: 30, get: d => d.processo },
                 { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
                 { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
-                { header: 'Dias Suspenso', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
+                { header: 'Dias Suspenso', width: 18, get: d => {
+                    const ts = parseDataBR(d.inicioSuspensao);
+                    if (ts == null) return '';
+                    return String(Math.max(0, Math.floor((Date.now() - ts) / DIA_MS)));
+                } },
+                { header: 'Dias Paralisados', width: 18, get: d => (d.dias == null ? '' : String(d.dias)) },
             ];
             const columnStylesTop15 = columnStylesEscalados(colunasTop15, uw);
             doc.autoTable({
