@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.51
+// @version      25.52
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13238,7 +13238,7 @@
         { id: 'atoOrdinatorioAutoridadePolicialAguardandoJuntada', label: 'Atos ordinatórios praticados pela autoridade policial aguardando análise de juntada' },
         { id: 'numeroPrestacoesPecuniariasEmAtraso', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em atraso', critico: true },
         { id: 'numeroPrestacoesPecuniariasEmAnalise', label: 'Prestações Pecuniárias (Guia de Recolhimento de Custas) em análise' },
-        { id: 'cumprimentosComunicacaoRecursalNaoEncaminhadas', label: 'Comunicações Recursais Pendentes de Encaminhamento' },
+        { id: 'cumprimentosComunicacaoRecursalNaoEncaminhadas', label: 'Comunicações Recursais Pendentes de Encaminhamento', critico: true },
         { id: 'processosNaoAtendidosJG', label: 'Processos com suspeita de incompetência - Juiz das Garantias', critico: true },
     ];
     // Só grava quando encontra o painel na página (pelo menos um dos spans presente) —
