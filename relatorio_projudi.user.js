@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.50
+// @version      25.51
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5572,23 +5572,20 @@
         let temIndicadorCritico = false;
         if (p.painelExtraTitulo) {
             const chavePainelExtra = cfg.prefixo + 'outros_indicadores';
-            const extras = (() => {
-                try {
-                    const raw = store.getItem(chavePainelExtra);
-                    const lista = raw ? JSON.parse(raw) : [];
-                    return (lista || [])
-                        .filter(it => (it.valor || 0) > 0)
-                        .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
-                } catch (e) {
-                    console.warn(`[Projudi Juntadas] montarResumoGenerico — erro lendo/parseando "${chavePainelExtra}":`, e);
-                    return [];
-                }
-            })();
+            // desembrulharArray (não JSON.parse direto) — bug relatado pelo usuário: o
+            // valor às vezes volta do localStorage codificado em MAIS de uma camada de
+            // JSON (JSON.parse de uma vez só devolvia uma STRING, não o array, e
+            // ".filter" quebrava com "is not a function"). Mesma proteção já usada em
+            // Audiências Realizadas (ver CHAVE_ACUMULADO_AR) para o mesmo tipo de valor.
+            const lista = desembrulharArray(store.getItem(chavePainelExtra)) || [];
+            const extras = lista
+                .filter(it => (it.valor || 0) > 0)
+                .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
             // Log de diagnóstico simétrico ao de capturarOutrosIndicadoresPainelJuntadas —
             // mostra, no momento exato da MONTAGEM do PDF, se o valor gravado por aquela
             // função ainda está acessível aqui (mesma store, mesma chave) e quantos
             // indicadores (>0) sobraram depois do filtro.
-            console.log(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": raw=${JSON.stringify(store.getItem(chavePainelExtra))} → ${extras.length} indicador(es) com valor > 0`);
+            console.log(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": ${lista.length} indicador(es) no total → ${extras.length} com valor > 0`);
             temIndicadorCritico = extras.some(it => it.critico);
             if (extras.length) {
                 tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
