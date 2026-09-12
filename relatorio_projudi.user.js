@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.52
+// @version      25.54
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7263,7 +7263,11 @@
             const maisAntiga = maiorDias(itens);
             return {
                 rotulo: s.rotulo, dados: s.dados, secao: s, _itens: itens,
-                pendentes: s.dados.length,
+                // Suspensos por Prazo Indeterminado: indicador da capa usa o total do
+                // card da home (ver totalHomeOuColetadoSuspensos), não s.dados.length —
+                // pedido do usuário, mesmo motivo do KPI/título no PDF individual (ver
+                // montarResumoSuspensos).
+                pendentes: s.cfgOriginal === CFG_SUSPENSOS ? totalHomeOuColetadoSuspensos(s.dados) : s.dados.length,
                 prioritarios: contarPrioritarios(s.dados),
                 maisAntiga,
                 status: classificarSituacaoPorDias(maisAntiga, LIMITES_CARTORIO.atencao, LIMITES_CARTORIO.critico),
@@ -10472,6 +10476,13 @@
         const p = CFG_SUSPENSOS.pdf;
         const r = dados || [];
         const gap = 6;
+        // Total mostrado no card "Processos Suspensos por Tempo Indeterminado" da página
+        // inicial (Mesa do Magistrado) — pode ser maior que r.length porque a tela de
+        // busca (processoBuscaSuspenso.do) filtra processos que a home ainda conta (ex.
+        // sem "Motivo" cadastrado). Pedido do usuário: KPI e título da tabela de "mais
+        // antigos" devem refletir o número da home, não o da busca — ver
+        // totalHomeOuColetadoSuspensos/capturarContadorHomeSuspensos.
+        const totalHomeSuspensos = totalHomeOuColetadoSuspensos(r);
 
         // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
         // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo
@@ -10496,7 +10507,7 @@
             const kY = yLinha + 5;
             const prio = contarPrioritarios(r);
             const kW2 = (uw - gap) / 2;
-            desenharCard(doc, m, kY, kW2, 28, p.atosTitulo, String(r.length), [], true, COR.azul);
+            desenharCard(doc, m, kY, kW2, 28, p.atosTitulo, String(totalHomeSuspensos), [], true, COR.azul);
             desenharCard(doc, m + kW2 + gap, kY, kW2, 28, p.rotuloPrioridadeKpi || 'Prioritários pendentes', String(prio),
                 [`${r.length ? Math.round(prio / r.length * 100) : 0}% do total`], true, COR.vermelho);
 
@@ -10538,12 +10549,23 @@
             const top15 = r.slice()
                 .sort((a, b) => (parseDataBR(a.inicioSuspensao) || 0) - (parseDataBR(b.inicioSuspensao) || 0))
                 .slice(0, 15);
-            tituloSecao(doc, m, proximoY, uw, `Processos suspensos há mais tempo (até 15 de ${r.length})`);
+            tituloSecao(doc, m, proximoY, uw, `Processos suspensos há mais tempo (até 15 de ${totalHomeSuspensos})`);
+            // Pedido do usuário: duas colunas de dias, lado a lado — "Dias Suspenso"
+            // (calculado por nós: dias corridos entre Início Suspensão e a data atual,
+            // sempre em dia) e "Dias Paralisado" (repete literalmente o que o Projudi
+            // mostra na coluna "Dias Paralisado" — mesmo campo d.dias já usado no card
+            // "Suspensão mais antiga"/totalHomeSuspensos, que pode ficar defasado em
+            // relação à data de início mostrada — ver conversa sobre 919 vs 887 dias).
             const colunasTop15 = [
                 { header: 'Processo', width: 30, get: d => d.processo },
                 { header: 'Atribuição (Competência)', width: 40, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
                 { header: 'Início Suspensão', width: 22, get: d => d.inicioSuspensao },
-                { header: 'Dias Suspenso', width: 20, get: d => (d.dias == null ? '' : String(d.dias)) },
+                { header: 'Dias Suspenso', width: 18, get: d => {
+                    const ts = parseDataBR(d.inicioSuspensao);
+                    if (ts == null) return '';
+                    return String(Math.max(0, Math.floor((Date.now() - ts) / DIA_MS)));
+                } },
+                { header: 'Dias Paralisados', width: 18, get: d => (d.dias == null ? '' : String(d.dias)) },
             ];
             const columnStylesTop15 = columnStylesEscalados(colunasTop15, uw);
             doc.autoTable({
@@ -13289,6 +13311,36 @@
         store.setItem(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
+    // Captura o número do card "Processos Suspensos por Tempo Indeterminado" da página
+    // inicial (Mesa do Magistrado) — pedido do usuário: o KPI "Processos suspensos" e o
+    // título da tabela de "mais antigos" no PDF devem mostrar esse total, não o total de
+    // registros que a tela de busca (processoBuscaSuspenso.do) efetivamente retorna, que
+    // pode ser menor (ex. processos sem "Motivo" cadastrado, que a home conta mas a busca
+    // filtra). Usa acharLinkAoLadoDoLabel/labelSemLinkEncontrado (já existentes, usados
+    // por navegarMenu('suspensos') pra achar o link a clicar) — mesmo padrão de
+    // capturarContadoresPainelRetorno acima, gravando em prefixo+'total_identificado'.
+    function capturarContadorHomeSuspensos() {
+        const labelRe = /suspensos\s+por\s+tempo\s+indeterminado/i;
+        const link = acharLinkAoLadoDoLabel(labelRe);
+        if (link) {
+            const n = parseInt((link.textContent || '').trim(), 10);
+            if (Number.isFinite(n)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', String(n));
+            return;
+        }
+        if (labelSemLinkEncontrado(labelRe)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', '0');
+    }
+
+    // Lê o total capturado por capturarContadorHomeSuspensos (card da home), com
+    // fallback pro nº de registros coletados quando ainda não foi capturado (ex.
+    // relatório rodado antes dessa mudança). Usado tanto no KPI/título do PDF individual
+    // (montarResumoSuspensos) quanto no indicador da linha "Suspensos por Prazo
+    // Indeterminado" na capa unificada do Cartório (ver itensCartorio em
+    // gerarPDFConjunto).
+    function totalHomeOuColetadoSuspensos(dados) {
+        const n = parseInt(store.getItem(CFG_SUSPENSOS.prefixo + 'total_identificado') || '', 10);
+        return Number.isFinite(n) ? n : (dados || []).length;
+    }
+
     function acharLinkMenu(urlRe, textoRe) {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
@@ -15187,6 +15239,7 @@
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
         chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas'); // demais cards do mesmo painel
         chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
+        chamarSeguro(capturarContadorHomeSuspensos, 'capturarContadorHomeSuspensos'); // total do card da home pro KPI de Suspensos por Prazo Indeterminado
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
         // comentário grande acima de CHAVE_MU_ATIVO).
