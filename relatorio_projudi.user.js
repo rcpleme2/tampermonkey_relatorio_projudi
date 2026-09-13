@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.60
+// @version      25.61
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2896,6 +2896,14 @@
             distribuicoes: [
                 { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
             ],
+            // Observação condicional (pedido do usuário): alerta quando há mandado
+            // aguardando análise de decurso de prazo há MAIS DE 30 DIAS (fora da faixa
+            // "Até 30 dias" de faixasPorPrioridade) — mesmo mecanismo genérico de
+            // p.observacaoPrazo já usado por CFG_JUNTADAS em montarResumoGenerico, sem
+            // precisar de lógica nova.
+            observacaoPrazo: 'Há mandados aguardando análise de decurso de prazo há mais de 30 dias. A secretaria '
+                + 'deverá priorizar a análise desses mandados, tendo em vista o risco de prejuízo ao andamento '
+                + 'processual decorrente da demora na verificação do decurso de prazo.',
             colunas: [
                 { header: 'Dt. Decurso', width: 20, get: (d) => d.dataDecurso },
                 { header: 'Processo', width: 34, get: (d) => d.processo },
