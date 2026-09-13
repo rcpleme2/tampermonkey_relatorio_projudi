@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.69
+// @version      25.70
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2367,7 +2367,7 @@
         },
     };
 
-    // ── Cumprimento de Medidas Alternativas em Atraso (menu Processos > Busca >
+    // ── Medidas Alternativas em Atraso (menu Processos > Busca >
     // Cumprimento de Medidas Alternativas — buscaMedidaAlternativa.do) ─────────────────
     // Categoria Crime (categoriaEspecifica: 'crime', pedido do usuário — Medidas
     // Alternativas é conceito exclusivamente criminal, mesma seção de Apreensões/
@@ -2395,7 +2395,7 @@
     // mesmo processo (a extração não deduplica por processo, cada linha da tela é uma
     // medida distinta) — mais a tabela discriminada completa via montarTabelaGenerico
     // reaproveitado.
-    const TITULO_MEDIDAS_ALTERNATIVAS_ATRASO = 'Cumprimento de Medidas Alternativas em Atraso';
+    const TITULO_MEDIDAS_ALTERNATIVAS_ATRASO = 'Medidas Alternativas em Atraso';
     // Texto fixo do balão de observação (pedido do usuário), mesmo padrão de
     // PARAGRAFOS_OBSERVACAO_PRESCRICOES/PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS — só
     // aparece no PDF quando há medidas listadas (ver montarResumoMedidasAlternativasAtraso).
@@ -3535,7 +3535,7 @@
         }, 1500);
     }
 
-    // Tela de filtros de Cumprimento de Medidas Alternativas em Atraso
+    // Tela de filtros de Medidas Alternativas em Atraso
     // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
     // Alternativas") — form + table.resultTable na MESMA página (mesmo padrão de
     // Apreensões/Monitoração Expirada acima). Pedido do usuário: NÃO fixar o select
@@ -8688,7 +8688,7 @@
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
             });
         }
-        // "Cumprimento de Medidas Alternativas em Atraso" — logo após Cumprimento de
+        // "Medidas Alternativas em Atraso" — logo após Cumprimento de
         // Medidas, mesma categoria Crime (mesma ordem de REPORTS_AUTOMACAO). Sem
         // classificação por situação/aging (mesmo padrão de Outros Cumprimentos/
         // Arquivados com Saldo — não é uma tarefa clássica de "dias parado"), por isso
@@ -8699,7 +8699,7 @@
             const qtdTipos = new Set(secaoMedidasAlternativasAtraso.dados.map(d => (d.tipo || '').trim()).filter(Boolean)).size;
             const qtdTiposMedida = new Set(secaoMedidasAlternativasAtraso.dados.map(d => (d.tipoMedida || '').trim()).filter(Boolean)).size;
             itensOutros.push({
-                nome: 'Cumprimento de Medidas Alternativas em Atraso',
+                nome: 'Medidas Alternativas em Atraso',
                 indicador: `${secaoMedidasAlternativasAtraso.dados.length} medida(s)`,
                 detalhamento: `${qtdTipos} tipo(s) · ${qtdTiposMedida} tipo(s) de medida distintos`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_MEDIDAS_ALTERNATIVAS_ATRASO,
@@ -10336,7 +10336,7 @@
         desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
-    // ── PDF de Cumprimento de Medidas Alternativas em Atraso (menu Processos > Busca >
+    // ── PDF de Medidas Alternativas em Atraso (menu Processos > Busca >
     // Cumprimento de Medidas Alternativas) ──────────────────────────────────────────────
     // Lista paginada por processo (mesmo esquema de Apreensões/Monitoração Expirada) —
     // reaproveita montarTabelaGenerico sem alteração pra tabela discriminada, mas o
@@ -13951,7 +13951,7 @@
             }
         }
 
-        // Tela de filtros de Cumprimento de Medidas Alternativas em Atraso
+        // Tela de filtros de Medidas Alternativas em Atraso
         // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
         // Alternativas") — mesmo padrão de Monitoração Expirada acima: decide pelo
         // ESTADO da automação, não pela presença de resultados.
@@ -14967,12 +14967,12 @@
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
         { key: 'cumprimentomedidas', cfg: CFG_CUMPRIMENTO_MEDIDAS, navAlvo: 'cumprimentomedidas', rotulo: 'Cumprimento de Medidas', curto: 'Cumpr. Medidas', categoriaEspecifica: 'crime', precisaPreencher: false },
-        // "Cumprimento de Medidas Alternativas em Atraso" — menu geral "Processos >
+        // "Medidas Alternativas em Atraso" — menu geral "Processos >
         // Busca > Cumprimento de Medidas Alternativas" (não uma aba da Mesa do Escrivão
         // Criminal, mas Medidas Alternativas é conceito exclusivamente criminal — pedido
         // do usuário: mover para a categoria Crime). Logo após Cumprimento de Medidas,
         // mesma categoria.
-        { key: 'medidasalternativasatraso', cfg: CFG_MEDIDAS_ALTERNATIVAS_ATRASO, navAlvo: 'medidasalternativasatraso', rotulo: 'Cumprimento de Medidas Alternativas em Atraso', curto: 'Med. Alternativas Atraso', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'medidasalternativasatraso', cfg: CFG_MEDIDAS_ALTERNATIVAS_ATRASO, navAlvo: 'medidasalternativasatraso', rotulo: 'Medidas Alternativas em Atraso', curto: 'Med. Alternativas Atraso', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
