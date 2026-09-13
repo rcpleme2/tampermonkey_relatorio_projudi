@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.60
+// @version      25.61
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11256,8 +11256,17 @@
         let extrasRemetidos = [];
         try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
         try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
+        // O mesmo processo pode aparecer nas DUAS fontes (ex.: um "Em remessa" de
+        // Paralisados que também foi encontrado por Processos Remetidos, com destino
+        // "Delegacia"/"Distribuidor"/etc.). removerProcessosDuplicados mantém só a 1ª
+        // ocorrência — os registros mapeados de Remetidos (que têm cfg.destino) vêm
+        // PRIMEIRO aqui de propósito, senão a versão sem destino (de CFG_REMESSAS) vence
+        // o dedupe e o processo some do card "Por destino da remessa" daquele
+        // destinatário (bug relatado pelo usuário: destinos como Delegacia apareciam
+        // rodando Processos Remetidos sozinho, mas sumiam ao rodar junto com Remessas em
+        // Aberto).
         return removerProcessosDuplicados(
-            [...dadosBase, ...extrasRemessas, ...extrasRemetidos.map(mapRemetidoParaFormatoRemessas)],
+            [...extrasRemetidos.map(mapRemetidoParaFormatoRemessas), ...dadosBase, ...extrasRemessas],
             'processo',
         );
     }
@@ -15685,8 +15694,12 @@
         const secaoRemetidos = secoes.find(s => s.cfg === CFG_PROCESSOS_REMETIDOS);
         const secaoRemessas = secoes.find(s => s.cfg === CFG_REMESSAS);
         if (secaoRemetidos && secaoRemessas) {
+            // Mesmo cuidado de dadosRemessasConsolidados: os registros de Remetidos (com
+            // destino) vêm PRIMEIRO, pra removerProcessosDuplicados preservar o destino
+            // em vez de descartá-lo quando o mesmo processo também aparece em Remessas em
+            // Aberto (sem campo destino).
             secaoRemessas.dados = removerProcessosDuplicados(
-                [...secaoRemessas.dados, ...secaoRemetidos.dados.map(mapRemetidoParaFormatoRemessas)],
+                [...secaoRemetidos.dados.map(mapRemetidoParaFormatoRemessas), ...secaoRemessas.dados],
                 'processo',
             );
         }
