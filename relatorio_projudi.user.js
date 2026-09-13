@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.57
+// @version      25.58
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9515,7 +9515,7 @@
         // processo pode ter mais de um preso, ver chaveDuplicata em
         // CFG_REAVALIACAO_PRISAO_PROVISORIA), igual ao "N registro(s) encontrado(s)" que
         // o próprio Projudi mostra na tela de origem.
-        desenharCard(doc, m, kY, kW, kH, 'Registros pendentes de reavaliação', String(r.length), [], true, COR.vermelho, COR.vermelho);
+        desenharCard(doc, m, kY, kW, kH, 'Prisões pendentes de reavaliação', String(r.length), [], true, COR.vermelho, COR.vermelho);
 
         const antigo = acharMaisAntigo(r, 'dataPrisao');
         const valAntigo = antigo ? antigo.dataStr : '—';
