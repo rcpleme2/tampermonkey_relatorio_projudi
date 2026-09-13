@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.58
+// @version      25.59
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2207,6 +2207,135 @@
         },
     };
 
+    // ── Feitos com Réu Sem RG/IIPR e Feitos com Parte Sem CPF/CNPJ (Mesa do Escrivão
+    // Criminal, cards "Feitos com réu sem RG/IIPR" e "Feitos com réu sem CPF/CNPJ" —
+    // mesmo bloco #tbMesa de Prescrições/Sem Infração Penal). Mesmo esquema de
+    // CFG_SEM_INFRACAO_PENAL acima (lista paginada por processo, usa criarColetor()/
+    // cfg.extrai normalmente), mas com UMA coluna a mais: a tabela real (fixtures
+    // enviadas pelo usuário) tem 6 colunas — [0] Processo [1] Classe Processual
+    // (Assunto Principal) [2] Parte [3] Data de Distribuição [4] Data Último Movimento
+    // [5] Dias Paralisado — em vez das 5 de Sem Infração Penal (que não tem "Parte").
+    const TITULO_SEM_RG = 'Feitos Ativos Com Réu Sem RG/IIPR';
+    const TITULO_SEM_CPF = 'Feitos Ativos Com Parte Sem CPF ou CNPJ';
+    const PARAGRAFOS_OBSERVACAO_SEM_RG = [
+        'A secretaria deverá diligenciar para a correta identificação civil do réu, providência indispensável para a expedição de mandados, citações/intimações e para a formação de eventual folha de antecedentes.',
+        'A ausência de RG/IIPR cadastrado dificulta a triagem e a tramitação do feito — recomenda-se solicitar a informação junto à autoridade policial ou, se for o caso, promover a atualização do cadastro processual assim que o dado estiver disponível.',
+    ];
+    const PARAGRAFOS_OBSERVACAO_SEM_CPF = [
+        'A secretaria deverá diligenciar para a correta identificação civil da parte, providência indispensável para a expedição de mandados, citações/intimações e para o cumprimento de eventuais determinações judiciais.',
+        'A ausência de CPF/CNPJ cadastrado dificulta a triagem e a tramitação do feito — recomenda-se solicitar a informação junto aos órgãos competentes ou, se for o caso, promover a atualização do cadastro processual assim que o dado estiver disponível.',
+    ];
+    const CFG_SEM_RG = {
+        prefixo: 'projudi_semrg_',
+        // Zero pendências é informação válida (mesmo padrão de CFG_SEM_INFRACAO_PENAL).
+        mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não por 'processo' (padrão
+        // de removerProcessosDuplicados) — mesmo motivo de CFG_APREENSOES: um processo
+        // pode legitimamente ter mais de um réu sem RG/IIPR cadastrado, gerando duas
+        // linhas com o mesmo número de processo e Parte diferente. Dedupe por 'processo'
+        // derrubaria uma dessas linhas, fazendo o total do card ficar menor que o
+        // "N registro(s) encontrado(s)" que o Projudi reportou na tela.
+        chaveDuplicata: '*',
+        // Mesma colisão de cabeçalho de CFG_SEM_INFRACAO_PENAL (a coluna "Dias
+        // Paralisado" casa com o regex largo de CFG_PARALISADOS) — detecção própria
+        // pelo <form id="mesaAnalistaEscrivaoForm"> com o actionType desta tela
+        // específica; precisa ser checada em detectarConfig() ANTES de CFG_PARALISADOS.
+        detecta: () => {
+            const form = document.getElementById('mesaAnalistaEscrivaoForm');
+            return !!(form && /actionType=pesquisarProcessosComReuSemRg/i.test(form.action));
+        },
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'sem_rg_projudi',
+        rotulos: { coletar: 'Extrair Sem RG', coletarMais: 'Extrair mais (Sem RG)', baixar: '⬇ Baixar Sem RG' },
+        cabecalhos: ['Processo', 'Classe Processual (Assunto Principal)', 'Parte', 'Data de Distribuição', 'Data Último Movimento', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[5]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                parte: textoCelula(tds[2]),
+                dataDistribuicao: textoCelula(tds[3]),
+                dataUltimoMovimento: textoCelula(tds[4]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.parte, d.dataDistribuicao, d.dataUltimoMovimento, (d.dias == null ? '' : String(d.dias))],
+        pdfCustom: (dados, somenteResumo) => gerarPDFSemRg(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_SEM_RG,
+            tabelaTitulo: 'Tabela discriminada dos feitos com réu sem RG/IIPR',
+            dataCampo: 'dataDistribuicao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 26, get: (d) => d.processo },
+                { header: 'Classe Processual (Assunto Principal)', width: 36, get: (d) => d.classe },
+                { header: 'Parte', width: 28, get: (d) => d.parte },
+                { header: 'Data de Distribuição', width: 18, get: (d) => d.dataDistribuicao },
+                { header: 'Data Último Movimento', width: 18, get: (d) => d.dataUltimoMovimento },
+                { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
+    };
+    const CFG_SEM_CPF = {
+        prefixo: 'projudi_semcpf_',
+        mostrarSeVazio: true,
+        // Mesmo motivo de CFG_SEM_RG/CFG_APREENSOES: um processo pode ter mais de uma
+        // parte sem CPF/CNPJ cadastrado, gerando linhas com o mesmo processo e Parte
+        // diferente — dedupe por 'processo' perderia uma delas.
+        chaveDuplicata: '*',
+        detecta: () => {
+            const form = document.getElementById('mesaAnalistaEscrivaoForm');
+            return !!(form && /actionType=pesquisarProcessosComParteSemCpf/i.test(form.action));
+        },
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'sem_cpf_cnpj_projudi',
+        rotulos: { coletar: 'Extrair Sem CPF/CNPJ', coletarMais: 'Extrair mais (Sem CPF/CNPJ)', baixar: '⬇ Baixar Sem CPF/CNPJ' },
+        cabecalhos: ['Processo', 'Classe Processual (Assunto Principal)', 'Parte', 'Data de Distribuição', 'Data Último Movimento', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 40 }, { wch: 30 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[5]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                parte: textoCelula(tds[2]),
+                dataDistribuicao: textoCelula(tds[3]),
+                dataUltimoMovimento: textoCelula(tds[4]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.parte, d.dataDistribuicao, d.dataUltimoMovimento, (d.dias == null ? '' : String(d.dias))],
+        pdfCustom: (dados, somenteResumo) => gerarPDFSemCpf(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_SEM_CPF,
+            tabelaTitulo: 'Tabela discriminada dos feitos com parte sem CPF ou CNPJ',
+            dataCampo: 'dataDistribuicao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 26, get: (d) => d.processo },
+                { header: 'Classe Processual (Assunto Principal)', width: 36, get: (d) => d.classe },
+                { header: 'Parte', width: 28, get: (d) => d.parte },
+                { header: 'Data de Distribuição', width: 18, get: (d) => d.dataDistribuicao },
+                { header: 'Data Último Movimento', width: 18, get: (d) => d.dataUltimoMovimento },
+                { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
+    };
+
     // ── Reavaliação da Prisão Provisória a cada 90 dias, Art 316 CPP (Mesa do Escrivão
     // Criminal, card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)"
     // dentro do #tbMesa, MESMA aba/bloco de Prescrições/Sem Infração Penal) —
@@ -3743,6 +3872,29 @@
         return null;
     }
 
+    // Cards "Feitos com réu sem RG/IIPR" e "Feitos com réu sem CPF/CNPJ" — mesmo bloco
+    // #tbMesa de Prescrições/Sem Infração Penal, mesmo molde de acharCardSemInfracao
+    // Penal acima (label sem <a href>, clique real no nó mais profundo).
+    function acharCardSemRg() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('#tbMesa label')) {
+                if (!/^feitos\s+com\s+r[ée]u\s+sem\s+rg\s*\/\s*iipr$/i.test((label.textContent || '').trim())) continue;
+                return label;
+            }
+        }
+        return null;
+    }
+    function acharCardSemCpf() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('#tbMesa label')) {
+                if (!/^feitos\s+com\s+r[ée]u\s+sem\s+cpf\s*\/\s*cnpj$/i.test((label.textContent || '').trim())) continue;
+                return label;
+            }
+        }
+        return null;
+    }
     // Card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)" — mesmo
     // esquema de acharCardSemInfracaoPenal acima (mesmo #tbMesa, mesmo tipo de card sem
     // <a href>, só um <label>). Devolve o <label> (nó mais profundo), não o <div
@@ -6716,6 +6868,23 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, comIndice),
             };
         }
+        if (cfg === CFG_SEM_RG) {
+            return {
+                rotulo: TITULO_SEM_RG,
+                // Resumo dedicado (mesmo padrão de Sem Infração Penal) — não usa
+                // montarResumoGenerico; a tabela discriminada reaproveita o genérico sem
+                // alteração (ver CFG_SEM_RG.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSemRg(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_RG, comIndice),
+            };
+        }
+        if (cfg === CFG_SEM_CPF) {
+            return {
+                rotulo: TITULO_SEM_CPF,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoSemCpf(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_CPF, comIndice),
+            };
+        }
         if (cfg === CFG_REAVALIACAO_PRISAO_PROVISORIA) {
             return {
                 rotulo: TITULO_REAVALIACAO_PRISAO_PROVISORIA,
@@ -7441,6 +7610,8 @@
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
+        const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
+        const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
@@ -7874,6 +8045,34 @@
                 indicador: `${secaoSemInfracaoPenal.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
+            });
+        }
+        // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — logo após
+        // Sem Infração Penal (mesma ordem do popup: REPORTS_AUTOMACAO declara semrg/
+        // semcpf logo após seminfracaopenal dentro da categoria Crime). Indicador: total
+        // de processos pendentes; detalhamento compacta a pendência mais antiga (por
+        // Data de Distribuição, a pedido do usuário — mesmo campo usado no card
+        // "Pendência mais antiga" do PDF individual, ver montarResumoSemRg/SemCpf).
+        if (secaoSemRg) {
+            const antigo = acharMaisAntigo(secaoSemRg.dados, 'dataDistribuicao');
+            const prejudicado = prejudicadoInfo(CFG_SEM_RG);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Feitos com Réu Sem RG/IIPR',
+                indicador: `${secaoSemRg.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_RG,
+            });
+        }
+        if (secaoSemCpf) {
+            const antigo = acharMaisAntigo(secaoSemCpf.dados, 'dataDistribuicao');
+            const prejudicado = prejudicadoInfo(CFG_SEM_CPF);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Feitos com Réu Sem CPF/CNPJ',
+                indicador: `${secaoSemCpf.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
             });
         }
         // "Reavaliação da Prisão Provisória (Art 316, CPP)" — logo após Sem Infração
@@ -9471,6 +9670,182 @@
         desenharRodape(doc, TITULO_SEM_INFRACAO_PENAL, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
+    // ── PDF de Feitos Com Réu Sem RG/IIPR e Feitos Com Parte Sem CPF/CNPJ (Mesa do
+    // Escrivão Criminal) — mesmo padrão de gerarPDFSemInfracaoPenal/montarResumoSem
+    // InfracaoPenal acima (mesma aba de origem, mesma categoria Crime), só com a coluna
+    // "Parte" a mais na tabela embutida.
+    function gerarPDFSemRg(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSemRg(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_SEM_RG, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_SEM_RG.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards (mesmo padrão de Sem Infração Penal): total de processos pendentes e a
+    // pendência mais antiga (menor Data de Distribuição, a pedido do usuário), com o processo correspondente
+    // como sub-linha.
+    function montarResumoSemRg(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SEM_RG, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataDistribuicao');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Distribuição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela embutida com os 5 PRIMEIROS processos (mesmo limite de Sem Infração
+        // Penal — precisa caber tudo numa única página junto com os cards e a
+        // observação).
+        const LIMITE_TABELA_EMBUTIDA_SEM_RG = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_SEM_RG);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_SEM_RG
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_SEM_RG} Processos`
+                : 'Lista dos Processos Com Réu Sem RG/IIPR';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_SEM_RG.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_SEM_RG, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação — só com processos listados, sem forçar 2ª página se não
+        // couber (mesmo padrão de Sem Infração Penal).
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_SEM_RG);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_SEM_RG, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_SEM_RG, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    function gerarPDFSemCpf(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoSemCpf(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_SEM_CPF, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_SEM_CPF.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoSemCpf(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_SEM_CPF, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataDistribuicao');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Distribuição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        const LIMITE_TABELA_EMBUTIDA_SEM_CPF = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_SEM_CPF);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_SEM_CPF
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_SEM_CPF} Processos`
+                : 'Lista dos Processos Com Parte Sem CPF/CNPJ';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_SEM_CPF.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_SEM_CPF, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_SEM_CPF);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_SEM_CPF, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_SEM_CPF, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF de Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP) ─────────
     function gerarPDFReavaliacaoPrisaoProvisoria(dados, somenteResumo) {
         const doc = novoDocPDF();
@@ -9566,6 +9941,7 @@
 
         desenharRodape(doc, TITULO_REAVALIACAO_PRISAO_PROVISORIA, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
+
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
@@ -11364,6 +11740,10 @@
         // também casa com o regex largo de CFG_PARALISADOS (/dias\s+paralisado/i) — só a
         // detecção própria (form#mesaAnalistaEscrivaoForm) distingue as duas.
         else if (CFG_SEM_INFRACAO_PENAL.detecta(cab)) cfg = CFG_SEM_INFRACAO_PENAL;
+        // CFG_SEM_RG e CFG_SEM_CPF também vêm ANTES de CFG_PARALISADOS pelo mesmo motivo
+        // (cabeçalho com "Dias Paralisado", detecção própria pelo actionType do form).
+        else if (CFG_SEM_RG.detecta(cab)) cfg = CFG_SEM_RG;
+        else if (CFG_SEM_CPF.detecta(cab)) cfg = CFG_SEM_CPF;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
@@ -12124,6 +12504,31 @@
                 cartao.click();
             } else {
                 console.log('[Projudi Sem Infração Penal] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+            }
+            return;
+        }
+
+        // Mesmo esquema acima, para "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem
+        // CPF/CNPJ" — cards sem <a href>, mesma aba, sem etapa de filtro/checkbox.
+        if (estadoAutoNoInicio === 'preenchendo_semrg' && !document.querySelector('table.resultTable')) {
+            const cartao = acharCardSemRg();
+            if (cartao) {
+                console.log('[Projudi Sem RG] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem RG/IIPR"');
+                store.setItem(AUTO_ESTADO, 'coletando_semrg');
+                cartao.click();
+            } else {
+                console.log('[Projudi Sem RG] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+            }
+            return;
+        }
+        if (estadoAutoNoInicio === 'preenchendo_semcpf' && !document.querySelector('table.resultTable')) {
+            const cartao = acharCardSemCpf();
+            if (cartao) {
+                console.log('[Projudi Sem CPF/CNPJ] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem CPF/CNPJ"');
+                store.setItem(AUTO_ESTADO, 'coletando_semcpf');
+                cartao.click();
+            } else {
+                console.log('[Projudi Sem CPF/CNPJ] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -13473,6 +13878,11 @@
         // Prescrições (card sem link, ver acharCardSemInfracaoPenal); ÚLTIMO da categoria
         // Crime, logo após Prescrições (mesma ordem em que os cards aparecem no #tbMesa).
         { key: 'seminfracaopenal', cfg: CFG_SEM_INFRACAO_PENAL, navAlvo: 'seminfracaopenal', rotulo: 'Feitos Sem Infração Penal', curto: 'Sem Infração Penal', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — mesma aba
+        // "Mesa do Escrivão Criminal" (cards sem link, ver acharCardSemRg/acharCardSemCpf);
+        // logo após Sem Infração Penal (mesma ordem em que os cards aparecem no #tbMesa).
+        { key: 'semrg', cfg: CFG_SEM_RG, navAlvo: 'semrg', rotulo: 'Feitos com Réu Sem RG/IIPR', curto: 'Sem RG', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'semcpf', cfg: CFG_SEM_CPF, navAlvo: 'semcpf', rotulo: 'Feitos com Réu Sem CPF/CNPJ', curto: 'Sem CPF/CNPJ', categoriaEspecifica: 'crime', precisaPreencher: true },
         // "Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP)" — mesma aba
         // "Mesa do Escrivão Criminal" de Prescrições/Sem Infração Penal (card sem link,
         // ver acharCardReavaliacaoPrisaoProvisoria); ÚLTIMO da categoria Crime, logo após
@@ -13841,6 +14251,10 @@
         // acharCardSemInfracaoPenal) acontece em injetarBotoes, a cada carregamento de
         // página, assim que o card aparecer no DOM.
         else if (alvo === 'seminfracaopenal') return navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal();
+        // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — mesma aba
+        // "Mesa do Escrivão Criminal"; o clique no card em si acontece em injetarBotoes.
+        else if (alvo === 'semrg') return navegarAbaMesaEscrivaoCriminalParaSemRg();
+        else if (alvo === 'semcpf') return navegarAbaMesaEscrivaoCriminalParaSemCpf();
         // "Reavaliação da Prisão Provisória" fica na mesma aba "Mesa do Escrivão
         // Criminal" de Prescrições/Sem Infração Penal — abre a aba aqui; o clique no
         // card em si (sem link, ver acharCardReavaliacaoPrisaoProvisoria) acontece em
@@ -13957,6 +14371,29 @@
         return true;
     }
 
+    // Mesmo esquema acima, mas para "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem
+    // CPF/CNPJ" — mesma aba ("Mesa do Escrivão Criminal"); o clique no card específico
+    // (ver acharCardSemRg/acharCardSemCpf) acontece à parte, no gate de injetarBotoes.
+    function navegarAbaMesaEscrivaoCriminalParaSemRg() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: semrg (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemRg — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+    function navegarAbaMesaEscrivaoCriminalParaSemCpf() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: semcpf (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemCpf — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
     // Mesmo esquema de navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal acima, mas para
     // "Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP)" — mesma aba; só o
     // clique seguinte (no próprio card, ver acharCardReavaliacaoPrisaoProvisoria) muda,
