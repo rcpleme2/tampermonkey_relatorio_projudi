@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.67
+// @version      25.68
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3128,11 +3128,29 @@
     }
     // Mesmo motivo de tabelaMandados() acima: não dá pra confiar em "a 1ª table.resultTable
     // do documento" — busca a tabela certa pelo cabeçalho dela em todas as da página.
+    //
+    // DIAGNÓSTICO (usuário relatou "retornou tudo zerado, mesmo havendo resultados"): sem
+    // uma linha de dados real confirmada (ver comentário grande acima), a causa mais
+    // provável é esta função não achar a tabela certa (regex do cabeçalho não bate com o
+    // texto real, ou a tabela de verdade não tem <thead> como filho DIRETO) — nesse caso o
+    // gate conclui "zero resultados" mesmo com processos na tela. Loga sempre que NÃO
+    // encontra, com o texto de cabeçalho de cada table.resultTable candidata, pra
+    // conseguirmos comparar com o esperado direto do console do navegador.
     function tabelaTransacaoPenal() {
-        return [...document.querySelectorAll('table.resultTable')].find(t => {
+        const candidatas = [...document.querySelectorAll('table.resultTable')];
+        const encontrada = candidatas.find(t => {
             const thead = t.querySelector(':scope > thead');
             return cabecalhoTransacaoPenal(thead ? thead.textContent : '');
         }) || null;
+        if (!encontrada) {
+            const cabecalhos = candidatas.map((t, i) => {
+                const thead = t.querySelector(':scope > thead');
+                const texto = (thead ? thead.textContent : '(sem thead)').replace(/\s+/g, ' ').trim();
+                return `[${i}] ${texto.slice(0, 150)}`;
+            });
+            console.log(`[Auto Projudi Transação Penal] tabelaTransacaoPenal(): nenhuma das ${candidatas.length} table.resultTable da página bateu com o cabeçalho esperado (regex: nome da parte + status da transação penal).`, cabecalhos);
+        }
+        return encontrada;
     }
     function tipoTransacaoPenalSelecionado() {
         const sel = document.getElementById('tipo');
@@ -3342,6 +3360,17 @@
         if (estadoAuto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         const selTipo = document.getElementById('tipo');
         const selStatus = document.getElementById('status');
+        const tabela = tabelaTransacaoPenal();
+        // DIAGNÓSTICO (usuário relatou "retornou tudo zerado, mesmo havendo resultados"):
+        // uma linha só, sempre impressa, com TODO o estado relevante nesta passada do gate
+        // — dá pra comparar direto no console do navegador se o filtro está correto, se a
+        // tabela foi achada, e quantas linhas ela tem (geral vs. só as diretas do tbody,
+        // pra descartar linha aninhada de alguma coluna atrapalhando a contagem).
+        console.log(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
+            + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
+            + `tabelaEncontrada=${!!tabela} tbodyTr(geral)=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} `
+            + `tbodyTr(direto)=${tabela ? tabela.querySelectorAll(':scope > tbody > tr').length : 'n/d'} `
+            + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
         if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A')) {
             if (selTipo) selTipo.value = tipoEsperado;
             if (selStatus) selStatus.value = 'A';
@@ -3352,7 +3381,7 @@
         }
         // Filtro já correto. Sem tabela de resultados ainda (1ª visita, antes de
         // qualquer busca) — clica em Pesquisar mesmo assim, sem esperar ação manual.
-        if (!tabelaTransacaoPenal()) {
+        if (!tabela) {
             const btn = document.getElementById('searchButton');
             console.log(`[Auto Projudi Transação Penal] filtro já correto (${chave}) mas sem resultados na tela ainda — clicando Pesquisar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
@@ -3361,7 +3390,7 @@
         // "Zero resultados" — mesmo padrão de marcarColetaMandadosVazia/avancarAutomacao
         // usado por gateMandados (função genérica, reaproveitada aqui sem alteração).
         const cfg = cfgTransacaoPenalPorChave(chave);
-        if (!tabelaTransacaoPenal().querySelector('tbody tr')) {
+        if (!tabela.querySelector('tbody tr')) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
             console.log(`[Auto Projudi Transação Penal] "${chave}" sem resultados — avançando`);
             avancarAutomacao(cfg);
