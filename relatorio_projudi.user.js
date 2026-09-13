@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.55
+// @version      25.56
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2822,7 +2822,19 @@
     // Relatório" (que dispara download de arquivo pelo navegador, sem forma direta de
     // interceptar o conteúdo). O servidor já sabe qual relatório gerar a partir do
     // estado de sessão criado pela navegação real até esta tela (ver
-    // iniciarColetaBensPendentesSngb) — só precisamos enviar tipoExportacao=CSV.
+    // iniciarColetaBensPendentesSngb).
+    // BUG corrigido: a 1ª versão reconstruía o corpo do POST manualmente com só 3 campos
+    // (tamanhoFonte/formato/tipoExportacao), vistos na captura estática da tela — mas o
+    // teste real da automação voltou "Relatório não encontrado" e 0 registros, com o
+    // download manual (mesmo link) funcionando normalmente. Indício de que o
+    // #relatorioForm tem campo(s) adicional(is) (ex.: identificador do relatório) que só
+    // existem no DOM ao vivo (injetados por JS após o carregamento), ausentes da captura
+    // estática usada para desenhar o corpo do POST. Corrigido usando new FormData(form) —
+    // captura TODOS os campos do form no estado atual, sem precisar conhecer seus nomes.
+    // Clique real (não .checked=true) no rádio de CSV — mesma cautela do CLAUDE.md
+    // ("clique sintético não é clique de verdade"): se o Projudi reagir à troca de
+    // exportação com algum JS (ex.: setar um campo oculto), só um clique de verdade
+    // dispara isso; FormData(form) é montado DEPOIS, já capturando esse efeito.
     // Resposta decodificada como windows-1252 (charset declarado pelo Projudi em todo o
     // site, confirmado na amostra real do CSV).
     function coletarBensPendentesSngb() {
@@ -2831,10 +2843,10 @@
             console.warn('[Projudi Bens Pendentes SNGB] formulário do relatório (#relatorioForm) não encontrado nesta tela.');
             return;
         }
-        console.log('[Projudi Bens Pendentes SNGB] solicitando CSV ao Projudi...');
-        const body = new URLSearchParams();
-        body.set('tamanhoFonte', '10');
-        body.set('formato', 'R');
+        const radioCsv = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCsv && !radioCsv.checked) radioCsv.click();
+        console.log(`[Projudi Bens Pendentes SNGB] solicitando CSV ao Projudi (tipoExportacao marcado=${radioCsv ? radioCsv.checked : 'campo não encontrado'})...`);
+        const body = new FormData(form);
         body.set('tipoExportacao', 'CSV');
         fetch(form.action, { method: 'POST', body, credentials: 'same-origin' })
             .then(resp => resp.arrayBuffer())
@@ -2842,6 +2854,9 @@
                 const texto = new TextDecoder('windows-1252').decode(buffer);
                 const registros = parseCsvBensPendentesSngb(texto);
                 console.log(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
+                if (registros.length === 0) {
+                    console.warn('[Projudi Bens Pendentes SNGB] 0 registros — início da resposta recebida (para diagnóstico):', texto.slice(0, 300));
+                }
                 store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'pagina_0', JSON.stringify(registros));
                 store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'num_paginas', '1');
                 store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'coletado', '1');
