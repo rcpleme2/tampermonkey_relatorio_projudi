@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.56
+// @version      25.57
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2254,6 +2254,14 @@
         // CFG_PRESCRICOES/CFG_SEM_INFRACAO_PENAL) — mostra a linha mesmo vazia, desde que
         // já coletado.
         mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão 'processo'
+        // (removerProcessosDuplicados) — mesmo caso de CFG_APREENSOES: um processo pode
+        // legitimamente ter mais de um preso (cada um é uma linha própria na tela do
+        // Projudi, com Guia/Motivo/Parte/Período diferentes), então dedupar por processo
+        // descartava presos de verdade sempre que dois deles compartilhavam o mesmo
+        // processo (bug relatado pelo usuário: card/tabela/planilha vinham com menos
+        // registros do que o "N registro(s) encontrado(s)" da tela do Projudi).
+        chaveDuplicata: '*',
         // Detecção própria pelo <form id="reavaliacaoProvisoriaForm"> (mesmo esquema de
         // CFG_SEM_INFRACAO_PENAL) — mais robusta do que casar pelo cabeçalho da tabela,
         // já que "Vara"/"Processo"/"Parte" sozinhos são colunas comuns a várias telas.
@@ -9503,7 +9511,11 @@
         const kH = 28;
         const kW = (uw - gap) / 2;
 
-        desenharCard(doc, m, kY, kW, kH, 'Presos pendentes de reavaliação', String(r.length), [], true, COR.vermelho, COR.vermelho);
+        // Total de REGISTROS (uma linha por preso, não por processo distinto — o mesmo
+        // processo pode ter mais de um preso, ver chaveDuplicata em
+        // CFG_REAVALIACAO_PRISAO_PROVISORIA), igual ao "N registro(s) encontrado(s)" que
+        // o próprio Projudi mostra na tela de origem.
+        desenharCard(doc, m, kY, kW, kH, 'Registros pendentes de reavaliação', String(r.length), [], true, COR.vermelho, COR.vermelho);
 
         const antigo = acharMaisAntigo(r, 'dataPrisao');
         const valAntigo = antigo ? antigo.dataStr : '—';
