@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.55
+// @version      25.56
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9519,7 +9519,7 @@
         let yObs = kY + kH + gap;
         if (r.length > 0) {
             const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA
-                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA} Presos`
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA} Processos`
                 : 'Lista dos Presos Pendentes de Reavaliação';
             tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
             const colunas = CFG_REAVALIACAO_PRISAO_PROVISORIA.pdf.colunas;
