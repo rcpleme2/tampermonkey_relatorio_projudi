@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.58
+// @version      25.59
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2336,6 +2336,113 @@
         },
     };
 
+    // ── Reavaliação da Prisão Provisória a cada 90 dias, Art 316 CPP (Mesa do Escrivão
+    // Criminal, card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)"
+    // dentro do #tbMesa, MESMA aba/bloco de Prescrições/Sem Infração Penal) —
+    // processo/criminal/reavaliacaoProvisoria.do?actionType=listar. Categoria Crime,
+    // igual Apreensões/Cumprimento de Medidas/Prescrições/Sem Infração Penal. Mesmo
+    // esquema de Sem Infração Penal (ver comentário lá): o card NÃO tem <a href> nenhum,
+    // só um <label> dentro de um <div class="quadroCorregedoriaEven/Odd"> (confirmado no
+    // .mhtml enviado pelo usuário), e clicar nele já leva DIRETO para a tela de
+    // resultados com table.resultTable pronta (14 registros no .mhtml, sem etapa de
+    // filtro/pesquisa intermediária). Ver acharCardReavaliacaoPrisaoProvisoria/
+    // navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria.
+    //
+    // DIFERENÇA importante em relação a Sem Infração Penal: a tela de resultados deste
+    // relatório não tem table.buttonBar NENHUMA (confirmado no .mhtml enviado pelo
+    // usuário — nenhum botão de Excel/paginação por baixo da tabela, mesmo com os 14
+    // registros presentes), então não pode contar com o fluxo genérico de injetarBotoes
+    // (que só monta os botões e chama o coletor depois de achar table.buttonBar). Por
+    // isso a coleta/paginação usa o coletor GENÉRICO normalmente (criarColetor — a
+    // paginação em si via a.arrowNextOn/#navigator e a extração por linha não dependem de
+    // buttonBar nenhum), mas os BOTÕES da UI são injetados à parte, ancorados no próprio
+    // <form>, tratado ANTES do "if (!buttonBar)" genérico — mesmo padrão de Outros
+    // Cumprimentos/Cumprimento de Medidas. Ver
+    // tratarPaginaReavaliacaoPrisaoProvisoria/CFG_REAVALIACAO_PRISAO_PROVISORIA.detecta.
+    //
+    // Lista paginada por processo (uma linha por PRESO — o mesmo processo pode repetir
+    // quando há mais de um réu preso), com resumo dedicado (2 cards + tabela embutida dos
+    // 5 primeiros + observação, mesmo padrão de CFG_SEM_INFRACAO_PENAL/CFG_PRESCRICOES) —
+    // a tabela discriminada completa reaproveita montarTabelaGenerico sem alteração.
+    //
+    // Colunas da tabela real (.mhtml enviado pelo usuário): [0] Data da Prisão
+    // [1] Processo [2] Vara [3] Guia de Prisão [4] Motivo da Prisão [5] Parte
+    // [6] Período de Prisão (texto tipo "6 meses e 10 dias (194 dias)" — extrai também o
+    // número de dias entre parênteses para permitir achar a pendência mais antiga).
+    const TITULO_REAVALIACAO_PRISAO_PROVISORIA = 'Reavaliação da Prisão Provisória a Cada 90 Dias (Art. 316, CPP)';
+    // Texto fixo do balão de observação (mesmo padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES/
+    // PARAGRAFOS_OBSERVACAO_SEM_INFRACAO_PENAL) — só a regra legal (art. 316, parágrafo
+    // único, CPP), sem entrar em critério de mérito sobre manter ou não a prisão (decisão
+    // que cabe ao magistrado, não a este relatório).
+    const PARAGRAFOS_OBSERVACAO_REAVALIACAO_PRISAO_PROVISORIA = [
+        'A secretaria deverá submeter os autos ao(à) magistrado(a) para a reavaliação da necessidade de manutenção da prisão preventiva ou em flagrante, nos termos do art. 316, parágrafo único, do Código de Processo Penal, que exige revisão da prisão a cada 90 (noventa) dias, sob pena de tornar a prisão ilegal.',
+    ];
+    const CFG_REAVALIACAO_PRISAO_PROVISORIA = {
+        prefixo: 'projudi_reavaliacaoprisao_',
+        // Zero pendências é informação válida (mesmo padrão de CFG_APREENSOES/
+        // CFG_PRESCRICOES/CFG_SEM_INFRACAO_PENAL) — mostra a linha mesmo vazia, desde que
+        // já coletado.
+        mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão 'processo'
+        // (removerProcessosDuplicados) — mesmo caso de CFG_APREENSOES: um processo pode
+        // legitimamente ter mais de um preso (cada um é uma linha própria na tela do
+        // Projudi, com Guia/Motivo/Parte/Período diferentes), então dedupar por processo
+        // descartava presos de verdade sempre que dois deles compartilhavam o mesmo
+        // processo (bug relatado pelo usuário: card/tabela/planilha vinham com menos
+        // registros do que o "N registro(s) encontrado(s)" da tela do Projudi).
+        chaveDuplicata: '*',
+        // Detecção própria pelo <form id="reavaliacaoProvisoriaForm"> (mesmo esquema de
+        // CFG_SEM_INFRACAO_PENAL) — mais robusta do que casar pelo cabeçalho da tabela,
+        // já que "Vara"/"Processo"/"Parte" sozinhos são colunas comuns a várias telas.
+        detecta: () => {
+            const form = document.getElementById('reavaliacaoProvisoriaForm');
+            return !!(form && /reavaliacaoProvisoria\.do/i.test(form.action));
+        },
+        minTds: 7,
+        usaAtuacao: false,
+        nomeArquivo: 'reavaliacao_prisao_provisoria_projudi',
+        rotulos: {
+            coletar: 'Extrair Reavaliação de Prisão Provisória',
+            coletarMais: 'Extrair mais (Reavaliação de Prisão Provisória)',
+            baixar: '⬇ Baixar Reavaliação de Prisão Provisória',
+        },
+        cabecalhos: ['Data da Prisão', 'Processo', 'Vara', 'Guia de Prisão', 'Motivo da Prisão', 'Parte', 'Período de Prisão'],
+        larguras: [{ wch: 14 }, { wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 30 }, { wch: 22 }],
+        extrai: (tds) => {
+            const periodo = textoCelula(tds[6]);
+            const mDias = periodo.match(/\((\d+)\s*dias?\)/i);
+            return {
+                dataPrisao: textoCelula(tds[0]),
+                processo: textoCelula(tds[1]),
+                vara: textoCelula(tds[2]),
+                guia: textoCelula(tds[3]),
+                motivo: textoCelula(tds[4]),
+                parte: textoCelula(tds[5]),
+                periodo,
+                dias: mDias ? parseInt(mDias[1], 10) : null,
+            };
+        },
+        linha: (d) => [d.dataPrisao, d.processo, d.vara, d.guia, d.motivo, d.parte, d.periodo],
+        pdfCustom: (dados, somenteResumo) => gerarPDFReavaliacaoPrisaoProvisoria(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoReavaliacao
+        // PrisaoProvisoria não usa nenhum outro campo além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_REAVALIACAO_PRISAO_PROVISORIA,
+            tabelaTitulo: 'Tabela discriminada das prisões provisórias pendentes de reavaliação',
+            dataCampo: 'dataPrisao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Data da Prisão', width: 18, get: (d) => d.dataPrisao },
+                { header: 'Processo', width: 28, get: (d) => d.processo },
+                { header: 'Vara', width: 34, get: (d) => d.vara },
+                { header: 'Guia de Prisão', width: 24, get: (d) => d.guia },
+                { header: 'Motivo da Prisão', width: 20, get: (d) => d.motivo },
+                { header: 'Parte', width: 34, get: (d) => d.parte },
+                { header: 'Período de Prisão', width: 24, get: (d) => d.periodo },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
     // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
     // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
@@ -3783,6 +3890,22 @@
         for (const d of docs) {
             for (const label of d.querySelectorAll('#tbMesa label')) {
                 if (!/^feitos\s+com\s+r[ée]u\s+sem\s+cpf\s*\/\s*cnpj$/i.test((label.textContent || '').trim())) continue;
+                return label;
+            }
+        }
+        return null;
+    }
+    // Card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)" — mesmo
+    // esquema de acharCardSemInfracaoPenal acima (mesmo #tbMesa, mesmo tipo de card sem
+    // <a href>, só um <label>). Devolve o <label> (nó mais profundo), não o <div
+    // class="quadroCorregedoria*"> que o envolve — mesmo motivo já documentado em
+    // acharCardSemInfracaoPenal (o clique precisa borbulhar por toda a cadeia de
+    // ancestrais onde o listener de verdade pode estar escutando).
+    function acharCardReavaliacaoPrisaoProvisoria() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('#tbMesa label')) {
+                if (!/reavalia[çc][ãa]o\s+da\s+pris[ãa]o\s+provis[óo]ria\s+a\s+cada\s+90\s+dias/i.test((label.textContent || '').trim())) continue;
                 return label;
             }
         }
@@ -6762,6 +6885,16 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_CPF, comIndice),
             };
         }
+        if (cfg === CFG_REAVALIACAO_PRISAO_PROVISORIA) {
+            return {
+                rotulo: TITULO_REAVALIACAO_PRISAO_PROVISORIA,
+                // Resumo dedicado (mesmo padrão de CFG_SEM_INFRACAO_PENAL) — não usa
+                // montarResumoGenerico; a tabela discriminada reaproveita o genérico sem
+                // alteração (ver CFG_REAVALIACAO_PRISAO_PROVISORIA.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoReavaliacaoPrisaoProvisoria(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_REAVALIACAO_PRISAO_PROVISORIA, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -7479,6 +7612,7 @@
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
+        const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -7939,6 +8073,20 @@
                 indicador: `${secaoSemCpf.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
+            });
+        }
+        // "Reavaliação da Prisão Provisória (Art 316, CPP)" — logo após Sem Infração
+        // Penal, mesma ordem de REPORTS_AUTOMACAO. Indicador: total de presos pendentes;
+        // detalhamento compacta a prisão mais antiga (por Data da Prisão).
+        if (secaoReavaliacaoPrisaoProvisoria) {
+            const antigo = acharMaisAntigo(secaoReavaliacaoPrisaoProvisoria.dados, 'dataPrisao');
+            const prejudicado = prejudicadoInfo(CFG_REAVALIACAO_PRISAO_PROVISORIA);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Reavaliação de Prisão Provisória (Art 316, CPP)',
+                indicador: `${secaoReavaliacaoPrisaoProvisoria.dados.length} preso(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -9697,6 +9845,103 @@
 
         desenharRodape(doc, TITULO_SEM_CPF, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
+
+    // ── PDF de Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP) ─────────
+    function gerarPDFReavaliacaoPrisaoProvisoria(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoReavaliacaoPrisaoProvisoria(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_REAVALIACAO_PRISAO_PROVISORIA, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_REAVALIACAO_PRISAO_PROVISORIA.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Mesmo padrão de montarResumoSemInfracaoPenal: só 2 cards (total de presos pendentes
+    // de reavaliação + a prisão mais antiga, por Data da Prisão) + tabela embutida com os
+    // 5 primeiros + balão de observação com a regra do art. 316, parágrafo único, CPP.
+    function montarResumoReavaliacaoPrisaoProvisoria(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_REAVALIACAO_PRISAO_PROVISORIA, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        // Total de REGISTROS (uma linha por preso, não por processo distinto — o mesmo
+        // processo pode ter mais de um preso, ver chaveDuplicata em
+        // CFG_REAVALIACAO_PRISAO_PROVISORIA), igual ao "N registro(s) encontrado(s)" que
+        // o próprio Projudi mostra na tela de origem.
+        desenharCard(doc, m, kY, kW, kH, 'Prisões pendentes de reavaliação', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataPrisao');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo
+            ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
+            : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Prisão mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela embutida com os 5 PRIMEIROS presos (mesmo padrão de Sem Infração Penal —
+        // ordem de chegada, sem reordenar por dias/urgência).
+        const LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_REAVALIACAO_PRISAO_PROVISORIA} Processos`
+                : 'Lista dos Presos Pendentes de Reavaliação';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_REAVALIACAO_PRISAO_PROVISORIA.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_REAVALIACAO_PRISAO_PROVISORIA, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação com a regra do art. 316, parágrafo único, CPP — só com
+        // presos listados; "0 pendências" não precisa de alerta pra secretaria agir.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_REAVALIACAO_PRISAO_PROVISORIA);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_REAVALIACAO_PRISAO_PROVISORIA, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_REAVALIACAO_PRISAO_PROVISORIA, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
@@ -12050,6 +12295,73 @@
         }
     }
 
+    // Tela de resultados de Reavaliação da Prisão Provisória a cada 90 dias (Art 316,
+    // CPP) — ao contrário de Outros Cumprimentos/Cumprimento de Medidas (painéis de
+    // contadores sem paginação), esta tela É uma lista paginada normal (table.resultTable
+    // com Data da Prisão/Processo/Vara/Guia de Prisão/Motivo da Prisão/Parte/Período de
+    // Prisão) — só falta o table.buttonBar (ver comentário em CFG_REAVALIACAO_PRISAO_
+    // PROVISORIA.detecta/injetarBotoes). Por isso usa o coletor GENÉRICO (criarColetor)
+    // por dentro, igual a qualquer relatório paginado — a paginação
+    // (a.arrowNextOn/#navigator) e a extração por linha (cfg.extrai) não dependem de
+    // buttonBar nenhum — só os botões da UI precisam de uma âncora alternativa (o próprio
+    // <form>, no lugar de table.buttonBar). Espelha a lógica de injetarBotoes() para
+    // relatórios "normais" (rodando→continuar / automação→iniciar / senão→render),
+    // sempre chamada uma única vez por carregamento de página (mesmo padrão do restante
+    // do arquivo — sem retry/espera ativa, já que a tabela já vem pronta no HTML inicial,
+    // sem AJAX).
+    function tratarPaginaReavaliacaoPrisaoProvisoria() {
+        const cfg = CFG_REAVALIACAO_PRISAO_PROVISORIA;
+        const coletor = criarColetor(cfg);
+
+        const mk = (id, title, onclick, texto) => {
+            const b = document.createElement('button');
+            b.id = id; b.type = 'button'; b.className = 'projudi-btn';
+            b.title = title; b.onclick = onclick;
+            if (texto) b.textContent = texto;
+            return b;
+        };
+
+        const form = document.getElementById('reavaliacaoProvisoriaForm');
+        const ancora = form || document.body;
+
+        const wrapExtracao = document.createElement('span');
+        wrapExtracao.id = 'projudi-extracao-individual';
+        if (!mostrarBotoesIndividuais()) wrapExtracao.style.display = 'none';
+        ancora.appendChild(wrapExtracao);
+
+        wrapExtracao.appendChild(mk('btn-coletar', 'Percorre todas as páginas e acrescenta aos dados já coletados', () => coletor.iniciar()));
+        wrapExtracao.appendChild(mk('btn-baixar', 'Junta tudo o que foi coletado e baixa a planilha Excel', () => coletor.baixar()));
+        wrapExtracao.appendChild(mk('btn-pdf', 'Gera um PDF com painel e a tabela completa', () => {
+            const chk = document.getElementById('chk-somente-resumo');
+            coletor.pdf(!!(chk && chk.checked));
+        }));
+        const rotuloResumo = document.createElement('label');
+        rotuloResumo.className = 'projudi-chk-resumo';
+        rotuloResumo.title = 'Gera o PDF só com o resumo (KPIs), sem a tabela discriminada';
+        rotuloResumo.innerHTML = '<input type="checkbox" id="chk-somente-resumo"> Só resumo (sem tabela)';
+        wrapExtracao.appendChild(rotuloResumo);
+        wrapExtracao.appendChild(mk('btn-limpar', 'Apaga os dados acumulados deste relatório', () => coletor.limpar(), 'Limpar'));
+
+        const status = document.createElement('span');
+        status.id = 'exportar-status';
+        wrapExtracao.appendChild(status);
+
+        const estadoAuto = store.getItem(AUTO_ESTADO);
+        const relAtual = relatorioPorCfg(cfg);
+        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key;
+
+        if (coletor.rodando() && !coletor.obsoleta()) {
+            console.log('[Projudi Reavaliação Prisão Provisória] retomando coleta após reload de paginação');
+            coletor.continuar();
+        } else if (querColetarAuto) {
+            console.log('[Projudi Reavaliação Prisão Provisória] automação: iniciando coleta ao chegar no relatório');
+            coletor.iniciar();
+        } else {
+            coletor.limparFlags();
+            coletor.render();
+        }
+    }
+
     function injetarBotoes() {
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
         console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
@@ -12218,6 +12530,32 @@
             } else {
                 console.log('[Projudi Sem CPF/CNPJ] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
+            return;
+        }
+
+        // Aba "Mesa do Escrivão Criminal" com o card "Reavaliação da prisão provisória a
+        // cada 90 dias (Art 316, CPP)" carregado — mesmo esquema do bloco de Sem Infração
+        // Penal acima (card sem <a href>, clique leva direto pra tela de resultados).
+        if (estadoAutoNoInicio === 'preenchendo_reavaliacaoprisao' && !document.querySelector('table.resultTable')) {
+            const cartaoReavaliacao = acharCardReavaliacaoPrisaoProvisoria();
+            if (cartaoReavaliacao) {
+                console.log('[Projudi Reavaliação Prisão Provisória] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)"');
+                store.setItem(AUTO_ESTADO, 'coletando_reavaliacaoprisao');
+                cartaoReavaliacao.click();
+            } else {
+                console.log('[Projudi Reavaliação Prisão Provisória] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+            }
+            return;
+        }
+
+        // Tela de resultados de Reavaliação da Prisão Provisória — table.resultTable
+        // normal, mas SEM table.buttonBar (confirmado no .mhtml enviado pelo usuário,
+        // mesmo com registros na tabela) — tratada à parte, ANTES do "if (!buttonBar)"
+        // logo abaixo (mesmo motivo de Outros Cumprimentos/Cumprimento de Medidas: sem
+        // isso, o fallback genérico trataria esta tela como "0 registros" mesmo quando há
+        // presos pendentes de reavaliação). Ver tratarPaginaReavaliacaoPrisaoProvisoria.
+        if (CFG_REAVALIACAO_PRISAO_PROVISORIA.detecta()) {
+            tratarPaginaReavaliacaoPrisaoProvisoria();
             return;
         }
 
@@ -13545,6 +13883,11 @@
         // logo após Sem Infração Penal (mesma ordem em que os cards aparecem no #tbMesa).
         { key: 'semrg', cfg: CFG_SEM_RG, navAlvo: 'semrg', rotulo: 'Feitos com Réu Sem RG/IIPR', curto: 'Sem RG', categoriaEspecifica: 'crime', precisaPreencher: true },
         { key: 'semcpf', cfg: CFG_SEM_CPF, navAlvo: 'semcpf', rotulo: 'Feitos com Réu Sem CPF/CNPJ', curto: 'Sem CPF/CNPJ', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP)" — mesma aba
+        // "Mesa do Escrivão Criminal" de Prescrições/Sem Infração Penal (card sem link,
+        // ver acharCardReavaliacaoPrisaoProvisoria); ÚLTIMO da categoria Crime, logo após
+        // Sem Infração Penal.
+        { key: 'reavaliacaoprisao', cfg: CFG_REAVALIACAO_PRISAO_PROVISORIA, navAlvo: 'reavaliacaoprisao', rotulo: 'Reavaliação de Prisão Provisória (Art 316, CPP)', curto: 'Reavaliação Prisão Prov.', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -13912,6 +14255,11 @@
         // "Mesa do Escrivão Criminal"; o clique no card em si acontece em injetarBotoes.
         else if (alvo === 'semrg') return navegarAbaMesaEscrivaoCriminalParaSemRg();
         else if (alvo === 'semcpf') return navegarAbaMesaEscrivaoCriminalParaSemCpf();
+        // "Reavaliação da Prisão Provisória" fica na mesma aba "Mesa do Escrivão
+        // Criminal" de Prescrições/Sem Infração Penal — abre a aba aqui; o clique no
+        // card em si (sem link, ver acharCardReavaliacaoPrisaoProvisoria) acontece em
+        // injetarBotoes, a cada carregamento de página, assim que o card aparecer no DOM.
+        else if (alvo === 'reavaliacaoprisao') return navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria();
         else if (alvo === 'inicio') link = acharLinkMenu(null, /^in[íi]cio$/i);
         else if (alvo === 'outroscumprimentos') return navegarAbaOutrosCumprimentos();
         // Mesma "Relatórios Dinâmicos" usada por dezenas de outros relatórios dinâmicos
@@ -14043,6 +14391,20 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemCpf — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+    // Mesmo esquema de navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal acima, mas para
+    // "Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP)" — mesma aba; só o
+    // clique seguinte (no próprio card, ver acharCardReavaliacaoPrisaoProvisoria) muda,
+    // feito à parte no gate de injetarBotoes.
+    function navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: reavaliacaoprisao (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
