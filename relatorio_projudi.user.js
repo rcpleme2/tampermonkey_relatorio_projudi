@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.57
+// @version      25.58
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2272,7 +2272,7 @@
         pdf: {
             titulo: TITULO_SEM_RG,
             tabelaTitulo: 'Tabela discriminada dos feitos com réu sem RG/IIPR',
-            dataCampo: 'dataUltimoMovimento',
+            dataCampo: 'dataDistribuicao',
             processoCampo: 'processo',
             colunas: [
                 { header: 'Processo', width: 26, get: (d) => d.processo },
@@ -2323,7 +2323,7 @@
         pdf: {
             titulo: TITULO_SEM_CPF,
             tabelaTitulo: 'Tabela discriminada dos feitos com parte sem CPF ou CNPJ',
-            dataCampo: 'dataUltimoMovimento',
+            dataCampo: 'dataDistribuicao',
             processoCampo: 'processo',
             colunas: [
                 { header: 'Processo', width: 26, get: (d) => d.processo },
@@ -9570,7 +9570,7 @@
         const antigo = acharMaisAntigo(r, 'dataDistribuicao');
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
-        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Distribuição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
 
         // Tabela embutida com os 5 PRIMEIROS processos (mesmo limite de Sem Infração
         // Penal — precisa caber tudo numa única página junto com os cards e a
@@ -9657,7 +9657,7 @@
         const antigo = acharMaisAntigo(r, 'dataDistribuicao');
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
-        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Distribuição mais antiga', valAntigo, subsAntigo, true, COR.ambar);
 
         const LIMITE_TABELA_EMBUTIDA_SEM_CPF = 5;
         const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_SEM_CPF);
