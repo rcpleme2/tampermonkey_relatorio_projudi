@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.63
+// @version      25.64
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9819,58 +9819,20 @@
     // de processos nesta tela, apenas os 3 totais).
     const TITULO_CUMPRIMENTO_MEDIDAS = 'Cumprimento de Medidas';
 
-    // Texto fixo da Observação (parágrafo único, justificado), pedido pelo autor do
-    // protótipo original.
-    const TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS = 'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
+    // Parágrafo da Observação (pedido pelo autor do protótipo original). Array de um
+    // item só para reaproveitar desenharCardObservacao/medirAlturaCardObservacao — mesmo
+    // card (borda arredondada + acento âmbar lateral + título em caixa alta) usado em
+    // todas as outras observações do relatório (Prescrições, Sem Infração Penal,
+    // Juntadas etc.) — este relatório usava uma caixa cinza avulsa, destoando do padrão
+    // visual do resto do arquivo.
+    const PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS = [
+        'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
         + 'realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir. Os '
         + 'comprovantes individualizados de cumprimento deverão ser anexados ao Projudi. Em caso de atraso '
         + 'no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da '
         + 'Comunidade informações atualizadas acerca de sua execução. O controle rigoroso das medidas '
-        + 'impostas deve constituir prática permanente da secretaria.';
-
-    // Altura ocupada por um parágrafo justificado, na fonte/tamanho já ativos no doc —
-    // chamado ANTES de desenhar (mesmo espírito de medirAlturaCardLista) para dimensionar
-    // a caixa de fundo da Observação com a altura certa.
-    function alturaParagrafoJustificado(doc, texto, larguraMax, entreLinhas) {
-        return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
-    }
-
-    // Justificação MANUAL, por repetição de espaços, em vez de doc.text(..., {align:
-    // 'justify'}) nativo do jsPDF ou de reposicionar cada palavra por coordenada própria
-    // — ambas as abordagens produziram palavras acentuadas GRUDADAS sem espaço nenhum em
-    // leitores de PDF reais (bug relatado pelo autor do protótipo original, mesmo com a
-    // largura de cada palavra medida corretamente — o problema é o MECANISMO de
-    // reposicionamento por coordenada entre chamadas de doc.text(), não a conta). Aqui
-    // cada linha vira UMA ÚNICA STRING (com espaços de verdade, às vezes repetidos) e é
-    // desenhada com UMA chamada doc.text() só — o mesmo mecanismo simples já usado em todo
-    // o resto do relatório. Última linha de cada parágrafo fica com espaço simples,
-    // alinhada à esquerda (convenção tipográfica de texto justificado).
-    function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
-        const linhas = doc.splitTextToSize(texto, larguraMax);
-        const espacoLargura = doc.getTextWidth(' ') || 1;
-        linhas.forEach((linha, i) => {
-            const ultimaLinha = i === linhas.length - 1;
-            const palavras = linha.split(' ').filter(Boolean);
-            if (ultimaLinha || palavras.length <= 1) {
-                doc.text(linha, x, y);
-            } else {
-                const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
-                const numLacunas = palavras.length - 1;
-                const totalEspacos = Math.max(numLacunas, Math.round((larguraMax - larguraPalavras) / espacoLargura));
-                const base = Math.floor(totalEspacos / numLacunas);
-                let resto = totalEspacos - base * numLacunas;
-                let linhaJustificada = palavras[0];
-                for (let k = 1; k < palavras.length; k++) {
-                    let n = base;
-                    if (resto > 0) { n++; resto--; }
-                    linhaJustificada += ' '.repeat(Math.max(1, n)) + palavras[k];
-                }
-                doc.text(linhaJustificada, x, y);
-            }
-            y += entreLinhas;
-        });
-        return linhas.length * entreLinhas;
-    }
+        + 'impostas deve constituir prática permanente da secretaria.',
+    ];
 
     // Card de KPI especializado: título pode quebrar em 2 linhas (ex. "Medidas sem
     // Cumprimentos Gerados", mais longo que os títulos curtos que desenharCard assume) e
@@ -9902,9 +9864,9 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
         if (critico) {
-            // Helvetica (não PublicSans embutida), mesma decisão do texto da Observação
-            // logo abaixo — ver comentário grande em desenharParagrafoJustificado sobre o
-            // bug de espaçamento em texto acentuado com a fonte TTF customizada.
+            // Helvetica (não PublicSans embutida) — mesma fonte usada pelo card de
+            // Observação (desenharCardObservacao), evitando texto acentuado grudado que a
+            // fonte TTF customizada produzia em leitores de PDF reais.
             doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
             doc.text('Situação: Crítico', cx, yy, { align: 'center' });
         }
@@ -9957,22 +9919,9 @@
         desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.azul);
         desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
 
-        let y = kY + kH + 10;
-        tituloSecao(doc, m, y, uw, 'Observação');
-        y += 5;
-
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
-        const entreLinhas = 4.6;
-        const padding = 5;
-        const alturaTexto = alturaParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, uw - 2 * padding, entreLinhas);
-        const caixaH = alturaTexto + 2 * padding;
-
-        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
-        doc.roundedRect(m, y, uw, caixaH, 2, 2, 'FD');
-
-        const ty = y + padding + 3.2;
-        doc.setTextColor(...COR.tintaSec);
-        desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, m + padding, ty, uw - 2 * padding, entreLinhas);
+        const y = kY + kH + 10;
+        const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS);
+        desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS, COR.ambar);
 
         desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
