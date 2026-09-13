@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.67
+// @version      25.68
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10368,12 +10368,13 @@
     }
 
     // Card do total geral (vermelho, pedido do usuário) seguido de UMA SEÇÃO POR TIPO
-    // (título + grade de cards individuais por tipo de medida dentro dele —
-    // desenharGradeCardsIndicadores/desenharCardIndicador, mesmo componente visual usado
-    // pelo painelExtra de Juntadas), cada card também com o total em vermelho
-    // (critico: true força COR.vermelhoVivo em desenharCardIndicador). Tipos sem nenhum
-    // registro simplesmente não aparecem (mesmo espírito de "distribuições vazias somem"
-    // já usado em montarResumoGenerico).
+    // (título + um PAR de cards por tipo de medida dentro dele, lado a lado — pedido do
+    // usuário: alinhar por tipo): esquerda = total de ocorrências (vermelho, como antes),
+    // direita = total de PROCESSOS DISTINTOS associados àquela medida (azul — cor
+    // diferente pra não confundir as duas métricas; um processo com 3 ocorrências da
+    // mesma medida conta 3 à esquerda e 1 à direita). Tipos sem nenhum registro
+    // simplesmente não aparecem (mesmo espírito de "distribuições vazias somem" já usado
+    // em montarResumoGenerico).
     function montarResumoMedidasAlternativasAtraso(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const r = dados || [];
@@ -10429,6 +10430,14 @@
             return ia - ib;
         });
 
+        // Cada tipo de medida ganha DOIS cards lado a lado (pedido do usuário: alinhar
+        // por tipo) — esquerda: total de OCORRÊNCIAS (linhas da tela, mesmo critério de
+        // antes, em VERMELHO); direita: total de PROCESSOS DISTINTOS associados àquela
+        // medida (em AZUL, pedido do usuário — cor diferente da ocorrência pra não
+        // confundir as duas métricas). Um mesmo processo com 3 ocorrências da mesma
+        // medida conta 3 à esquerda e 1 à direita.
+        const kW2 = (uw - gap) / 2;
+        const kH2 = 28;
         tiposEncontrados.forEach(tipo => {
             const registrosDoTipo = porTipoMapa.get(tipo);
             // topN alto o bastante pra nunca cair no corte "Outros" (semOutros:true já
@@ -10436,18 +10445,43 @@
             // medida encontrados dentro deste tipo viram card, um por um, pedido do
             // usuário).
             const porTipoMedida = contarPorCampo(registrosDoTipo, 'tipoMedida', 999, null, true);
-            // Só garante que o TÍTULO da seção não fique sozinho colado no rodapé (a
-            // grade de cards abaixo dele pagina sozinha, via ctx, se precisar) — mesma
-            // folga mínima usada por outros blocos deste arquivo antes de um tituloSecao.
-            if (y + TITULO_TABELA_H + 20 > ph - 14) {
+            const processosPorMedida = new Map();
+            registrosDoTipo.forEach(d => {
+                const medida = (d.tipoMedida || '').trim() || '(vazio)';
+                if (!processosPorMedida.has(medida)) processosPorMedida.set(medida, new Set());
+                if (d.processo) processosPorMedida.get(medida).add(d.processo);
+            });
+
+            const desenharTituloGrupo = (cont) => {
+                tituloSecao(doc, m, y + 4, uw, `${tipo} (${registrosDoTipo.length})${cont ? ' (cont.)' : ''}`);
+                y += TITULO_TABELA_H;
+            };
+
+            // Só garante que o TÍTULO da seção não fique sozinho colado no rodapé, com a
+            // 1ª linha de cards indo pra página seguinte.
+            if (y + TITULO_TABELA_H + kH2 + 20 > ph - 14) {
                 ctx.rodapeAntesDeVirar();
                 doc.addPage();
                 ctx.cabecalhoContinuacao();
                 y = ctx.topoContinuacao;
             }
-            tituloSecao(doc, m, y + 4, uw, `${tipo} (${registrosDoTipo.length})`);
-            const itensCards = porTipoMedida.map(it => ({ titulo: it.label, valor: it.valor, critico: true, acento: COR.azul }));
-            y = desenharGradeCardsIndicadores(doc, m, y + TITULO_TABELA_H, uw, itensCards, ctx) + gap;
+            desenharTituloGrupo(false);
+
+            porTipoMedida.forEach(it => {
+                if (y + kH2 > ph - 14) {
+                    ctx.rodapeAntesDeVirar();
+                    doc.addPage();
+                    ctx.cabecalhoContinuacao();
+                    y = ctx.topoContinuacao;
+                    desenharTituloGrupo(true);
+                }
+                const qtdDistintos = processosPorMedida.has(it.label) ? processosPorMedida.get(it.label).size : 0;
+                desenharCard(doc, m, y, kW2, kH2, it.label, String(it.valor), ['Ocorrências'], true, COR.azul, COR.vermelho);
+                desenharCard(doc, m + kW2 + gap, y, kW2, kH2, it.label, String(qtdDistintos), ['Processos distintos'], true, COR.azul, COR.azul);
+                y += kH2 + gap;
+            });
+
+            y += 2;
         });
 
         desenharRodape(doc, TITULO_MEDIDAS_ALTERNATIVAS_ATRASO, carimbo, pw, ph, m, comIndice);
