@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.54
+// @version      25.55
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2030,6 +2030,54 @@
         },
     };
 
+    // ── Bens Pendentes de Cadastro no SNGB (tela Apreensões/SNGB, link "Acesso rápido:
+    // Processos com apreensões sem registro no SNGB") ──────────────────────────────────
+    // Categoria Crime, logo após Apreensões (pedido do usuário: PDF deve aparecer após o
+    // de Apreensões — ver ordem em REPORTS_AUTOMACAO). DESVIO DO PADRÃO GENÉRICO
+    // (documentado conforme pedido do CLAUDE.md): esta tela não é uma table.resultTable
+    // paginada — o link de acesso rápido leva a uma tela de exportação nativa do Projudi
+    // (administracao/relatorio.do, #relatorioForm) que só gera o arquivo (PDF/Excel/CSV)
+    // ao clicar em "Gerar Relatório". Em vez de criarColetor, a coleta busca o CSV
+    // diretamente via fetch (ver coletarBensPendentesSngb) e salva no mesmo formato
+    // "pagina_0" usado por CFG_OUTROS_CUMPRIMENTOS, para que lerDadosDe/foiColetado/capa
+    // unificada continuem funcionando sem mudança. detecta:false pois nunca deve ser
+    // escolhido por table.resultTable — a detecção própria vive em
+    // paginaRelatorioBensSngb().
+    const CFG_BENS_PENDENTES_SNGB = {
+        prefixo: 'projudi_bens_sngb_',
+        // "Zero processos pendentes" é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES) — mostra a linha mesmo vazia, desde que já coletado.
+        mostrarSeVazio: true,
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'bens_pendentes_sngb_projudi',
+        rotulos: { coletar: 'Extrair Bens Pendentes SNGB', coletarMais: 'Extrair mais (Bens Pendentes SNGB)', baixar: '⬇ Baixar Bens Pendentes SNGB' },
+        cabecalhos: ['Processo', 'Total de Apreensões PROJUDI', 'Último Processamento'],
+        larguras: [{ wch: 26 }, { wch: 28 }, { wch: 20 }],
+        linha: (d) => [d.processo, d.totalApreensoes, d.ultimoProcessamento],
+        pdf: {
+            titulo: 'Processos com Bens Pendentes de Cadastro no SNGB',
+            atosTitulo: 'Processos com apreensões sem registro no SNGB',
+            dataCampo: 'ultimoProcessamento',
+            dataTitulo: 'Último processamento mais antigo',
+            processoCampo: 'processo',
+            // Não distingue prioritário/normal (não existe esse conceito neste CSV) — mesmo
+            // motivo/padrão de CFG_APREENSOES.
+            semPrioridade: true,
+            // Sem planilha de aging por dias parado — "Último Processamento" é a última vez
+            // que o Projudi tentou integrar com o SNGB, não um indicador de atraso.
+            semAgingBloco: true,
+            kpisExtras: [
+                { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'azul' },
+            ],
+            colunas: [
+                { header: 'Processo', width: 34, get: (d) => d.processo },
+                { header: 'Total de Apreensões PROJUDI', width: 30, get: (d) => d.totalApreensoes },
+                { header: 'Último Processamento', width: 26, get: (d) => d.ultimoProcessamento },
+            ],
+        },
+    };
+
     // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
     // Categoria Crime, logo após Apreensões (pedido do usuário) — protótipo desenvolvido
     // desacoplado (branch claude/cumprimento-medidas-extraction-0foe5f, arquivo próprio
@@ -2695,6 +2743,187 @@
                 }
             }, 15000);
         }, 1500);
+    }
+
+    // ── Bens Pendentes de Cadastro no SNGB — coleta via CSV (ver comentário de
+    // CFG_BENS_PENDENTES_SNGB para o porquê deste fluxo fugir do padrão de
+    // criarColetor) ──────────────────────────────────────────────────────────────────
+
+    // Acha o link "Acesso rápido: Processos com apreensões sem registro no SNGB" na tela
+    // de Apreensões/SNGB por TEXTO (não por id/classe — não temos a marcação exata do
+    // link, só a captura visual da tela), robusto a mudanças de id/href.
+    function acharLinkAcessoRapidoSngb() {
+        const links = document.querySelectorAll('a');
+        for (const a of links) {
+            const texto = (a.textContent || '').replace(/\s+/g, ' ').trim();
+            if (/acesso\s+r[áa]pido/i.test(texto) && /sngb/i.test(texto)) return a;
+        }
+        return null;
+    }
+
+    // Clica de verdade (navegação real, não fetch) no link de acesso rápido — isso leva
+    // à tela administracao/relatorio.do (#relatorioForm), que é quem detém no servidor
+    // qual relatório será gerado (ver paginaRelatorioBensSngb/coletarBensPendentesSngb).
+    // disparadoPelaAutomacao=true: o estado da automação (AUTO_ESTADO='coletando_bensSngb')
+    // já é sinal suficiente para a tela seguinte buscar o CSV sozinha. Uso manual (false):
+    // marca um sinalizador próprio (prefixo+'buscar_agora') para não depender do estado
+    // da automação (que pode nem estar em uso) nem disparar a busca em qualquer visita
+    // manual a essa tela.
+    function iniciarColetaBensPendentesSngb(disparadoPelaAutomacao) {
+        const link = acharLinkAcessoRapidoSngb();
+        if (!link) {
+            console.warn('[Projudi Bens Pendentes SNGB] link "Acesso rápido: Processos com apreensões sem registro no SNGB" não encontrado nesta tela.');
+            return;
+        }
+        if (!disparadoPelaAutomacao) store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora', '1');
+        console.log('[Projudi Bens Pendentes SNGB] clicando no link de acesso rápido...');
+        link.click();
+    }
+
+    // Tela administracao/relatorio.do carregada a partir do link de acesso rápido acima —
+    // reconhecida pelo form#relatorioForm cujo conteúdo cita "SNGB" (nome/título do
+    // relatório, ver captura da tela). Não usa acesso por id específico do relatório
+    // (não exposto no HTML do form — a identidade do relatório fica em estado de sessão
+    // no servidor, setado pela navegação real que carregou esta tela).
+    function paginaRelatorioBensSngb() {
+        const form = document.getElementById('relatorioForm');
+        if (!form) return null;
+        return /sngb/i.test(form.textContent || '') ? form : null;
+    }
+
+    // Número bruto do CSV (20 dígitos, sem máscara) -> formato padrão CNJ
+    // NNNNNNN-DD.AAAA.J.TR.OOOO. Ex.: "00013555120268160054" -> "0001355-51.2026.8.16.0054".
+    function formatarNumeroProcessoCNJ(digitosBrutos) {
+        const d = (digitosBrutos || '').replace(/\D/g, '');
+        if (d.length !== 20) return digitosBrutos || '';
+        return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16, 20)}`;
+    }
+
+    // Parser do CSV gerado por administracao/relatorio.do (tipoExportacao=CSV): campos
+    // entre aspas separados por ";", 3 colunas (Processo; Total de Apreensões PROJUDI;
+    // Último Processamento). Confirmado em amostra real — sem aspas/";" escapados dentro
+    // dos dados, então um split simples por campo é suficiente (sem necessidade de um
+    // parser RFC4180 completo).
+    function parseCsvBensPendentesSngb(texto) {
+        const linhas = texto.split(/\r\n|\r|\n/).filter(l => l.trim() !== '');
+        return linhas.slice(1).map(linha => {
+            const campos = linha.split(';').map(c => c.trim().replace(/^"|"$/g, ''));
+            const [processoBruto, totalBruto, ultimoProcessamento] = campos;
+            return {
+                processo: formatarNumeroProcessoCNJ(processoBruto),
+                totalApreensoes: parseInt(totalBruto, 10) || 0,
+                ultimoProcessamento: ultimoProcessamento || '',
+            };
+        }).filter(r => r.processo);
+    }
+
+    // Solicita o CSV ao Projudi via fetch direto ao action do #relatorioForm (mesma
+    // origem — cookies de sessão inclusos automaticamente) em vez de clicar em "Gerar
+    // Relatório" (que dispara download de arquivo pelo navegador, sem forma direta de
+    // interceptar o conteúdo). O servidor já sabe qual relatório gerar a partir do
+    // estado de sessão criado pela navegação real até esta tela (ver
+    // iniciarColetaBensPendentesSngb) — só precisamos enviar tipoExportacao=CSV.
+    // Resposta decodificada como windows-1252 (charset declarado pelo Projudi em todo o
+    // site, confirmado na amostra real do CSV).
+    function coletarBensPendentesSngb() {
+        const form = paginaRelatorioBensSngb();
+        if (!form) {
+            console.warn('[Projudi Bens Pendentes SNGB] formulário do relatório (#relatorioForm) não encontrado nesta tela.');
+            return;
+        }
+        console.log('[Projudi Bens Pendentes SNGB] solicitando CSV ao Projudi...');
+        const body = new URLSearchParams();
+        body.set('tamanhoFonte', '10');
+        body.set('formato', 'R');
+        body.set('tipoExportacao', 'CSV');
+        fetch(form.action, { method: 'POST', body, credentials: 'same-origin' })
+            .then(resp => resp.arrayBuffer())
+            .then(buffer => {
+                const texto = new TextDecoder('windows-1252').decode(buffer);
+                const registros = parseCsvBensPendentesSngb(texto);
+                console.log(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
+                store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'pagina_0', JSON.stringify(registros));
+                store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'num_paginas', '1');
+                store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'coletado', '1');
+                avancarAutomacao(CFG_BENS_PENDENTES_SNGB);
+            })
+            .catch(e => {
+                console.error('[Projudi Bens Pendentes SNGB] falha ao obter/processar o CSV', e);
+            });
+    }
+
+    // Dispatcher da tela administracao/relatorio.do para Bens Pendentes SNGB — chamado
+    // logo no início de injetarBotoes (ver ponto de chamada perto de
+    // tratarPaginaCumprimentoMedidas). Devolve true sempre que a tela é a nossa (mesmo em
+    // uso manual sem gatilho), para suprimir o fallback genérico de buttonBar
+    // (detectarConfig()/criarColetor, que cairia em CFG_RETORNO por padrão nesta tela —
+    // ela tem table.buttonBar mas nenhuma table.resultTable reconhecível).
+    function tratarPaginaRelatorioBensSngb() {
+        const form = paginaRelatorioBensSngb();
+        if (!form) return false;
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        const gatilhoManual = store.getItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora') === '1';
+        if (estadoAtual === 'coletando_bensSngb' || gatilhoManual) {
+            store.removeItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora');
+            console.log('[Projudi Bens Pendentes SNGB] tela do relatório encontrada — solicitando CSV ao Projudi');
+            coletarBensPendentesSngb();
+            return true;
+        }
+        // Chegada manual direta a esta tela (sem passar pelo nosso botão/automação): só
+        // oferece os botões abaixo — nenhum dispara sozinho, para não fazer requisição
+        // automática em qualquer visita a esta tela.
+        if (mostrarBotoesIndividuais() && !document.getElementById('btn-bens-sngb-buscar')) {
+            const ancora = form.querySelector('table.buttonBar') || form;
+            const prefixo = CFG_BENS_PENDENTES_SNGB.prefixo;
+
+            const bBuscar = document.createElement('button');
+            bBuscar.id = 'btn-bens-sngb-buscar';
+            bBuscar.type = 'button';
+            bBuscar.className = 'projudi-btn';
+            bBuscar.title = 'Solicita o CSV deste relatório ao Projudi e monta os dados coletados';
+            bBuscar.textContent = 'Buscar CSV (Bens Pendentes SNGB)';
+            bBuscar.onclick = () => coletarBensPendentesSngb();
+            ancora.appendChild(bBuscar);
+
+            const bExcel = document.createElement('button');
+            bExcel.id = 'btn-bens-sngb-baixarexcel';
+            bExcel.type = 'button';
+            bExcel.className = 'projudi-btn';
+            bExcel.title = 'Baixa a planilha Excel com os dados já coletados (busque o CSV primeiro, se ainda não coletou)';
+            bExcel.textContent = CFG_BENS_PENDENTES_SNGB.rotulos.baixar;
+            bExcel.onclick = async () => {
+                const dados = await lerDadosDe(prefixo);
+                gerarEbaixarExcel(dados, CFG_BENS_PENDENTES_SNGB);
+            };
+            ancora.appendChild(bExcel);
+
+            const bPdf = document.createElement('button');
+            bPdf.id = 'btn-bens-sngb-baixarpdf';
+            bPdf.type = 'button';
+            bPdf.className = 'projudi-btn';
+            bPdf.title = 'Gera um PDF individual com resumo e tabela deste relatório (busque o CSV primeiro, se ainda não coletou)';
+            bPdf.textContent = '⬇ Baixar PDF';
+            bPdf.onclick = async () => {
+                const dados = await lerDadosDe(prefixo);
+                gerarPDF(dados, CFG_BENS_PENDENTES_SNGB, false);
+            };
+            ancora.appendChild(bPdf);
+
+            const bLimpar = document.createElement('button');
+            bLimpar.id = 'btn-bens-sngb-limpar';
+            bLimpar.type = 'button';
+            bLimpar.className = 'projudi-btn';
+            bLimpar.title = 'Apaga os dados coletados deste relatório';
+            bLimpar.textContent = 'Limpar';
+            bLimpar.onclick = () => {
+                store.removeItem(prefixo + 'pagina_0');
+                store.removeItem(prefixo + 'num_paginas');
+                store.removeItem(prefixo + 'coletado');
+            };
+            ancora.appendChild(bLimpar);
+        }
+        return true;
     }
 
     // Tela de filtros de Prescrições (mesaAnalistaEscrivao.do, alcançada pelo link
@@ -7304,6 +7533,7 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
+        const secaoBensSngb = secoes.find(s => s.cfgOriginal === CFG_BENS_PENDENTES_SNGB);
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
@@ -7691,6 +7921,19 @@
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
+            });
+        }
+        // "Bens Pendentes de Cadastro no SNGB" — logo após Bens Apreendidos (pedido do
+        // usuário), mesma ordem do popup de automação (REPORTS_AUTOMACAO). Sem
+        // classificação por situação/aging (não é um conceito aplicável aqui, mesmo
+        // motivo de Outros Cumprimentos/Arquivados com Saldo).
+        if (secaoBensSngb) {
+            const totalApreensoes = secaoBensSngb.dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0);
+            itensOutros.push({
+                nome: 'Bens Pendentes de Cadastro no SNGB',
+                indicador: `${secaoBensSngb.dados.length} processo(s)`,
+                detalhamento: `Total de apreensões sem registro: ${totalApreensoes}`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_BENS_PENDENTES_SNGB,
             });
         }
         // "Cumprimento de Medidas" — logo após Bens Apreendidos (mesma ordem do popup:
@@ -11735,6 +11978,17 @@
             return;
         }
 
+        // Tela administracao/relatorio.do (confirmação de exportação do relatório nativo
+        // "Processos com apreensões sem registro no SNGB", alcançada pelo link "Acesso
+        // rápido" na tela de Apreensões/SNGB) — TEM table.buttonBar, então cairia no
+        // fallback genérico de detectarConfig()/criarColetor logo abaixo (sem
+        // table.resultTable reconhecível, assumiria CFG_RETORNO por padrão — via
+        // detectarConfig() -> null -> fallback) se não fosse tratada antes. Sem espera de
+        // estabilização (não há AJAX aqui, só o form estático da confirmação).
+        if (tratarPaginaRelatorioBensSngb()) {
+            return;
+        }
+
         // Painel de Mandados: "Para Realizar" da aba "Análise de Juntadas"
         // (mesaAnalista.do?actionType=listaAnaliseJuntadas — NÃO é a mesma tela de
         // Juntadas/Retorno, que ficam em analisarJuntada.do/conclusao.do; é o painel com
@@ -12106,6 +12360,16 @@
                 preencherEPesquisarApreensoes();
                 return;
             }
+            // Bens Pendentes de Cadastro no SNGB — mesma tela (apreensaoForm), mas em vez de
+            // preencher/pesquisar, clica no link "Acesso rápido" (ver
+            // iniciarColetaBensPendentesSngb/CFG_BENS_PENDENTES_SNGB para o porquê deste
+            // fluxo fugir do padrão de preencherEPesquisar+criarColetor).
+            if (estadoAtual === 'preenchendo_bensSngb') {
+                console.log('[Projudi Bens Pendentes SNGB] automação: clicando no link de acesso rápido');
+                store.setItem(AUTO_ESTADO, 'coletando_bensSngb');
+                iniciarColetaBensPendentesSngb(true);
+                return;
+            }
             // Uso manual (fora da automação): a tela já convive com resultados de uma
             // pesquisa anterior (própria ou de outra sessão), então não há como usar
             // "sem linha nenhuma" para decidir se o botão deve aparecer.
@@ -12117,6 +12381,14 @@
                 bPendentes.textContent = 'Preencher e Pesquisar (Apreensões Pendentes)';
                 bPendentes.onclick = () => preencherEPesquisarApreensoes();
                 buttonBar.appendChild(bPendentes);
+
+                const bBensSngb = document.createElement('button');
+                bBensSngb.type = 'button';
+                bBensSngb.className = 'projudi-btn';
+                bBensSngb.title = 'Clica no link "Acesso rápido" e busca o CSV de processos com apreensões sem registro no SNGB';
+                bBensSngb.textContent = 'Extrair Bens Pendentes SNGB';
+                bBensSngb.onclick = () => iniciarColetaBensPendentesSngb(false);
+                buttonBar.appendChild(bBensSngb);
             }
         }
 
@@ -13123,6 +13395,14 @@
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Logo após Apreensões (pedido do usuário: PDF deve aparecer após o de
+        // Apreensões — a ordem aqui define a ordem das seções no PDF conjunto, ver
+        // secoesColetadas). Mesma tela (navAlvo: 'apreensoes' — apreensaoForm), mas em vez
+        // de preencher/pesquisar, clica no link "Acesso rápido: Processos com apreensões
+        // sem registro no SNGB" e busca o CSV gerado pelo Projudi (ver
+        // CFG_BENS_PENDENTES_SNGB para o porquê deste relatório fugir do padrão de
+        // criarColetor).
+        { key: 'bensSngb', cfg: CFG_BENS_PENDENTES_SNGB, navAlvo: 'apreensoes', rotulo: 'Bens Pendentes de Cadastro no SNGB', curto: 'Bens SNGB', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
