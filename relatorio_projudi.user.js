@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.61
+// @version      25.67
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2030,6 +2030,84 @@
         },
     };
 
+    // ── Bens Pendentes de Cadastro no SNGB (tela Apreensões/SNGB, link "Acesso rápido:
+    // Processos com apreensões sem registro no SNGB") ──────────────────────────────────
+    // Categoria Crime, logo após Apreensões (pedido do usuário: PDF deve aparecer após o
+    // de Apreensões — ver ordem em REPORTS_AUTOMACAO). DESVIO DO PADRÃO GENÉRICO
+    // (documentado conforme pedido do CLAUDE.md): esta tela não é uma table.resultTable
+    // paginada — o link de acesso rápido leva a uma tela de exportação nativa do Projudi
+    // (administracao/relatorio.do, #relatorioForm) que só gera o arquivo (PDF/Excel/CSV)
+    // ao clicar em "Gerar Relatório". Em vez de criarColetor, a coleta busca o CSV
+    // diretamente via fetch (ver coletarBensPendentesSngb) e salva no mesmo formato
+    // "pagina_0" usado por CFG_OUTROS_CUMPRIMENTOS, para que lerDadosDe/foiColetado/capa
+    // unificada continuem funcionando sem mudança. detecta:false pois nunca deve ser
+    // escolhido por table.resultTable — a detecção própria vive em
+    // paginaRelatorioBensSngb().
+    const CFG_BENS_PENDENTES_SNGB = {
+        prefixo: 'projudi_bens_sngb_',
+        // "Zero processos pendentes" é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES) — mostra a linha mesmo vazia, desde que já coletado.
+        mostrarSeVazio: true,
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'bens_pendentes_sngb_projudi',
+        rotulos: { coletar: 'Extrair Bens Pendentes SNGB', coletarMais: 'Extrair mais (Bens Pendentes SNGB)', baixar: '⬇ Baixar Bens Pendentes SNGB' },
+        cabecalhos: ['Processo', 'Total de Apreensões PROJUDI', 'Último Processamento'],
+        larguras: [{ wch: 26 }, { wch: 28 }, { wch: 20 }],
+        linha: (d) => [d.processo, d.totalApreensoes, d.ultimoProcessamento],
+        pdf: {
+            titulo: 'Processos com Bens Pendentes de Cadastro no SNGB',
+            atosTitulo: 'Processos com apreensões sem registro no SNGB',
+            dataCampo: 'ultimoProcessamento',
+            dataTitulo: 'Último processamento mais antigo',
+            processoCampo: 'processo',
+            // Não distingue prioritário/normal (não existe esse conceito neste CSV) — mesmo
+            // motivo/padrão de CFG_APREENSOES.
+            semPrioridade: true,
+            // Sem planilha de aging por dias parado — "Último Processamento" é a última vez
+            // que o Projudi tentou integrar com o SNGB, não um indicador de atraso.
+            semAgingBloco: true,
+            // Os dois acento em vermelho (pedido do usuário) — nome da cor, não o array RGB
+            // (mesmo motivo de CFG_CONCLUSOES: este cfg é montado antes de `const COR`
+            // existir no arquivo, TDZ; montarResumoGenerico resolve COR[nome] na hora de
+            // desenhar). atosAcento troca a cor do 1º card (o de atosTitulo, "Processos com
+            // apreensões sem registro no SNGB") — sem ele, cai no azul de sempre.
+            atosAcento: 'vermelho',
+            kpisExtras: [
+                { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'vermelho' },
+            ],
+            // Sem campo categórico natural pra agrupar (só processo/contagem/data) — usa o
+            // ponto de extensão `calc` (ver comentário em montarResumoGenerico) pra listar
+            // os primeiros 5 processos da coleta em vez de uma contagem por categoria
+            // (pedido do usuário). rotuloCategoria troca o cabeçalho da 1ª coluna de
+            // "Categoria" (padrão) para "Processo"; a coluna "Qtd." mostra o total de
+            // apreensões de cada um.
+            distribuicoes: [
+                {
+                    titulo: 'Primeiros 5 processos da lista (amostra)',
+                    rotuloCategoria: 'Processo',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: d.processo, valor: d.totalApreensoes || 0 })),
+                    }),
+                },
+            ],
+            colunas: [
+                { header: 'Processo', width: 34, get: (d) => d.processo },
+                { header: 'Total de Apreensões PROJUDI', width: 30, get: (d) => d.totalApreensoes },
+                { header: 'Último Processamento', width: 26, get: (d) => d.ultimoProcessamento },
+            ],
+            // Observação final destacada (pedido do usuário, texto literal fornecido) — só
+            // quando há processo pendente (dados.length > 0); com zero, nenhum balão.
+            // Função em vez de string fixa (ver suporte em montarResumoGenerico) —
+            // diferente de CFG_SUSPENSOS, que sempre mostra a sua.
+            observacaoFinal: (dados) => dados.length > 0
+                ? 'O cadastro de bens no SNGB é obrigatório, nos termos de resolução do CNJ e de disposição '
+                    + 'constante do Código de Normas do Foro Judicial. A secretaria deverá envidar esforços para '
+                    + 'que os bens pendentes sejam cadastrados no referido sistema com a urgência necessária.'
+                : null,
+        },
+    };
+
     // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
     // Categoria Crime, logo após Apreensões (pedido do usuário) — protótipo desenvolvido
     // desacoplado (branch claude/cumprimento-medidas-extraction-0foe5f, arquivo próprio
@@ -2655,6 +2733,12 @@
     const CFG_MANDADOS_RETORNO = {
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
+        // Pedido do usuário: reforçar o critério do total mostrado no KPI do resumo —
+        // usar o "N registro(s) encontrado(s)" que o próprio Projudi reporta na 1ª
+        // página da busca (mesmo mecanismo já validado em CFG_APREENSOES/CFG_JUNTADAS/
+        // CFG_RETORNO, ver adicionarPagina/totalIdentificadoNoResumo), em vez de
+        // dados.length (nº de registros efetivamente coletados/deduplicados).
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '13',
         minTds: 16, // só esta tela tem a coluna "Data retorno" (ver mapaColunasMandado)
         usaAtuacao: false,
@@ -2682,6 +2766,29 @@
             distribuicoes: [
                 { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
             ],
+            // Observação condicional (pedido do usuário): alerta quando há mandado
+            // retornado há MAIS DE 15 DIAS e ainda pendente de análise (todo registro
+            // desta tela já é "aguardando análise de retorno", então "ainda não
+            // analisado" é a lista inteira). Não dá pra reaproveitar o mecanismo
+            // genérico de p.observacaoPrazo (faixasPorPrioridade tem o corte fixo em 30
+            // dias) — usa p.observacaoFinal como função (mesmo ponto de extensão de
+            // CFG_BENS_PENDENTES_SNGB), calculando o limiar de 15 dias direto em cima de
+            // dataRetorno. DIA_MS/parseDataBR são `const`/`function` declarados mais
+            // abaixo no arquivo (TDZ para CFG_MANDADOS_RETORNO, que é montado antes
+            // deles) — mas só são lidos quando a função roda, na geração do PDF, bem
+            // depois do módulo inteiro já ter sido inicializado, então não há problema.
+            observacaoFinal: (dados) => {
+                const agora = Date.now();
+                const temAntigo = dados.some(d => {
+                    const ts = parseDataBR(d.dataRetorno);
+                    return ts != null && Math.floor((agora - ts) / DIA_MS) > 15;
+                });
+                return temAntigo
+                    ? 'Há mandados retornados há mais de 15 dias ainda pendentes de análise. A secretaria '
+                        + 'deverá priorizar a análise desses mandados, tendo em vista o risco de prejuízo ao '
+                        + 'andamento processual decorrente da demora na verificação do retorno.'
+                    : null;
+            },
             colunas: [
                 { header: 'Processo', width: 34, get: (d) => d.processo },
                 { header: 'Dt. Retorno', width: 20, get: (d) => d.dataRetorno },
@@ -2701,6 +2808,8 @@
     const CFG_MANDADOS_CUMPRIMENTO = {
         prefixo: 'projudi_mandadoscumprimento_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
         minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
         usaAtuacao: false,
@@ -2751,6 +2860,8 @@
     const CFG_MANDADOS_DISTRIBUICAO = {
         prefixo: 'projudi_mandadosdistribuicao_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '11',
         minTds: 15,
         usaAtuacao: false,
@@ -2791,6 +2902,8 @@
     const CFG_MANDADOS_DECURSO = {
         prefixo: 'projudi_mandadosdecurso_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '8',
         minTds: 16, // mesma contagem da tela de Retorno, mas com "Data Decurso" no lugar de "Data retorno"
         usaAtuacao: false,
@@ -2818,6 +2931,14 @@
             distribuicoes: [
                 { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
             ],
+            // Observação condicional (pedido do usuário): alerta quando há mandado
+            // aguardando análise de decurso de prazo há MAIS DE 30 DIAS (fora da faixa
+            // "Até 30 dias" de faixasPorPrioridade) — mesmo mecanismo genérico de
+            // p.observacaoPrazo já usado por CFG_JUNTADAS em montarResumoGenerico, sem
+            // precisar de lógica nova.
+            observacaoPrazo: 'Há mandados aguardando análise de decurso de prazo há mais de 30 dias. A secretaria '
+                + 'deverá priorizar a análise desses mandados, tendo em vista o risco de prejuízo ao andamento '
+                + 'processual decorrente da demora na verificação do decurso de prazo.',
             colunas: [
                 { header: 'Dt. Decurso', width: 20, get: (d) => d.dataDecurso },
                 { header: 'Processo', width: 34, get: (d) => d.processo },
@@ -3281,6 +3402,237 @@
                 }
             }, 15000);
         }, 1500);
+    }
+
+    // ── Bens Pendentes de Cadastro no SNGB — coleta via CSV (ver comentário de
+    // CFG_BENS_PENDENTES_SNGB para o porquê deste fluxo fugir do padrão de
+    // criarColetor) ──────────────────────────────────────────────────────────────────
+
+    // Acha o link "Acesso rápido: Processos com apreensões sem registro no SNGB" na tela
+    // de Apreensões/SNGB por TEXTO (não por id/classe — não temos a marcação exata do
+    // link, só a captura visual da tela), robusto a mudanças de id/href.
+    function acharLinkAcessoRapidoSngb() {
+        const links = document.querySelectorAll('a');
+        for (const a of links) {
+            const texto = (a.textContent || '').replace(/\s+/g, ' ').trim();
+            if (/acesso\s+r[áa]pido/i.test(texto) && /sngb/i.test(texto)) return a;
+        }
+        return null;
+    }
+
+    // Clica de verdade (navegação real, não fetch) no link de acesso rápido — isso leva
+    // à tela administracao/relatorio.do (#relatorioForm), que é quem detém no servidor
+    // qual relatório será gerado (ver paginaRelatorioBensSngb/coletarBensPendentesSngb).
+    // disparadoPelaAutomacao=true: o estado da automação (AUTO_ESTADO='coletando_bensSngb')
+    // já é sinal suficiente para a tela seguinte buscar o CSV sozinha. Uso manual (false):
+    // marca um sinalizador próprio (prefixo+'buscar_agora') para não depender do estado
+    // da automação (que pode nem estar em uso) nem disparar a busca em qualquer visita
+    // manual a essa tela.
+    function iniciarColetaBensPendentesSngb(disparadoPelaAutomacao) {
+        const link = acharLinkAcessoRapidoSngb();
+        if (!link) {
+            console.warn('[Projudi Bens Pendentes SNGB] link "Acesso rápido: Processos com apreensões sem registro no SNGB" não encontrado nesta tela.');
+            return;
+        }
+        if (!disparadoPelaAutomacao) store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora', '1');
+        console.log('[Projudi Bens Pendentes SNGB] clicando no link de acesso rápido...');
+        link.click();
+    }
+
+    // Tela administracao/relatorio.do carregada a partir do link de acesso rápido acima —
+    // reconhecida pelo form#relatorioForm cujo conteúdo cita "SNGB" (nome/título do
+    // relatório, ver captura da tela). Não usa acesso por id específico do relatório
+    // (não exposto no HTML do form — a identidade do relatório fica em estado de sessão
+    // no servidor, setado pela navegação real que carregou esta tela).
+    function paginaRelatorioBensSngb() {
+        const form = document.getElementById('relatorioForm');
+        if (!form) return null;
+        return /sngb/i.test(form.textContent || '') ? form : null;
+    }
+
+    // Número bruto do CSV (20 dígitos, sem máscara) -> formato padrão CNJ
+    // NNNNNNN-DD.AAAA.J.TR.OOOO. Ex.: "00013555120268160054" -> "0001355-51.2026.8.16.0054".
+    function formatarNumeroProcessoCNJ(digitosBrutos) {
+        const d = (digitosBrutos || '').replace(/\D/g, '');
+        if (d.length !== 20) return digitosBrutos || '';
+        return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16, 20)}`;
+    }
+
+    // Parser do CSV gerado por administracao/relatorio.do (tipoExportacao=CSV): campos
+    // entre aspas separados por ";", 3 colunas (Processo; Total de Apreensões PROJUDI;
+    // Último Processamento). Confirmado em amostra real — sem aspas/";" escapados dentro
+    // dos dados, então um split simples por campo é suficiente (sem necessidade de um
+    // parser RFC4180 completo).
+    function parseCsvBensPendentesSngb(texto) {
+        const linhas = texto.split(/\r\n|\r|\n/).filter(l => l.trim() !== '');
+        return linhas.slice(1).map(linha => {
+            const campos = linha.split(';').map(c => c.trim().replace(/^"|"$/g, ''));
+            const [processoBruto, totalBruto, ultimoProcessamento] = campos;
+            return {
+                processo: formatarNumeroProcessoCNJ(processoBruto),
+                totalApreensoes: parseInt(totalBruto, 10) || 0,
+                ultimoProcessamento: ultimoProcessamento || '',
+            };
+        }).filter(r => r.processo);
+    }
+
+    // Solicita o CSV ao Projudi via fetch direto ao action do #relatorioForm (mesma
+    // origem — cookies de sessão inclusos automaticamente) em vez de clicar em "Gerar
+    // Relatório" (que dispara um DOWNLOAD DE VERDADE pra pasta de downloads do
+    // navegador — sem forma de interceptar o conteúdo de um download real a partir do
+    // Tampermonkey). O servidor já sabe qual relatório gerar a partir do estado de sessão
+    // criado pela navegação real até esta tela (ver iniciarColetaBensPendentesSngb).
+    //
+    // Mesma técnica já validada em produção por CFG_ARQUIVADOS_SALDO (ver
+    // extrairArquivadosSaldoAgora/corpoFormularioArquivadosSaldo/coletarViaFetch/
+    // interpretarResposta logo acima) — reaproveita os helpers genéricos de lá
+    // (semBOM/pareceCSV/respostaEhPDF/decodificarResposta, nenhum específico de
+    // Arquivados com Saldo). BUG já corrigido aqui: a 1ª versão reconstruía o corpo do
+    // POST manualmente com só 3 campos (tamanhoFonte/formato/tipoExportacao) vistos na
+    // captura estática da tela — o teste real voltou "Relatório não encontrado" e 0
+    // registros, enquanto o download manual do mesmo link funcionava. Corrigido do mesmo
+    // jeito que Arquivados com Saldo: `new URLSearchParams(new FormData(form))` — serializa
+    // o FormData REAL do form (todos os campos do estado atual, incluindo os que só
+    // existem no DOM ao vivo, injetados por JS após o carregamento) como
+    // application/x-www-form-urlencoded (não multipart — o endpoint é um form POST comum).
+    function selecionarFormatoCSVBensSngb(form) {
+        const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
+        if (radioCSV && !radioCSV.checked) radioCSV.click();
+        else if (!radioCSV) console.warn('[Projudi Bens Pendentes SNGB] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        return radioCSV;
+    }
+
+    async function coletarViaFetchBensSngb(urlAction, corpo) {
+        const resp = await fetch(urlAction, { method: 'POST', body: corpo, credentials: 'same-origin' });
+        console.log('[Projudi Bens Pendentes SNGB] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url);
+        if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
+        const buffer = await resp.arrayBuffer();
+        if (!buffer || buffer.byteLength === 0) {
+            throw new Error('a resposta veio vazia (0 bytes) — sessão pode ter expirado, ou a sessão usada nesta via não é a mesma da aba.');
+        }
+        // Mesmo comportamento documentado em CFG_ARQUIVADOS_SALDO: quando não há nenhum
+        // processo pendente, o Projudi pode ignorar o tipoExportacao=CSV pedido e devolver
+        // um PDF avulso (relatório vazio) em vez do CSV — resultado válido (0 registros).
+        if (respostaEhPDF(buffer)) {
+            console.log('[Projudi Bens Pendentes SNGB] resposta veio como PDF (não CSV) — nenhum processo pendente encontrado, tratando como 0 registros.');
+            return '';
+        }
+        const { texto, encoding, tentativas } = decodificarResposta(buffer);
+        if (!texto) {
+            console.warn('[Projudi Bens Pendentes SNGB] nenhuma decodificação pareceu CSV:', tentativas);
+            throw new Error(`a resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`);
+        }
+        console.log(`[Projudi Bens Pendentes SNGB] CSV reconhecido (encoding ${encoding})`);
+        return texto;
+    }
+
+    let coletaBensPendentesSngbEmAndamento = false;
+
+    async function coletarBensPendentesSngb() {
+        if (coletaBensPendentesSngbEmAndamento) {
+            console.log('[Projudi Bens Pendentes SNGB] coleta já em andamento — ignorando novo disparo');
+            return;
+        }
+        const form = paginaRelatorioBensSngb();
+        if (!form) {
+            console.warn('[Projudi Bens Pendentes SNGB] formulário do relatório (#relatorioForm) não encontrado nesta tela.');
+            return;
+        }
+        coletaBensPendentesSngbEmAndamento = true;
+        console.log('[Projudi Bens Pendentes SNGB] formulário encontrado — solicitando o CSV em segundo plano (sem tocar nos botões da tela)');
+        try {
+            selecionarFormatoCSVBensSngb(form);
+            const corpo = new URLSearchParams(new FormData(form));
+            const texto = await coletarViaFetchBensSngb(form.action, corpo);
+            const registros = texto ? parseCsvBensPendentesSngb(texto) : [];
+            console.log(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
+            store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'pagina_0', JSON.stringify(registros));
+            store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'num_paginas', '1');
+            store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'coletado', '1');
+            avancarAutomacao(CFG_BENS_PENDENTES_SNGB);
+        } catch (err) {
+            // Sem alert() aqui de propósito — bloquearia a automação rodando sem
+            // supervisão (mesmo motivo de extrairArquivadosSaldoAgora). O watchdog
+            // (verificarTravamentoAutomacao) acaba pulando este item depois de alguns
+            // minutos sem progresso, mesma rede de segurança usada pelos demais relatórios.
+            console.error('[Projudi Bens Pendentes SNGB] falha ao obter/processar o CSV', err);
+        } finally {
+            coletaBensPendentesSngbEmAndamento = false;
+        }
+    }
+
+    // Dispatcher da tela administracao/relatorio.do para Bens Pendentes SNGB — chamado
+    // logo no início de injetarBotoes (ver ponto de chamada perto de
+    // tratarPaginaCumprimentoMedidas). Devolve true sempre que a tela é a nossa (mesmo em
+    // uso manual sem gatilho), para suprimir o fallback genérico de buttonBar
+    // (detectarConfig()/criarColetor, que cairia em CFG_RETORNO por padrão nesta tela —
+    // ela tem table.buttonBar mas nenhuma table.resultTable reconhecível).
+    function tratarPaginaRelatorioBensSngb() {
+        const form = paginaRelatorioBensSngb();
+        if (!form) return false;
+
+        const estadoAtual = store.getItem(AUTO_ESTADO);
+        const gatilhoManual = store.getItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora') === '1';
+        if (estadoAtual === 'coletando_bensSngb' || gatilhoManual) {
+            store.removeItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora');
+            console.log('[Projudi Bens Pendentes SNGB] tela do relatório encontrada — solicitando CSV ao Projudi');
+            coletarBensPendentesSngb();
+            return true;
+        }
+        // Chegada manual direta a esta tela (sem passar pelo nosso botão/automação): só
+        // oferece os botões abaixo — nenhum dispara sozinho, para não fazer requisição
+        // automática em qualquer visita a esta tela.
+        if (mostrarBotoesIndividuais() && !document.getElementById('btn-bens-sngb-buscar')) {
+            const ancora = form.querySelector('table.buttonBar') || form;
+            const prefixo = CFG_BENS_PENDENTES_SNGB.prefixo;
+
+            const bBuscar = document.createElement('button');
+            bBuscar.id = 'btn-bens-sngb-buscar';
+            bBuscar.type = 'button';
+            bBuscar.className = 'projudi-btn';
+            bBuscar.title = 'Solicita o CSV deste relatório ao Projudi e monta os dados coletados';
+            bBuscar.textContent = 'Buscar CSV (Bens Pendentes SNGB)';
+            bBuscar.onclick = () => coletarBensPendentesSngb();
+            ancora.appendChild(bBuscar);
+
+            const bExcel = document.createElement('button');
+            bExcel.id = 'btn-bens-sngb-baixarexcel';
+            bExcel.type = 'button';
+            bExcel.className = 'projudi-btn';
+            bExcel.title = 'Baixa a planilha Excel com os dados já coletados (busque o CSV primeiro, se ainda não coletou)';
+            bExcel.textContent = CFG_BENS_PENDENTES_SNGB.rotulos.baixar;
+            bExcel.onclick = async () => {
+                const dados = await lerDadosDe(prefixo);
+                gerarEbaixarExcel(dados, CFG_BENS_PENDENTES_SNGB);
+            };
+            ancora.appendChild(bExcel);
+
+            const bPdf = document.createElement('button');
+            bPdf.id = 'btn-bens-sngb-baixarpdf';
+            bPdf.type = 'button';
+            bPdf.className = 'projudi-btn';
+            bPdf.title = 'Gera um PDF individual com resumo e tabela deste relatório (busque o CSV primeiro, se ainda não coletou)';
+            bPdf.textContent = '⬇ Baixar PDF';
+            bPdf.onclick = async () => {
+                const dados = await lerDadosDe(prefixo);
+                gerarPDF(dados, CFG_BENS_PENDENTES_SNGB, false);
+            };
+            ancora.appendChild(bPdf);
+
+            const bLimpar = document.createElement('button');
+            bLimpar.id = 'btn-bens-sngb-limpar';
+            bLimpar.type = 'button';
+            bLimpar.className = 'projudi-btn';
+            bLimpar.title = 'Apaga os dados coletados deste relatório';
+            bLimpar.textContent = 'Limpar';
+            bLimpar.onclick = () => {
+                store.removeItem(prefixo + 'pagina_0');
+                store.removeItem(prefixo + 'num_paginas');
+                store.removeItem(prefixo + 'coletado');
+            };
+            ancora.appendChild(bLimpar);
+        }
+        return true;
     }
 
     // Tela de filtros de Prescrições (mesaAnalistaEscrivao.do, alcançada pelo link
@@ -3920,6 +4272,15 @@
         // tratarPaginaArquivadosSaldo()/injetarBotoes (ver abaixo).
         detecta: () => false,
         usaAtuacao: false,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão 'processo'
+        // (removerProcessosDuplicados) — mesmo motivo já corrigido em CFG_APREENSOES/
+        // CFG_MONITORACAO_EXPIRADAS/CFG_SEM_RG etc.: um mesmo processo pode ter mais de
+        // um depósito judicial arquivado com saldo (contas judiciais DIFERENTES, ver
+        // "Conta Judicial" no CSV), cada um com seu próprio saldo — dedupar por
+        // 'processo' descartava as linhas extras do mesmo processo, subtraindo saldo
+        // real do total (bug relatado pelo usuário: diferença entre o saldo total do PDF
+        // e a soma do CSV do Projudi).
+        chaveDuplicata: '*',
         nomeArquivo: 'processos_arquivados_saldo_projudi',
         rotulos: { coletar: 'Extrair Processos Arquivados com Saldo', baixar: '⬇ Baixar Processos Arquivados com Saldo' },
         pdfCustom: (dados) => gerarPDFArquivadosSaldo(dados),
@@ -6171,7 +6532,10 @@
             : NaN;
         const valorAtos = Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
         const kpis = [
-            { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR.azul },
+            // atosAcento (opcional, nome da cor — ver acento de kpisExtras/mesmo motivo de
+            // TDZ) troca a cor deste 1º card; sem ele, cai no azul de sempre (comportamento
+            // idêntico a antes desta mudança pra todo relatório que não define o campo).
+            { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR[p.atosAcento] || COR.azul },
         ];
         if (!p.semPrioridade) {
             kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`], acento: COR.vermelho });
@@ -6264,14 +6628,18 @@
         const faixas = faixasPorPrioridade(dados, p.dataCampo, now);
         // Distribuições sem nenhum item qualificado (ex.: minValor, quando nenhum
         // processo tem mais de uma ocorrência) são omitidas inteiramente, em vez de
-        // aparecer vazias. Uma entrada com `calc(dados)` (ponto de extensão — nenhum
-        // relatório usa hoje) pula contarPorCampo e usa o que `calc` devolver ({itens}).
+        // aparecer vazias. Uma entrada com `calc(dados)` (ponto de extensão — usado por
+        // CFG_BENS_PENDENTES_SNGB pra uma lista de itens que não vem de contarPorCampo,
+        // ex. "primeiros N processos") pula contarPorCampo e usa o que `calc` devolver
+        // ({itens}). rotuloCategoria/acento repassados (opcionais — desenharGradeTabelas
+        // já os lê de cada bloco; sem eles, cai no padrão 'Categoria'/azul de sempre, byte-
+        // a-byte igual antes desta mudança).
         const distribuicoes = p.distribuicoes
             .map(g => {
                 const itens = (typeof g.calc === 'function')
                     ? ((g.calc(dados) || {}).itens || [])
                     : contarPorCampo(dados, g.campo, g.topN, g.limpar, g.semOutros, g.minValor);
-                return { titulo: g.titulo, span: g.span || 1, itens };
+                return { titulo: g.titulo, span: g.span || 1, itens, rotuloCategoria: g.rotuloCategoria, acento: g.acento };
             })
             .filter(c => c.itens.length);
 
@@ -6350,11 +6718,15 @@
             }
         }
 
-        // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
-        // usado por CFG_SUSPENSOS), numa caixa com título "OBSERVAÇÃO" em destaque.
-        if (p.observacaoFinal) {
+        // Observação final destacada (pedido do usuário — ponto de extensão, hoje usado
+        // por CFG_SUSPENSOS [string fixa] e CFG_BENS_PENDENTES_SNGB [função — observação
+        // só quando há processos pendentes]), numa caixa com título "OBSERVAÇÃO" em
+        // destaque. Aceita string (sempre aparece, comportamento de sempre) ou função
+        // `(dados) => string|null` (decide por conta própria se/o que mostrar).
+        const textoObsFinal = typeof p.observacaoFinal === 'function' ? p.observacaoFinal(dados) : p.observacaoFinal;
+        if (textoObsFinal) {
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4);
-            const linhasObs = doc.splitTextToSize(p.observacaoFinal, uw);
+            const linhasObs = doc.splitTextToSize(textoObsFinal, uw);
             const alturaObs = 9 + linhasObs.length * 3.3;
             if (y + alturaObs > ph - m) {
                 ctx.rodapeAntesDeVirar();
@@ -8006,6 +8378,7 @@
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
+        const secaoBensSngb = secoes.find(s => s.cfgOriginal === CFG_BENS_PENDENTES_SNGB);
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
@@ -8393,10 +8766,20 @@
         // da categoria específica Crime, mesmo aparecendo nesta mesma tabela "Outros".
         if (secaoArquivadosSaldo) {
             const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
+            // Pedido do usuário: indicador mostra PROCESSOS distintos (a contagem
+            // acionável — quantos processos precisam de análise), não registros — desde
+            // que o dedupe passou a ser por registro inteiro (ver
+            // montarResumoArquivadosSaldo/processosUnicos), um mesmo processo pode ter
+            // mais de uma conta judicial com saldo e aparecer mais de uma vez em
+            // secaoArquivadosSaldo.dados.
+            const processosUnicosCapa = new Set(secaoArquivadosSaldo.dados.map(d => d.processo)).size;
+            const detalhamentoSaldo = processosUnicosCapa !== secaoArquivadosSaldo.dados.length
+                ? `Saldo total: ${fmtBRL(saldoTotal)} · ${secaoArquivadosSaldo.dados.length} registro(s)`
+                : `Saldo total: ${fmtBRL(saldoTotal)}`;
             itensOutros.push({
                 nome: 'Processos Arquivados com Saldo',
-                indicador: `${secaoArquivadosSaldo.dados.length} processo(s)`,
-                detalhamento: `Saldo total: ${fmtBRL(saldoTotal)}`,
+                indicador: `${processosUnicosCapa} processo(s)`,
+                detalhamento: detalhamentoSaldo,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
@@ -8416,6 +8799,19 @@
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
+            });
+        }
+        // "Bens Pendentes de Cadastro no SNGB" — logo após Bens Apreendidos (pedido do
+        // usuário), mesma ordem do popup de automação (REPORTS_AUTOMACAO). Sem
+        // classificação por situação/aging (não é um conceito aplicável aqui, mesmo
+        // motivo de Outros Cumprimentos/Arquivados com Saldo).
+        if (secaoBensSngb) {
+            const totalApreensoes = secaoBensSngb.dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0);
+            itensOutros.push({
+                nome: 'Bens Pendentes de Cadastro no SNGB',
+                indicador: `${secaoBensSngb.dados.length} processo(s)`,
+                detalhamento: `Total de apreensões sem registro: ${totalApreensoes}`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_BENS_PENDENTES_SNGB,
             });
         }
         // "Cumprimento de Medidas" — logo após Bens Apreendidos (mesma ordem do popup:
@@ -9743,58 +10139,20 @@
     // de processos nesta tela, apenas os 3 totais).
     const TITULO_CUMPRIMENTO_MEDIDAS = 'Cumprimento de Medidas';
 
-    // Texto fixo da Observação (parágrafo único, justificado), pedido pelo autor do
-    // protótipo original.
-    const TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS = 'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
+    // Parágrafo da Observação (pedido pelo autor do protótipo original). Array de um
+    // item só para reaproveitar desenharCardObservacao/medirAlturaCardObservacao — mesmo
+    // card (borda arredondada + acento âmbar lateral + título em caixa alta) usado em
+    // todas as outras observações do relatório (Prescrições, Sem Infração Penal,
+    // Juntadas etc.) — este relatório usava uma caixa cinza avulsa, destoando do padrão
+    // visual do resto do arquivo.
+    const PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS = [
+        'Observação: A fiscalização do cumprimento das medidas impostas deverá ser '
         + 'realizada exclusivamente por meio do Sistema Projudi ou outro que o venha a substituir. Os '
         + 'comprovantes individualizados de cumprimento deverão ser anexados ao Projudi. Em caso de atraso '
         + 'no cumprimento das medidas, a secretaria deverá solicitar periodicamente ao Conselho da '
         + 'Comunidade informações atualizadas acerca de sua execução. O controle rigoroso das medidas '
-        + 'impostas deve constituir prática permanente da secretaria.';
-
-    // Altura ocupada por um parágrafo justificado, na fonte/tamanho já ativos no doc —
-    // chamado ANTES de desenhar (mesmo espírito de medirAlturaCardLista) para dimensionar
-    // a caixa de fundo da Observação com a altura certa.
-    function alturaParagrafoJustificado(doc, texto, larguraMax, entreLinhas) {
-        return doc.splitTextToSize(texto, larguraMax).length * entreLinhas;
-    }
-
-    // Justificação MANUAL, por repetição de espaços, em vez de doc.text(..., {align:
-    // 'justify'}) nativo do jsPDF ou de reposicionar cada palavra por coordenada própria
-    // — ambas as abordagens produziram palavras acentuadas GRUDADAS sem espaço nenhum em
-    // leitores de PDF reais (bug relatado pelo autor do protótipo original, mesmo com a
-    // largura de cada palavra medida corretamente — o problema é o MECANISMO de
-    // reposicionamento por coordenada entre chamadas de doc.text(), não a conta). Aqui
-    // cada linha vira UMA ÚNICA STRING (com espaços de verdade, às vezes repetidos) e é
-    // desenhada com UMA chamada doc.text() só — o mesmo mecanismo simples já usado em todo
-    // o resto do relatório. Última linha de cada parágrafo fica com espaço simples,
-    // alinhada à esquerda (convenção tipográfica de texto justificado).
-    function desenharParagrafoJustificado(doc, texto, x, y, larguraMax, entreLinhas) {
-        const linhas = doc.splitTextToSize(texto, larguraMax);
-        const espacoLargura = doc.getTextWidth(' ') || 1;
-        linhas.forEach((linha, i) => {
-            const ultimaLinha = i === linhas.length - 1;
-            const palavras = linha.split(' ').filter(Boolean);
-            if (ultimaLinha || palavras.length <= 1) {
-                doc.text(linha, x, y);
-            } else {
-                const larguraPalavras = palavras.reduce((s, p) => s + doc.getTextWidth(p), 0);
-                const numLacunas = palavras.length - 1;
-                const totalEspacos = Math.max(numLacunas, Math.round((larguraMax - larguraPalavras) / espacoLargura));
-                const base = Math.floor(totalEspacos / numLacunas);
-                let resto = totalEspacos - base * numLacunas;
-                let linhaJustificada = palavras[0];
-                for (let k = 1; k < palavras.length; k++) {
-                    let n = base;
-                    if (resto > 0) { n++; resto--; }
-                    linhaJustificada += ' '.repeat(Math.max(1, n)) + palavras[k];
-                }
-                doc.text(linhaJustificada, x, y);
-            }
-            y += entreLinhas;
-        });
-        return linhas.length * entreLinhas;
-    }
+        + 'impostas deve constituir prática permanente da secretaria.',
+    ];
 
     // Card de KPI especializado: título pode quebrar em 2 linhas (ex. "Medidas sem
     // Cumprimentos Gerados", mais longo que os títulos curtos que desenharCard assume) e
@@ -9826,9 +10184,9 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
         if (critico) {
-            // Helvetica (não PublicSans embutida), mesma decisão do texto da Observação
-            // logo abaixo — ver comentário grande em desenharParagrafoJustificado sobre o
-            // bug de espaçamento em texto acentuado com a fonte TTF customizada.
+            // Helvetica (não PublicSans embutida) — mesma fonte usada pelo card de
+            // Observação (desenharCardObservacao), evitando texto acentuado grudado que a
+            // fonte TTF customizada produzia em leitores de PDF reais.
             doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
             doc.text('Situação: Crítico', cx, yy, { align: 'center' });
         }
@@ -9881,22 +10239,9 @@
         desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.azul);
         desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
 
-        let y = kY + kH + 10;
-        tituloSecao(doc, m, y, uw, 'Observação');
-        y += 5;
-
-        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
-        const entreLinhas = 4.6;
-        const padding = 5;
-        const alturaTexto = alturaParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, uw - 2 * padding, entreLinhas);
-        const caixaH = alturaTexto + 2 * padding;
-
-        doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
-        doc.roundedRect(m, y, uw, caixaH, 2, 2, 'FD');
-
-        const ty = y + padding + 3.2;
-        doc.setTextColor(...COR.tintaSec);
-        desenharParagrafoJustificado(doc, TEXTO_OBSERVACAO_CUMPRIMENTO_MEDIDAS, m + padding, ty, uw - 2 * padding, entreLinhas);
+        const y = kY + kH + 10;
+        const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS);
+        desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS, COR.ambar);
 
         desenharRodape(doc, TITULO_CUMPRIMENTO_MEDIDAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
@@ -10786,6 +11131,12 @@
         const r = dados || [];
         const gap = 6;
         const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+        // Pedido do usuário: distinguir PROCESSOS distintos de REGISTROS (linhas do CSV)
+        // — desde que o dedupe passou a ser por registro inteiro (chaveDuplicata: '*',
+        // ver CFG_ARQUIVADOS_SALDO), um mesmo processo pode aparecer mais de uma vez
+        // aqui quando tem mais de uma conta judicial com saldo. r.length conta
+        // REGISTROS; processosUnicos conta processos distintos.
+        const processosUnicos = new Set(r.map(d => d.processo)).size;
 
         // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
         // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo.
@@ -10799,15 +11150,22 @@
             doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
+            const rotuloContagem = processosUnicos !== r.length
+                ? `${processosUnicos} processo(s)  •  ${r.length} registro(s)`
+                : `${r.length} processo(s)`;
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${rotuloContagem}`, m, rotuloInfo.y);
             const yLinha = rotuloInfo.y + 3.5;
             doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
-            // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
-            // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
+            // "Processos Distintos"/"Total de Registros"/"Saldo Total" (pedido do
+            // usuário: distinguir os dois números desde que um processo pode ter mais de
+            // uma conta judicial com saldo — ver processosUnicos acima). Antes só havia
+            // "Total de Processos" (removido o card "Saldo Médio por Processo" que
+            // existia antes disso).
             const kY = yLinha + 6;
             const kpis = [
-                { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
+                { titulo: 'Processos Distintos', valor: String(processosUnicos), acento: COR.azul },
+                { titulo: 'Total de Registros', valor: String(r.length), acento: COR.azul },
                 { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.azul },
             ];
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -10848,7 +11206,7 @@
         // ordenação: Saldo descendente (maior primeiro).
         if (r.length && !somenteTabelas) {
             const ordenadosCompleta = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
-            tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length})`);
+            tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length} registro(s))`);
             const colunasCompleta = [
                 { header: 'Processo', width: 26, get: d => d.processo },
                 { header: 'Atribuição (Competência)', width: 30, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
@@ -10896,7 +11254,7 @@
             return;
         }
 
-        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} registro(s))`);
         const tabInicioY = proximoY + 6;
 
         const colunas = [
@@ -11009,6 +11367,15 @@
 
     const TITULO_PARALISADOS = 'Processos Paralisados';
 
+    // Texto fixo do balão de OBSERVAÇÃO do resumo de Paralisados (pedido do usuário,
+    // texto literal fornecido) — mesmo padrão de medirAlturaCardObservacao/
+    // desenharCardObservacao (Helvetica, justificado, acento âmbar) já usado no balão de
+    // Remessas em Aberto. Só aparece quando dados.length > 0 (ver uso em
+    // montarResumoParalisados) — sem paralisados, nenhum balão.
+    const PARAGRAFOS_OBSERVACAO_PARALISADOS = [
+        'A secretaria deverá realizar acompanhamento periódico dos processos paralisados há mais de 30 dias, mantendo rigoroso controle desse indicador e adotando as providências necessárias para assegurar o regular andamento dos feitos e prevenir atrasos indevidos na tramitação processual.',
+    ];
+
     function gerarPDFParalisados(dados, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoParalisados(doc, dados, true, false);
@@ -11082,6 +11449,24 @@
         }
         desenharCard(doc, m, k3Y, uw, 26, 'Processo paralisado há mais tempo', valMP, subsMP, true, COR.vermelho);
 
+        // Balão de OBSERVAÇÃO (pedido do usuário) — logo abaixo do card "Processo
+        // paralisado há mais tempo", acima das tabelas de ranking; só aparece havendo
+        // ao menos 1 paralisado (mesmo critério de CFG_BENS_PENDENTES_SNGB).
+        let yObsParalisados = k3Y + 26 + gap + 2;
+        if (dados.length > 0) {
+            const hObsParalisados = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_PARALISADOS);
+            if (yObsParalisados + hObsParalisados > ph - 14) {
+                desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                doc.addPage();
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${TITULO_PARALISADOS} — detalhamento`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+                yObsParalisados = m + 14;
+            }
+            desenharCardObservacao(doc, m, yObsParalisados, uw, hObsParalisados, 'Observação', PARAGRAFOS_OBSERVACAO_PARALISADOS);
+            yObsParalisados += hObsParalisados + gap;
+        }
+
         // Tabelas no lugar dos dois gráficos empilhados de antes (pedido do usuário):
         // ranking dos processos mais demorados, depois o tempo médio por Classe
         // Processual — cada uma abre página nova se não couber no que resta da página 1.
@@ -11094,7 +11479,7 @@
                 doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
             },
         };
-        let y = k3Y + 26 + gap + 2;
+        let y = yObsParalisados;
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
             if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
@@ -11211,8 +11596,17 @@
         let extrasRemetidos = [];
         try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
         try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
+        // O mesmo processo pode aparecer nas DUAS fontes (ex.: um "Em remessa" de
+        // Paralisados que também foi encontrado por Processos Remetidos, com destino
+        // "Delegacia"/"Distribuidor"/etc.). removerProcessosDuplicados mantém só a 1ª
+        // ocorrência — os registros mapeados de Remetidos (que têm cfg.destino) vêm
+        // PRIMEIRO aqui de propósito, senão a versão sem destino (de CFG_REMESSAS) vence
+        // o dedupe e o processo some do card "Por destino da remessa" daquele
+        // destinatário (bug relatado pelo usuário: destinos como Delegacia apareciam
+        // rodando Processos Remetidos sozinho, mas sumiam ao rodar junto com Remessas em
+        // Aberto).
         return removerProcessosDuplicados(
-            [...dadosBase, ...extrasRemessas, ...extrasRemetidos.map(mapRemetidoParaFormatoRemessas)],
+            [...extrasRemetidos.map(mapRemetidoParaFormatoRemessas), ...dadosBase, ...extrasRemessas],
             'processo',
         );
     }
@@ -12987,6 +13381,17 @@
             return;
         }
 
+        // Tela administracao/relatorio.do (confirmação de exportação do relatório nativo
+        // "Processos com apreensões sem registro no SNGB", alcançada pelo link "Acesso
+        // rápido" na tela de Apreensões/SNGB) — TEM table.buttonBar, então cairia no
+        // fallback genérico de detectarConfig()/criarColetor logo abaixo (sem
+        // table.resultTable reconhecível, assumiria CFG_RETORNO por padrão — via
+        // detectarConfig() -> null -> fallback) se não fosse tratada antes. Sem espera de
+        // estabilização (não há AJAX aqui, só o form estático da confirmação).
+        if (tratarPaginaRelatorioBensSngb()) {
+            return;
+        }
+
         // Painel de Mandados: "Para Realizar" da aba "Análise de Juntadas"
         // (mesaAnalista.do?actionType=listaAnaliseJuntadas — NÃO é a mesma tela de
         // Juntadas/Retorno, que ficam em analisarJuntada.do/conclusao.do; é o painel com
@@ -13437,6 +13842,16 @@
                 preencherEPesquisarApreensoes();
                 return;
             }
+            // Bens Pendentes de Cadastro no SNGB — mesma tela (apreensaoForm), mas em vez de
+            // preencher/pesquisar, clica no link "Acesso rápido" (ver
+            // iniciarColetaBensPendentesSngb/CFG_BENS_PENDENTES_SNGB para o porquê deste
+            // fluxo fugir do padrão de preencherEPesquisar+criarColetor).
+            if (estadoAtual === 'preenchendo_bensSngb') {
+                console.log('[Projudi Bens Pendentes SNGB] automação: clicando no link de acesso rápido');
+                store.setItem(AUTO_ESTADO, 'coletando_bensSngb');
+                iniciarColetaBensPendentesSngb(true);
+                return;
+            }
             // Uso manual (fora da automação): a tela já convive com resultados de uma
             // pesquisa anterior (própria ou de outra sessão), então não há como usar
             // "sem linha nenhuma" para decidir se o botão deve aparecer.
@@ -13448,6 +13863,14 @@
                 bPendentes.textContent = 'Preencher e Pesquisar (Apreensões Pendentes)';
                 bPendentes.onclick = () => preencherEPesquisarApreensoes();
                 buttonBar.appendChild(bPendentes);
+
+                const bBensSngb = document.createElement('button');
+                bBensSngb.type = 'button';
+                bBensSngb.className = 'projudi-btn';
+                bBensSngb.title = 'Clica no link "Acesso rápido" e busca o CSV de processos com apreensões sem registro no SNGB';
+                bBensSngb.textContent = 'Extrair Bens Pendentes SNGB';
+                bBensSngb.onclick = () => iniciarColetaBensPendentesSngb(false);
+                buttonBar.appendChild(bBensSngb);
             }
         }
 
@@ -14492,6 +14915,14 @@
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
         { key: 'apreensoes', cfg: CFG_APREENSOES, navAlvo: 'apreensoes', rotulo: 'Apreensões Pendentes', curto: 'Apreensões', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Logo após Apreensões (pedido do usuário: PDF deve aparecer após o de
+        // Apreensões — a ordem aqui define a ordem das seções no PDF conjunto, ver
+        // secoesColetadas). Mesma tela (navAlvo: 'apreensoes' — apreensaoForm), mas em vez
+        // de preencher/pesquisar, clica no link "Acesso rápido: Processos com apreensões
+        // sem registro no SNGB" e busca o CSV gerado pelo Projudi (ver
+        // CFG_BENS_PENDENTES_SNGB para o porquê deste relatório fugir do padrão de
+        // criarColetor).
+        { key: 'bensSngb', cfg: CFG_BENS_PENDENTES_SNGB, navAlvo: 'apreensoes', rotulo: 'Bens Pendentes de Cadastro no SNGB', curto: 'Bens SNGB', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
@@ -15663,8 +16094,12 @@
         const secaoRemetidos = secoes.find(s => s.cfg === CFG_PROCESSOS_REMETIDOS);
         const secaoRemessas = secoes.find(s => s.cfg === CFG_REMESSAS);
         if (secaoRemetidos && secaoRemessas) {
+            // Mesmo cuidado de dadosRemessasConsolidados: os registros de Remetidos (com
+            // destino) vêm PRIMEIRO, pra removerProcessosDuplicados preservar o destino
+            // em vez de descartá-lo quando o mesmo processo também aparece em Remessas em
+            // Aberto (sem campo destino).
             secaoRemessas.dados = removerProcessosDuplicados(
-                [...secaoRemessas.dados, ...secaoRemetidos.dados.map(mapRemetidoParaFormatoRemessas)],
+                [...secaoRemetidos.dados.map(mapRemetidoParaFormatoRemessas), ...secaoRemessas.dados],
                 'processo',
             );
         }
