@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.57
+// @version      25.58
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2070,6 +2070,10 @@
             kpisExtras: [
                 { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'azul' },
             ],
+            // Sem campo categórico natural pra agrupar (só processo/contagem/data) — vazio
+            // em vez de omitido: montarResumoGenerico faz p.distribuicoes.map(...) sem
+            // checar undefined, então precisa existir mesmo sem nenhuma distribuição real.
+            distribuicoes: [],
             colunas: [
                 { header: 'Processo', width: 34, get: (d) => d.processo },
                 { header: 'Total de Apreensões PROJUDI', width: 30, get: (d) => d.totalApreensoes },
