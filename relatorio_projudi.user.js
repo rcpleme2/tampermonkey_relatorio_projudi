@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.55
+// @version      25.56
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2234,6 +2234,16 @@
         // CFG_APREENSOES/CFG_PRESCRICOES) — mostra a linha mesmo vazia, desde que já
         // coletado.
         mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão
+        // (removerProcessosDuplicados dedupe por 'processo' quando chaveDuplicata não é
+        // informado) — mesmo problema já corrigido em CFG_APREENSOES: um processo pode
+        // legitimamente ter mais de uma monitoração eletrônica expirada (ex.: "Medida
+        // Cautelar" e "Medida Protetiva ao Agressor" simultâneas, ou duas medidas em
+        // períodos diferentes). Dedupe por 'processo' colapsava esses registros
+        // distintos, fazendo o card "Total de monitorações expiradas" mostrar a
+        // quantidade de PROCESSOS em vez da quantidade de REGISTROS (bug relatado pelo
+        // usuário).
+        chaveDuplicata: '*',
         detecta: (cab) => /data\s+prov[áa]vel\s+de\s+t[ée]rmino/i.test(cab),
         minTds: 6,
         usaAtuacao: false,
@@ -7951,7 +7961,16 @@
             };
         }
 
-        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
+        // Bug relatado pelo usuário: rodando só um relatório da categoria "Outros" (ex.:
+        // Monitoração Eletrônica Expirada, Prescrições, Apreensões — nenhum deles entra em
+        // CFGS_CARTORIO nem é Gabinete), o PDF conjunto saía com a página 1 (capa) em
+        // branco — temConteudo não considerava outrasSecoes/secaoAtivosClasse, então a
+        // capa (desenharCapaSituacao logo abaixo) nunca era desenhada, e sem ela nenhuma
+        // outra página era aberta (usouPagina1 ficava false o tempo todo, já que seções
+        // zeradas de "Outros" também não geram página própria — ver secaoVazia mais
+        // abaixo), resultando na página em branco padrão que o jsPDF cria por padrão.
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado
+            || atuacoesAtivas.length > 0 || outrasSecoes.length > 0 || !!secaoAtivosClasse;
         let usouPagina1 = false;
 
         // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas' a
