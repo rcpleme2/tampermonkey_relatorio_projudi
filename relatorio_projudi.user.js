@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.56
+// @version      25.57
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7917,9 +7917,10 @@
         // Sem Infração Penal (mesma ordem do popup: REPORTS_AUTOMACAO declara semrg/
         // semcpf logo após seminfracaopenal dentro da categoria Crime). Indicador: total
         // de processos pendentes; detalhamento compacta a pendência mais antiga (por
-        // Data Último Movimento).
+        // Data de Distribuição, a pedido do usuário — mesmo campo usado no card
+        // "Pendência mais antiga" do PDF individual, ver montarResumoSemRg/SemCpf).
         if (secaoSemRg) {
-            const antigo = acharMaisAntigo(secaoSemRg.dados, 'dataUltimoMovimento');
+            const antigo = acharMaisAntigo(secaoSemRg.dados, 'dataDistribuicao');
             const prejudicado = prejudicadoInfo(CFG_SEM_RG);
             const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
             itensOutros.push({
@@ -7930,7 +7931,7 @@
             });
         }
         if (secaoSemCpf) {
-            const antigo = acharMaisAntigo(secaoSemCpf.dados, 'dataUltimoMovimento');
+            const antigo = acharMaisAntigo(secaoSemCpf.dados, 'dataDistribuicao');
             const prejudicado = prejudicadoInfo(CFG_SEM_CPF);
             const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
             itensOutros.push({
@@ -9538,7 +9539,7 @@
     }
 
     // Só 2 cards (mesmo padrão de Sem Infração Penal): total de processos pendentes e a
-    // pendência mais antiga (menor Data Último Movimento), com o processo correspondente
+    // pendência mais antiga (menor Data de Distribuição, a pedido do usuário), com o processo correspondente
     // como sub-linha.
     function montarResumoSemRg(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
@@ -9566,7 +9567,7 @@
 
         desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
 
-        const antigo = acharMaisAntigo(r, 'dataUltimoMovimento');
+        const antigo = acharMaisAntigo(r, 'dataDistribuicao');
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
@@ -9653,7 +9654,7 @@
 
         desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
 
-        const antigo = acharMaisAntigo(r, 'dataUltimoMovimento');
+        const antigo = acharMaisAntigo(r, 'dataDistribuicao');
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Pendência mais antiga', valAntigo, subsAntigo, true, COR.ambar);
