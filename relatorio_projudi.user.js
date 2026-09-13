@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.71
+// @version      25.72
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3460,8 +3460,7 @@
         // pra descartar linha aninhada de alguma coluna atrapalhando a contagem).
         console.log(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
-            + `tabelaEncontrada=${!!tabela} tbodyTr(geral)=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} `
-            + `tbodyTr(direto)=${tabela ? tabela.querySelectorAll(':scope > tbody > tr').length : 'n/d'} `
+            + `tabelaEncontrada=${!!tabela} tbodyTr=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
         if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A')) {
             if (selTipo) selTipo.value = tipoEsperado;
@@ -8462,10 +8461,14 @@
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
+        // Benefícios/Medidas/Suspensões (Transação Penal/Suspensão Condicional/Pena
+        // Substitutiva/Medida Protetiva/Medida Cautelar/ANPP) saiu daqui — pedido do
+        // usuário: mover a seção para dentro da categoria Crime, mesmo padrão de
+        // Apreensões/Cumprimento de Medidas/Prescrições/Medidas Alternativas em Atraso
+        // (ver CFGS_GRUPO_TRANSACAO_PENAL/secaoApreensoes mais abaixo, dentro do bloco
+        // "Crime" que alimenta itensOutros).
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS,
-            CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO,
-            CFG_TRANSACAO_PENAL, CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PENA, CFG_PENA_SUBSTITUTIVA,
-            CFG_MEDIDA_PROTETIVA, CFG_MEDIDA_CAUTELAR, CFG_ANPP];
+            CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
         // Seções com cfg.mostrarSeVazio (Suspensos, Audiências Pendentes) aparecem mesmo
         // com dados.length === 0, desde que já tenham sido coletadas (ver KEY_COLETADO/
         // foiColetado) — "zero pendências" é um dado, não um vazio a esconder.
@@ -8556,6 +8559,15 @@
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoMonitoracaoExpiradas = secoes.find(s => s.cfgOriginal === CFG_MONITORACAO_EXPIRADAS);
         const secaoMedidasAlternativasAtraso = secoes.find(s => s.cfgOriginal === CFG_MEDIDAS_ALTERNATIVAS_ATRASO);
+        // Benefícios/Medidas/Suspensões (Crime) — 7 tipos, cada um sua própria seção (ver
+        // CFGS_GRUPO_TRANSACAO_PENAL mais abaixo, dentro do bloco que alimenta itensOutros).
+        const secaoTransacaoPenal = secoes.find(s => s.cfgOriginal === CFG_TRANSACAO_PENAL);
+        const secaoSuspCondProcesso = secoes.find(s => s.cfgOriginal === CFG_SUSPENSAO_COND_PROCESSO);
+        const secaoSuspCondPena = secoes.find(s => s.cfgOriginal === CFG_SUSPENSAO_COND_PENA);
+        const secaoPenaSubstitutiva = secoes.find(s => s.cfgOriginal === CFG_PENA_SUBSTITUTIVA);
+        const secaoMedidaProtetiva = secoes.find(s => s.cfgOriginal === CFG_MEDIDA_PROTETIVA);
+        const secaoMedidaCautelar = secoes.find(s => s.cfgOriginal === CFG_MEDIDA_CAUTELAR);
+        const secaoAnpp = secoes.find(s => s.cfgOriginal === CFG_ANPP);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
@@ -8731,19 +8743,11 @@
         // Mandados (Retorno/Distribuição/Cumprimento/Decurso), que já têm 1 nível de
         // indentação (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do
         // usuário.
-        // Benefícios/Medidas/Suspensões — mesma estrutura de 2 níveis de Mandados acima
-        // (pedido do usuário: "relação de suspensões por tipo", cada tipo é seu próprio
-        // mini-relatório agrupado sob um item pai, mesmo espírito visual de Mandados).
-        const CFGS_GRUPO_TRANSACAO_PENAL = [CFG_TRANSACAO_PENAL, CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PENA,
-            CFG_PENA_SUBSTITUTIVA, CFG_MEDIDA_PROTETIVA, CFG_MEDIDA_CAUTELAR, CFG_ANPP];
-        const rotulosCurtosTransacaoPenal = new Map([
-            [CFG_TRANSACAO_PENAL, 'Transação Penal'], [CFG_SUSPENSAO_COND_PROCESSO, 'Susp. Cond. Processo'],
-            [CFG_SUSPENSAO_COND_PENA, 'Susp. Cond. Pena'], [CFG_PENA_SUBSTITUTIVA, 'Pena Substitutiva'],
-            [CFG_MEDIDA_PROTETIVA, 'Medida Protetiva'], [CFG_MEDIDA_CAUTELAR, 'Medida Cautelar'], [CFG_ANPP, 'ANPP'],
-        ]);
-        const itensTransacaoPenal = CFGS_GRUPO_TRANSACAO_PENAL.map(c => itensCartorio.find(t => t.secao.cfgOriginal === c)).filter(Boolean);
+        // Benefícios/Medidas/Suspensões saiu daqui — mesmo padrão de Apreensões/
+        // Cumprimento de Medidas/Prescrições: pedido do usuário, mora agora dentro da
+        // categoria Crime (ver bloco "Crime" mais abaixo, que alimenta itensOutros).
         const itensPendencias = itensCartorio
-            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && !CFGS_GRUPO_TRANSACAO_PENAL.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
+            .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
             .flatMap(t => comSubLinhasAtribuicao(
                 linhaTarefa(t, t.secao.cfgOriginal === CFG_RETORNO ? 'Retorno de Conclusão' : t.rotulo),
                 t.dados, (n) => `${n} pendente(s)`,
@@ -8757,14 +8761,6 @@
             itensMandados.forEach(t => {
                 const l = linhaTarefa(t, rotulosCurtosMandados.get(t.secao.cfgOriginal));
                 l.grupoPai = 'Mandados';
-                itensPendencias.push(l);
-            });
-        }
-        if (itensTransacaoPenal.length) {
-            itensPendencias.push(linhaGrupo('Benefícios/Medidas/Suspensões', ''));
-            itensTransacaoPenal.forEach(t => {
-                const l = linhaTarefa(t, rotulosCurtosTransacaoPenal.get(t.secao.cfgOriginal));
-                l.grupoPai = 'Benefícios/Medidas/Suspensões';
                 itensPendencias.push(l);
             });
         }
@@ -9021,6 +9017,34 @@
                 indicador: `${secaoMedidasAlternativasAtraso.dados.length} medida(s)`,
                 detalhamento: `${qtdTipos} tipo(s) · ${qtdTiposMedida} tipo(s) de medida distintos`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_MEDIDAS_ALTERNATIVAS_ATRASO,
+            });
+        }
+        // "Benefícios/Medidas/Suspensões" — pedido do usuário: mover pra dentro da
+        // categoria Crime (antes era Cartório). A tela de origem só permite pesquisar UM
+        // tipo por vez (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal), então continuam
+        // sendo 7 CFGs/seções independentes — aqui aparecem agrupadas sob um cabeçalho só
+        // (mesmo mecanismo de linhaGrupo/grupoPai já usado por "Mandados" dentro de
+        // Pendências), sem classificação por situação/aging (mesmo motivo de Medidas
+        // Alternativas em Atraso — não é uma tarefa clássica de "dias parado").
+        const CFGS_GRUPO_TRANSACAO_PENAL = [
+            [CFG_TRANSACAO_PENAL, secaoTransacaoPenal, 'Transação Penal'],
+            [CFG_SUSPENSAO_COND_PROCESSO, secaoSuspCondProcesso, 'Susp. Cond. Processo'],
+            [CFG_SUSPENSAO_COND_PENA, secaoSuspCondPena, 'Susp. Cond. Pena'],
+            [CFG_PENA_SUBSTITUTIVA, secaoPenaSubstitutiva, 'Pena Substitutiva'],
+            [CFG_MEDIDA_PROTETIVA, secaoMedidaProtetiva, 'Medida Protetiva'],
+            [CFG_MEDIDA_CAUTELAR, secaoMedidaCautelar, 'Medida Cautelar'],
+            [CFG_ANPP, secaoAnpp, 'ANPP'],
+        ].filter(([, secao]) => !!secao);
+        if (CFGS_GRUPO_TRANSACAO_PENAL.length) {
+            itensOutros.push(linhaGrupo('Benefícios/Medidas/Suspensões', ''));
+            CFGS_GRUPO_TRANSACAO_PENAL.forEach(([cfg, secao, curto]) => {
+                itensOutros.push({
+                    nome: curto,
+                    indicador: `${secao.dados.length} processo(s)`,
+                    detalhamento: '—',
+                    situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: cfg,
+                    grupoPai: 'Benefícios/Medidas/Suspensões',
+                });
             });
         }
         // "Prescrições" — ÚLTIMO da categoria Crime (pedido do usuário: ordem cronológica/
@@ -15245,19 +15269,6 @@
         { key: 'mandadosdistribuicao', cfg: CFG_MANDADOS_DISTRIBUICAO, navAlvo: 'mandadosdistribuicao', rotulo: 'Mandados Aguardando Distribuição ao Oficial de Justiça', rotuloChecklist: 'Aguardando Distribuição', curto: 'Mand. Distribuição', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
         { key: 'mandadoscumprimento', cfg: CFG_MANDADOS_CUMPRIMENTO, navAlvo: 'mandadoscumprimento', rotulo: 'Mandados Pendentes de Cumprimento', rotuloChecklist: 'Pendentes de Cumprimento', curto: 'Mand. Cumprimento', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
         { key: 'mandadosdecurso', cfg: CFG_MANDADOS_DECURSO, navAlvo: 'mandadosdecurso', rotulo: 'Mandados Aguardando Análise de Decurso de Prazo', rotuloChecklist: 'Decurso de Prazo', curto: 'Mand. Decurso', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
-        // Benefícios/Medidas/Suspensões — 7 itens de fila INDEPENDENTES (pedido do
-        // usuário: "relação de suspensões por tipo"), mesmo esquema de Mandados: um único
-        // navAlvo (a tela buscaTransacaoPenal.do), o <select id="tipo"> é que muda por
-        // item (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal). precisaPreencher: true
-        // porque status="ATIVA" precisa ser marcado (e o tipo corrigido, a partir do 2º
-        // item) antes de cada busca.
-        { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'suspcondpena', cfg: CFG_SUSPENSAO_COND_PENA, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional da Pena (Ativas)', rotuloChecklist: 'Susp. Cond. da Pena', curto: 'Susp. Cond. Pena', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'penasubstitutiva', cfg: CFG_PENA_SUBSTITUTIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Pena Substitutiva (Ativas)', rotuloChecklist: 'Pena Substitutiva', curto: 'Pena Substitutiva', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'medidaprotetiva', cfg: CFG_MEDIDA_PROTETIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Protetiva ao Agressor (Ativas)', rotuloChecklist: 'Medida Protetiva', curto: 'Medida Protetiva', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'medidacautelar', cfg: CFG_MEDIDA_CAUTELAR, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Cautelar (Ativas)', rotuloChecklist: 'Medida Cautelar', curto: 'Medida Cautelar', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
-        { key: 'anpp', cfg: CFG_ANPP, navAlvo: 'beneficiosmedidas', rotulo: 'Acordo de Não Persecução Penal (Ativos)', rotuloChecklist: 'ANPP', curto: 'ANPP', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Benefícios/Medidas/Suspensões' },
         // ── Audiências (movida do Crime pro Cartório/Cível-Geral — pedido do usuário:
         // fica visível em qualquer categoria/aba, não só Crime, igual aos demais itens
         // acima) ─────────────────────────────────────────────────────────────────────
@@ -15322,6 +15333,21 @@
         // do usuário: mover para a categoria Crime). Logo após Cumprimento de Medidas,
         // mesma categoria.
         { key: 'medidasalternativasatraso', cfg: CFG_MEDIDAS_ALTERNATIVAS_ATRASO, navAlvo: 'medidasalternativasatraso', rotulo: 'Medidas Alternativas em Atraso', curto: 'Med. Alternativas Atraso', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Benefícios/Medidas/Suspensões — pedido do usuário: mover pra dentro da
+        // categoria Crime (antes era Cartório, ver CFGS_GRUPO_TRANSACAO_PENAL em
+        // gerarPDFConjunto/itensOutros). Continuam sendo 7 itens de fila INDEPENDENTES
+        // (a tela buscaTransacaoPenal.do só permite pesquisar 1 tipo por vez), mesmo
+        // esquema de Mandados: um único navAlvo, o <select id="tipo"> é que muda por
+        // item (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal). precisaPreencher: true
+        // porque status="ATIVA" precisa ser marcado (e o tipo corrigido, a partir do 2º
+        // item) antes de cada busca.
+        { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'suspcondpena', cfg: CFG_SUSPENSAO_COND_PENA, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional da Pena (Ativas)', rotuloChecklist: 'Susp. Cond. da Pena', curto: 'Susp. Cond. Pena', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'penasubstitutiva', cfg: CFG_PENA_SUBSTITUTIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Pena Substitutiva (Ativas)', rotuloChecklist: 'Pena Substitutiva', curto: 'Pena Substitutiva', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'medidaprotetiva', cfg: CFG_MEDIDA_PROTETIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Protetiva ao Agressor (Ativas)', rotuloChecklist: 'Medida Protetiva', curto: 'Medida Protetiva', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'medidacautelar', cfg: CFG_MEDIDA_CAUTELAR, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Cautelar (Ativas)', rotuloChecklist: 'Medida Cautelar', curto: 'Medida Cautelar', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'anpp', cfg: CFG_ANPP, navAlvo: 'beneficiosmedidas', rotulo: 'Acordo de Não Persecução Penal (Ativos)', rotuloChecklist: 'ANPP', curto: 'ANPP', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
