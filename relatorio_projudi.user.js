@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.58
+// @version      25.59
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2067,13 +2067,28 @@
             // Sem planilha de aging por dias parado — "Último Processamento" é a última vez
             // que o Projudi tentou integrar com o SNGB, não um indicador de atraso.
             semAgingBloco: true,
+            // acento em vermelho (pedido do usuário) — nome da cor, não o array RGB
+            // (mesmo motivo de CFG_CONCLUSOES: este cfg é montado antes de `const COR`
+            // existir no arquivo, TDZ; montarResumoGenerico resolve COR[nome] na hora de
+            // desenhar).
             kpisExtras: [
-                { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'azul' },
+                { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'vermelho' },
             ],
-            // Sem campo categórico natural pra agrupar (só processo/contagem/data) — vazio
-            // em vez de omitido: montarResumoGenerico faz p.distribuicoes.map(...) sem
-            // checar undefined, então precisa existir mesmo sem nenhuma distribuição real.
-            distribuicoes: [],
+            // Sem campo categórico natural pra agrupar (só processo/contagem/data) — usa o
+            // ponto de extensão `calc` (ver comentário em montarResumoGenerico) pra listar
+            // os primeiros 5 processos da coleta em vez de uma contagem por categoria
+            // (pedido do usuário). rotuloCategoria troca o cabeçalho da 1ª coluna de
+            // "Categoria" (padrão) para "Processo"; a coluna "Qtd." mostra o total de
+            // apreensões de cada um.
+            distribuicoes: [
+                {
+                    titulo: 'Primeiros 5 processos da lista (amostra)',
+                    rotuloCategoria: 'Processo',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: d.processo, valor: d.totalApreensoes || 0 })),
+                    }),
+                },
+            ],
             colunas: [
                 { header: 'Processo', width: 34, get: (d) => d.processo },
                 { header: 'Total de Apreensões PROJUDI', width: 30, get: (d) => d.totalApreensoes },
@@ -5884,14 +5899,18 @@
         const faixas = faixasPorPrioridade(dados, p.dataCampo, now);
         // Distribuições sem nenhum item qualificado (ex.: minValor, quando nenhum
         // processo tem mais de uma ocorrência) são omitidas inteiramente, em vez de
-        // aparecer vazias. Uma entrada com `calc(dados)` (ponto de extensão — nenhum
-        // relatório usa hoje) pula contarPorCampo e usa o que `calc` devolver ({itens}).
+        // aparecer vazias. Uma entrada com `calc(dados)` (ponto de extensão — usado por
+        // CFG_BENS_PENDENTES_SNGB pra uma lista de itens que não vem de contarPorCampo,
+        // ex. "primeiros N processos") pula contarPorCampo e usa o que `calc` devolver
+        // ({itens}). rotuloCategoria/acento repassados (opcionais — desenharGradeTabelas
+        // já os lê de cada bloco; sem eles, cai no padrão 'Categoria'/azul de sempre, byte-
+        // a-byte igual antes desta mudança).
         const distribuicoes = p.distribuicoes
             .map(g => {
                 const itens = (typeof g.calc === 'function')
                     ? ((g.calc(dados) || {}).itens || [])
                     : contarPorCampo(dados, g.campo, g.topN, g.limpar, g.semOutros, g.minValor);
-                return { titulo: g.titulo, span: g.span || 1, itens };
+                return { titulo: g.titulo, span: g.span || 1, itens, rotuloCategoria: g.rotuloCategoria, acento: g.acento };
             })
             .filter(c => c.itens.length);
 
