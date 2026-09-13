@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.65
+// @version      25.66
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2766,6 +2766,29 @@
             distribuicoes: [
                 { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
             ],
+            // Observação condicional (pedido do usuário): alerta quando há mandado
+            // retornado há MAIS DE 15 DIAS e ainda pendente de análise (todo registro
+            // desta tela já é "aguardando análise de retorno", então "ainda não
+            // analisado" é a lista inteira). Não dá pra reaproveitar o mecanismo
+            // genérico de p.observacaoPrazo (faixasPorPrioridade tem o corte fixo em 30
+            // dias) — usa p.observacaoFinal como função (mesmo ponto de extensão de
+            // CFG_BENS_PENDENTES_SNGB), calculando o limiar de 15 dias direto em cima de
+            // dataRetorno. DIA_MS/parseDataBR são `const`/`function` declarados mais
+            // abaixo no arquivo (TDZ para CFG_MANDADOS_RETORNO, que é montado antes
+            // deles) — mas só são lidos quando a função roda, na geração do PDF, bem
+            // depois do módulo inteiro já ter sido inicializado, então não há problema.
+            observacaoFinal: (dados) => {
+                const agora = Date.now();
+                const temAntigo = dados.some(d => {
+                    const ts = parseDataBR(d.dataRetorno);
+                    return ts != null && Math.floor((agora - ts) / DIA_MS) > 15;
+                });
+                return temAntigo
+                    ? 'Há mandados retornados há mais de 15 dias ainda pendentes de análise. A secretaria '
+                        + 'deverá priorizar a análise desses mandados, tendo em vista o risco de prejuízo ao '
+                        + 'andamento processual decorrente da demora na verificação do retorno.'
+                    : null;
+            },
             colunas: [
                 { header: 'Processo', width: 34, get: (d) => d.processo },
                 { header: 'Dt. Retorno', width: 20, get: (d) => d.dataRetorno },
@@ -2908,6 +2931,14 @@
             distribuicoes: [
                 { titulo: 'Mandados por Natureza', campo: 'natureza', topN: 12 },
             ],
+            // Observação condicional (pedido do usuário): alerta quando há mandado
+            // aguardando análise de decurso de prazo há MAIS DE 30 DIAS (fora da faixa
+            // "Até 30 dias" de faixasPorPrioridade) — mesmo mecanismo genérico de
+            // p.observacaoPrazo já usado por CFG_JUNTADAS em montarResumoGenerico, sem
+            // precisar de lógica nova.
+            observacaoPrazo: 'Há mandados aguardando análise de decurso de prazo há mais de 30 dias. A secretaria '
+                + 'deverá priorizar a análise desses mandados, tendo em vista o risco de prejuízo ao andamento '
+                + 'processual decorrente da demora na verificação do decurso de prazo.',
             colunas: [
                 { header: 'Dt. Decurso', width: 20, get: (d) => d.dataDecurso },
                 { header: 'Processo', width: 34, get: (d) => d.processo },
