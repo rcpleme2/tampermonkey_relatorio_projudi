@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.59
+// @version      25.60
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2067,10 +2067,12 @@
             // Sem planilha de aging por dias parado — "Último Processamento" é a última vez
             // que o Projudi tentou integrar com o SNGB, não um indicador de atraso.
             semAgingBloco: true,
-            // acento em vermelho (pedido do usuário) — nome da cor, não o array RGB
+            // Os dois acento em vermelho (pedido do usuário) — nome da cor, não o array RGB
             // (mesmo motivo de CFG_CONCLUSOES: este cfg é montado antes de `const COR`
             // existir no arquivo, TDZ; montarResumoGenerico resolve COR[nome] na hora de
-            // desenhar).
+            // desenhar). atosAcento troca a cor do 1º card (o de atosTitulo, "Processos com
+            // apreensões sem registro no SNGB") — sem ele, cai no azul de sempre.
+            atosAcento: 'vermelho',
             kpisExtras: [
                 { titulo: 'Total de apreensões sem registro (soma)', calc: (dados) => dados.reduce((s, d) => s + (d.totalApreensoes || 0), 0), acento: 'vermelho' },
             ],
@@ -2094,6 +2096,15 @@
                 { header: 'Total de Apreensões PROJUDI', width: 30, get: (d) => d.totalApreensoes },
                 { header: 'Último Processamento', width: 26, get: (d) => d.ultimoProcessamento },
             ],
+            // Observação final destacada (pedido do usuário, texto literal fornecido) — só
+            // quando há processo pendente (dados.length > 0); com zero, nenhum balão.
+            // Função em vez de string fixa (ver suporte em montarResumoGenerico) —
+            // diferente de CFG_SUSPENSOS, que sempre mostra a sua.
+            observacaoFinal: (dados) => dados.length > 0
+                ? 'O cadastro de bens no SNGB é obrigatório, nos termos de resolução do CNJ e de disposição '
+                    + 'constante do Código de Normas do Foro Judicial. A secretaria deverá envidar esforços para '
+                    + 'que os bens pendentes sejam cadastrados no referido sistema com a urgência necessária.'
+                : null,
         },
     };
 
@@ -5806,7 +5817,10 @@
             : NaN;
         const valorAtos = Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
         const kpis = [
-            { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR.azul },
+            // atosAcento (opcional, nome da cor — ver acento de kpisExtras/mesmo motivo de
+            // TDZ) troca a cor deste 1º card; sem ele, cai no azul de sempre (comportamento
+            // idêntico a antes desta mudança pra todo relatório que não define o campo).
+            { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR[p.atosAcento] || COR.azul },
         ];
         if (!p.semPrioridade) {
             kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`], acento: COR.vermelho });
@@ -5989,11 +6003,15 @@
             }
         }
 
-        // Observação final destacada (pedido do usuário — ponto de extensão, hoje só
-        // usado por CFG_SUSPENSOS), numa caixa com título "OBSERVAÇÃO" em destaque.
-        if (p.observacaoFinal) {
+        // Observação final destacada (pedido do usuário — ponto de extensão, hoje usado
+        // por CFG_SUSPENSOS [string fixa] e CFG_BENS_PENDENTES_SNGB [função — observação
+        // só quando há processos pendentes]), numa caixa com título "OBSERVAÇÃO" em
+        // destaque. Aceita string (sempre aparece, comportamento de sempre) ou função
+        // `(dados) => string|null` (decide por conta própria se/o que mostrar).
+        const textoObsFinal = typeof p.observacaoFinal === 'function' ? p.observacaoFinal(dados) : p.observacaoFinal;
+        if (textoObsFinal) {
             doc.setFont('PublicSans', 'italic'); doc.setFontSize(7.4);
-            const linhasObs = doc.splitTextToSize(p.observacaoFinal, uw);
+            const linhasObs = doc.splitTextToSize(textoObsFinal, uw);
             const alturaObs = 9 + linhasObs.length * 3.3;
             if (y + alturaObs > ph - m) {
                 ctx.rodapeAntesDeVirar();
