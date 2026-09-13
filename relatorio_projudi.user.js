@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.66
+// @version      25.70
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2367,6 +2367,98 @@
         },
     };
 
+    // ── Medidas Alternativas em Atraso (menu Processos > Busca >
+    // Cumprimento de Medidas Alternativas — buscaMedidaAlternativa.do) ─────────────────
+    // Categoria Crime (categoriaEspecifica: 'crime', pedido do usuário — Medidas
+    // Alternativas é conceito exclusivamente criminal, mesma seção de Apreensões/
+    // Prescrições/Monitoração Expirada), mesmo a tela ficando no menu geral
+    // "Processos > Busca" em vez de uma aba da Mesa do Escrivão Criminal. Form +
+    // table.resultTable na MESMA página (mesmo padrão de Apreensões/Prescrições/
+    // Monitoração Expirada) — usa criarColetor()/cfg.extrai normalmente.
+    //
+    // A tela tem um filtro "Tipo" (tipoTransacao) com as opções Transação Penal/
+    // Suspensão Condicional do Processo/Suspensão Condicional da Pena/Pena Substitutiva/
+    // Medida Protetiva ao Agressor/Medida Cautelar — pedido do usuário: NÃO fixar esse
+    // filtro (mantém "TODOS", o padrão da tela), trazendo os 6 tipos numa coleta só, e
+    // mantém "Situação" = "Atrasadas" (já vem marcada por padrão na tela, mas
+    // confirmamos antes de pesquisar, mesmo esquema de preencherEPesquisarMonitoracao
+    // Expiradas). Colunas da tabela real (.mhtml enviado pelo usuário): [0] Processo
+    // [1] Nome da Parte [2] Condições/Suspensões/Substituições (= Tipo/tipoTransacao)
+    // [3] Tipo de Medida (medida específica, ex. "Comparecimento em juízo")
+    // [4] Cumprimento [5] Cumprimento Efetivo.
+    //
+    // PDF dedicado via pdfCustom (montarResumoMedidasAlternativasAtraso): total geral em
+    // VERMELHO (pedido do usuário) + uma seção por TIPO (Transação Penal/Suspensão
+    // Condicional.../Medida Cautelar/etc.) com um card individual POR TIPO DE MEDIDA
+    // dentro dela (coluna "Tipo de Medida"), cada um também com o total em vermelho —
+    // somando TODAS as ocorrências, mesmo quando várias medidas do mesmo tipo caem no
+    // mesmo processo (a extração não deduplica por processo, cada linha da tela é uma
+    // medida distinta) — mais a tabela discriminada completa via montarTabelaGenerico
+    // reaproveitado.
+    const TITULO_MEDIDAS_ALTERNATIVAS_ATRASO = 'Medidas Alternativas em Atraso';
+    // Texto fixo do balão de observação (pedido do usuário), mesmo padrão de
+    // PARAGRAFOS_OBSERVACAO_PRESCRICOES/PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS — só
+    // aparece no PDF quando há medidas listadas (ver montarResumoMedidasAlternativasAtraso).
+    const PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS = [
+        'A secretaria deverá exercer controle permanente dos indicadores relacionados às condições e medidas em atraso, analisando periodicamente as ocorrências pendentes e promovendo as providências necessárias em cada caso. Sempre que necessário, a parte deverá ser intimada a justificar e/ou dar continuidade ao cumprimento das condições fixadas.',
+    ];
+    const CFG_MEDIDAS_ALTERNATIVAS_ATRASO = {
+        prefixo: 'projudi_medidasalternativas_',
+        // Zero medidas em atraso é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_MONITORACAO_EXPIRADAS) — mostra a linha mesmo vazia, desde
+        // que já coletado.
+        mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão
+        // (removerProcessosDuplicados dedupe por 'processo' quando chaveDuplicata não é
+        // informado) — mesmo problema já corrigido em CFG_APREENSOES/CFG_MONITORACAO_
+        // EXPIRADAS: um processo pode legitimamente ter mais de uma medida alternativa em
+        // atraso, inclusive de tipos diferentes (pedido do usuário: somar todas, ainda
+        // que existam várias no mesmo processo).
+        chaveDuplicata: '*',
+        detecta: (cab) => /condi[çc][õo]es\/suspens/i.test(cab) && /tipo\s+de\s+medida/i.test(cab),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'medidas_alternativas_atraso_projudi',
+        rotulos: { coletar: 'Extrair Medidas Alternativas em Atraso', coletarMais: 'Extrair mais (Medidas Alternativas em Atraso)', baixar: '⬇ Baixar Medidas Alternativas em Atraso' },
+        cabecalhos: ['Processo', 'Nome da Parte', 'Tipo', 'Tipo de Medida', 'Cumprimento', 'Cumprimento Efetivo'],
+        larguras: [{ wch: 26 }, { wch: 36 }, { wch: 26 }, { wch: 34 }, { wch: 14 }, { wch: 16 }],
+        // Processo (td[0]): número em <em class="normal"/"attention">, mesmo padrão de
+        // Prescrições/Monitoração Expirada; demais colunas são texto simples (links, mas
+        // textoCelula já junta o texto visível).
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                nomeParte: textoCelula(tds[1]),
+                tipo: textoCelula(tds[2]),
+                tipoMedida: textoCelula(tds[3]),
+                cumprimento: textoCelula(tds[4]),
+                cumprimentoEfetivo: textoCelula(tds[5]),
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+            };
+        },
+        linha: (d) => [d.processo, d.nomeParte, d.tipo, d.tipoMedida, d.cumprimento, d.cumprimentoEfetivo],
+        pdfCustom: (dados, somenteResumo) => gerarPDFMedidasAlternativasAtraso(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoMedidas
+        // AlternativasAtraso não usa nenhum outro campo de p além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_MEDIDAS_ALTERNATIVAS_ATRASO,
+            tabelaTitulo: 'Tabela discriminada das medidas alternativas em atraso',
+            dataCampo: 'cumprimento',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 20, get: (d) => d.processo },
+                { header: 'Nome da Parte', width: 26, get: (d) => d.nomeParte },
+                { header: 'Tipo', width: 22, get: (d) => d.tipo },
+                { header: 'Tipo de Medida', width: 28, get: (d) => d.tipoMedida },
+                { header: 'Cumprimento', width: 14, get: (d) => d.cumprimento },
+                { header: 'Cumprimento Efetivo', width: 16, get: (d) => d.cumprimentoEfetivo },
+            ],
+        },
+    };
+
     // ── Feitos com Réu Sem RG/IIPR e Feitos com Parte Sem CPF/CNPJ (Mesa do Escrivão
     // Criminal, cards "Feitos com réu sem RG/IIPR" e "Feitos com réu sem CPF/CNPJ" —
     // mesmo bloco #tbMesa de Prescrições/Sem Infração Penal). Mesmo esquema de
@@ -3438,6 +3530,46 @@
                 console.log(`[Projudi Monitoração Expirada] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Monitoração Expirada] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de Medidas Alternativas em Atraso
+    // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
+    // Alternativas") — form + table.resultTable na MESMA página (mesmo padrão de
+    // Apreensões/Monitoração Expirada acima). Pedido do usuário: NÃO fixar o select
+    // "Tipo" (tipoTransacao) — mantém "TODOS" (o padrão da tela), trazendo os 6 tipos
+    // (Transação Penal/Suspensão Condicional do Processo/Suspensão Condicional da
+    // Pena/Pena Substitutiva/Medida Protetiva ao Agressor/Medida Cautelar) numa coleta
+    // só; o PDF agrupa por Tipo depois (ver montarResumoMedidasAlternativasAtraso). Só
+    // confirma o rádio "Situação" (situacao) = "atrasadas" (já vem marcado por padrão na
+    // tela, mas confirmamos antes de pesquisar, mesmo esquema de
+    // formularioMonitoracaoExpiradas).
+    function formularioMedidasAlternativasAtraso() {
+        const form = document.getElementById('buscaMedidaAlternativaForm');
+        return form && form.querySelector('#tipoTransacao') ? form : null;
+    }
+
+    function preencherEPesquisarMedidasAlternativasAtraso() {
+        const form = formularioMedidasAlternativasAtraso();
+        if (!form) return;
+
+        const radioAtrasadas = form.querySelector('input[name="situacao"][value="atrasadas"]');
+        if (radioAtrasadas && !radioAtrasadas.checked) radioAtrasadas.click();
+        console.log(`[Projudi Medidas Alternativas em Atraso] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Medidas Alternativas em Atraso] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Medidas Alternativas em Atraso] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Medidas Alternativas em Atraso] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Medidas Alternativas em Atraso] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -7369,6 +7501,17 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_MONITORACAO_EXPIRADAS, comIndice),
             };
         }
+        if (cfg === CFG_MEDIDAS_ALTERNATIVAS_ATRASO) {
+            return {
+                rotulo: TITULO_MEDIDAS_ALTERNATIVAS_ATRASO,
+                // Resumo dedicado (total geral + um card por tipo de medida, todos em
+                // vermelho — pedido do usuário) — não usa montarResumoGenerico; a tabela
+                // discriminada reaproveita o genérico sem alteração (ver
+                // CFG_MEDIDAS_ALTERNATIVAS_ATRASO.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMedidasAlternativasAtraso(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_MEDIDAS_ALTERNATIVAS_ATRASO, comIndice),
+            };
+        }
         if (cfg === CFG_SEM_RG) {
             return {
                 rotulo: TITULO_SEM_RG,
@@ -8113,6 +8256,7 @@
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoMonitoracaoExpiradas = secoes.find(s => s.cfgOriginal === CFG_MONITORACAO_EXPIRADAS);
+        const secaoMedidasAlternativasAtraso = secoes.find(s => s.cfgOriginal === CFG_MEDIDAS_ALTERNATIVAS_ATRASO);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
@@ -8542,6 +8686,23 @@
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+            });
+        }
+        // "Medidas Alternativas em Atraso" — logo após Cumprimento de
+        // Medidas, mesma categoria Crime (mesma ordem de REPORTS_AUTOMACAO). Sem
+        // classificação por situação/aging (mesmo padrão de Outros Cumprimentos/
+        // Arquivados com Saldo — não é uma tarefa clássica de "dias parado"), por isso
+        // semSituacao: true. Indicador: total geral; detalhamento compacta quantos tipos
+        // de medida (Transação Penal/Suspensão Condicional/Medida Cautelar/etc.) e
+        // quantos tipos de medida específicos aparecem.
+        if (secaoMedidasAlternativasAtraso) {
+            const qtdTipos = new Set(secaoMedidasAlternativasAtraso.dados.map(d => (d.tipo || '').trim()).filter(Boolean)).size;
+            const qtdTiposMedida = new Set(secaoMedidasAlternativasAtraso.dados.map(d => (d.tipoMedida || '').trim()).filter(Boolean)).size;
+            itensOutros.push({
+                nome: 'Medidas Alternativas em Atraso',
+                indicador: `${secaoMedidasAlternativasAtraso.dados.length} medida(s)`,
+                detalhamento: `${qtdTipos} tipo(s) · ${qtdTiposMedida} tipo(s) de medida distintos`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_MEDIDAS_ALTERNATIVAS_ATRASO,
             });
         }
         // "Prescrições" — ÚLTIMO da categoria Crime (pedido do usuário: ordem cronológica/
@@ -10173,6 +10334,178 @@
         }
 
         desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Medidas Alternativas em Atraso (menu Processos > Busca >
+    // Cumprimento de Medidas Alternativas) ──────────────────────────────────────────────
+    // Lista paginada por processo (mesmo esquema de Apreensões/Monitoração Expirada) —
+    // reaproveita montarTabelaGenerico sem alteração pra tabela discriminada, mas o
+    // resumo é dedicado: total geral em VERMELHO (pedido do usuário) + uma seção POR
+    // TIPO (coluna "Tipo"/tipoTransacao: Transação Penal/Suspensão Condicional do
+    // Processo/Suspensão Condicional da Pena/Pena Substitutiva/Medida Protetiva ao
+    // Agressor/Medida Cautelar — pedido do usuário: fazer o mesmo pra todos os tipos,
+    // não só Medida Cautelar), cada uma com um card por TIPO DE MEDIDA dentro dela
+    // (coluna "Tipo de Medida"), também em vermelho, somando TODAS as ocorrências
+    // (contarPorCampo conta por LINHA, não por processo — um processo com 3 medidas do
+    // mesmo tipo conta 3, exatamente o que o usuário pediu).
+
+    // Ordem de exibição das seções por Tipo — mesma ordem do <select name="tipoTransacao">
+    // da tela (ver .mhtml enviado pelo usuário). Um tipo que apareça nos dados mas não
+    // esteja nesta lista (select mudou no Projudi) cai no fim, na ordem em que aparecer.
+    const ORDEM_TIPOS_MEDIDA_ALTERNATIVA = [
+        'Transação Penal',
+        'Suspensão Condicional do Processo',
+        'Suspensão Condicional da Pena',
+        'Pena Substitutiva',
+        'Medida Protetiva ao Agressor',
+        'Medida Cautelar',
+    ];
+
+    function gerarPDFMedidasAlternativasAtraso(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoMedidasAlternativasAtraso(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_MEDIDAS_ALTERNATIVAS_ATRASO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_MEDIDAS_ALTERNATIVAS_ATRASO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Card do total geral (vermelho, pedido do usuário) seguido de UMA SEÇÃO POR TIPO
+    // (título + um PAR de cards por tipo de medida dentro dele, lado a lado — pedido do
+    // usuário: alinhar por tipo): esquerda = total de ocorrências (vermelho, como antes),
+    // direita = total de PROCESSOS DISTINTOS associados àquela medida (azul — cor
+    // diferente pra não confundir as duas métricas; um processo com 3 ocorrências da
+    // mesma medida conta 3 à esquerda e 1 à direita). Tipos sem nenhum registro
+    // simplesmente não aparecem (mesmo espírito de "distribuições vazias somem" já usado
+    // em montarResumoGenerico).
+    function montarResumoMedidasAlternativasAtraso(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_MEDIDAS_ALTERNATIVAS_ATRASO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+
+        desenharCard(doc, m, kY, uw, kH, 'Total de Medidas Alternativas em Atraso', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        let y = kY + kH + gap + 2;
+        const ctx = {
+            rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_MEDIDAS_ALTERNATIVAS_ATRASO, carimbo, pw, ph, m, comIndice),
+            topoContinuacao: m + 14,
+            cabecalhoContinuacao: () => {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${TITULO_MEDIDAS_ALTERNATIVAS_ATRASO} — por tipo`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+            },
+        };
+
+        // Agrupa os registros por "tipo" (Transação Penal/Suspensão Condicional do
+        // Processo/.../Medida Cautelar) na ordem de ORDEM_TIPOS_MEDIDA_ALTERNATIVA — tipo
+        // fora dessa lista (select mudou no Projudi) cai no fim, na ordem de 1ª aparição.
+        const porTipoMapa = new Map();
+        r.forEach(d => {
+            const tipo = (d.tipo || '').trim() || '(sem tipo)';
+            if (!porTipoMapa.has(tipo)) porTipoMapa.set(tipo, []);
+            porTipoMapa.get(tipo).push(d);
+        });
+        const tiposEncontrados = [...porTipoMapa.keys()].sort((a, b) => {
+            const ia = ORDEM_TIPOS_MEDIDA_ALTERNATIVA.indexOf(a);
+            const ib = ORDEM_TIPOS_MEDIDA_ALTERNATIVA.indexOf(b);
+            if (ia === -1 && ib === -1) return 0;
+            if (ia === -1) return 1;
+            if (ib === -1) return -1;
+            return ia - ib;
+        });
+
+        // Cada tipo de medida ganha DOIS cards lado a lado (pedido do usuário: alinhar
+        // por tipo) — esquerda: total de OCORRÊNCIAS (linhas da tela, mesmo critério de
+        // antes, em VERMELHO); direita: total de PROCESSOS DISTINTOS associados àquela
+        // medida (em AZUL, pedido do usuário — cor diferente da ocorrência pra não
+        // confundir as duas métricas). Um mesmo processo com 3 ocorrências da mesma
+        // medida conta 3 à esquerda e 1 à direita.
+        const kW2 = (uw - gap) / 2;
+        const kH2 = 28;
+        tiposEncontrados.forEach(tipo => {
+            const registrosDoTipo = porTipoMapa.get(tipo);
+            // topN alto o bastante pra nunca cair no corte "Outros" (semOutros:true já
+            // garante isso, mas topN explícito documenta a intenção: TODOS os tipos de
+            // medida encontrados dentro deste tipo viram card, um por um, pedido do
+            // usuário).
+            const porTipoMedida = contarPorCampo(registrosDoTipo, 'tipoMedida', 999, null, true);
+            const processosPorMedida = new Map();
+            registrosDoTipo.forEach(d => {
+                const medida = (d.tipoMedida || '').trim() || '(vazio)';
+                if (!processosPorMedida.has(medida)) processosPorMedida.set(medida, new Set());
+                if (d.processo) processosPorMedida.get(medida).add(d.processo);
+            });
+
+            const desenharTituloGrupo = (cont) => {
+                tituloSecao(doc, m, y + 4, uw, `${tipo} (${registrosDoTipo.length})${cont ? ' (cont.)' : ''}`);
+                y += TITULO_TABELA_H;
+            };
+
+            // Só garante que o TÍTULO da seção não fique sozinho colado no rodapé, com a
+            // 1ª linha de cards indo pra página seguinte.
+            if (y + TITULO_TABELA_H + kH2 + 20 > ph - 14) {
+                ctx.rodapeAntesDeVirar();
+                doc.addPage();
+                ctx.cabecalhoContinuacao();
+                y = ctx.topoContinuacao;
+            }
+            desenharTituloGrupo(false);
+
+            porTipoMedida.forEach(it => {
+                if (y + kH2 > ph - 14) {
+                    ctx.rodapeAntesDeVirar();
+                    doc.addPage();
+                    ctx.cabecalhoContinuacao();
+                    y = ctx.topoContinuacao;
+                    desenharTituloGrupo(true);
+                }
+                const qtdDistintos = processosPorMedida.has(it.label) ? processosPorMedida.get(it.label).size : 0;
+                desenharCard(doc, m, y, kW2, kH2, it.label, String(qtdDistintos), ['Processos distintos'], true, COR.azul, COR.azul);
+                desenharCard(doc, m + kW2 + gap, y, kW2, kH2, it.label, String(it.valor), ['Ocorrências'], true, COR.vermelho, COR.vermelho);
+                y += kH2 + gap;
+            });
+
+            y += 2;
+        });
+
+        // Balão de observação (pedido do usuário) — só com medidas listadas; "0 medidas
+        // em atraso" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
+        // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo —
+        // mesmo esquema de PARAGRAFOS_OBSERVACAO_PRESCRICOES/montarResumoPrescricoes.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS);
+            if (y + alturaObs > ph - m) {
+                ctx.rodapeAntesDeVirar();
+                doc.addPage();
+                ctx.cabecalhoContinuacao();
+                y = ctx.topoContinuacao;
+            }
+            desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS, COR.ambar);
+        }
+
+        desenharRodape(doc, TITULO_MEDIDAS_ALTERNATIVAS_ATRASO, carimbo, pw, ph, m, comIndice);
     }
 
     // ── PDF de Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem
@@ -12418,6 +12751,7 @@
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
         else if (CFG_PRESCRICOES.detecta(cab)) cfg = CFG_PRESCRICOES;
         else if (CFG_MONITORACAO_EXPIRADAS.detecta(cab)) cfg = CFG_MONITORACAO_EXPIRADAS;
+        else if (CFG_MEDIDAS_ALTERNATIVAS_ATRASO.detecta(cab)) cfg = CFG_MEDIDAS_ALTERNATIVAS_ATRASO;
         else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
@@ -13617,6 +13951,32 @@
             }
         }
 
+        // Tela de filtros de Medidas Alternativas em Atraso
+        // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
+        // Alternativas") — mesmo padrão de Monitoração Expirada acima: decide pelo
+        // ESTADO da automação, não pela presença de resultados.
+        if (formularioMedidasAlternativasAtraso()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_medidasalternativasatraso') {
+                console.log('[Projudi Medidas Alternativas em Atraso] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_medidasalternativasatraso');
+                preencherEPesquisarMedidasAlternativasAtraso();
+                return;
+            }
+            // Uso manual (fora da automação): a tela pode já conviver com resultados de
+            // uma pesquisa anterior, então não há como usar "sem linha nenhuma" para
+            // decidir se o botão deve aparecer.
+            if (estadoAtual !== 'coletando_medidasalternativasatraso' && mostrarBotoesIndividuais()) {
+                const bMedidasAlternativasAtraso = document.createElement('button');
+                bMedidasAlternativasAtraso.type = 'button';
+                bMedidasAlternativasAtraso.className = 'projudi-btn';
+                bMedidasAlternativasAtraso.title = 'Confirma "Situação" = Atrasadas (mantém "Tipo" = Todos) e pesquisa';
+                bMedidasAlternativasAtraso.textContent = 'Preencher e Pesquisar (Medidas Alternativas em Atraso)';
+                bMedidasAlternativasAtraso.onclick = () => preencherEPesquisarMedidasAlternativasAtraso();
+                buttonBar.appendChild(bMedidasAlternativasAtraso);
+            }
+        }
+
         // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
         // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
         // automação, não pela presença de resultados).
@@ -14607,6 +14967,12 @@
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
         { key: 'cumprimentomedidas', cfg: CFG_CUMPRIMENTO_MEDIDAS, navAlvo: 'cumprimentomedidas', rotulo: 'Cumprimento de Medidas', curto: 'Cumpr. Medidas', categoriaEspecifica: 'crime', precisaPreencher: false },
+        // "Medidas Alternativas em Atraso" — menu geral "Processos >
+        // Busca > Cumprimento de Medidas Alternativas" (não uma aba da Mesa do Escrivão
+        // Criminal, mas Medidas Alternativas é conceito exclusivamente criminal — pedido
+        // do usuário: mover para a categoria Crime). Logo após Cumprimento de Medidas,
+        // mesma categoria.
+        { key: 'medidasalternativasatraso', cfg: CFG_MEDIDAS_ALTERNATIVAS_ATRASO, navAlvo: 'medidasalternativasatraso', rotulo: 'Medidas Alternativas em Atraso', curto: 'Med. Alternativas Atraso', categoriaEspecifica: 'crime', precisaPreencher: true },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
@@ -15015,6 +15381,10 @@
         // acharLinkArquivadosSaldoNaListagem, chamada por tratarPaginaArquivadosSaldo).
         else if (alvo === 'arquivadosaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
+        // "Cumprimento de Medidas Alternativas" fica no menu geral "Processos > Busca"
+        // (link direto com href, não numa aba) — mesmo esquema simples de
+        // acharLinkMenu usado por Apreensões.
+        else if (alvo === 'medidasalternativasatraso') link = acharLinkMenu(/buscaMedidaAlternativa\.do/i, /cumprimento\s+de\s+medidas\s+alternativas/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
