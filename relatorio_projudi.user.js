@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.61
+// @version      25.63
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2733,6 +2733,12 @@
     const CFG_MANDADOS_RETORNO = {
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
+        // Pedido do usuário: reforçar o critério do total mostrado no KPI do resumo —
+        // usar o "N registro(s) encontrado(s)" que o próprio Projudi reporta na 1ª
+        // página da busca (mesmo mecanismo já validado em CFG_APREENSOES/CFG_JUNTADAS/
+        // CFG_RETORNO, ver adicionarPagina/totalIdentificadoNoResumo), em vez de
+        // dados.length (nº de registros efetivamente coletados/deduplicados).
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '13',
         minTds: 16, // só esta tela tem a coluna "Data retorno" (ver mapaColunasMandado)
         usaAtuacao: false,
@@ -2779,6 +2785,8 @@
     const CFG_MANDADOS_CUMPRIMENTO = {
         prefixo: 'projudi_mandadoscumprimento_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '4',
         minTds: 17, // tem "Distribuição"/"Visualização (Oficial)" a mais — ver mapaColunasMandado
         usaAtuacao: false,
@@ -2829,6 +2837,8 @@
     const CFG_MANDADOS_DISTRIBUICAO = {
         prefixo: 'projudi_mandadosdistribuicao_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '11',
         minTds: 15,
         usaAtuacao: false,
@@ -2869,6 +2879,8 @@
     const CFG_MANDADOS_DECURSO = {
         prefixo: 'projudi_mandadosdecurso_',
         mostrarSeVazio: true,
+        // Ver comentário em CFG_MANDADOS_RETORNO.totalIdentificadoNoResumo.
+        totalIdentificadoNoResumo: true,
         detecta: () => !!tabelaMandados() && statusCumprimentoCartorioSelecionado() === '8',
         minTds: 16, // mesma contagem da tela de Retorno, mas com "Data Decurso" no lugar de "Data retorno"
         usaAtuacao: false,
@@ -3961,6 +3973,15 @@
         // tratarPaginaArquivadosSaldo()/injetarBotoes (ver abaixo).
         detecta: () => false,
         usaAtuacao: false,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão 'processo'
+        // (removerProcessosDuplicados) — mesmo motivo já corrigido em CFG_APREENSOES/
+        // CFG_MONITORACAO_EXPIRADAS/CFG_SEM_RG etc.: um mesmo processo pode ter mais de
+        // um depósito judicial arquivado com saldo (contas judiciais DIFERENTES, ver
+        // "Conta Judicial" no CSV), cada um com seu próprio saldo — dedupar por
+        // 'processo' descartava as linhas extras do mesmo processo, subtraindo saldo
+        // real do total (bug relatado pelo usuário: diferença entre o saldo total do PDF
+        // e a soma do CSV do Projudi).
+        chaveDuplicata: '*',
         nomeArquivo: 'processos_arquivados_saldo_projudi',
         rotulos: { coletar: 'Extrair Processos Arquivados com Saldo', baixar: '⬇ Baixar Processos Arquivados com Saldo' },
         pdfCustom: (dados) => gerarPDFArquivadosSaldo(dados),
@@ -8425,10 +8446,20 @@
         // da categoria específica Crime, mesmo aparecendo nesta mesma tabela "Outros".
         if (secaoArquivadosSaldo) {
             const saldoTotal = secaoArquivadosSaldo.dados.reduce((s, d) => s + (d.saldo || 0), 0);
+            // Pedido do usuário: indicador mostra PROCESSOS distintos (a contagem
+            // acionável — quantos processos precisam de análise), não registros — desde
+            // que o dedupe passou a ser por registro inteiro (ver
+            // montarResumoArquivadosSaldo/processosUnicos), um mesmo processo pode ter
+            // mais de uma conta judicial com saldo e aparecer mais de uma vez em
+            // secaoArquivadosSaldo.dados.
+            const processosUnicosCapa = new Set(secaoArquivadosSaldo.dados.map(d => d.processo)).size;
+            const detalhamentoSaldo = processosUnicosCapa !== secaoArquivadosSaldo.dados.length
+                ? `Saldo total: ${fmtBRL(saldoTotal)} · ${secaoArquivadosSaldo.dados.length} registro(s)`
+                : `Saldo total: ${fmtBRL(saldoTotal)}`;
             itensOutros.push({
                 nome: 'Processos Arquivados com Saldo',
-                indicador: `${secaoArquivadosSaldo.dados.length} processo(s)`,
-                detalhamento: `Saldo total: ${fmtBRL(saldoTotal)}`,
+                indicador: `${processosUnicosCapa} processo(s)`,
+                detalhamento: detalhamentoSaldo,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_ARQUIVADOS_SALDO,
             });
         }
@@ -10831,6 +10862,12 @@
         const r = dados || [];
         const gap = 6;
         const saldoTotal = r.reduce((s, d) => s + (d.saldo || 0), 0);
+        // Pedido do usuário: distinguir PROCESSOS distintos de REGISTROS (linhas do CSV)
+        // — desde que o dedupe passou a ser por registro inteiro (chaveDuplicata: '*',
+        // ver CFG_ARQUIVADOS_SALDO), um mesmo processo pode aparecer mais de uma vez
+        // aqui quando tem mais de uma conta judicial com saldo. r.length conta
+        // REGISTROS; processosUnicos conta processos distintos.
+        const processosUnicos = new Set(r.map(d => d.processo)).size;
 
         // No PDF "Tabelas Discriminadas" (somenteTabelas) o pedido do usuário é ir direto
         // às tabelas — sem título grande, KPIs ou observação, só um cabeçalho mínimo.
@@ -10844,15 +10881,22 @@
             doc.text(TITULO_ARQUIVADOS_SALDO, m, m + 2);
             const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
             doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
-            doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} processo(s)`, m, rotuloInfo.y);
+            const rotuloContagem = processosUnicos !== r.length
+                ? `${processosUnicos} processo(s)  •  ${r.length} registro(s)`
+                : `${r.length} processo(s)`;
+            doc.text(`Extraído em ${hoje} às ${hora}  •  ${rotuloContagem}`, m, rotuloInfo.y);
             const yLinha = rotuloInfo.y + 3.5;
             doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
-            // Só "Total de Processos" e "Saldo Total" (pedido do usuário: removeu o card
-            // "Saldo Médio por Processo" que existia antes) — os dois dividem a largura toda.
+            // "Processos Distintos"/"Total de Registros"/"Saldo Total" (pedido do
+            // usuário: distinguir os dois números desde que um processo pode ter mais de
+            // uma conta judicial com saldo — ver processosUnicos acima). Antes só havia
+            // "Total de Processos" (removido o card "Saldo Médio por Processo" que
+            // existia antes disso).
             const kY = yLinha + 6;
             const kpis = [
-                { titulo: 'Total de Processos', valor: String(r.length), acento: COR.azul },
+                { titulo: 'Processos Distintos', valor: String(processosUnicos), acento: COR.azul },
+                { titulo: 'Total de Registros', valor: String(r.length), acento: COR.azul },
                 { titulo: 'Saldo Total', valor: fmtBRL(saldoTotal), acento: COR.azul },
             ];
             const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
@@ -10893,7 +10937,7 @@
         // ordenação: Saldo descendente (maior primeiro).
         if (r.length && !somenteTabelas) {
             const ordenadosCompleta = r.slice().sort((a, b) => (b.saldo || 0) - (a.saldo || 0));
-            tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length})`);
+            tituloSecao(doc, m, proximoY, uw, `Processos arquivados com saldo (${r.length} registro(s))`);
             const colunasCompleta = [
                 { header: 'Processo', width: 26, get: d => d.processo },
                 { header: 'Atribuição (Competência)', width: 30, get: d => d.competencia || d.atuacao || '(sem atribuição)' },
@@ -10941,7 +10985,7 @@
             return;
         }
 
-        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} processo(s))`);
+        tituloSecao(doc, m, proximoY, uw, `Tabela discriminada — ${TITULO_ARQUIVADOS_SALDO} (${r.length} registro(s))`);
         const tabInicioY = proximoY + 6;
 
         const colunas = [
