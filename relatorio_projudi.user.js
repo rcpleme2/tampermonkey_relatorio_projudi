@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.68
+// @version      25.69
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2396,6 +2396,12 @@
     // medida distinta) — mais a tabela discriminada completa via montarTabelaGenerico
     // reaproveitado.
     const TITULO_MEDIDAS_ALTERNATIVAS_ATRASO = 'Cumprimento de Medidas Alternativas em Atraso';
+    // Texto fixo do balão de observação (pedido do usuário), mesmo padrão de
+    // PARAGRAFOS_OBSERVACAO_PRESCRICOES/PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS — só
+    // aparece no PDF quando há medidas listadas (ver montarResumoMedidasAlternativasAtraso).
+    const PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS = [
+        'A secretaria deverá exercer controle permanente dos indicadores relacionados às condições e medidas em atraso, analisando periodicamente as ocorrências pendentes e promovendo as providências necessárias em cada caso. Sempre que necessário, a parte deverá ser intimada a justificar e/ou dar continuidade ao cumprimento das condições fixadas.',
+    ];
     const CFG_MEDIDAS_ALTERNATIVAS_ATRASO = {
         prefixo: 'projudi_medidasalternativas_',
         // Zero medidas em atraso é uma informação válida (mesmo padrão de
@@ -10476,13 +10482,28 @@
                     desenharTituloGrupo(true);
                 }
                 const qtdDistintos = processosPorMedida.has(it.label) ? processosPorMedida.get(it.label).size : 0;
-                desenharCard(doc, m, y, kW2, kH2, it.label, String(it.valor), ['Ocorrências'], true, COR.azul, COR.vermelho);
-                desenharCard(doc, m + kW2 + gap, y, kW2, kH2, it.label, String(qtdDistintos), ['Processos distintos'], true, COR.azul, COR.azul);
+                desenharCard(doc, m, y, kW2, kH2, it.label, String(qtdDistintos), ['Processos distintos'], true, COR.azul, COR.azul);
+                desenharCard(doc, m + kW2 + gap, y, kW2, kH2, it.label, String(it.valor), ['Ocorrências'], true, COR.vermelho, COR.vermelho);
                 y += kH2 + gap;
             });
 
             y += 2;
         });
+
+        // Balão de observação (pedido do usuário) — só com medidas listadas; "0 medidas
+        // em atraso" não precisa de alerta pra secretaria agir. Fonte Helvetica e texto
+        // justificado (ver desenharCardObservacao), cor âmbar/laranja padrão do arquivo —
+        // mesmo esquema de PARAGRAFOS_OBSERVACAO_PRESCRICOES/montarResumoPrescricoes.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS);
+            if (y + alturaObs > ph - m) {
+                ctx.rodapeAntesDeVirar();
+                doc.addPage();
+                ctx.cabecalhoContinuacao();
+                y = ctx.topoContinuacao;
+            }
+            desenharCardObservacao(doc, m, y, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_MEDIDAS_ALTERNATIVAS, COR.ambar);
+        }
 
         desenharRodape(doc, TITULO_MEDIDAS_ALTERNATIVAS_ATRASO, carimbo, pw, ph, m, comIndice);
     }
