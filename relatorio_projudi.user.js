@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.60
+// @version      25.61
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2289,6 +2289,88 @@
         },
     };
 
+    // ── Medidas Cautelares Diversas da Prisão em Atraso (menu Processos > Busca >
+    // Cumprimento de Medidas Alternativas — buscaMedidaAlternativa.do) ─────────────────
+    // Diferente de Apreensões/Prescrições/Monitoração Expirada (Mesa do Escrivão
+    // Criminal): esta tela fica no menu geral "Processos > Busca", não numa aba
+    // específica — por isso é Cartório (dominio: 'cartorio', sem categoriaEspecifica),
+    // seguindo a convenção padrão do projeto (todo relatório novo é Cartório, a não ser
+    // que seja sobre conclusões por magistrado). Form + table.resultTable na MESMA
+    // página (mesmo padrão de Apreensões/Prescrições/Monitoração Expirada) — usa
+    // criarColetor()/cfg.extrai normalmente. A tela tem um filtro "Tipo" (tipoTransacao)
+    // com as opções Transação Penal/Suspensão Condicional do Processo/Suspensão
+    // Condicional da Pena/Pena Substitutiva/Medida Protetiva ao Agressor/Medida Cautelar
+    // — este relatório fixa em "C" (Medida Cautelar = Medida Cautelar Diversa da Prisão)
+    // e mantém "Situação" = "Atrasadas" (já vem marcada por padrão na tela, mas
+    // confirmamos antes de pesquisar, mesmo esquema de preencherEPesquisarMonitoracao
+    // Expiradas). Colunas da tabela real (.mhtml enviado pelo usuário): [0] Processo
+    // [1] Nome da Parte [2] Condições/Suspensões/Substituições (= Tipo/tipoTransacao,
+    // sempre "Medida Cautelar" nesta busca) [3] Tipo de Medida (medida específica, ex.
+    // "Comparecimento em juízo") [4] Cumprimento [5] Cumprimento Efetivo.
+    //
+    // PDF dedicado via pdfCustom (montarResumoMedidasCautelaresAtraso): total geral em
+    // VERMELHO (pedido do usuário) + um card individual POR TIPO DE MEDIDA (coluna
+    // "Tipo de Medida"), cada um também com o total em vermelho — somando TODAS as
+    // ocorrências, mesmo quando várias medidas do mesmo tipo caem no mesmo processo (a
+    // extração não deduplica por processo, cada linha da tela é uma medida distinta) —
+    // mais a tabela discriminada completa via montarTabelaGenerico reaproveitado.
+    const TITULO_MEDIDAS_CAUTELARES_ATRASO = 'Medidas Cautelares Diversas da Prisão em Atraso';
+    const CFG_MEDIDAS_CAUTELARES_ATRASO = {
+        prefixo: 'projudi_medidascautelaresatraso_',
+        // Zero medidas em atraso é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_MONITORACAO_EXPIRADAS) — mostra a linha mesmo vazia, desde
+        // que já coletado.
+        mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão
+        // (removerProcessosDuplicados dedupe por 'processo' quando chaveDuplicata não é
+        // informado) — mesmo problema já corrigido em CFG_APREENSOES/CFG_MONITORACAO_
+        // EXPIRADAS: um processo pode legitimamente ter mais de uma medida cautelar em
+        // atraso (pedido do usuário: somar todas, ainda que existam várias no mesmo
+        // processo).
+        chaveDuplicata: '*',
+        detecta: (cab) => /condi[çc][õo]es\/suspens/i.test(cab) && /tipo\s+de\s+medida/i.test(cab),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'medidas_cautelares_atraso_projudi',
+        rotulos: { coletar: 'Extrair Medidas Cautelares em Atraso', coletarMais: 'Extrair mais (Medidas Cautelares em Atraso)', baixar: '⬇ Baixar Medidas Cautelares em Atraso' },
+        cabecalhos: ['Processo', 'Nome da Parte', 'Tipo', 'Tipo de Medida', 'Cumprimento', 'Cumprimento Efetivo'],
+        larguras: [{ wch: 26 }, { wch: 36 }, { wch: 26 }, { wch: 34 }, { wch: 14 }, { wch: 16 }],
+        // Processo (td[0]): número em <em class="normal"/"attention">, mesmo padrão de
+        // Prescrições/Monitoração Expirada; demais colunas são texto simples (links, mas
+        // textoCelula já junta o texto visível).
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                nomeParte: textoCelula(tds[1]),
+                tipo: textoCelula(tds[2]),
+                tipoMedida: textoCelula(tds[3]),
+                cumprimento: textoCelula(tds[4]),
+                cumprimentoEfetivo: textoCelula(tds[5]),
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+            };
+        },
+        linha: (d) => [d.processo, d.nomeParte, d.tipo, d.tipoMedida, d.cumprimento, d.cumprimentoEfetivo],
+        pdfCustom: (dados, somenteResumo) => gerarPDFMedidasCautelaresAtraso(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoMedidas
+        // CautelaresAtraso não usa nenhum outro campo de p além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_MEDIDAS_CAUTELARES_ATRASO,
+            tabelaTitulo: 'Tabela discriminada das medidas cautelares diversas da prisão em atraso',
+            dataCampo: 'cumprimento',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 22, get: (d) => d.processo },
+                { header: 'Nome da Parte', width: 30, get: (d) => d.nomeParte },
+                { header: 'Tipo de Medida', width: 34, get: (d) => d.tipoMedida },
+                { header: 'Cumprimento', width: 16, get: (d) => d.cumprimento },
+                { header: 'Cumprimento Efetivo', width: 18, get: (d) => d.cumprimentoEfetivo },
+            ],
+        },
+    };
+
     // ── Feitos com Réu Sem RG/IIPR e Feitos com Parte Sem CPF/CNPJ (Mesa do Escrivão
     // Criminal, cards "Feitos com réu sem RG/IIPR" e "Feitos com réu sem CPF/CNPJ" —
     // mesmo bloco #tbMesa de Prescrições/Sem Infração Penal). Mesmo esquema de
@@ -3086,6 +3168,47 @@
                 console.log(`[Projudi Monitoração Expirada] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Monitoração Expirada] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de Medidas Cautelares Diversas da Prisão em Atraso
+    // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
+    // Alternativas") — form + table.resultTable na MESMA página (mesmo padrão de
+    // Apreensões/Monitoração Expirada acima). Dois campos precisam ficar como o
+    // relatório exige: select "Tipo" (tipoTransacao) = "C" (Medida Cautelar) e rádio
+    // "Situação" (situacao) = "atrasadas" (já vem marcado por padrão na tela, mas
+    // confirmamos antes de pesquisar, mesmo esquema de formularioMonitoracaoExpiradas).
+    function formularioMedidasCautelaresAtraso() {
+        const form = document.getElementById('buscaMedidaAlternativaForm');
+        return form && form.querySelector('#tipoTransacao') ? form : null;
+    }
+
+    function preencherEPesquisarMedidasCautelaresAtraso() {
+        const form = formularioMedidasCautelaresAtraso();
+        if (!form) return;
+
+        const selTipo = form.querySelector('#tipoTransacao');
+        if (selTipo && selTipo.value !== 'C') {
+            selTipo.value = 'C';
+            selTipo.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const radioAtrasadas = form.querySelector('input[name="situacao"][value="atrasadas"]');
+        if (radioAtrasadas && !radioAtrasadas.checked) radioAtrasadas.click();
+        console.log(`[Projudi Medidas Cautelares em Atraso] tipoTransacao=${selTipo ? selTipo.value : 'n/d'} situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Medidas Cautelares em Atraso] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Medidas Cautelares em Atraso] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Medidas Cautelares em Atraso] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Medidas Cautelares em Atraso] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -6997,6 +7120,17 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_MONITORACAO_EXPIRADAS, comIndice),
             };
         }
+        if (cfg === CFG_MEDIDAS_CAUTELARES_ATRASO) {
+            return {
+                rotulo: TITULO_MEDIDAS_CAUTELARES_ATRASO,
+                // Resumo dedicado (total geral + um card por tipo de medida, todos em
+                // vermelho — pedido do usuário) — não usa montarResumoGenerico; a tabela
+                // discriminada reaproveita o genérico sem alteração (ver
+                // CFG_MEDIDAS_CAUTELARES_ATRASO.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMedidasCautelaresAtraso(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_MEDIDAS_CAUTELARES_ATRASO, comIndice),
+            };
+        }
         if (cfg === CFG_SEM_RG) {
             return {
                 rotulo: TITULO_SEM_RG,
@@ -7740,6 +7874,7 @@
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoMonitoracaoExpiradas = secoes.find(s => s.cfgOriginal === CFG_MONITORACAO_EXPIRADAS);
+        const secaoMedidasCautelaresAtraso = secoes.find(s => s.cfgOriginal === CFG_MEDIDAS_CAUTELARES_ATRASO);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
@@ -8094,6 +8229,20 @@
                 indicador: `${totalPendentes} pendente(s)`,
                 detalhamento: `${secaoOutrosCumprimentos.dados.length} tipo(s) com pendência · ${totalUrgentes} urgente(s)`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_OUTROS_CUMPRIMENTOS,
+            });
+        }
+        // "Medidas Cautelares Diversas da Prisão em Atraso" — logo após Outros
+        // Cumprimentos (mesma ordem de REPORTS_AUTOMACAO). Sem classificação por
+        // situação/aging (mesmo padrão de Outros Cumprimentos/Arquivados com Saldo — não
+        // é uma tarefa clássica de "dias parado"), por isso semSituacao: true. Indicador:
+        // total geral; detalhamento compacta quantos tipos de medida distintos aparecem.
+        if (secaoMedidasCautelaresAtraso) {
+            const qtdTipos = new Set(secaoMedidasCautelaresAtraso.dados.map(d => (d.tipoMedida || '').trim()).filter(Boolean)).size;
+            itensOutros.push({
+                nome: 'Medidas Cautelares Diversas da Prisão em Atraso',
+                indicador: `${secaoMedidasCautelaresAtraso.dados.length} medida(s)`,
+                detalhamento: `${qtdTipos} tipo(s) de medida distintos`,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_MEDIDAS_CAUTELARES_ATRASO,
             });
         }
         // "Processos Arquivados com Saldo" — mesmo padrão de Outros Cumprimentos: sem
@@ -9828,6 +9977,80 @@
         }
 
         desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Medidas Cautelares Diversas da Prisão em Atraso (menu Processos > Busca >
+    // Cumprimento de Medidas Alternativas) ──────────────────────────────────────────────
+    // Lista paginada por processo (mesmo esquema de Apreensões/Monitoração Expirada) —
+    // reaproveita montarTabelaGenerico sem alteração pra tabela discriminada, mas o
+    // resumo é dedicado: total geral em VERMELHO (pedido do usuário) + um card por TIPO
+    // DE MEDIDA (coluna "Tipo de Medida"), também em vermelho, somando TODAS as
+    // ocorrências (contarPorCampo conta por LINHA, não por processo — um processo com 3
+    // medidas do mesmo tipo conta 3, exatamente o que o usuário pediu).
+    function gerarPDFMedidasCautelaresAtraso(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoMedidasCautelaresAtraso(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_MEDIDAS_CAUTELARES_ATRASO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_MEDIDAS_CAUTELARES_ATRASO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Card do total geral (vermelho, pedido do usuário) seguido de uma grade de cards
+    // individuais por tipo de medida (desenharGradeCardsIndicadores/desenharCardIndicador
+    // — mesmo componente visual usado pelo painelExtra de Juntadas), cada um também com
+    // o total em vermelho (critico: true força COR.vermelhoVivo em desenharCardIndicador).
+    function montarResumoMedidasCautelaresAtraso(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const carimbo = `${hoje} ${hora}`;
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_MEDIDAS_CAUTELARES_ATRASO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+
+        desenharCard(doc, m, kY, uw, kH, 'Total de Medidas Cautelares em Atraso', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        let y = kY + kH + gap + 2;
+        const ctx = {
+            rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_MEDIDAS_CAUTELARES_ATRASO, carimbo, pw, ph, m, comIndice),
+            topoContinuacao: m + 14,
+            cabecalhoContinuacao: () => {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${TITULO_MEDIDAS_CAUTELARES_ATRASO} — por tipo de medida`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+            },
+        };
+
+        if (r.length > 0) {
+            // topN alto o bastante pra nunca cair no corte "Outros" (semOutros:true já
+            // garante isso, mas topN explícito documenta a intenção: TODOS os tipos
+            // encontrados viram card, um por um, pedido do usuário).
+            const porTipo = contarPorCampo(r, 'tipoMedida', 999, null, true);
+            tituloSecao(doc, m, y + 4, uw, 'Medidas Cautelares em Atraso por Tipo de Medida');
+            const itensCards = porTipo.map(it => ({ titulo: it.label, valor: it.valor, critico: true, acento: COR.azul }));
+            y = desenharGradeCardsIndicadores(doc, m, y + TITULO_TABELA_H, uw, itensCards, ctx) + gap;
+        }
+
+        desenharRodape(doc, TITULO_MEDIDAS_CAUTELARES_ATRASO, carimbo, pw, ph, m, comIndice);
     }
 
     // ── PDF de Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem
@@ -12024,6 +12247,7 @@
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
         else if (CFG_PRESCRICOES.detecta(cab)) cfg = CFG_PRESCRICOES;
         else if (CFG_MONITORACAO_EXPIRADAS.detecta(cab)) cfg = CFG_MONITORACAO_EXPIRADAS;
+        else if (CFG_MEDIDAS_CAUTELARES_ATRASO.detecta(cab)) cfg = CFG_MEDIDAS_CAUTELARES_ATRASO;
         else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
@@ -13194,6 +13418,32 @@
             }
         }
 
+        // Tela de filtros de Medidas Cautelares Diversas da Prisão em Atraso
+        // (buscaMedidaAlternativa.do, menu "Processos > Busca > Cumprimento de Medidas
+        // Alternativas") — mesmo padrão de Monitoração Expirada acima: decide pelo
+        // ESTADO da automação, não pela presença de resultados.
+        if (formularioMedidasCautelaresAtraso()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_medidascautelaresatraso') {
+                console.log('[Projudi Medidas Cautelares em Atraso] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_medidascautelaresatraso');
+                preencherEPesquisarMedidasCautelaresAtraso();
+                return;
+            }
+            // Uso manual (fora da automação): a tela pode já conviver com resultados de
+            // uma pesquisa anterior, então não há como usar "sem linha nenhuma" para
+            // decidir se o botão deve aparecer.
+            if (estadoAtual !== 'coletando_medidascautelaresatraso' && mostrarBotoesIndividuais()) {
+                const bMedidasCautelaresAtraso = document.createElement('button');
+                bMedidasCautelaresAtraso.type = 'button';
+                bMedidasCautelaresAtraso.className = 'projudi-btn';
+                bMedidasCautelaresAtraso.title = 'Marca "Tipo" = Medida Cautelar e "Situação" = Atrasadas, e pesquisa';
+                bMedidasCautelaresAtraso.textContent = 'Preencher e Pesquisar (Medidas Cautelares em Atraso)';
+                bMedidasCautelaresAtraso.onclick = () => preencherEPesquisarMedidasCautelaresAtraso();
+                buttonBar.appendChild(bMedidasCautelaresAtraso);
+            }
+        }
+
         // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
         // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
         // automação, não pela presença de resultados).
@@ -14157,6 +14407,12 @@
         // painel, e como uma linha própria na tabela unificada do Cartório do PDF conjunto
         // (ver linhasCartorio em gerarPDFConjunto, mesmo padrão de "Bens Apreendidos").
         { key: 'outroscumprimentos', cfg: CFG_OUTROS_CUMPRIMENTOS, navAlvo: 'outroscumprimentos', rotulo: 'Outros Cumprimentos', curto: 'Outros Cumprim.', dominio: 'cartorio', precisaPreencher: false },
+        // Medidas Cautelares Diversas da Prisão em Atraso — menu geral "Processos > Busca
+        // > Cumprimento de Medidas Alternativas" (não uma aba da Mesa do Escrivão
+        // Criminal), por isso é Cartório (sem categoriaEspecifica), seguindo a convenção
+        // padrão do projeto. Logo após Outros Cumprimentos, mesmo grupo "Outros" do
+        // Cartório na capa unificada (ver itensOutros em gerarPDFConjunto).
+        { key: 'medidascautelaresatraso', cfg: CFG_MEDIDAS_CAUTELARES_ATRASO, navAlvo: 'medidascautelaresatraso', rotulo: 'Medidas Cautelares Diversas da Prisão em Atraso', curto: 'Med. Cautelares Atraso', dominio: 'cartorio', precisaPreencher: true },
         // Relatório Dinâmico do Projudi (administracao/relatorio.do), sem tabela de
         // resultados nem paginação — os dados vêm de um CSV pedido via fetch() em
         // segundo plano (ver CFG_ARQUIVADOS_SALDO/tratarPaginaArquivadosSaldo). Entra no
@@ -14584,6 +14840,10 @@
         // acharLinkArquivadosSaldoNaListagem, chamada por tratarPaginaArquivadosSaldo).
         else if (alvo === 'arquivadosaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
+        // "Cumprimento de Medidas Alternativas" fica no menu geral "Processos > Busca"
+        // (link direto com href, não numa aba) — mesmo esquema simples de
+        // acharLinkMenu usado por Apreensões.
+        else if (alvo === 'medidascautelaresatraso') link = acharLinkMenu(/buscaMedidaAlternativa\.do/i, /cumprimento\s+de\s+medidas\s+alternativas/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
