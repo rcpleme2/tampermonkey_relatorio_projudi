@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.64
+// @version      25.65
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -11047,6 +11047,15 @@
 
     const TITULO_PARALISADOS = 'Processos Paralisados';
 
+    // Texto fixo do balão de OBSERVAÇÃO do resumo de Paralisados (pedido do usuário,
+    // texto literal fornecido) — mesmo padrão de medirAlturaCardObservacao/
+    // desenharCardObservacao (Helvetica, justificado, acento âmbar) já usado no balão de
+    // Remessas em Aberto. Só aparece quando dados.length > 0 (ver uso em
+    // montarResumoParalisados) — sem paralisados, nenhum balão.
+    const PARAGRAFOS_OBSERVACAO_PARALISADOS = [
+        'A secretaria deverá realizar acompanhamento periódico dos processos paralisados há mais de 30 dias, mantendo rigoroso controle desse indicador e adotando as providências necessárias para assegurar o regular andamento dos feitos e prevenir atrasos indevidos na tramitação processual.',
+    ];
+
     function gerarPDFParalisados(dados, somenteResumo) {
         const doc = novoDocPDF();
         montarResumoParalisados(doc, dados, true, false);
@@ -11120,6 +11129,24 @@
         }
         desenharCard(doc, m, k3Y, uw, 26, 'Processo paralisado há mais tempo', valMP, subsMP, true, COR.vermelho);
 
+        // Balão de OBSERVAÇÃO (pedido do usuário) — logo abaixo do card "Processo
+        // paralisado há mais tempo", acima das tabelas de ranking; só aparece havendo
+        // ao menos 1 paralisado (mesmo critério de CFG_BENS_PENDENTES_SNGB).
+        let yObsParalisados = k3Y + 26 + gap + 2;
+        if (dados.length > 0) {
+            const hObsParalisados = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_PARALISADOS);
+            if (yObsParalisados + hObsParalisados > ph - 14) {
+                desenharRodape(doc, TITULO_PARALISADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                doc.addPage();
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${TITULO_PARALISADOS} — detalhamento`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+                yObsParalisados = m + 14;
+            }
+            desenharCardObservacao(doc, m, yObsParalisados, uw, hObsParalisados, 'Observação', PARAGRAFOS_OBSERVACAO_PARALISADOS);
+            yObsParalisados += hObsParalisados + gap;
+        }
+
         // Tabelas no lugar dos dois gráficos empilhados de antes (pedido do usuário):
         // ranking dos processos mais demorados, depois o tempo médio por Classe
         // Processual — cada uma abre página nova se não couber no que resta da página 1.
@@ -11132,7 +11159,7 @@
                 doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
             },
         };
-        let y = k3Y + 26 + gap + 2;
+        let y = yObsParalisados;
         const top10 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 10);
         if (top10.length) {
             if (y + medirTabela(top10.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
