@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.55
+// @version      25.56
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2222,13 +2222,20 @@
         'A ausência de RG/IIPR cadastrado dificulta a triagem e a tramitação do feito — recomenda-se solicitar a informação junto à autoridade policial ou, se for o caso, promover a atualização do cadastro processual assim que o dado estiver disponível.',
     ];
     const PARAGRAFOS_OBSERVACAO_SEM_CPF = [
-        'A secretaria deverá diligenciar para a correta identificação civil ou fiscal da parte, providência indispensável para a expedição de mandados, citações/intimações e para o cumprimento de eventuais determinações judiciais.',
+        'A secretaria deverá diligenciar para a correta identificação civil da parte, providência indispensável para a expedição de mandados, citações/intimações e para o cumprimento de eventuais determinações judiciais.',
         'A ausência de CPF/CNPJ cadastrado dificulta a triagem e a tramitação do feito — recomenda-se solicitar a informação junto aos órgãos competentes ou, se for o caso, promover a atualização do cadastro processual assim que o dado estiver disponível.',
     ];
     const CFG_SEM_RG = {
         prefixo: 'projudi_semrg_',
         // Zero pendências é informação válida (mesmo padrão de CFG_SEM_INFRACAO_PENAL).
         mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não por 'processo' (padrão
+        // de removerProcessosDuplicados) — mesmo motivo de CFG_APREENSOES: um processo
+        // pode legitimamente ter mais de um réu sem RG/IIPR cadastrado, gerando duas
+        // linhas com o mesmo número de processo e Parte diferente. Dedupe por 'processo'
+        // derrubaria uma dessas linhas, fazendo o total do card ficar menor que o
+        // "N registro(s) encontrado(s)" que o Projudi reportou na tela.
+        chaveDuplicata: '*',
         // Mesma colisão de cabeçalho de CFG_SEM_INFRACAO_PENAL (a coluna "Dias
         // Paralisado" casa com o regex largo de CFG_PARALISADOS) — detecção própria
         // pelo <form id="mesaAnalistaEscrivaoForm"> com o actionType desta tela
@@ -2280,6 +2287,10 @@
     const CFG_SEM_CPF = {
         prefixo: 'projudi_semcpf_',
         mostrarSeVazio: true,
+        // Mesmo motivo de CFG_SEM_RG/CFG_APREENSOES: um processo pode ter mais de uma
+        // parte sem CPF/CNPJ cadastrado, gerando linhas com o mesmo processo e Parte
+        // diferente — dedupe por 'processo' perderia uma delas.
+        chaveDuplicata: '*',
         detecta: () => {
             const form = document.getElementById('mesaAnalistaEscrivaoForm');
             return !!(form && /actionType=pesquisarProcessosComParteSemCpf/i.test(form.action));
