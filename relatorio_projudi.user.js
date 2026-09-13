@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.59
+// @version      25.60
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2207,6 +2207,88 @@
         },
     };
 
+    // ── Monitoração Eletrônica Expirada (Mesa do Escrivão Criminal, link "Expiradas"
+    // dentro do card "Monitoração Eletrônica") — buscaMonitoracaoEletronica.do, rádio
+    // "situacao" pré-marcado em "atrasadas" (rótulo do card é "Expiradas", mas o valor do
+    // rádio no formulário é "atrasadas" — confirmado no .mhtml enviado pelo usuário).
+    // Categoria Crime, mesmo esquema de navegação de Prescrições (clica na aba "Mesa do
+    // Escrivão Criminal", depois clica no link "Expiradas" quando ele aparecer — ver
+    // navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas/formularioMonitoracaoExpiradas/
+    // preencherEPesquisarMonitoracaoExpiradas). Lista paginada por processo (mesmo esquema
+    // de Juntadas/Prescrições) — usa criarColetor()/cfg.extrai normalmente. PDF dedicado
+    // via pdfCustom (montarResumoMonitoracaoExpiradas, só 2 cards — total em VERMELHO,
+    // pedido do usuário) + montarTabelaGenerico reaproveitado sem alteração pra tabela
+    // discriminada.
+    //
+    // Colunas da tabela real (.mhtml enviado pelo usuário): [0] Processo [1] Nome da Parte
+    // [2] Tipo [3] Data de Início [4] Data Provável de Término [5] Data Final [6] Status.
+    const TITULO_MONITORACAO_EXPIRADAS = 'Monitoração Eletrônica — Medidas Expiradas';
+    // Texto fixo do balão de observação (pedido do usuário) — só aparece no PDF quando há
+    // processos listados (mesmo padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES).
+    const PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS = [
+        'A secretaria deverá verificar cada monitoração eletrônica expirada e adotar as providências cabíveis (renovação da medida, baixa/encerramento da monitoração ou comunicação ao juízo), evitando que o processo permaneça com medida vencida sem manifestação.',
+    ];
+    const CFG_MONITORACAO_EXPIRADAS = {
+        prefixo: 'projudi_monitoracaoexpiradas_',
+        // Zero monitorações expiradas é uma informação válida (mesmo padrão de
+        // CFG_APREENSOES/CFG_PRESCRICOES) — mostra a linha mesmo vazia, desde que já
+        // coletado.
+        mostrarSeVazio: true,
+        // Dedupe pelo registro INTEIRO (chaveDuplicata: '*'), não pelo padrão
+        // (removerProcessosDuplicados dedupe por 'processo' quando chaveDuplicata não é
+        // informado) — mesmo problema já corrigido em CFG_APREENSOES: um processo pode
+        // legitimamente ter mais de uma monitoração eletrônica expirada (ex.: "Medida
+        // Cautelar" e "Medida Protetiva ao Agressor" simultâneas, ou duas medidas em
+        // períodos diferentes). Dedupe por 'processo' colapsava esses registros
+        // distintos, fazendo o card "Total de monitorações expiradas" mostrar a
+        // quantidade de PROCESSOS em vez da quantidade de REGISTROS (bug relatado pelo
+        // usuário).
+        chaveDuplicata: '*',
+        detecta: (cab) => /data\s+prov[áa]vel\s+de\s+t[ée]rmino/i.test(cab),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'monitoracao_eletronica_expiradas_projudi',
+        rotulos: { coletar: 'Extrair Monitoração Expirada', coletarMais: 'Extrair mais (Monitoração Expirada)', baixar: '⬇ Baixar Monitoração Expirada' },
+        cabecalhos: ['Processo', 'Nome da Parte', 'Tipo', 'Data de Início', 'Data Provável de Término', 'Data Final', 'Status'],
+        larguras: [{ wch: 26 }, { wch: 36 }, { wch: 26 }, { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 16 }],
+        // Processo (td[0]): número em <em class="normal"/"attention">, mesmo padrão de
+        // Prescrições/Sem Infração Penal; demais colunas são texto simples.
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            return {
+                processo,
+                nomeParte: textoCelula(tds[1]),
+                tipo: textoCelula(tds[2]),
+                dataInicio: textoCelula(tds[3]),
+                dataProvavelTermino: textoCelula(tds[4]),
+                dataFinal: textoCelula(tds[5]),
+                status: textoCelula(tds[6]),
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+            };
+        },
+        linha: (d) => [d.processo, d.nomeParte, d.tipo, d.dataInicio, d.dataProvavelTermino, d.dataFinal, d.status],
+        pdfCustom: (dados, somenteResumo) => gerarPDFMonitoracaoExpiradas(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoMonitoracao
+        // Expiradas não usa nenhum outro campo de p além do que já é lido aqui).
+        pdf: {
+            titulo: TITULO_MONITORACAO_EXPIRADAS,
+            tabelaTitulo: 'Tabela discriminada das monitorações eletrônicas expiradas',
+            dataCampo: 'dataProvavelTermino',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 22, get: (d) => d.processo },
+                { header: 'Nome da Parte', width: 30, get: (d) => d.nomeParte },
+                { header: 'Tipo', width: 24, get: (d) => d.tipo },
+                { header: 'Data de Início', width: 14, get: (d) => d.dataInicio },
+                { header: 'Data Provável de Término', width: 16, get: (d) => d.dataProvavelTermino },
+                { header: 'Data Final', width: 14, get: (d) => d.dataFinal },
+                { header: 'Status', width: 16, get: (d) => d.status },
+            ],
+        },
+    };
+
     // ── Feitos com Réu Sem RG/IIPR e Feitos com Parte Sem CPF/CNPJ (Mesa do Escrivão
     // Criminal, cards "Feitos com réu sem RG/IIPR" e "Feitos com réu sem CPF/CNPJ" —
     // mesmo bloco #tbMesa de Prescrições/Sem Infração Penal). Mesmo esquema de
@@ -2967,6 +3049,43 @@
                 console.log(`[Projudi Prescrições] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
                     console.warn('[Projudi Prescrições] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                }
+            }, 15000);
+        }, 1500);
+    }
+
+    // Tela de filtros de Monitoração Eletrônica (buscaMonitoracaoEletronica.do,
+    // alcançada pelo link "Expiradas" dentro do card "Monitoração Eletrônica" da Mesa do
+    // Escrivão Criminal) — form + table.resultTable na MESMA página (mesmo padrão de
+    // Apreensões/Prescrições acima). O rádio "situacao" já chega marcado em "atrasadas"
+    // (valor do card "Expiradas"), mas confirmamos antes de pesquisar — só clica se AINDA
+    // não estiver marcado. Clique de verdade via .click() (não .checked = true +
+    // dispatchEvent — armadilha já documentada no CLAUDE.md: rádio/checkbox do Projudi às
+    // vezes só reage a clique real do usuário).
+    function formularioMonitoracaoExpiradas() {
+        const form = document.getElementById('buscaMonitoracaoEletronicaForm');
+        return form && form.querySelector('input[name="situacao"]') ? form : null;
+    }
+
+    function preencherEPesquisarMonitoracaoExpiradas() {
+        const form = formularioMonitoracaoExpiradas();
+        if (!form) return;
+
+        const radioAtrasadas = form.querySelector('input[name="situacao"][value="atrasadas"]');
+        if (radioAtrasadas && !radioAtrasadas.checked) radioAtrasadas.click();
+        console.log(`[Projudi Monitoração Expirada] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Monitoração Expirada] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Monitoração Expirada] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+
+            setTimeout(() => {
+                const aindaNoFormulario = !document.querySelector('table.resultTable');
+                console.log(`[Projudi Monitoração Expirada] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                if (aindaNoFormulario) {
+                    console.warn('[Projudi Monitoração Expirada] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -6868,6 +6987,16 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_INFRACAO_PENAL, comIndice),
             };
         }
+        if (cfg === CFG_MONITORACAO_EXPIRADAS) {
+            return {
+                rotulo: TITULO_MONITORACAO_EXPIRADAS,
+                // Resumo dedicado (só 2 cards, total em vermelho — pedido do usuário) —
+                // não usa montarResumoGenerico; a tabela discriminada reaproveita o
+                // genérico sem alteração (ver CFG_MONITORACAO_EXPIRADAS.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoMonitoracaoExpiradas(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_MONITORACAO_EXPIRADAS, comIndice),
+            };
+        }
         if (cfg === CFG_SEM_RG) {
             return {
                 rotulo: TITULO_SEM_RG,
@@ -7610,6 +7739,7 @@
         const secaoCumprimentoMedidas = secoes.find(s => s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS);
         const secaoPrescricoes = secoes.find(s => s.cfgOriginal === CFG_PRESCRICOES);
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
+        const secaoMonitoracaoExpiradas = secoes.find(s => s.cfgOriginal === CFG_MONITORACAO_EXPIRADAS);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
@@ -8047,6 +8177,20 @@
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
             });
         }
+        // "Monitoração Eletrônica Expirada" — logo após Sem Infração Penal (mesma ordem
+        // de REPORTS_AUTOMACAO). Indicador: total de monitorações expiradas;
+        // detalhamento compacta a mais antiga (por Data Provável de Término).
+        if (secaoMonitoracaoExpiradas) {
+            const antigo = acharMaisAntigo(secaoMonitoracaoExpiradas.dados, 'dataProvavelTermino');
+            const prejudicado = prejudicadoInfo(CFG_MONITORACAO_EXPIRADAS);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Monitoração Eletrônica Expirada',
+                indicador: `${secaoMonitoracaoExpiradas.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_MONITORACAO_EXPIRADAS,
+            });
+        }
         // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — logo após
         // Sem Infração Penal (mesma ordem do popup: REPORTS_AUTOMACAO declara semrg/
         // semcpf logo após seminfracaopenal dentro da categoria Crime). Indicador: total
@@ -8165,7 +8309,16 @@
             };
         }
 
-        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado || atuacoesAtivas.length > 0;
+        // Bug relatado pelo usuário: rodando só um relatório da categoria "Outros" (ex.:
+        // Monitoração Eletrônica Expirada, Prescrições, Apreensões — nenhum deles entra em
+        // CFGS_CARTORIO nem é Gabinete), o PDF conjunto saía com a página 1 (capa) em
+        // branco — temConteudo não considerava outrasSecoes/secaoAtivosClasse, então a
+        // capa (desenharCapaSituacao logo abaixo) nunca era desenhada, e sem ela nenhuma
+        // outra página era aberta (usouPagina1 ficava false o tempo todo, já que seções
+        // zeradas de "Outros" também não geram página própria — ver secaoVazia mais
+        // abaixo), resultando na página em branco padrão que o jsPDF cria por padrão.
+        const temConteudo = itensCartorio.length > 0 || gabinete.itens.length > 0 || gabinete.coletado
+            || atuacoesAtivas.length > 0 || outrasSecoes.length > 0 || !!secaoAtivosClasse;
         let usouPagina1 = false;
 
         // ═══ CAPA "Situação da Unidade" — só no modo 'resumo'. No modo 'tabelas' a
@@ -9568,6 +9721,113 @@
         }
 
         desenharRodape(doc, TITULO_PRESCRICOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Monitoração Eletrônica Expirada (Mesa do Escrivão Criminal, link
+    // "Expiradas") ─────────────────────────────────────────────────────────────
+    // Lista paginada por processo (ao contrário de Cumprimento de Medidas/Outros
+    // Cumprimentos, que são painéis agregados) — reaproveita montarTabelaGenerico sem
+    // alteração pra tabela discriminada, mas o resumo é dedicado (só 2 cards, mesmo
+    // esquema de gerarPDFPrescricoes/montarResumoPrescricoes acima) em vez de
+    // montarResumoGenerico.
+    function gerarPDFMonitoracaoExpiradas(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoMonitoracaoExpiradas(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_MONITORACAO_EXPIRADAS, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_MONITORACAO_EXPIRADAS.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards: total de monitorações expiradas (número em VERMELHO — pedido do
+    // usuário) e a expiração mais antiga (menor dataProvavelTermino entre os processos),
+    // com o processo correspondente como sub-linha. Mesmo esquema visual de
+    // montarResumoPrescricoes acima.
+    function montarResumoMonitoracaoExpiradas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_MONITORACAO_EXPIRADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de monitorações expiradas', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataProvavelTermino');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Expiração mais antiga', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela discriminada EMBUTIDA nesta mesma página, acima da observação (mesmo
+        // esquema de montarResumoPrescricoes) — além da página separada de
+        // montarTabelaGenerico. Limitada aos 10 primeiros, ordenados pela expiração mais
+        // antiga (dataProvavelTermino crescente), mesmo critério do card acima.
+        const LIMITE_TABELA_EMBUTIDA_MONITORACAO_EXPIRADAS = 10;
+        const ordenadosPorExpiracao = r.slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataProvavelTermino); const tb = parseDataBR(b.dataProvavelTermino);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+        const primeirosDaLista = ordenadosPorExpiracao.slice(0, LIMITE_TABELA_EMBUTIDA_MONITORACAO_EXPIRADAS);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_MONITORACAO_EXPIRADAS
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_MONITORACAO_EXPIRADAS} Processos (expiração mais antiga)`
+                : 'Lista dos Processos com Monitoração Expirada';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_MONITORACAO_EXPIRADAS.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação — só com processos listados; "0 pendências" não precisa de
+        // alerta pra secretaria agir. Fonte Helvetica e texto justificado (ver
+        // desenharCardObservacao), cor âmbar/laranja padrão do arquivo.
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS);
+            if (yObs + alturaObs > ph - m) {
+                desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                doc.addPage();
+                yObs = m + 4;
+            }
+            desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_MONITORACAO_EXPIRADAS, COR.ambar);
+        }
+
+        desenharRodape(doc, TITULO_MONITORACAO_EXPIRADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF de Feitos Sem Infração Penal (Mesa do Escrivão Criminal, card "Feitos sem
@@ -11763,6 +12023,7 @@
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
         else if (CFG_PRESCRICOES.detecta(cab)) cfg = CFG_PRESCRICOES;
+        else if (CFG_MONITORACAO_EXPIRADAS.detecta(cab)) cfg = CFG_MONITORACAO_EXPIRADAS;
         else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
@@ -12139,6 +12400,7 @@
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
+        if (navAlvo === 'monitoracaoexpiradas') return /buscaMonitoracaoEletronica\.do/i;
         // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
         // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
         // que renderizam só um aviso de "nenhum resultado" em vez de tabela) disparar em
@@ -12504,6 +12766,25 @@
                 cartao.click();
             } else {
                 console.log('[Projudi Sem Infração Penal] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+            }
+            return;
+        }
+
+        // Aba "Mesa do Escrivão Criminal" com "Expiradas" (Monitoração Eletrônica)
+        // carregada — 2º passo da navegação (1º: clicar na aba, ver
+        // navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas/navegarMenu(
+        // 'monitoracaoexpiradas')). Mesmo problema de Prescrições acima: essa tela NÃO tem
+        // table.buttonBar (é a home/aba, não uma tela de resultados) — sem tratar isso
+        // ANTES do gate "if (!buttonBar)" logo abaixo, a extração nunca chegaria a rodar.
+        // Detectado só pelo ESTADO da automação (preenchendo_monitoracaoexpiradas), sem
+        // depender de conteúdo que pode ainda não ter carregado.
+        if (estadoAutoNoInicio === 'preenchendo_monitoracaoexpiradas' && !formularioMonitoracaoExpiradas()) {
+            const linkExpiradas = acharLinkMenu(/buscaMonitoracaoEletronica\.do/i, /^expiradas$/i);
+            if (linkExpiradas) {
+                console.log('[Projudi Monitoração Expirada] aba "Mesa do Escrivão Criminal" carregada — clicando em "Expiradas"');
+                linkExpiradas.click();
+            } else {
+                console.log('[Projudi Monitoração Expirada] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Expiradas" ainda não apareceu)');
             }
             return;
         }
@@ -12885,6 +13166,31 @@
                 bPrescricoes.textContent = 'Preencher e Pesquisar (Prescrições)';
                 bPrescricoes.onclick = () => preencherEPesquisarPrescricoes();
                 buttonBar.appendChild(bPrescricoes);
+            }
+        }
+
+        // Tela de filtros de Monitoração Eletrônica (buscaMonitoracaoEletronica.do, link
+        // "Expiradas" da Mesa do Escrivão Criminal) — mesmo padrão de Prescrições acima:
+        // decide pelo ESTADO da automação, não pela presença de resultados.
+        if (formularioMonitoracaoExpiradas()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_monitoracaoexpiradas') {
+                console.log('[Projudi Monitoração Expirada] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_monitoracaoexpiradas');
+                preencherEPesquisarMonitoracaoExpiradas();
+                return;
+            }
+            // Uso manual (fora da automação): a tela pode já conviver com resultados de
+            // uma pesquisa anterior, então não há como usar "sem linha nenhuma" para
+            // decidir se o botão deve aparecer.
+            if (estadoAtual !== 'coletando_monitoracaoexpiradas' && mostrarBotoesIndividuais()) {
+                const bMonitoracaoExpiradas = document.createElement('button');
+                bMonitoracaoExpiradas.type = 'button';
+                bMonitoracaoExpiradas.className = 'projudi-btn';
+                bMonitoracaoExpiradas.title = 'Marca "Atrasadas" (Expiradas) e pesquisa';
+                bMonitoracaoExpiradas.textContent = 'Preencher e Pesquisar (Monitoração Expirada)';
+                bMonitoracaoExpiradas.onclick = () => preencherEPesquisarMonitoracaoExpiradas();
+                buttonBar.appendChild(bMonitoracaoExpiradas);
             }
         }
 
@@ -13875,9 +14181,14 @@
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
         { key: 'prescricoes', cfg: CFG_PRESCRICOES, navAlvo: 'prescricoes', rotulo: 'Prescrições', curto: 'Prescrições', categoriaEspecifica: 'crime', precisaPreencher: true },
         // "Feitos Sem Infração Penal" — mesma aba "Mesa do Escrivão Criminal" de
-        // Prescrições (card sem link, ver acharCardSemInfracaoPenal); ÚLTIMO da categoria
-        // Crime, logo após Prescrições (mesma ordem em que os cards aparecem no #tbMesa).
+        // Prescrições (card sem link, ver acharCardSemInfracaoPenal); logo após
+        // Prescrições (mesma ordem em que os cards aparecem no #tbMesa).
         { key: 'seminfracaopenal', cfg: CFG_SEM_INFRACAO_PENAL, navAlvo: 'seminfracaopenal', rotulo: 'Feitos Sem Infração Penal', curto: 'Sem Infração Penal', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Monitoração Eletrônica Expirada" — mesma aba "Mesa do Escrivão Criminal", link
+        // "Expiradas" dentro do card "Monitoração Eletrônica"; logo após Sem Infração
+        // Penal (mesma ordem de aparição no #tbMesa; a ordem final da categoria Crime
+        // segue REPORTS_AUTOMACAO, ver "ordemNaCapa" em gerarPDFConjunto).
+        { key: 'monitoracaoexpiradas', cfg: CFG_MONITORACAO_EXPIRADAS, navAlvo: 'monitoracaoexpiradas', rotulo: 'Monitoração Eletrônica Expirada', curto: 'Monit. Eletrônica Exp.', categoriaEspecifica: 'crime', precisaPreencher: true },
         // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — mesma aba
         // "Mesa do Escrivão Criminal" (cards sem link, ver acharCardSemRg/acharCardSemCpf);
         // logo após Sem Infração Penal (mesma ordem em que os cards aparecem no #tbMesa).
@@ -14251,6 +14562,12 @@
         // acharCardSemInfracaoPenal) acontece em injetarBotoes, a cada carregamento de
         // página, assim que o card aparecer no DOM.
         else if (alvo === 'seminfracaopenal') return navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal();
+        // "Expiradas" (Monitoração Eletrônica) fica na mesma aba "Mesa do Escrivão
+        // Criminal" de Prescrições/Sem Infração Penal — abre a aba aqui; o clique no link
+        // "Expiradas" em si (ver acharLinkMenu/buscaMonitoracaoEletronica.do na 2ª etapa
+        // de injetarBotoes) acontece a cada carregamento de página, assim que o link
+        // aparecer — mesmo esquema de "Vencidas" (Prescrições).
+        else if (alvo === 'monitoracaoexpiradas') return navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas();
         // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — mesma aba
         // "Mesa do Escrivão Criminal"; o clique no card em si acontece em injetarBotoes.
         else if (alvo === 'semrg') return navegarAbaMesaEscrivaoCriminalParaSemRg();
@@ -14371,6 +14688,23 @@
         return true;
     }
 
+    // Aba "Mesa do Escrivão Criminal" (Monitoração Eletrônica, link "Expiradas") — mesmo
+    // esquema de navegarAbaMesaEscrivaoCriminalParaPrescricoes acima: clica na aba e já
+    // devolve sucesso, sem esperar o conteúdo carregar. O clique em "Expiradas"
+    // propriamente dito é um passo SEPARADO (ver bloco perto de
+    // formularioMonitoracaoExpiradas em injetarBotoes), disparado a cada carregamento de
+    // página assim que o link aparecer — mesma navegação de verdade (não AJAX) já
+    // confirmada para "Vencidas" (Prescrições).
+    function navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: monitoracaoexpiradas (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
     // Mesmo esquema acima, mas para "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem
     // CPF/CNPJ" — mesma aba ("Mesa do Escrivão Criminal"); o clique no card específico
     // (ver acharCardSemRg/acharCardSemCpf) acontece à parte, no gate de injetarBotoes.
