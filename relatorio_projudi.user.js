@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.75
+// @version      25.76
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -31,8 +31,17 @@
     // não é atômica entre frames) — aceitável para um log de diagnóstico, não crítico.
     const CHAVE_LOG_DETALHADO = 'projudi_log_detalhado';
     const LOG_DETALHADO_MAX = 400;
+    // Bug relatado pelo usuário ("linhas.push is not a function", centenas de vezes no
+    // console): JSON.parse pode ter sucesso mas devolver algo que não é array (ex.: a
+    // chave já continha outro valor por algum motivo) — sem o Array.isArray abaixo, o
+    // valor não-array passava direto pra quem chama, que quebrava ao tentar .push nele.
+    // Também nunca deixa lerLogDetalhado() propagar exceção — quem chama sempre recebe um
+    // array de verdade, mesmo vazio.
     function lerLogDetalhado() {
-        try { return JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]'); } catch (e) { return []; }
+        try {
+            const v = JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]');
+            return Array.isArray(v) ? v : [];
+        } catch (e) { return []; }
     }
     function atualizarLogDetalhadoUI() {
         try {
