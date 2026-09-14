@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.72
+// @version      25.73
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18,6 +18,45 @@
     'use strict';
 
     const store = window.localStorage;
+
+    // ── Log detalhado dentro do painel (pedido do usuário: mesma ideia do projeto
+    // SEEU_correição — um "▼ Ver log detalhado" no próprio painel da extensão, sem
+    // precisar abrir o console do navegador pra acompanhar o que a automação está
+    // fazendo/decidindo) ──────────────────────────────────────────────────────────────
+    // Guardado em localStorage (não só memória) porque cada passo da automação costuma
+    // recarregar a página inteira (clique em Pesquisar/navegação de menu) — um buffer só
+    // em memória se perderia a cada reload. Como o Projudi roda o script em várias frames
+    // sem @noframes (ver comentário grande de IDB_NOME logo abaixo), duas frames podem
+    // gravar quase ao mesmo tempo e uma sobrescrever a linha da outra (leitura-e-escrita
+    // não é atômica entre frames) — aceitável para um log de diagnóstico, não crítico.
+    const CHAVE_LOG_DETALHADO = 'projudi_log_detalhado';
+    const LOG_DETALHADO_MAX = 400;
+    function lerLogDetalhado() {
+        try { return JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]'); } catch (e) { return []; }
+    }
+    function atualizarLogDetalhadoUI() {
+        const caixa = document.getElementById('pa-log-detalhado');
+        if (!caixa) return;
+        const linhas = lerLogDetalhado();
+        caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+        caixa.scrollTop = caixa.scrollHeight;
+    }
+    // Registra uma linha no log detalhado do painel E no console (console.log continua
+    // funcionando exatamente como antes — isto é um ACRÉSCIMO, não substitui o console
+    // pra quem prefere DevTools). Use nos pontos que já eram logados via console.log e
+    // que ajudam a diagnosticar decisões da automação (gates, "zero resultados", linhas
+    // rejeitadas na coleta, avanço de fila) — não é pra logar TUDO, só o que interessa
+    // pra depuração.
+    function logPainel(msg, extra) {
+        if (extra !== undefined) console.log(msg, extra); else console.log(msg);
+        const linhas = lerLogDetalhado();
+        let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${msg}`;
+        if (extra !== undefined) { try { linha += ' ' + JSON.stringify(extra); } catch (e) { /* não serializável, ignora */ } }
+        linhas.push(linha);
+        if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
+        store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
+        atualizarLogDetalhadoUI();
+    }
 
     // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
     // localStorage para tudo mais) ──────────────────────────────────────────────────
@@ -3240,7 +3279,7 @@
                 const texto = (thead ? thead.textContent : '(sem thead)').replace(/\s+/g, ' ').trim();
                 return `[${i}] ${texto.slice(0, 150)}`;
             });
-            console.log(`[Auto Projudi Transação Penal] tabelaTransacaoPenal(): nenhuma das ${candidatas.length} table.resultTable da página bateu com o cabeçalho esperado (regex: nome da parte + status da transação penal).`, cabecalhos);
+            logPainel(`[Auto Projudi Transação Penal] tabelaTransacaoPenal(): nenhuma das ${candidatas.length} table.resultTable da página bateu com o cabeçalho esperado (regex: nome da parte + status da transação penal).`, cabecalhos);
         }
         return encontrada;
     }
@@ -3454,11 +3493,11 @@
         const selStatus = document.getElementById('status');
         const tabela = tabelaTransacaoPenal();
         // DIAGNÓSTICO (usuário relatou "retornou tudo zerado, mesmo havendo resultados"):
-        // uma linha só, sempre impressa, com TODO o estado relevante nesta passada do gate
-        // — dá pra comparar direto no console do navegador se o filtro está correto, se a
-        // tabela foi achada, e quantas linhas ela tem (geral vs. só as diretas do tbody,
-        // pra descartar linha aninhada de alguma coluna atrapalhando a contagem).
-        console.log(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
+        // uma linha só, sempre registrada, com TODO o estado relevante nesta passada do
+        // gate — aparece tanto no console quanto no "▼ Ver log detalhado" do painel (ver
+        // logPainel), pra comparar se o filtro está correto, se a tabela foi achada, e
+        // quantas linhas ela tem.
+        logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
             + `tabelaEncontrada=${!!tabela} tbodyTr=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
@@ -3466,7 +3505,7 @@
             if (selTipo) selTipo.value = tipoEsperado;
             if (selStatus) selStatus.value = 'A';
             const btn = document.getElementById('searchButton');
-            console.log(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A (${chave}) e clicando Pesquisar`);
+            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A (${chave}) e clicando Pesquisar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
@@ -3474,7 +3513,7 @@
         // qualquer busca) — clica em Pesquisar mesmo assim, sem esperar ação manual.
         if (!tabela) {
             const btn = document.getElementById('searchButton');
-            console.log(`[Auto Projudi Transação Penal] filtro já correto (${chave}) mas sem resultados na tela ainda — clicando Pesquisar`);
+            logPainel(`[Auto Projudi Transação Penal] filtro já correto (${chave}) mas sem resultados na tela ainda — clicando Pesquisar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
@@ -3483,7 +3522,7 @@
         const cfg = cfgTransacaoPenalPorChave(chave);
         if (!tabela.querySelector('tbody tr')) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
-            console.log(`[Auto Projudi Transação Penal] "${chave}" sem resultados — avançando`);
+            logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados — avançando`);
             avancarAutomacao(cfg);
             return true;
         }
@@ -5138,9 +5177,9 @@
                     rejeitadas.push({ motivo: 'extrai() devolveu null', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
                 }
             });
-            console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
+            logPainel(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             if (dados.length < linhas.length) {
-                console.log(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
+                logPainel(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
             }
             if (linhas.length === 0 && tabelas.length > 0) {
                 const cabecalhos = [...tabelas].map((t, i) => {
@@ -14908,6 +14947,30 @@
         }
     }
 
+    // Liga o comportamento "marcar o pai marca os filhos junto" no checklist de
+    // relatórios — pedido do usuário: marcar só "Medidas Alternativas em Atraso" já
+    // seleciona os 7 tipos de Benefícios/Medidas/Suspensões (ver campo opcional
+    // paiChecklist em REPORTS_AUTOMACAO), continuando possível desmarcar um filho
+    // manualmente depois. `seletorClasse` é a classe do checkbox (`.pa-check` no painel
+    // da página inicial, `.projudi-mu-rel-check` no popup de seleção de várias unidades —
+    // os dois têm o MESMO checklist duplicado, ver injetarPainel/injetarSeletorUnidades),
+    // e `escopo` é o elemento onde procurar tanto o pai quanto os filhos (precisa conter
+    // os dois — normalmente o painel inteiro, ou o bloco da categoria Crime já renderizado).
+    // Desmarcar o pai também desmarca os filhos (comportamento simétrico de "selecionar
+    // tudo/nada" — o pedido do usuário cobriu só a direção de marcar, mas desmarcar em
+    // bloco é o esperado de um checkbox-mestre).
+    function ligarCheckboxesPaiFilho(escopo, seletorClasse, aoMudar) {
+        escopo.querySelectorAll(`${seletorClasse}[data-filhos]`).forEach(pai => {
+            pai.addEventListener('change', () => {
+                pai.dataset.filhos.split(',').forEach(chave => {
+                    const filho = escopo.querySelector(`${seletorClasse}[data-key="${chave}"]`);
+                    if (filho) filho.checked = pai.checked;
+                });
+                if (aoMudar) aoMudar();
+            });
+        });
+    }
+
     // Injeta, na tela de seleção de área de atuação (página cheia ou popup), um checkbox
     // ao lado de cada unidade da árvore — ÚNICA forma de escolher unidades (pedido do
     // usuário: nada de dropdown/popup separado, só os checkboxes na própria página) — e
@@ -14946,25 +15009,53 @@
         // então "selecionar" a opção já exibida não disparava 'change' e o valor antigo
         // persistia silenciosamente (bug relatado pelo usuário).
         const periodoTmSalvo = store.getItem('projudi_auto_periodo_tm') || '1m';
-        function linhaRelatorio(r) {
+        function linhaRelatorio(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === periodoTmSalvo ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `<label class="${classeItem}">
                     <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                </label>`;
+        }
+        // Checkbox "pai" SINTÉTICO (ver ROTULOS_GRUPO_CHECKLIST) — não tem data-key
+        // (fica de fora da fila de automação e da persistência de seleções, ambas
+        // baseadas em dataset.key), só data-filhos pra ligarCheckboxesPaiFilho marcar os
+        // filhos reais junto.
+        function linhaGrupoChecklist(chave, filhosKeys) {
+            return `<label class="pa-item pa-item-pai-sintetico">
+                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                 </label>`;
         }
         // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
         // linhasComSubgrupos em injetarPainel) — pedido do usuário: reproduzir aqui os
         // itens/subitens do popup secundário (ex.: cabeçalho "Audiências" agrupando
         // Pendentes/Designadas/Realizadas, hoje só apareciam soltas sem o cabeçalho).
+        // Itens com paiChecklist (ver Benefícios/Medidas/Suspensões em REPORTS_AUTOMACAO)
+        // não aparecem soltos — são desenhados dentro do bloco do pai SINTÉTICO
+        // (linhaGrupoChecklist), indentados, na posição do 1º filho encontrado.
         function linhasComSubgruposMU(itens) {
             let html = '';
             let subgrupoAberto = null;
+            const filhosPorPai = new Map();
             itens.forEach(r => {
+                if (!r.paiChecklist) return;
+                if (!filhosPorPai.has(r.paiChecklist)) filhosPorPai.set(r.paiChecklist, []);
+                filhosPorPai.get(r.paiChecklist).push(r);
+            });
+            const gruposDesenhados = new Set();
+            itens.forEach(r => {
+                if (r.paiChecklist) {
+                    if (!gruposDesenhados.has(r.paiChecklist)) {
+                        gruposDesenhados.add(r.paiChecklist);
+                        const filhos = filhosPorPai.get(r.paiChecklist) || [];
+                        html += linhaGrupoChecklist(r.paiChecklist, filhos.map(f => f.key));
+                        html += `<div class="pa-item-filhos">${filhos.map(f => linhaRelatorio(f, true)).join('')}</div>`;
+                    }
+                    return; // filho: já desenhado dentro do bloco do pai acima
+                }
                 if (r.subgrupo !== subgrupoAberto) {
                     subgrupoAberto = r.subgrupo || null;
                     if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
@@ -15057,12 +15148,17 @@
         // mesmo, os dois ficam sincronizados via essa chave.
         function salvarSelecoesRelatorios() {
             const obj = lerSelecoesSalvasPainel();
-            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { obj[c.dataset.key] = c.checked; });
+            // if (c.dataset.key) — o checkbox "pai" sintético (ver linhaGrupoChecklist/
+            // ROTULOS_GRUPO_CHECKLIST) não tem data-key de propósito, fica de fora daqui.
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
             store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
         }
         painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
             c.addEventListener('change', salvarSelecoesRelatorios);
         });
+        // Marcar o checkbox "pai" sintético (Suspensões por Tipo) já marca os 7 filhos
+        // junto — ver ligarCheckboxesPaiFilho/paiChecklist em REPORTS_AUTOMACAO.
+        ligarCheckboxesPaiFilho(painel, '.projudi-mu-rel-check', salvarSelecoesRelatorios);
         painel.querySelector('#projudi-mu-rel-marcar').onclick = () => {
             painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = true; });
             salvarSelecoesRelatorios();
@@ -15341,13 +15437,23 @@
         // item (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal). precisaPreencher: true
         // porque status="ATIVA" precisa ser marcado (e o tipo corrigido, a partir do 2º
         // item) antes de cada busca.
-        { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'suspcondpena', cfg: CFG_SUSPENSAO_COND_PENA, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional da Pena (Ativas)', rotuloChecklist: 'Susp. Cond. da Pena', curto: 'Susp. Cond. Pena', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'penasubstitutiva', cfg: CFG_PENA_SUBSTITUTIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Pena Substitutiva (Ativas)', rotuloChecklist: 'Pena Substitutiva', curto: 'Pena Substitutiva', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'medidaprotetiva', cfg: CFG_MEDIDA_PROTETIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Protetiva ao Agressor (Ativas)', rotuloChecklist: 'Medida Protetiva', curto: 'Medida Protetiva', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'medidacautelar', cfg: CFG_MEDIDA_CAUTELAR, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Cautelar (Ativas)', rotuloChecklist: 'Medida Cautelar', curto: 'Medida Cautelar', categoriaEspecifica: 'crime', precisaPreencher: true },
-        { key: 'anpp', cfg: CFG_ANPP, navAlvo: 'beneficiosmedidas', rotulo: 'Acordo de Não Persecução Penal (Ativos)', rotuloChecklist: 'ANPP', curto: 'ANPP', categoriaEspecifica: 'crime', precisaPreencher: true },
+        //
+        // paiChecklist: 'suspensoesportipo' — pedido do usuário: um checkbox NOVO e
+        // independente "Suspensões por Tipo" (não é um relatório de verdade, não existe
+        // como chave própria de REPORTS_AUTOMACAO — ver ROTULOS_GRUPO_CHECKLIST/
+        // linhasComSubgrupos/linhasComSubgruposMU) agrupa só estes 7 como submenu
+        // indentado embaixo dele; marcá-lo já marca os 7 juntos, desmarcar um filho
+        // manualmente continua possível depois (ver ligarCheckboxesPaiFilho). SEM
+        // relação com "Medidas Alternativas em Atraso" (relatório/branch diferente,
+        // não mexer). Não altera nada da coleta/PDF em si — é só um atalho de seleção
+        // no checklist.
+        { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'suspcondpena', cfg: CFG_SUSPENSAO_COND_PENA, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional da Pena (Ativas)', rotuloChecklist: 'Susp. Cond. da Pena', curto: 'Susp. Cond. Pena', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'penasubstitutiva', cfg: CFG_PENA_SUBSTITUTIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Pena Substitutiva (Ativas)', rotuloChecklist: 'Pena Substitutiva', curto: 'Pena Substitutiva', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'medidaprotetiva', cfg: CFG_MEDIDA_PROTETIVA, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Protetiva ao Agressor (Ativas)', rotuloChecklist: 'Medida Protetiva', curto: 'Medida Protetiva', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'medidacautelar', cfg: CFG_MEDIDA_CAUTELAR, navAlvo: 'beneficiosmedidas', rotulo: 'Medida Cautelar (Ativas)', rotuloChecklist: 'Medida Cautelar', curto: 'Medida Cautelar', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'anpp', cfg: CFG_ANPP, navAlvo: 'beneficiosmedidas', rotulo: 'Acordo de Não Persecução Penal (Ativos)', rotuloChecklist: 'ANPP', curto: 'ANPP', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
@@ -15376,6 +15482,15 @@
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
     ];
+    // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
+    // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
+    // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
+    // paiChecklist (ver linhasComSubgrupos/linhasComSubgruposMU/ligarCheckboxesPaiFilho).
+    // "suspensoesportipo" agrupa os 7 itens de Benefícios/Medidas/Suspensões — pedido do
+    // usuário: marcar só esse checkbox já marca os 7 juntos.
+    const ROTULOS_GRUPO_CHECKLIST = {
+        suspensoesportipo: 'Suspensões por Tipo',
+    };
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     // Considera tanto r.cfg (cfg "representante" do item) quanto r.cfgs (lista completa,
     // opcional) — suporte genérico para um item de fila que precise agrupar mais de um
@@ -16115,13 +16230,13 @@
         const estado = store.getItem(AUTO_ESTADO);
         const rel = relatorioPorCfg(cfg);
         if (!rel || estado !== 'coletando_' + rel.key) {
-            console.log(`[Auto Projudi] avancarAutomacao ignorado — estado="${estado}" cfg=${cfg ? cfg.prefixo : 'null'} rel=${rel ? rel.key : 'null'}`);
+            logPainel(`[Auto Projudi] avancarAutomacao ignorado — estado="${estado}" cfg=${cfg ? cfg.prefixo : 'null'} rel=${rel ? rel.key : 'null'}`);
             return;
         }
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
-        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
+        logPainel(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
         if (!prox && multiUnidadeEmCurso()) {
             console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
         }
@@ -17130,6 +17245,13 @@
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF, ou marque as unidades desejadas na tela "Alterar Atuação"/login para automatizar todas de uma vez.</div>
+                <div class="pa-log">
+                    <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
+                    <div id="pa-log-wrap" style="display:none;">
+                        <pre id="pa-log-detalhado" class="pa-log-box"></pre>
+                        <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
+                    </div>
+                </div>
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = async () => {
@@ -17177,6 +17299,20 @@
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
+        // "▼ Ver log detalhado" — colapsado por padrão; ao abrir, preenche com o que já
+        // foi registrado por logPainel (persiste entre reloads, ver CHAVE_LOG_DETALHADO).
+        painel.querySelector('#pa-log-toggle').onclick = () => {
+            const wrap = painel.querySelector('#pa-log-wrap');
+            const btn = painel.querySelector('#pa-log-toggle');
+            const abrindo = wrap.style.display === 'none';
+            wrap.style.display = abrindo ? '' : 'none';
+            btn.textContent = abrindo ? '▲ Ocultar log detalhado' : '▼ Ver log detalhado';
+            if (abrindo) atualizarLogDetalhadoUI();
+        };
+        painel.querySelector('#pa-log-limpar').onclick = () => {
+            store.removeItem(CHAVE_LOG_DETALHADO);
+            atualizarLogDetalhadoUI();
+        };
         // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
         // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
@@ -17407,6 +17543,9 @@
         }
         #painel-automacao .pa-item , #projudi-mu-painel .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item-sub , #projudi-mu-painel .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item-filhos , #projudi-mu-painel .pa-item-filhos { margin-left: 6px; }
+        #painel-automacao .pa-item-filho , #projudi-mu-painel .pa-item-filho { margin-left: 20px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item-pai-sintetico , #projudi-mu-painel .pa-item-pai-sintetico { font-weight: 600; }
         #painel-automacao .pa-item input[type="checkbox"] , #projudi-mu-painel .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select , #projudi-mu-painel .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
         #painel-automacao .pa-placeholder , #projudi-mu-painel .pa-placeholder {
@@ -17434,6 +17573,13 @@
         #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; gap: 6px; }
 
         #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-log , #projudi-mu-painel .pa-log { margin-top: 8px; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-log-toggle-btn , #projudi-mu-painel .pa-log-toggle-btn { font-size: .68em; }
+        #painel-automacao .pa-log-box , #projudi-mu-painel .pa-log-box {
+            max-height: 180px; overflow-y: auto; margin: 6px 0; padding: 6px;
+            background: #FAFAF7; border: 1px solid #DEDDD6; border-radius: 3px;
+            font-family: monospace; font-size: .62em; white-space: pre-wrap; word-break: break-word;
+        }
 
         /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
            window.confirm() nativo não permite customizar o texto dos botões, então este
