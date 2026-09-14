@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.70
+// @version      25.71
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2822,6 +2822,26 @@
         }) || null;
     }
 
+    // Mesma armadilha do comentário acima, mas para o "N registro(s)" do topo da tabela
+    // (div#navigator div.navLeft), usado por totalRegistrosPagina()/adicionarPagina para
+    // preencher o KPI do resumo (cfg.totalIdentificadoNoResumo). Bug relatado pelo
+    // usuário: o total de "Aguardando Análise de Retorno" e "Aguardando Análise de
+    // Decurso de Prazo" saía errado no PDF/Excel — nessas duas telas (só nessas, não em
+    // Distribuição/Cumprimento) a página tem OUTRO div#navigator, de um widget alheio,
+    // ANTES do de Mandados no DOM; document.querySelector('div#navigator') genérico
+    // (usado por totalRegistrosPagina()) pegava o navigator errado e lia o total de
+    // outra coisa. Resolve do mesmo jeito que tabelaMandados(): quando há mais de um
+    // div#navigator na página, usa o que vem DEPOIS da tabela de Mandados no DOM (é onde
+    // o Projudi sempre posiciona a paginação da própria tabela de resultados).
+    function navigatorDeMandados() {
+        const tabela = tabelaMandados();
+        if (!tabela) return null;
+        const navegadores = [...document.querySelectorAll('div#navigator')];
+        if (navegadores.length <= 1) return navegadores[0] || null;
+        return navegadores.find(nav => !!(tabela.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING))
+            || navegadores[0];
+    }
+
     const CFG_MANDADOS_RETORNO = {
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
@@ -2836,6 +2856,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_retorno_projudi',
         rotulos: { coletar: 'Extrair Mandados (Retorno)', coletarMais: 'Extrair mais (Mandados Retorno)', baixar: '⬇ Baixar Mandados (Retorno)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -2907,6 +2928,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_pendentes_cumprimento_projudi',
         rotulos: { coletar: 'Extrair Mandados (Cumprimento)', coletarMais: 'Extrair mais (Mandados Cumprimento)', baixar: '⬇ Baixar Mandados (Cumprimento)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -2959,6 +2981,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_aguardando_distribuicao_projudi',
         rotulos: { coletar: 'Extrair Mandados (Aguardando Distribuição)', coletarMais: 'Extrair mais (Mandados Aguardando Distribuição)', baixar: '⬇ Baixar Mandados (Aguardando Distribuição)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -3001,6 +3024,7 @@
         usaAtuacao: false,
         contextoExtra: () => ({ mapa: mapaColunasMandado() }),
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_decurso_prazo_projudi',
         rotulos: { coletar: 'Extrair Mandados (Decurso de Prazo)', coletarMais: 'Extrair mais (Mandados Decurso de Prazo)', baixar: '⬇ Baixar Mandados (Decurso de Prazo)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -4734,7 +4758,10 @@
             // a coleta em si acabe com outra contagem. Opt-in via cfg.totalIdentificadoNoResumo
             // — outros relatórios continuam sem gravar essa chave.
             if (idx === 0 && cfg.totalIdentificadoNoResumo) {
-                const totalInicial = totalRegistrosPagina();
+                // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
+                // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
+                // o comportamento de sempre (1º div#navigator do documento).
+                const totalInicial = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
                 if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
             }
             // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
@@ -4956,7 +4983,7 @@
             }
 
             const pagina = numeroPaginaAtual();
-            const totReg = totalRegistrosPagina();
+            const totReg = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
             const porPag = dadosPagina.length || 20;
             const totPag = totReg ? Math.ceil(totReg / porPag) : '?';
             const ctx = cfg.usaAtuacao ? `"${lerAtuacao() || '(sem atuação)'}" — ` : '';
@@ -5097,10 +5124,25 @@
         return b ? parseInt(b.textContent.trim(), 10) : 1;
     }
 
-    function totalRegistrosPagina() {
-        const nav = document.querySelector('div#navigator div.navLeft');
+    // raizNavigator opcional: div#navigator já resolvido pelo chamador (ver
+    // navigatorDeMandados() — telas com mais de um div#navigator na página, ex.
+    // "Aguardando Análise de Retorno"/"Aguardando Análise de Decurso de Prazo" de
+    // Mandados). Sem argumento, mantém o comportamento de sempre (1º div#navigator do
+    // documento) — usado por todo relatório que não tem esse problema.
+    function totalRegistrosPagina(raizNavigator) {
+        const navRaiz = raizNavigator !== undefined ? raizNavigator : document.querySelector('div#navigator');
+        const nav = navRaiz ? navRaiz.querySelector('div.navLeft') : null;
         if (!nav) return null;
-        const m = nav.textContent.match(/(\d+)\s+registro/);
+        const texto = nav.textContent;
+        // Bug relatado pelo usuário: nas telas de Mandados o Projudi escreve "Total de
+        // registros nesta página: N" — o NÚMERO vem DEPOIS da palavra "registros", ao
+        // contrário do formato "N registro(s) encontrado(s)" das demais telas (número
+        // ANTES). O regex só cobria o 2º formato, então nunca batia em Mandados —
+        // total_identificado ficava sempre vazio lá e o KPI caía no fallback
+        // dados.length (que só "parecia certo" quando a coleta paginada terminava sem
+        // nenhuma mudança ao vivo no Projudi nesse meio-tempo). Agora tenta os dois
+        // formatos, número antes ou depois de "registro(s)".
+        const m = texto.match(/(\d+)\s+registro/) || texto.match(/registros?[^\d]*(\d+)/i);
         return m ? parseInt(m[1], 10) : null;
     }
 
