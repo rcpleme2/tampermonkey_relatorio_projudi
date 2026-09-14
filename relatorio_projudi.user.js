@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.77
+// @version      25.78
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3314,7 +3314,36 @@
         return form && form.querySelector('#tipo') && form.querySelector('#status') ? form : null;
     }
 
-    function extrairLinhaTransacaoPenal(tds) {
+    // Pedido do usuário: percorrer cada Motivo da Suspensão INDIVIDUALMENTE dentro de
+    // cada um dos 7 Tipos (o campo #idMotivoSuspProcesso da tela, antes deixado sempre em
+    // "Todas") e discriminar isso no relatório. Como a tabela de resultados não tem uma
+    // coluna própria de "Motivo" (não dá pra descobrir isso só olhando a linha), a única
+    // forma é buscar 1 vez por Motivo e marcar cada linha coletada com qual busca a
+    // trouxe — ver contextoExtra em cada CFG_*/avancarMotivoOuTerminar abaixo. Valores e
+    // rótulos exatos do <select id="idMotivoSuspProcesso"> (confirmado na tela real);
+    // "Todas" (-1) fica de fora — cada um dos 10 motivos nomeados é buscado em separado,
+    // a soma deles já cobre o que "Todas" mostraria.
+    const MOTIVOS_SUSPENSAO = [
+        { valor: '1', rotulo: 'Questão Prejudicial (art. 92/93 CPP)' },
+        { valor: '2', rotulo: 'Art. 366 do CPP' },
+        { valor: '3', rotulo: 'Art. 89 da Lei 9.099/95' },
+        { valor: '4', rotulo: 'Insanidade Mental' },
+        { valor: '5', rotulo: 'Carta Precatória' },
+        { valor: '6', rotulo: 'Exceção' },
+        { valor: '7', rotulo: 'Incidentes' },
+        { valor: '8', rotulo: 'Art. 94 do CPP' },
+        { valor: '9', rotulo: 'Art. 4, §3º da Lei 12.850/13' },
+        { valor: '10', rotulo: 'Acordo de Não Persecução Penal' },
+    ];
+    function rotuloMotivoSuspensao(valor) {
+        const m = MOTIVOS_SUSPENSAO.find(x => x.valor === valor);
+        return m ? m.rotulo : '';
+    }
+
+    // `contexto` (3º argumento, vindo de cfg.contextoExtra — ver criarColetor/
+    // coletarPaginaAtual) é o rótulo do Motivo da Suspensão em busca no momento desta
+    // página, já que a tabela em si não expõe essa informação por linha.
+    function extrairLinhaTransacaoPenal(tds, atuacao, contexto) {
         if (tds.length < 9) return null; // ver comentário grande acima — 9 <td> diretos, confirmado com amostra real
         const processo = textoCelula(tds[0]);
         if (!processo) return null;
@@ -3339,14 +3368,16 @@
             dataInicio: textoCelula(tds[6]),
             dataFinal: textoCelula(tds[7]),
             statusTransacao: textoCelula(tds[8]),
+            motivoSuspensao: contexto || '',
         };
     }
     const CABECALHOS_TRANSACAO_PENAL_XLSX = ['Processo', 'Nome da Parte', 'Data da Infração', 'Classe Processual',
-        'Assunto Principal', 'Medidas', 'Status da Medida', 'Observação', 'Data de Início', 'Data Final', 'Status da Transação Penal'];
+        'Assunto Principal', 'Medidas', 'Status da Medida', 'Observação', 'Data de Início', 'Data Final',
+        'Status da Transação Penal', 'Motivo da Suspensão'];
     const LARGURAS_TRANSACAO_PENAL_XLSX = [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 26 }, { wch: 26 },
-        { wch: 30 }, { wch: 18 }, { wch: 26 }, { wch: 16 }, { wch: 16 }, { wch: 26 }];
+        { wch: 30 }, { wch: 18 }, { wch: 26 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 30 }];
     const LINHA_TRANSACAO_PENAL_XLSX = (d) => [d.processo, d.nomeParte, d.dataInfracao, d.classe, d.assunto,
-        d.medidas, d.statusMedida, d.observacao, d.dataInicio, d.dataFinal, d.statusTransacao];
+        d.medidas, d.statusMedida, d.observacao, d.dataInicio, d.dataFinal, d.statusTransacao, d.motivoSuspensao];
 
     // cfg.pdf compartilhado pelos 7 tipos — só título/atosTitulo mudam (ver cada CFG_*
     // abaixo). semPrioridade: true porque não há noção de urgência nesta tela (mesmo
@@ -3366,22 +3397,43 @@
             distribuicoes: [
                 { titulo: 'Por Classe Processual', campo: 'classe', topN: 12 },
                 { titulo: 'Por Status da Transação Penal', campo: 'statusTransacao', topN: 8 },
+                // Pedido do usuário: discriminar por Motivo da Suspensão (ver
+                // MOTIVOS_SUSPENSAO/avancarMotivoOuTerminar — cada linha já vem marcada
+                // com o motivo da busca que a trouxe). topN 12 cobre os 10 motivos
+                // nomeados inteiros, sem cortar em "Outros".
+                { titulo: 'Por Motivo da Suspensão', campo: 'motivoSuspensao', topN: 12 },
             ],
             colunas: [
-                { header: 'Processo', width: 24, get: (d) => d.processo },
-                { header: 'Nome da Parte', width: 28, get: (d) => d.nomeParte },
-                { header: 'Classe Processual', width: 24, get: (d) => d.classe },
-                { header: 'Medidas', width: 26, get: (d) => d.medidas },
-                { header: 'Status da Medida', width: 18, get: (d) => d.statusMedida },
-                { header: 'Data de Início', width: 16, get: (d) => d.dataInicio },
-                { header: 'Data Final', width: 16, get: (d) => d.dataFinal },
-                { header: 'Status da Transação Penal', width: 24, get: (d) => d.statusTransacao },
+                { header: 'Processo', width: 22, get: (d) => d.processo },
+                { header: 'Nome da Parte', width: 26, get: (d) => d.nomeParte },
+                { header: 'Classe Processual', width: 22, get: (d) => d.classe },
+                { header: 'Medidas', width: 22, get: (d) => d.medidas },
+                { header: 'Status da Medida', width: 16, get: (d) => d.statusMedida },
+                { header: 'Data de Início', width: 14, get: (d) => d.dataInicio },
+                { header: 'Data Final', width: 14, get: (d) => d.dataFinal },
+                { header: 'Status da Transação Penal', width: 20, get: (d) => d.statusTransacao },
+                { header: 'Motivo da Suspensão', width: 26, get: (d) => d.motivoSuspensao },
             ],
         };
     }
     function rotulosTransacaoPenal(curto) {
         return { coletar: `Extrair ${curto}`, coletarMais: `Extrair mais (${curto})`, baixar: `⬇ Baixar ${curto}` };
     }
+    // cfg.contextoExtra — chamado 1x por página coletada (ver coletarPaginaAtual), não
+    // por linha. Devolve o rótulo do Motivo da Suspensão atualmente selecionado, pra
+    // extrairLinhaTransacaoPenal marcar cada linha com ele (a tabela em si não expõe
+    // essa informação por linha).
+    function contextoExtraTransacaoPenal() {
+        const sel = document.getElementById('idMotivoSuspProcesso');
+        return sel ? rotuloMotivoSuspensao(sel.value) : '';
+    }
+    // cfg.aoTerminarColeta — chamado por criarColetor/continuar() quando a paginação da
+    // busca ATUAL termina (sem "próxima página"), no lugar de avancarAutomacao(cfg)
+    // direto (mesmo gancho genérico usado por Tempo Médio pra buscar mês a mês, ver
+    // preencherEPesquisarTempoMedio). Função regular (não arrow) porque é chamada como
+    // `cfg.aoTerminarColeta()` — `this` vem amarrado ao cfg certo nessa chamada, sem
+    // precisar de closure por CFG individual.
+    function aoTerminarColetaTransacaoPenal() { avancarMotivoOuTerminar(this); }
 
     const CFG_TRANSACAO_PENAL = {
         prefixo: 'projudi_transacaopenal_t_',
@@ -3389,6 +3441,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'transacao_penal_projudi',
         rotulos: rotulosTransacaoPenal('Transação Penal'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3403,6 +3457,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'suspensao_condicional_processo_projudi',
         rotulos: rotulosTransacaoPenal('Susp. Cond. Processo'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3417,6 +3473,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'U',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'suspensao_condicional_pena_projudi',
         rotulos: rotulosTransacaoPenal('Susp. Cond. Pena'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3431,6 +3489,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'P',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'pena_substitutiva_projudi',
         rotulos: rotulosTransacaoPenal('Pena Substitutiva'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3445,6 +3505,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'M',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'medida_protetiva_projudi',
         rotulos: rotulosTransacaoPenal('Medida Protetiva'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3459,6 +3521,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'C',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'medida_cautelar_projudi',
         rotulos: rotulosTransacaoPenal('Medida Cautelar'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3473,6 +3537,8 @@
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'N',
         minTds: 9,
         usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
         nomeArquivo: 'acordo_nao_persecucao_penal_projudi',
         rotulos: rotulosTransacaoPenal('ANPP'),
         cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
@@ -3503,15 +3569,46 @@
         return CFG_TRANSACAO_PENAL;
     }
 
+    // Avança para o próximo Motivo da Suspensão da fila deste CFG (ver MOTIVOS_SUSPENSAO)
+    // ou, se a fila já acabou, avança a automação de verdade para o próximo Tipo — mesmo
+    // papel de "próximo mês" em preencherEPesquisarTempoMedio, mas aqui chamado tanto do
+    // gate (zero resultados) quanto de aoTerminarColetaTransacaoPenal (paginação de um
+    // Motivo terminou com dados de verdade), então os dois caminhos convergem pra cá em
+    // vez de cada um decidir "avançar tipo" por conta própria.
+    function avancarMotivoOuTerminar(cfg) {
+        const chaveFila = cfg.prefixo + 'fila_motivos';
+        const fila = desembrulharArray(store.getItem(chaveFila)) || [];
+        if (!fila.length) {
+            // Nenhum Motivo restante — encerra este Tipo. "Zero em todos os Motivos" só
+            // marca coletado=1 aqui (não a cada Motivo individual) — mesma lógica de
+            // marcarColetaMandadosVazia (idempotente, não sobrescreve dado já coletado).
+            if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
+            store.removeItem(cfg.prefixo + 'motivo_atual');
+            store.removeItem(chaveFila);
+            logPainel(`[Auto Projudi Transação Penal] "${cfg.prefixo}" — todos os Motivos da Suspensão percorridos, avançando para o próximo Tipo`);
+            avancarAutomacao(cfg);
+            return;
+        }
+        const proximoMotivo = fila[0];
+        store.setItem(chaveFila, JSON.stringify(fila.slice(1)));
+        store.setItem(cfg.prefixo + 'motivo_atual', proximoMotivo);
+        const sel = document.getElementById('idMotivoSuspProcesso');
+        if (sel) sel.value = proximoMotivo;
+        const btn = document.getElementById('searchButton');
+        logPainel(`[Auto Projudi Transação Penal] Motivo da Suspensão concluído — avançando para "${rotuloMotivoSuspensao(proximoMotivo)}" (${fila.length} restante(s) na fila)`);
+        setTimeout(() => { if (btn) btn.click(); }, 400);
+    }
+
     // Gate chamado no início de injetarBotoes() quando a URL é buscaTransacaoPenal.do.
-    // Diferente de gateMandados() (só corrige 1 select), aqui corrige DOIS selects
-    // (#tipo e #status) sempre que qualquer um dos dois não bate com o esperado da key
-    // atual da automação, antes de clicar em Pesquisar de novo. #codTipoMedida e
-    // #idMotivoSuspProcesso ficam SEMPRE intocados (pedido do usuário: default "-1"/
-    // Todas). Diferente também de Mandados: aqui form e resultTable convivem na MESMA
-    // página desde a 1ª visita (mesmo esquema de Paralisados/Remessas via
-    // formularioParalisado) — não há painel/aba intermediária, então este gate cobre
-    // tanto "preenchendo_" (1ª busca) quanto "coletando_" (correção/zero resultados).
+    // Corrige TRÊS selects (#tipo, #status e — pedido do usuário —
+    // #idMotivoSuspProcesso, percorrido individualmente por MOTIVOS_SUSPENSAO em vez de
+    // ficar em "Todas") sempre que algum não bate com o esperado da key/Motivo atual da
+    // automação, antes de clicar em Pesquisar de novo. #codTipoMedida continua SEMPRE
+    // intocado (pedido do usuário: default "-1"/Todas). Diferente de Mandados: aqui form
+    // e resultTable convivem na MESMA página desde a 1ª visita (mesmo esquema de
+    // Paralisados/Remessas via formularioParalisado) — não há painel/aba intermediária,
+    // então este gate cobre tanto "preenchendo_" (1ª busca) quanto "coletando_"
+    // (correção/zero resultados/avanço de Motivo).
     function gateTransacaoPenal() {
         // DIAGNÓSTICO — registrado ANTES de qualquer "return" antecipado (bug relatado
         // pelo usuário: automação "travada", nada no log nem no console). Sem esta linha
@@ -3529,10 +3626,37 @@
             logPainel(`[Auto Projudi Transação Penal] gate saindo — chave="${chave}" não é um dos 7 tipos (fora da automação deste relatório, ou estado ainda não promovido)`);
             return false; // fora da automação para este relatório — segue fluxo manual normal
         }
+        const cfg = cfgTransacaoPenalPorChave(chave);
 
-        if (estadoAutoBruto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+        if (estadoAutoBruto.startsWith('preenchendo_')) {
+            store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+            // 1ª visita deste Tipo: (re)inicia a fila de Motivos da Suspensão do zero —
+            // pedido do usuário: cada um dos 10 motivos nomeados é buscado em separado
+            // dentro deste Tipo, em vez de deixar #idMotivoSuspProcesso em "Todas".
+            store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(MOTIVOS_SUSPENSAO.map(m => m.valor)));
+            store.removeItem(cfg.prefixo + 'motivo_atual');
+        }
+        // Garante que sempre há um Motivo "atual" definido antes de checar o filtro —
+        // tira o próximo da fila se ainda não tiver um (1ª passada deste Tipo, ou algo
+        // limpou motivo_atual sem popular a fila de novo).
+        let motivoEsperado = store.getItem(cfg.prefixo + 'motivo_atual');
+        if (!motivoEsperado) {
+            const fila = desembrulharArray(store.getItem(cfg.prefixo + 'fila_motivos')) || [];
+            if (!fila.length) {
+                // Defensivo — não deveria acontecer (a fila só some depois de já ter
+                // processado todos os motivos, ver avancarMotivoOuTerminar).
+                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem Motivo atual nem fila — encerrando defensivamente`);
+                avancarAutomacao(cfg);
+                return true;
+            }
+            motivoEsperado = fila[0];
+            store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(fila.slice(1)));
+            store.setItem(cfg.prefixo + 'motivo_atual', motivoEsperado);
+        }
+
         const selTipo = document.getElementById('tipo');
         const selStatus = document.getElementById('status');
+        const selMotivo = document.getElementById('idMotivoSuspProcesso');
         const tabela = tabelaTransacaoPenal();
         // Conta só linhas com "cara de dado de verdade" (>= minTds células diretas) — a
         // tela do Projudi mantém uma ÚNICA <tr> com <td colspan="6">Nenhum registro
@@ -3541,15 +3665,16 @@
         // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
         // genérico mesmo em telas vazias).
         const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 9) : [];
-        logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
-            + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
+        logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} motivoEsperado=${motivoEsperado} (${rotuloMotivoSuspensao(motivoEsperado)}) `
+            + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} motivoAtual=${selMotivo ? selMotivo.value : 'n/d'} `
             + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
-        if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A')) {
+        if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A') || (selMotivo && selMotivo.value !== motivoEsperado)) {
             if (selTipo) selTipo.value = tipoEsperado;
             if (selStatus) selStatus.value = 'A';
+            if (selMotivo) selMotivo.value = motivoEsperado;
             const btn = document.getElementById('searchButton');
-            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A (${chave}) e clicando Pesquisar`);
+            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A motivo=${motivoEsperado} (${chave}) e clicando Pesquisar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
@@ -3561,13 +3686,11 @@
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
-        // "Zero resultados" — mesmo padrão de marcarColetaMandadosVazia/avancarAutomacao
-        // usado por gateMandados (função genérica, reaproveitada aqui sem alteração).
-        const cfg = cfgTransacaoPenalPorChave(chave);
+        // "Zero resultados" neste Motivo — avança para o próximo Motivo da fila (ou
+        // encerra o Tipo, se já era o último) em vez de avançar a automação direto.
         if (!linhasDeVerdade.length) {
-            if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
-            logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados — avançando`);
-            avancarAutomacao(cfg);
+            logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados para o Motivo "${rotuloMotivoSuspensao(motivoEsperado)}"`);
+            avancarMotivoOuTerminar(cfg);
             return true;
         }
         return false; // deixa o fluxo genérico (detectarConfig/criarColetor) coletar normalmente
@@ -5101,6 +5224,12 @@
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
             // (da área Crime) que não foi limpa antes de recomeçar.
             store.removeItem(cfg.prefixo + 'tem_motivo');
+            // Fila de Motivos da Suspensão em andamento (ver avancarMotivoOuTerminar/
+            // gateTransacaoPenal) — sem limpar aqui, um "Limpar" no meio da iteração
+            // deixaria a próxima coleta retomar de um Motivo no meio da lista, em vez de
+            // recomeçar do primeiro. Sem efeito para cfgs que não usam esse recurso.
+            store.removeItem(cfg.prefixo + 'fila_motivos');
+            store.removeItem(cfg.prefixo + 'motivo_atual');
         }
 
         async function adicionarPagina(dadosPagina) {
@@ -8794,6 +8923,38 @@
             };
             itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaSuspensosPrazo, secaoSuspensosPrazo.dados, (n) => `${n} processo(s)`));
         }
+        // "Benefícios/Medidas/Suspensões" — pedido do usuário: aparecer no PDF final EM
+        // SEQUÊNCIA com "Suspensos com Prazo Determinado" (não mexe na categoria do
+        // painel/Menu, que continua Crime — ver categoriaEspecifica em REPORTS_AUTOMACAO;
+        // só a ORDEM DAS PÁGINAS no PDF muda, controlada pela posição do item na
+        // "tabela única do Cartório" — ver ordemNaCapa/outrasSecoes.sort em
+        // gerarPDFConjunto). A tela de origem só permite pesquisar UM tipo por vez (ver
+        // TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal), então continuam sendo 7
+        // CFGs/seções independentes — aqui aparecem agrupadas sob um cabeçalho só (mesmo
+        // mecanismo de linhaGrupo/grupoPai já usado por "Mandados" dentro de Pendências),
+        // sem classificação por situação/aging (mesmo motivo de Medidas Alternativas em
+        // Atraso — não é uma tarefa clássica de "dias parado").
+        const CFGS_GRUPO_TRANSACAO_PENAL = [
+            [CFG_TRANSACAO_PENAL, secaoTransacaoPenal, 'Transação Penal'],
+            [CFG_SUSPENSAO_COND_PROCESSO, secaoSuspCondProcesso, 'Susp. Cond. Processo'],
+            [CFG_SUSPENSAO_COND_PENA, secaoSuspCondPena, 'Susp. Cond. Pena'],
+            [CFG_PENA_SUBSTITUTIVA, secaoPenaSubstitutiva, 'Pena Substitutiva'],
+            [CFG_MEDIDA_PROTETIVA, secaoMedidaProtetiva, 'Medida Protetiva'],
+            [CFG_MEDIDA_CAUTELAR, secaoMedidaCautelar, 'Medida Cautelar'],
+            [CFG_ANPP, secaoAnpp, 'ANPP'],
+        ].filter(([, secao]) => !!secao);
+        if (CFGS_GRUPO_TRANSACAO_PENAL.length) {
+            itensEstatisticasGerais.push(linhaGrupo('Benefícios/Medidas/Suspensões', ''));
+            CFGS_GRUPO_TRANSACAO_PENAL.forEach(([cfg, secao, curto]) => {
+                itensEstatisticasGerais.push({
+                    nome: curto,
+                    indicador: `${secao.dados.length} processo(s)`,
+                    detalhamento: '—',
+                    situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: cfg,
+                    grupoPai: 'Benefícios/Medidas/Suspensões',
+                });
+            });
+        }
         // "Em Instância Recursal" — indicador: total em instância recursal.
         // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
         if (secaoInstanciaRecursal) {
@@ -9100,34 +9261,6 @@
                 indicador: `${secaoMedidasAlternativasAtraso.dados.length} medida(s)`,
                 detalhamento: `${qtdTipos} tipo(s) · ${qtdTiposMedida} tipo(s) de medida distintos`,
                 situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_MEDIDAS_ALTERNATIVAS_ATRASO,
-            });
-        }
-        // "Benefícios/Medidas/Suspensões" — pedido do usuário: mover pra dentro da
-        // categoria Crime (antes era Cartório). A tela de origem só permite pesquisar UM
-        // tipo por vez (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal), então continuam
-        // sendo 7 CFGs/seções independentes — aqui aparecem agrupadas sob um cabeçalho só
-        // (mesmo mecanismo de linhaGrupo/grupoPai já usado por "Mandados" dentro de
-        // Pendências), sem classificação por situação/aging (mesmo motivo de Medidas
-        // Alternativas em Atraso — não é uma tarefa clássica de "dias parado").
-        const CFGS_GRUPO_TRANSACAO_PENAL = [
-            [CFG_TRANSACAO_PENAL, secaoTransacaoPenal, 'Transação Penal'],
-            [CFG_SUSPENSAO_COND_PROCESSO, secaoSuspCondProcesso, 'Susp. Cond. Processo'],
-            [CFG_SUSPENSAO_COND_PENA, secaoSuspCondPena, 'Susp. Cond. Pena'],
-            [CFG_PENA_SUBSTITUTIVA, secaoPenaSubstitutiva, 'Pena Substitutiva'],
-            [CFG_MEDIDA_PROTETIVA, secaoMedidaProtetiva, 'Medida Protetiva'],
-            [CFG_MEDIDA_CAUTELAR, secaoMedidaCautelar, 'Medida Cautelar'],
-            [CFG_ANPP, secaoAnpp, 'ANPP'],
-        ].filter(([, secao]) => !!secao);
-        if (CFGS_GRUPO_TRANSACAO_PENAL.length) {
-            itensOutros.push(linhaGrupo('Benefícios/Medidas/Suspensões', ''));
-            CFGS_GRUPO_TRANSACAO_PENAL.forEach(([cfg, secao, curto]) => {
-                itensOutros.push({
-                    nome: curto,
-                    indicador: `${secao.dados.length} processo(s)`,
-                    detalhamento: '—',
-                    situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: cfg,
-                    grupoPai: 'Benefícios/Medidas/Suspensões',
-                });
             });
         }
         // "Prescrições" — ÚLTIMO da categoria Crime (pedido do usuário: ordem cronológica/
