@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.76
+// @version      25.77
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -15204,15 +15204,6 @@
         { key: 'mandadosdistribuicao', cfg: CFG_MANDADOS_DISTRIBUICAO, navAlvo: 'mandadosdistribuicao', rotulo: 'Mandados Aguardando Distribuição ao Oficial de Justiça', rotuloChecklist: 'Aguardando Distribuição', curto: 'Mand. Distribuição', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
         { key: 'mandadoscumprimento', cfg: CFG_MANDADOS_CUMPRIMENTO, navAlvo: 'mandadoscumprimento', rotulo: 'Mandados Pendentes de Cumprimento', rotuloChecklist: 'Pendentes de Cumprimento', curto: 'Mand. Cumprimento', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
         { key: 'mandadosdecurso', cfg: CFG_MANDADOS_DECURSO, navAlvo: 'mandadosdecurso', rotulo: 'Mandados Aguardando Análise de Decurso de Prazo', rotuloChecklist: 'Decurso de Prazo', curto: 'Mand. Decurso', dominio: 'cartorio', precisaPreencher: true, subgrupo: 'Mandados' },
-        // Mandados de Prisão / Alvarás de Soltura A Regularizar — telas novas e
-        // independentes do cluster de Mandados acima (endpoints e menu próprios, ver
-        // comentário grande na definição dos dois cfgs). Vão para o subgrupo
-        // "Pendências" (mesmo grupo de Juntadas/Retorno/Paralisados/Remessas) por serem,
-        // como aqueles, pendências do Cartório aguardando regularização. Landing direto
-        // nos resultados (link de menu já filtra "A Regularizar"), sem formulário
-        // próprio — por isso precisaPreencher: false, mesmo esquema de Retorno/Juntadas.
-        { key: 'mandadosprisaoregularizar', cfg: CFG_MANDADOS_PRISAO_REGULARIZAR, navAlvo: 'mandadosprisaoregularizar', rotulo: 'Mandados de Prisão A Regularizar', curto: 'Mand. Prisão A Reg.', dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
-        { key: 'alvarassolturaregularizar', cfg: CFG_ALVARAS_SOLTURA_REGULARIZAR, navAlvo: 'alvarassolturaregularizar', rotulo: 'Alvarás de Soltura A Regularizar', curto: 'Alv. Soltura A Reg.', dominio: 'cartorio', precisaPreencher: false, subgrupo: 'Pendências' },
         // ── Audiências (movida do Crime pro Cartório/Cível-Geral — pedido do usuário:
         // fica visível em qualquer categoria/aba, não só Crime, igual aos demais itens
         // acima) ─────────────────────────────────────────────────────────────────────
@@ -15267,6 +15258,17 @@
         // CFG_BENS_PENDENTES_SNGB para o porquê deste relatório fugir do padrão de
         // criarColetor).
         { key: 'bensSngb', cfg: CFG_BENS_PENDENTES_SNGB, navAlvo: 'apreensoes', rotulo: 'Bens Pendentes de Cadastro no SNGB', curto: 'Bens SNGB', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Mandados de Prisão / Alvarás de Soltura A Regularizar (pedido do usuário: mover
+        // para a categoria Crime — mandado de prisão e alvará de soltura são conceitos
+        // exclusivamente criminais, mesmo raciocínio já aplicado a Medidas Alternativas
+        // em Atraso). Telas novas e independentes do cluster de Mandados de Cartório
+        // acima (endpoints/menu próprios, ver comentário grande na definição dos dois
+        // cfgs) — igual a Apreensões/Bens SNGB, chegam direto pelo menu de topo
+        // "Cumprimentos", sem passar pela aba "Mesa do Escrivão Criminal". Landing direto
+        // nos resultados (link de menu já filtra "A Regularizar"), sem formulário
+        // próprio — por isso precisaPreencher: false, mesmo esquema de Retorno/Juntadas.
+        { key: 'mandadosprisaoregularizar', cfg: CFG_MANDADOS_PRISAO_REGULARIZAR, navAlvo: 'mandadosprisaoregularizar', rotulo: 'Mandados de Prisão A Regularizar', curto: 'Mand. Prisão A Reg.', categoriaEspecifica: 'crime', precisaPreencher: false },
+        { key: 'alvarassolturaregularizar', cfg: CFG_ALVARAS_SOLTURA_REGULARIZAR, navAlvo: 'alvarassolturaregularizar', rotulo: 'Alvarás de Soltura A Regularizar', curto: 'Alv. Soltura A Reg.', categoriaEspecifica: 'crime', precisaPreencher: false },
         // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
