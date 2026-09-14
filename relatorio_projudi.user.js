@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.77
+// @version      25.78
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3179,6 +3179,20 @@
             distribuicoes: [
                 { titulo: 'Alvarás por Motivo de Expedição', campo: 'motivoExpedicao', topN: 12 },
                 { titulo: 'Alvarás por Classe Processual', campo: 'classe', topN: 12 },
+                // Lista dos 5 primeiros registros da coleta (pedido do usuário) — mesmo
+                // ponto de extensão `calc` já usado por CFG_BENS_PENDENTES_SNGB (pula
+                // contarPorCampo e usa a lista de {label, valor} devolvida direto).
+                // Sem quantidade natural por registro (cada linha é 1 alvará), então
+                // valor fica fixo em 1 — a coluna "Qtd./%" da tabela genérica de
+                // distribuições vira só um efeito colateral do formato, o que importa é
+                // a lista em si.
+                {
+                    titulo: 'Lista dos 5 primeiros registros',
+                    rotuloCategoria: 'Alvará (Processo)',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: `${d.numero} (${d.processo})`, valor: 1 })),
+                    }),
+                },
             ],
             colunas: [
                 { header: 'Número', width: 16, get: (d) => d.numero },
@@ -3238,6 +3252,16 @@
             distribuicoes: [
                 { titulo: 'Mandados por Motivo de Expedição', campo: 'motivoExpedicao', topN: 12 },
                 { titulo: 'Mandados por Classe Processual', campo: 'classe', topN: 12 },
+                // Ver comentário em CFG_ALVARAS_SOLTURA_REGULARIZAR.pdf.distribuicoes
+                // sobre esta lista (mesmo pedido do usuário, mesmo ponto de extensão
+                // `calc`, valor fixo em 1 por não haver quantidade natural por registro).
+                {
+                    titulo: 'Lista dos 5 primeiros registros',
+                    rotuloCategoria: 'Mandado (Processo)',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: `${d.mandado} (${d.processo})`, valor: 1 })),
+                    }),
+                },
             ],
             colunas: [
                 { header: 'Mandado', width: 16, get: (d) => d.mandado },
