@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.79
+// @version      25.80
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2883,6 +2883,26 @@
         }) || null;
     }
 
+    // Mesma armadilha do comentário acima, mas para o "N registro(s)" do topo da tabela
+    // (div#navigator div.navLeft), usado por totalRegistrosPagina()/adicionarPagina para
+    // preencher o KPI do resumo (cfg.totalIdentificadoNoResumo). Bug relatado pelo
+    // usuário: o total de "Aguardando Análise de Retorno" e "Aguardando Análise de
+    // Decurso de Prazo" saía errado no PDF/Excel — nessas duas telas (só nessas, não em
+    // Distribuição/Cumprimento) a página tem OUTRO div#navigator, de um widget alheio,
+    // ANTES do de Mandados no DOM; document.querySelector('div#navigator') genérico
+    // (usado por totalRegistrosPagina()) pegava o navigator errado e lia o total de
+    // outra coisa. Resolve do mesmo jeito que tabelaMandados(): quando há mais de um
+    // div#navigator na página, usa o que vem DEPOIS da tabela de Mandados no DOM (é onde
+    // o Projudi sempre posiciona a paginação da própria tabela de resultados).
+    function navigatorDeMandados() {
+        const tabela = tabelaMandados();
+        if (!tabela) return null;
+        const navegadores = [...document.querySelectorAll('div#navigator')];
+        if (navegadores.length <= 1) return navegadores[0] || null;
+        return navegadores.find(nav => !!(tabela.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING))
+            || navegadores[0];
+    }
+
     const CFG_MANDADOS_RETORNO = {
         prefixo: 'projudi_mandadosretorno_',
         mostrarSeVazio: true, // "zero mandados aguardando retorno" é uma informação válida
@@ -2897,6 +2917,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_retorno_projudi',
         rotulos: { coletar: 'Extrair Mandados (Retorno)', coletarMais: 'Extrair mais (Mandados Retorno)', baixar: '⬇ Baixar Mandados (Retorno)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -2909,6 +2930,13 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Pedido do usuário: card extra com processos DISTINTOS — um mesmo processo
+            // pode ter mais de um mandado nesta fase, então "registros" (mandados) e
+            // "processos distintos" são números diferentes aqui (mesmo padrão já usado em
+            // CFG_APREENSOES, ver kpisExtras lá).
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando análise de retorno',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de retorno',
@@ -2968,6 +2996,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_pendentes_cumprimento_projudi',
         rotulos: { coletar: 'Extrair Mandados (Cumprimento)', coletarMais: 'Extrair mais (Mandados Cumprimento)', baixar: '⬇ Baixar Mandados (Cumprimento)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -2980,6 +3009,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados pendentes de cumprimento',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados pendentes de cumprimento',
@@ -3020,6 +3053,7 @@
         usaAtuacao: false,
         contextoExtra: mapaColunasMandado,
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_aguardando_distribuicao_projudi',
         rotulos: { coletar: 'Extrair Mandados (Aguardando Distribuição)', coletarMais: 'Extrair mais (Mandados Aguardando Distribuição)', baixar: '⬇ Baixar Mandados (Aguardando Distribuição)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -3032,6 +3066,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando distribuição ao oficial de justiça',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando distribuição ao oficial de justiça',
@@ -3062,6 +3100,7 @@
         usaAtuacao: false,
         contextoExtra: () => ({ mapa: mapaColunasMandado() }),
         pageSizeSelect: { name: 'cumprimentoCartorioMandadoPageSizeOptions', valor: '500' },
+        navigatorRaiz: navigatorDeMandados, // ver comentário de navigatorDeMandados()
         nomeArquivo: 'mandados_decurso_prazo_projudi',
         rotulos: { coletar: 'Extrair Mandados (Decurso de Prazo)', coletarMais: 'Extrair mais (Mandados Decurso de Prazo)', baixar: '⬇ Baixar Mandados (Decurso de Prazo)' },
         cabecalhos: CABECALHOS_MANDADO_XLSX,
@@ -3074,6 +3113,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando análise de decurso de prazo',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de decurso de prazo',
@@ -5264,12 +5307,31 @@
             // Captura o "N registro(s) encontrado(s)" mostrado pelo Projudi na 1ª página,
             // ANTES de qualquer paginação — pedido do usuário (Apreensões): o Projudi é um
             // sistema vivo, então o total pode mudar durante a coleta paginada (novas
-            // apreensões registradas no meio do caminho). Guardado uma única vez (idx===0)
-            // pra o KPI "Apreensões pendentes" no PDF sempre mostrar esse número, mesmo que
-            // a coleta em si acabe com outra contagem. Opt-in via cfg.totalIdentificadoNoResumo
-            // — outros relatórios continuam sem gravar essa chave.
-            if (idx === 0 && cfg.totalIdentificadoNoResumo) {
-                const totalInicial = totalRegistrosPagina();
+            // apreensões registradas no meio do caminho). Guardado uma única vez por
+            // rodada pra o KPI "Apreensões pendentes" no PDF sempre mostrar esse número,
+            // mesmo que a coleta em si acabe com outra contagem. Opt-in via
+            // cfg.totalIdentificadoNoResumo — outros relatórios continuam sem gravar essa
+            // chave.
+            //
+            // idx===0 sozinho (comportamento original) só é verdade na PRIMEIRA página
+            // que este prefixo já viu DESDE SEMPRE — o botão "Extrair" ACRESCENTA aos
+            // dados já coletados (não limpa antes, só "Limpar" faz isso), então numa
+            // 2ª extração do mesmo relatório (ex.: gerar o relatório de novo dias
+            // depois) idx já vem >0 e total_identificado nunca era atualizado de novo —
+            // ficava CONGELADO no valor (ou na ausência de valor, caindo no fallback
+            // dados.length) da primeira vez que esse relatório foi extraído. Bug
+            // relatado pelo usuário: "Mandados Aguardando Análise de Retorno" mostrava
+            // sempre o mesmo total (igual ao nº de registros coletados) mesmo depois do
+            // fix do formato do texto, porque esse prefixo específico já tinha dados
+            // acumulados de antes do fix. numeroPaginaAtual()===1 (a página que o
+            // PRÓPRIO PROJUDI está mostrando agora, não o nosso contador acumulado)
+            // garante que o total seja recapturado toda vez que uma coleta REALMENTE
+            // recomeça da página 1, mesmo com dados antigos ainda acumulados.
+            if ((idx === 0 || numeroPaginaAtual() === 1) && cfg.totalIdentificadoNoResumo) {
+                // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
+                // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
+                // o comportamento de sempre (1º div#navigator do documento).
+                const totalInicial = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
                 if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
             }
             // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
@@ -5491,7 +5553,7 @@
             }
 
             const pagina = numeroPaginaAtual();
-            const totReg = totalRegistrosPagina();
+            const totReg = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
             const porPag = dadosPagina.length || 20;
             const totPag = totReg ? Math.ceil(totReg / porPag) : '?';
             const ctx = cfg.usaAtuacao ? `"${lerAtuacao() || '(sem atuação)'}" — ` : '';
@@ -5632,11 +5694,46 @@
         return b ? parseInt(b.textContent.trim(), 10) : 1;
     }
 
-    function totalRegistrosPagina() {
-        const nav = document.querySelector('div#navigator div.navLeft');
+    // raizNavigator opcional: div#navigator já resolvido pelo chamador (ver
+    // navigatorDeMandados() — telas com mais de um div#navigator na página, ex.
+    // "Aguardando Análise de Retorno"/"Aguardando Análise de Decurso de Prazo" de
+    // Mandados). Sem argumento, mantém o comportamento de sempre (1º div#navigator do
+    // documento) — usado por todo relatório que não tem esse problema.
+    function totalRegistrosPagina(raizNavigator) {
+        const navRaiz = raizNavigator !== undefined ? raizNavigator : document.querySelector('div#navigator');
+        const nav = navRaiz ? navRaiz.querySelector('div.navLeft') : null;
         if (!nav) return null;
-        const m = nav.textContent.match(/(\d+)\s+registro/);
+        const texto = nav.textContent;
+        // Bug relatado pelo usuário: nas telas de Mandados o Projudi escreve "Total de
+        // registros nesta página: N" — o NÚMERO vem DEPOIS da palavra "registros", ao
+        // contrário do formato "N registro(s) encontrado(s)" das demais telas (número
+        // ANTES). O regex só cobria o 2º formato, então nunca batia em Mandados —
+        // total_identificado ficava sempre vazio lá e o KPI caía no fallback
+        // dados.length (que só "parecia certo" quando a coleta paginada terminava sem
+        // nenhuma mudança ao vivo no Projudi nesse meio-tempo). Agora tenta os dois
+        // formatos, número antes ou depois de "registro(s)".
+        const m = texto.match(/(\d+)\s+registro/) || texto.match(/registros?[^\d]*(\d+)/i);
         return m ? parseInt(m[1], 10) : null;
+    }
+
+    // Total mostrado no KPI/resumo de um relatório: o total IDENTIFICADO na 1ª página da
+    // busca (ver adicionarPagina/cfg.totalIdentificadoNoResumo), não dados.length —
+    // pedido do usuário (Apreensões): o Projudi é um sistema vivo, então a coleta
+    // paginada pode acabar com uma contagem diferente da que o próprio Projudi reportou
+    // no início da busca; o número identificado deve sempre prevalecer, mesmo que a
+    // coleta em si traga outro total. Sem cfg.totalIdentificadoNoResumo (demais
+    // relatórios), cai direto em dados.length, comportamento de sempre.
+    //
+    // Extraído de montarResumoGenerico (KPI do PDF individual) para ser reaproveitado
+    // também pela capa unificada (gerarPDFConjunto/itensCartorio) — bug relatado pelo
+    // usuário: a capa mostrava "Mandados Aguardando Análise de Retorno: 39 pendente(s)"
+    // enquanto a seção detalhada do MESMO PDF já mostrava corretamente 44 — a capa
+    // calculava "pendentes" direto como dados.length, sem passar por essa mesma lógica.
+    function totalIdentificadoOuColetado(cfg, dados) {
+        const totalIdentificado = cfg.totalIdentificadoNoResumo
+            ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
+            : NaN;
+        return Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
     }
 
     // ── Download genérico (dispara a partir de um clique do usuário) ─────────────
@@ -6116,11 +6213,34 @@
 
         if (central) {
             const cx = x + w / 2;
-            // altura total do bloco: título (4) + valor (7) + subs (4 cada)
-            const blocoH = 4 + 8 + subs.length * 4.2;
-            let yy = y + (h - blocoH) / 2 + 4;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
-            doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
+            // Título pode ser longo (ex. "Mandados Aguardando Análise de Decurso de
+            // Prazo") e vazar por cima do card vizinho quando há 3+ cards na mesma linha
+            // (w menor por card, ex. depois de acrescentar "Processos distintos" nos KPIs
+            // de Mandados) — bug relatado pelo usuário: título sem quebra nem truncamento
+            // nenhum (só o VALOR já passava por textoTruncadoParaLargura). Quebra em até
+            // 3 linhas (doc.splitTextToSize — 3 e não 2, senão um título como "Mandados
+            // Aguardando Distribuição ao Oficial de Justiça" perderia "Justiça" da 3ª
+            // linha SEM sinal nenhum de corte, já que a 2ª linha sozinha já cabia
+            // inteira). Só se sobrar uma 4ª linha (não deveria acontecer com os títulos
+            // reais dos relatórios) é que a 3ª ganha reticências.
+            const TITULO_MAX_LINHAS = 3;
+            const ALTURA_LINHA_TITULO = 3.2;
+            const todasLinhasTitulo = doc.splitTextToSize(String(titulo).toUpperCase(), w - 8);
+            const linhasTitulo = todasLinhasTitulo.slice(0, TITULO_MAX_LINHAS);
+            const ultima = linhasTitulo.length - 1;
+            linhasTitulo[ultima] = todasLinhasTitulo.length > TITULO_MAX_LINHAS
+                ? textoTruncadoParaLargura(doc, linhasTitulo[ultima].replace(/\s+$/, '') + '…', w - 8)
+                : textoTruncadoParaLargura(doc, linhasTitulo[ultima], w - 8);
+            const extraLinhas = (linhasTitulo.length - 1) * ALTURA_LINHA_TITULO;
+            // altura total do bloco: título (4 + extraLinhas) + valor (7) + subs (4 cada)
+            const blocoH = 4 + extraLinhas + 8 + subs.length * 4.2;
+            let yy = y + (h - blocoH) / 2 + 4;
+            linhasTitulo.forEach((linha, i) => {
+                if (i > 0) yy += ALTURA_LINHA_TITULO;
+                doc.text(linha, cx, yy, { align: 'center' });
+            });
+            yy += 7;
             // Escolhe a MAIOR fonte que caiba o valor por inteiro (medindo de verdade, não
             // só por número de caracteres) — o número de um processo (~25 caracteres) caía
             // no mesmo balde de fonte 15pt que valores bem mais curtos, estourava a largura
@@ -6920,16 +7040,7 @@
         // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
         const kY = hy + 6;
         const prio = contarPrioritarios(dados);
-        // "Apreensões pendentes" mostra o total IDENTIFICADO na 1ª página da busca (ver
-        // adicionarPagina/cfg.totalIdentificadoNoResumo), não dados.length — pedido do
-        // usuário: o Projudi é um sistema vivo, então a coleta paginada pode acabar com uma
-        // contagem diferente da que o próprio Projudi reportou no início da busca; o KPI
-        // deve sempre mostrar esse número identificado, mesmo que a coleta em si traga
-        // outro total. Sem esse cfg (demais relatórios), comportamento igual a antes.
-        const totalIdentificado = cfg.totalIdentificadoNoResumo
-            ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
-            : NaN;
-        const valorAtos = Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
+        const valorAtos = totalIdentificadoOuColetado(cfg, dados);
         const kpis = [
             // atosAcento (opcional, nome da cor — ver acento de kpisExtras/mesmo motivo de
             // TDZ) troca a cor deste 1º card; sem ele, cai no azul de sempre (comportamento
@@ -8764,8 +8875,15 @@
                 // Suspensos por Prazo Indeterminado: indicador da capa usa o total do
                 // card da home (ver totalHomeOuColetadoSuspensos), não s.dados.length —
                 // pedido do usuário, mesmo motivo do KPI/título no PDF individual (ver
-                // montarResumoSuspensos).
-                pendentes: s.cfgOriginal === CFG_SUSPENSOS ? totalHomeOuColetadoSuspensos(s.dados) : s.dados.length,
+                // montarResumoSuspensos). Os demais relatórios com
+                // cfg.totalIdentificadoNoResumo (Mandados, Apreensões, Juntadas, Retorno,
+                // Remessas) usam totalIdentificadoOuColetado — mesma lógica do KPI da
+                // seção detalhada (ver comentário ali); bug relatado pelo usuário: a capa
+                // mostrava dados.length puro, divergindo do total já corrigido na seção
+                // detalhada do mesmo PDF.
+                pendentes: s.cfgOriginal === CFG_SUSPENSOS
+                    ? totalHomeOuColetadoSuspensos(s.dados)
+                    : totalIdentificadoOuColetado(s.cfgOriginal, s.dados),
                 prioritarios: contarPrioritarios(s.dados),
                 maisAntiga,
                 status: classificarSituacaoPorDias(maisAntiga, LIMITES_CARTORIO.atencao, LIMITES_CARTORIO.critico),
