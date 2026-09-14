@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.73
+// @version      25.74
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3482,24 +3482,37 @@
     // formularioParalisado) — não há painel/aba intermediária, então este gate cobre
     // tanto "preenchendo_" (1ª busca) quanto "coletando_" (correção/zero resultados).
     function gateTransacaoPenal() {
-        if (!formularioTransacaoPenal()) return false;
-        const estadoAuto = store.getItem(AUTO_ESTADO) || '';
-        const chave = keyDoEstadoAtual(estadoAuto);
+        // DIAGNÓSTICO — registrado ANTES de qualquer "return" antecipado (bug relatado
+        // pelo usuário: automação "travada", nada no log nem no console). Sem esta linha
+        // no topo, um early-return (form não encontrado, ou chave/tipoEsperado vazios por
+        // AUTO_ESTADO ainda não promovido de "ir_X" pra "preenchendo_X" no instante em que
+        // injetarBotoes() rodou) saía da função em silêncio total, sem deixar rastro de
+        // por que nada aconteceu.
+        const estadoAutoBruto = store.getItem(AUTO_ESTADO) || '';
+        const formOk = !!formularioTransacaoPenal();
+        logPainel(`[Auto Projudi Transação Penal] gate chamado — url=${location.pathname} estadoAuto="${estadoAutoBruto}" formularioEncontrado=${formOk}`);
+        if (!formOk) return false;
+        const chave = keyDoEstadoAtual(estadoAutoBruto);
         const tipoEsperado = chave && TIPO_POR_CHAVE_TRANSACAO[chave];
-        if (!tipoEsperado) return false; // fora da automação para este relatório — segue fluxo manual normal
+        if (!tipoEsperado) {
+            logPainel(`[Auto Projudi Transação Penal] gate saindo — chave="${chave}" não é um dos 7 tipos (fora da automação deste relatório, ou estado ainda não promovido)`);
+            return false; // fora da automação para este relatório — segue fluxo manual normal
+        }
 
-        if (estadoAuto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+        if (estadoAutoBruto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
         const selTipo = document.getElementById('tipo');
         const selStatus = document.getElementById('status');
         const tabela = tabelaTransacaoPenal();
-        // DIAGNÓSTICO (usuário relatou "retornou tudo zerado, mesmo havendo resultados"):
-        // uma linha só, sempre registrada, com TODO o estado relevante nesta passada do
-        // gate — aparece tanto no console quanto no "▼ Ver log detalhado" do painel (ver
-        // logPainel), pra comparar se o filtro está correto, se a tabela foi achada, e
-        // quantas linhas ela tem.
+        // Conta só linhas com "cara de dado de verdade" (>= minTds células diretas) — a
+        // tela do Projudi mantém uma ÚNICA <tr> com <td colspan="6">Nenhum registro
+        // encontrado</td> mesmo com zero resultados (confirmado na amostra real), então
+        // "existe algum <tr>" NÃO significa "tem dado" (bug corrigido: antes isso fazia
+        // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
+        // genérico mesmo em telas vazias).
+        const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 11) : [];
         logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
-            + `tabelaEncontrada=${!!tabela} tbodyTr=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} `
+            + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
         if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A')) {
             if (selTipo) selTipo.value = tipoEsperado;
@@ -3520,7 +3533,7 @@
         // "Zero resultados" — mesmo padrão de marcarColetaMandadosVazia/avancarAutomacao
         // usado por gateMandados (função genérica, reaproveitada aqui sem alteração).
         const cfg = cfgTransacaoPenalPorChave(chave);
-        if (!tabela.querySelector('tbody tr')) {
+        if (!linhasDeVerdade.length) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
             logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados — avançando`);
             avancarAutomacao(cfg);
@@ -13744,7 +13757,7 @@
 
     function injetarBotoes() {
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
-        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
+        logPainel(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
 
         // Página de Outros Cumprimentos (painel de contadores, sem form/pesquisa e SEM
         // table.buttonBar — diferente de todas as outras telas de relatório) — tratada
@@ -17154,16 +17167,26 @@
 
         // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
-        function linhaChecklistItem(r) {
+        function linhaChecklistItem(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `
                     <label class="${classeItem}">
                         <input type="checkbox" class="pa-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                    </label>`;
+        }
+        // Checkbox "pai" SINTÉTICO (ver ROTULOS_GRUPO_CHECKLIST) — não tem data-key
+        // (fica de fora da fila de automação e da persistência de seleções, ambas
+        // baseadas em dataset.key), só data-filhos pra ligarCheckboxesPaiFilho marcar os
+        // filhos reais junto.
+        function linhaGrupoChecklist(chave, filhosKeys) {
+            return `
+                    <label class="pa-item pa-item-pai-sintetico">
+                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -17172,10 +17195,29 @@
         // continuam soltos, sem cabeçalho, exatamente como antes deste recurso. Não é
         // uma estrutura de fila diferente: cada item continua sendo o mesmo
         // <input class="pa-check" data-key="...">, só com um wrapper visual em volta.
+        // Itens com paiChecklist (ver Benefícios/Medidas/Suspensões em REPORTS_AUTOMACAO)
+        // não aparecem soltos — são desenhados dentro do bloco do pai SINTÉTICO
+        // (linhaGrupoChecklist), indentados, na posição do 1º filho encontrado.
         function linhasComSubgrupos(itens) {
             let html = '';
             let subgrupoAberto = null;
+            const filhosPorPai = new Map();
             itens.forEach(r => {
+                if (!r.paiChecklist) return;
+                if (!filhosPorPai.has(r.paiChecklist)) filhosPorPai.set(r.paiChecklist, []);
+                filhosPorPai.get(r.paiChecklist).push(r);
+            });
+            const gruposDesenhados = new Set();
+            itens.forEach(r => {
+                if (r.paiChecklist) {
+                    if (!gruposDesenhados.has(r.paiChecklist)) {
+                        gruposDesenhados.add(r.paiChecklist);
+                        const filhos = filhosPorPai.get(r.paiChecklist) || [];
+                        html += linhaGrupoChecklist(r.paiChecklist, filhos.map(f => f.key));
+                        html += `<div class="pa-item-filhos">${filhos.map(f => linhaChecklistItem(f, true)).join('')}</div>`;
+                    }
+                    return; // filho: já desenhado dentro do bloco do pai acima
+                }
                 if (r.subgrupo !== subgrupoAberto) {
                     subgrupoAberto = r.subgrupo || null;
                     if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
@@ -17359,6 +17401,10 @@
             // reanexado a esses elementos NOVOS a cada troca de aba, senão marcar/
             // desmarcar um item específico de uma categoria não-Cível não persistia.
             grupoEspecifico.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
+            // Marcar o checkbox "pai" sintético (ex.: Suspensões por Tipo) já marca os
+            // filhos junto — precisa reanexar aqui pelo mesmo motivo do listener acima
+            // (innerHTML recria os elementos do zero a cada troca de categoria).
+            ligarCheckboxesPaiFilho(grupoEspecifico, '.pa-check', salvarSelecoesPainel);
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
             atualizarPainel();
         }
