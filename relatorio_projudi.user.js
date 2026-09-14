@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.82
+// @version      25.83
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3388,7 +3388,15 @@
     // página, já que a tabela em si não expõe essa informação por linha.
     function extrairLinhaTransacaoPenal(tds, atuacao, contexto) {
         if (tds.length < 9) return null; // ver comentário grande acima — 9 <td> diretos, confirmado com amostra real
-        const processo = textoCelula(tds[0]);
+        // Pedido do usuário: processos com mais de um réu aparecem em mais de uma <tr>
+        // (mesmo processo, "Nome da Parte" diferente) — o card "Processos distintos"
+        // contava errado quando o texto bruto da célula trazia ícones/rótulos extras que
+        // variavam entre as linhas (ex.: só uma delas com ícone de "histórico"), fazendo
+        // duas linhas do MESMO processo virarem chaves diferentes no Set de dedupe. Extrai
+        // só o número no formato CNJ (mesmo regex usado em Audiências Designadas, ver
+        // linha 1512) para normalizar — cai no texto bruto se não achar o padrão.
+        const processoBruto = textoCelula(tds[0]);
+        const processo = (processoBruto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [processoBruto])[0];
         if (!processo) return null;
         // tds[5] é o <td> com a <table> aninhada de Medidas/Status da Medida/Observação —
         // pode vir sem nenhum <tr> (sem medida associada), daí medidaTds.length === 0 e os
