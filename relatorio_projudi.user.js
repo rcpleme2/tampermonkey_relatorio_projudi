@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.83
+// @version      25.84
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3352,6 +3352,14 @@
         const sel = document.getElementById('tipo');
         return sel ? sel.value : null;
     }
+    // Pedido do usuário: rodar a MESMA busca (Tipo + Motivo) uma 2ª vez, restrita a
+    // processos com "Situação do Processo" = Ativos — ver CFG_TRANSACAO_PENAL_ATIVOS/
+    // CFG_SUSPENSAO_COND_PROCESSO_ATIVOS. Diferente de #tipo/#status (<select>), esse
+    // filtro é um grupo de <input type="radio" name="situacaoProcesso">.
+    function situacaoProcessoSelecionada() {
+        const marcado = document.querySelector('input[name="situacaoProcesso"]:checked');
+        return marcado ? marcado.value : null;
+    }
     function formularioTransacaoPenal() {
         const form = document.getElementById('buscaTransacaoPenalForm');
         return form && form.querySelector('#tipo') && form.querySelector('#status') ? form : null;
@@ -3459,11 +3467,36 @@
             // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
             // (o que estourava o texto dos cards com 6+ colunas). Explicitamente NÃO
             // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
-            secaoCardsExtra: {
-                titulo: 'Motivo da Suspensão',
-                calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
-                    .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
-            },
+            secaoCardsExtra: [
+                {
+                    titulo: 'Motivo da Suspensão',
+                    calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
+                        .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
+                },
+                // Pedido do usuário: suspensões ativas vinculadas a um processo cuja
+                // "Situação do Processo" no Projudi ainda consta como Ativos geram dúvida
+                // sobre alguma baixa que a secretaria não tenha feito. A mesma busca
+                // (Tipo + cada um dos 10 Motivos) roda uma 2ª vez com esse filtro (ver
+                // CFG_TRANSACAO_PENAL_ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS e o anexo
+                // de dadosAtivos em secoesColetadas) — os resultados NÃO viram uma seção/
+                // página própria, só alimentam estes cards de alerta dentro do relatório
+                // "pai". Fica vazio (não aparece) se essa 2ª busca ainda não rodou.
+                {
+                    titulo: '⚠ Vinculadas a Processo ATIVO (possível baixa pendente)',
+                    calc: (dados) => {
+                        const ativos = dados.dadosAtivos || [];
+                        if (!ativos.length) return [];
+                        const processosDistintosAtivos = new Set(ativos.map(d => d.processo).filter(Boolean)).size;
+                        const porMotivo = contarPorCampo(ativos, 'motivoSuspensao', 12)
+                            .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'vermelho' }));
+                        return [
+                            { titulo: 'Total vinculado a processo ativo', valor: ativos.length, acento: 'vermelho' },
+                            { titulo: 'Processos distintos (ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
+                            ...porMotivo,
+                        ];
+                    },
+                },
+            ],
             distribuicoes: [
                 { titulo: 'Por Classe Processual', campo: 'classe', topN: 12 },
                 { titulo: 'Por Status da Transação Penal', campo: 'statusTransacao', topN: 8 },
@@ -3525,7 +3558,11 @@
     const CFG_TRANSACAO_PENAL = {
         prefixo: 'projudi_transacaopenal_t_',
         mostrarSeVazio: true, // "zero transações penais ativas" é uma informação válida
-        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T',
+        // situacaoProcessoSelecionada() !== 'ativos' — sem essa checagem, esta detecta()
+        // também bateria na tela da busca companheira (ver CFG_TRANSACAO_PENAL_ATIVOS
+        // logo abaixo, mesmo Tipo "T", só muda "Situação do Processo"), ambíguo pra
+        // detectarConfig()/criarColetor saber qual coleta está em andamento.
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() !== 'ativos',
         minTds: 9,
         usaAtuacao: false,
         contextoExtra: contextoExtraTransacaoPenal,
@@ -3541,7 +3578,7 @@
     const CFG_SUSPENSAO_COND_PROCESSO = {
         prefixo: 'projudi_transacaopenal_s_',
         mostrarSeVazio: true,
-        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S',
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S' && situacaoProcessoSelecionada() !== 'ativos',
         minTds: 9,
         usaAtuacao: false,
         contextoExtra: contextoExtraTransacaoPenal,
@@ -3554,16 +3591,62 @@
         linha: LINHA_TRANSACAO_PENAL_XLSX,
         pdf: pdfTransacaoPenal('Suspensão Condicional do Processo — Ativas', 'Suspensões condicionais do processo ativas'),
     };
+    // Pedido do usuário: rodar a MESMA busca (Tipo Transação Penal/Susp. Cond. Processo,
+    // Status=ATIVA, cada um dos 10 Motivos) uma 2ª vez com "Situação do Processo" =
+    // Ativos (<input type="radio" name="situacaoProcesso" value="ativos">) — suspensões
+    // ativas vinculadas a um processo AINDA ativo geram dúvida sobre alguma baixa que a
+    // secretaria não tenha feito. Prefixo/coleta própria (própria automação, própria
+    // paginação), mas SEM seção/página própria no PDF — os dados só alimentam os cards de
+    // alerta do relatório "pai" (ver secaoCardsExtra em pdfTransacaoPenal e o anexo de
+    // dadosAtivos em secoesColetadas). cfg.situacaoProcesso: 'ativos' é lido por
+    // gateTransacaoPenal pra saber que precisa corrigir esse rádio também.
+    const CFG_TRANSACAO_PENAL_ATIVOS = {
+        prefixo: 'projudi_transacaopenal_t_ativos_',
+        mostrarSeVazio: true,
+        situacaoProcesso: 'ativos',
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() === 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'transacao_penal_processo_ativo_projudi',
+        rotulos: rotulosTransacaoPenal('Transação Penal (Processo Ativo)'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Transação Penal — Ativas, Processo Ativo', 'Transações penais ativas em processos ativos'),
+    };
+    const CFG_SUSPENSAO_COND_PROCESSO_ATIVOS = {
+        prefixo: 'projudi_transacaopenal_s_ativos_',
+        mostrarSeVazio: true,
+        situacaoProcesso: 'ativos',
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S' && situacaoProcessoSelecionada() === 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'suspensao_condicional_processo_processo_ativo_projudi',
+        rotulos: rotulosTransacaoPenal('Susp. Cond. Processo (Processo Ativo)'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Suspensão Condicional do Processo — Ativas, Processo Ativo', 'Suspensões condicionais do processo ativas em processos ativos'),
+    };
     // Mapa "key do item de fila" -> valor do <select id="tipo"> — mesmo esquema de
-    // STATUS_POR_CHAVE_MANDADO/cfgMandadoPorChave acima.
-    // Escopo reduzido a pedido do usuário: apenas Transação Penal e Suspensão
-    // Condicional do Processo (os demais tipos foram descontinuados).
+    // STATUS_POR_CHAVE_MANDADO/cfgMandadoPorChave acima. As variantes "...ativos" têm o
+    // MESMO valor de Tipo — o que muda é cfg.situacaoProcesso (ver cfgTransacaoPenalPorChave).
     const TIPO_POR_CHAVE_TRANSACAO = {
         transacaopenal: 'T',
         suspcondprocesso: 'S',
+        transacaopenalativos: 'T',
+        suspcondprocessoativos: 'S',
     };
     function cfgTransacaoPenalPorChave(chave) {
         if (chave === 'suspcondprocesso') return CFG_SUSPENSAO_COND_PROCESSO;
+        if (chave === 'transacaopenalativos') return CFG_TRANSACAO_PENAL_ATIVOS;
+        if (chave === 'suspcondprocessoativos') return CFG_SUSPENSAO_COND_PROCESSO_ATIVOS;
         return CFG_TRANSACAO_PENAL;
     }
 
@@ -3663,16 +3746,31 @@
         // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
         // genérico mesmo em telas vazias).
         const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 9) : [];
+        // cfg.situacaoProcesso só existe nas variantes "...ativos" (ver CFG_TRANSACAO_PENAL_
+        // ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS) — undefined nas 2 variantes originais
+        // significa "não mexe nesse filtro", preservando o comportamento de sempre.
+        const situacaoEsperada = cfg.situacaoProcesso || null;
+        const situacaoAtual = situacaoProcessoSelecionada();
         logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} motivoEsperado=${motivoEsperado} (${rotuloMotivoSuspensao(motivoEsperado)}) `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} motivoAtual=${selMotivo ? selMotivo.value : 'n/d'} `
+            + `situacaoProcessoEsperada=${situacaoEsperada || '(não verificado)'} situacaoProcessoAtual=${situacaoAtual || 'n/d'} `
             + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
-        if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A') || (selMotivo && selMotivo.value !== motivoEsperado)) {
+        if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A') || (selMotivo && selMotivo.value !== motivoEsperado)
+            || (situacaoEsperada && situacaoAtual !== situacaoEsperada)) {
             if (selTipo) selTipo.value = tipoEsperado;
             if (selStatus) selStatus.value = 'A';
             if (selMotivo) selMotivo.value = motivoEsperado;
+            if (situacaoEsperada) {
+                // Clique real (não .checked=true) — mesma armadilha já documentada de
+                // checkbox/aba do Projudi só reagindo a um clique de usuário de verdade.
+                const radioAlvo = [...document.querySelectorAll('input[name="situacaoProcesso"]')]
+                    .find(r => r.value === situacaoEsperada);
+                if (radioAlvo && !radioAlvo.checked) radioAlvo.click();
+            }
             const btn = document.getElementById('searchButton');
-            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A motivo=${motivoEsperado} (${chave}) e clicando Pesquisar`);
+            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A motivo=${motivoEsperado}`
+                + `${situacaoEsperada ? ` situacaoProcesso=${situacaoEsperada}` : ''} (${chave}) e clicando Pesquisar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
@@ -7072,12 +7170,19 @@
         // o que estourava o texto dos cards). Ponto de extensão OPCIONAL — cfg.pdf que
         // não define p.secaoCardsExtra fica byte-a-byte como antes desta mudança.
         if (p.secaoCardsExtra) {
-            const itensSecao = (p.secaoCardsExtra.calc(dados) || [])
-                .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
-            if (itensSecao.length) {
-                tituloSecao(doc, m, y + 4, uw, p.secaoCardsExtra.titulo);
-                y = desenharGradeCardsKpi(doc, m, y + TITULO_TABELA_H, uw, itensSecao, ctx, p.secaoCardsExtra.cols) + 2;
-            }
+            // Aceita um único bloco {titulo, calc} ou uma lista deles (pedido do usuário,
+            // Benefícios/Medidas/Suspensões: mais de uma seção de cards — "Motivo da
+            // Suspensão" e, quando há dados da busca companheira por processo ativo,
+            // "Vinculadas a Processo ATIVO" — cada uma com seu próprio título).
+            const blocos = Array.isArray(p.secaoCardsExtra) ? p.secaoCardsExtra : [p.secaoCardsExtra];
+            blocos.forEach(bloco => {
+                const itensSecao = (bloco.calc(dados) || [])
+                    .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
+                if (itensSecao.length) {
+                    tituloSecao(doc, m, y + 4, uw, bloco.titulo);
+                    y = desenharGradeCardsKpi(doc, m, y + TITULO_TABELA_H, uw, itensSecao, ctx, bloco.cols) + 2;
+                }
+            });
         }
 
         // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
@@ -13431,6 +13536,8 @@
         // pelo valor do <select id="tipo"> (ver detecta() de cada CFG_* acima).
         else if (CFG_TRANSACAO_PENAL.detecta(cab)) cfg = CFG_TRANSACAO_PENAL;
         else if (CFG_SUSPENSAO_COND_PROCESSO.detecta(cab)) cfg = CFG_SUSPENSAO_COND_PROCESSO;
+        else if (CFG_TRANSACAO_PENAL_ATIVOS.detecta(cab)) cfg = CFG_TRANSACAO_PENAL_ATIVOS;
+        else if (CFG_SUSPENSAO_COND_PROCESSO_ATIVOS.detecta(cab)) cfg = CFG_SUSPENSAO_COND_PROCESSO_ATIVOS;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
@@ -15737,6 +15844,14 @@
         // no checklist.
         { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
         { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        // paiChecklist: 'suspensoesprocessoativo' — pedido do usuário: mesma busca de
+        // Transação Penal/Susp. Cond. Processo (Tipo + cada um dos 10 Motivos) rodada uma
+        // 2ª vez com "Situação do Processo" = Ativos, pra sinalizar suspensões ativas
+        // vinculadas a processo ainda ativo (possível baixa não feita pela secretaria).
+        // Não vira seção própria no PDF — só alimenta cards de alerta dentro do
+        // relatório "pai" (ver secaoCardsExtra em pdfTransacaoPenal/secoesColetadas).
+        { key: 'transacaopenalativos', cfg: CFG_TRANSACAO_PENAL_ATIVOS, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal — Processo Ativo (Ativas)', rotuloChecklist: 'Transação Penal (Processo Ativo)', curto: 'Transação Penal (Proc. Ativo)', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesprocessoativo' },
+        { key: 'suspcondprocessoativos', cfg: CFG_SUSPENSAO_COND_PROCESSO_ATIVOS, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo — Processo Ativo (Ativas)', rotuloChecklist: 'Susp. Cond. Processo (Processo Ativo)', curto: 'Susp. Cond. Processo (Proc. Ativo)', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesprocessoativo' },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
@@ -15773,6 +15888,7 @@
     // usuário: marcar só esse checkbox já marca os 7 juntos.
     const ROTULOS_GRUPO_CHECKLIST = {
         suspensoesportipo: 'Suspensões por Tipo',
+        suspensoesprocessoativo: 'Suspensões — Processo Ativo (Auditoria)',
     };
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     // Considera tanto r.cfg (cfg "representante" do item) quanto r.cfgs (lista completa,
@@ -16926,7 +17042,22 @@
                 'processo',
             );
         }
+        // Pedido do usuário: cards de alerta "vinculadas a Processo ATIVO" dentro do
+        // PRÓPRIO resumo de Transação Penal/Susp. Cond. Processo, não uma seção própria
+        // (ver secaoCardsExtra em pdfTransacaoPenal) — anexa os dados da busca
+        // companheira (mesmo Tipo/Motivo, "Situação do Processo" = Ativos, ver
+        // CFG_TRANSACAO_PENAL_ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS) como propriedade
+        // no array de dados do relatório "pai", e some com a seção "ativos" isolada da
+        // lista final — ela nunca teve página própria, só alimenta os cards.
+        const anexarDadosAtivos = (cfgPrincipal, cfgAtivos) => {
+            const principal = secoes.find(s => s.cfg === cfgPrincipal);
+            const ativos = secoes.find(s => s.cfg === cfgAtivos);
+            if (principal && ativos) principal.dados.dadosAtivos = ativos.dados;
+        };
+        anexarDadosAtivos(CFG_TRANSACAO_PENAL, CFG_TRANSACAO_PENAL_ATIVOS);
+        anexarDadosAtivos(CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PROCESSO_ATIVOS);
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
+            .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
