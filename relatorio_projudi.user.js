@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.84
+// @version      25.85
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3360,6 +3360,22 @@
         const marcado = document.querySelector('input[name="situacaoProcesso"]:checked');
         return marcado ? marcado.value : null;
     }
+    // cfg.situacaoProcesso é 'ativos' (variantes "...ativos") ou 'todos' (as 2 variantes
+    // originais) — nunca compara direto com o VALUE bruto de "todos" (não confirmado,
+    // só o de "ativos" foi confirmado pelo usuário: <input value="ativos">) — em vez
+    // disso, "todos" só precisa dizer "o rádio marcado NÃO é o de ativos". Bug relatado
+    // pelo usuário: sem corrigir ativamente esse rádio nas 2 variantes originais
+    // (assumindo, errado, que o padrão do Projudi era sempre "Todos"), a tela às vezes
+    // chega com "Ativos" pré-marcado — a coleta de "Transação Penal" saía zerada porque
+    // detecta() (que exige NÃO ser "ativos") nunca batia.
+    function situacaoProcessoBate(esperada, atual) {
+        if (!esperada) return true; // não verifica
+        return esperada === 'ativos' ? atual === 'ativos' : atual !== 'ativos';
+    }
+    function radioSituacaoProcessoAlvo(esperada) {
+        const radios = [...document.querySelectorAll('input[name="situacaoProcesso"]')];
+        return esperada === 'ativos' ? radios.find(r => r.value === 'ativos') : radios.find(r => r.value !== 'ativos');
+    }
     function formularioTransacaoPenal() {
         const form = document.getElementById('buscaTransacaoPenalForm');
         return form && form.querySelector('#tipo') && form.querySelector('#status') ? form : null;
@@ -3457,17 +3473,42 @@
             // juntos no topo — diferente do card de total (que conta REGISTROS: com a
             // busca por Motivo da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo processo pode
             // aparecer mais de uma vez se tiver mais de uma suspensão com motivos
-            // diferentes), "Processos distintos" conta processos únicos.
+            // diferentes), "Processos distintos" conta processos únicos. Fica só com essas
+            // 2 (não uma 3ª/4ª/5ª linha aqui) pra não voltar a espremer o texto dos cards —
+            // os cards de processo ativo/suspenso viram uma 2ª LINHA logo abaixo, sem
+            // título próprio (ver 1º bloco de secaoCardsExtra), não squeezados nesta linha.
             kpisExtras: (dados) => {
                 const processosDistintos = new Set(dados.map(d => d.processo).filter(Boolean)).size;
                 return [{ titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
             },
-            // Pedido do usuário: os cards por Motivo da Suspensão (ex.: "Art. 366 do
-            // CPP: 45", "Art. 89 da Lei 9.099/95: 27") ganham seção PRÓPRIA, com título,
-            // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
-            // (o que estourava o texto dos cards com 6+ colunas). Explicitamente NÃO
-            // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
             secaoCardsExtra: [
+                // Pedido do usuário: "Total vinculado a Processo Ativo"/"Processos
+                // distintos (Ativos)" ficam na seção de cima, logo abaixo do total — e
+                // "Total vinculado a Processos Suspensos" (o total geral MENOS o
+                // vinculado a processo ativo — o "caso normal", sem indício de baixa
+                // pendente) é novo. Sem `titulo` (bloco sem cabeçalho próprio) — é uma
+                // continuação visual da linha de cards gerais, não uma seção separada
+                // como "Motivo da Suspensão"/o alerta por Motivo abaixo. `cols: 3` pra
+                // ocupar a largura toda numa única linha de 3 cards. Só aparece quando a
+                // busca companheira (Situação do Processo=Ativos) já rodou.
+                {
+                    cols: 3,
+                    calc: (dados) => {
+                        const ativos = dados.dadosAtivos || [];
+                        if (!ativos.length) return [];
+                        const processosDistintosAtivos = new Set(ativos.map(d => d.processo).filter(Boolean)).size;
+                        return [
+                            { titulo: 'Total vinculado a Processo Ativo', valor: ativos.length, acento: 'vermelho' },
+                            { titulo: 'Processos distintos (Ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
+                            { titulo: 'Total vinculado a Processos Suspensos', valor: dados.length - ativos.length, acento: 'aqua' },
+                        ];
+                    },
+                },
+                // Pedido do usuário: os cards por Motivo da Suspensão (ex.: "Art. 366 do
+                // CPP: 45", "Art. 89 da Lei 9.099/95: 27") ganham seção PRÓPRIA, com título,
+                // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
+                // (o que estourava o texto dos cards com 6+ colunas). Explicitamente NÃO
+                // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
                 {
                     titulo: 'Motivo da Suspensão',
                     calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
@@ -3478,22 +3519,16 @@
                 // sobre alguma baixa que a secretaria não tenha feito. A mesma busca
                 // (Tipo + cada um dos 10 Motivos) roda uma 2ª vez com esse filtro (ver
                 // CFG_TRANSACAO_PENAL_ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS e o anexo
-                // de dadosAtivos em secoesColetadas) — os resultados NÃO viram uma seção/
-                // página própria, só alimentam estes cards de alerta dentro do relatório
-                // "pai". Fica vazio (não aparece) se essa 2ª busca ainda não rodou.
+                // de dadosAtivos em secoesColetadas) — os totais gerais já foram pro topo
+                // (1º bloco acima); aqui fica só a discriminação por Motivo. Fica vazio
+                // (não aparece) se essa 2ª busca ainda não rodou.
                 {
-                    titulo: '⚠ Vinculadas a Processo ATIVO (possível baixa pendente)',
+                    titulo: '⚠ Vinculadas a Processo ATIVO (possível baixa pendente) — por Motivo',
                     calc: (dados) => {
                         const ativos = dados.dadosAtivos || [];
                         if (!ativos.length) return [];
-                        const processosDistintosAtivos = new Set(ativos.map(d => d.processo).filter(Boolean)).size;
-                        const porMotivo = contarPorCampo(ativos, 'motivoSuspensao', 12)
+                        return contarPorCampo(ativos, 'motivoSuspensao', 12)
                             .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'vermelho' }));
-                        return [
-                            { titulo: 'Total vinculado a processo ativo', valor: ativos.length, acento: 'vermelho' },
-                            { titulo: 'Processos distintos (ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
-                            ...porMotivo,
-                        ];
                     },
                 },
             ],
@@ -3558,10 +3593,14 @@
     const CFG_TRANSACAO_PENAL = {
         prefixo: 'projudi_transacaopenal_t_',
         mostrarSeVazio: true, // "zero transações penais ativas" é uma informação válida
-        // situacaoProcessoSelecionada() !== 'ativos' — sem essa checagem, esta detecta()
-        // também bateria na tela da busca companheira (ver CFG_TRANSACAO_PENAL_ATIVOS
-        // logo abaixo, mesmo Tipo "T", só muda "Situação do Processo"), ambíguo pra
-        // detectarConfig()/criarColetor saber qual coleta está em andamento.
+        // situacaoProcesso: 'todos' — bug relatado pelo usuário: "Transação Penal" saiu
+        // zerada do PDF porque o rádio "Situação do Processo" do Projudi NÃO tem "Todos"
+        // como padrão em toda tela/Tipo (confirmado pelo usuário: a tela chega com
+        // "Ativos" pré-marcado); sem corrigir isso ativamente aqui (gateTransacaoPenal),
+        // o rádio ficava em "Ativos" e detecta() (que exige NÃO ser "ativos", pra não se
+        // confundir com CFG_TRANSACAO_PENAL_ATIVOS) nunca batia — a coleta toda ia parar
+        // no prefixo da variante Ativos, deixando este cfg com 0 registros.
+        situacaoProcesso: 'todos',
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() !== 'ativos',
         minTds: 9,
         usaAtuacao: false,
@@ -3578,6 +3617,7 @@
     const CFG_SUSPENSAO_COND_PROCESSO = {
         prefixo: 'projudi_transacaopenal_s_',
         mostrarSeVazio: true,
+        situacaoProcesso: 'todos', // ver comentário em CFG_TRANSACAO_PENAL.situacaoProcesso
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S' && situacaoProcessoSelecionada() !== 'ativos',
         minTds: 9,
         usaAtuacao: false,
@@ -3746,26 +3786,26 @@
         // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
         // genérico mesmo em telas vazias).
         const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 9) : [];
-        // cfg.situacaoProcesso só existe nas variantes "...ativos" (ver CFG_TRANSACAO_PENAL_
-        // ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS) — undefined nas 2 variantes originais
-        // significa "não mexe nesse filtro", preservando o comportamento de sempre.
+        // cfg.situacaoProcesso é 'ativos' ou 'todos' (ver comentário em
+        // situacaoProcessoBate acima) — as 4 variantes agora corrigem esse rádio
+        // ativamente, nenhuma "deixa como está".
         const situacaoEsperada = cfg.situacaoProcesso || null;
         const situacaoAtual = situacaoProcessoSelecionada();
+        const situacaoOk = situacaoProcessoBate(situacaoEsperada, situacaoAtual);
         logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} motivoEsperado=${motivoEsperado} (${rotuloMotivoSuspensao(motivoEsperado)}) `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} motivoAtual=${selMotivo ? selMotivo.value : 'n/d'} `
-            + `situacaoProcessoEsperada=${situacaoEsperada || '(não verificado)'} situacaoProcessoAtual=${situacaoAtual || 'n/d'} `
+            + `situacaoProcessoEsperada=${situacaoEsperada || '(não verificado)'} situacaoProcessoAtual=${situacaoAtual || 'n/d'} situacaoProcessoOk=${situacaoOk} `
             + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
         if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A') || (selMotivo && selMotivo.value !== motivoEsperado)
-            || (situacaoEsperada && situacaoAtual !== situacaoEsperada)) {
+            || !situacaoOk) {
             if (selTipo) selTipo.value = tipoEsperado;
             if (selStatus) selStatus.value = 'A';
             if (selMotivo) selMotivo.value = motivoEsperado;
-            if (situacaoEsperada) {
+            if (situacaoEsperada && !situacaoOk) {
                 // Clique real (não .checked=true) — mesma armadilha já documentada de
                 // checkbox/aba do Projudi só reagindo a um clique de usuário de verdade.
-                const radioAlvo = [...document.querySelectorAll('input[name="situacaoProcesso"]')]
-                    .find(r => r.value === situacaoEsperada);
+                const radioAlvo = radioSituacaoProcessoAlvo(situacaoEsperada);
                 if (radioAlvo && !radioAlvo.checked) radioAlvo.click();
             }
             const btn = document.getElementById('searchButton');
@@ -7173,14 +7213,21 @@
             // Aceita um único bloco {titulo, calc} ou uma lista deles (pedido do usuário,
             // Benefícios/Medidas/Suspensões: mais de uma seção de cards — "Motivo da
             // Suspensão" e, quando há dados da busca companheira por processo ativo,
-            // "Vinculadas a Processo ATIVO" — cada uma com seu próprio título).
+            // "Vinculadas a Processo ATIVO" — cada uma com seu próprio título). `titulo`
+            // é opcional — sem ele (pedido do usuário: cards de processo ativo/suspenso
+            // "na seção acima, abaixo do total"), o bloco vira só mais uma LINHA de
+            // cards, sem cabeçalho de seção, continuando visualmente a linha de kpis do
+            // topo em vez de virar uma seção separada.
             const blocos = Array.isArray(p.secaoCardsExtra) ? p.secaoCardsExtra : [p.secaoCardsExtra];
             blocos.forEach(bloco => {
                 const itensSecao = (bloco.calc(dados) || [])
                     .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
                 if (itensSecao.length) {
-                    tituloSecao(doc, m, y + 4, uw, bloco.titulo);
-                    y = desenharGradeCardsKpi(doc, m, y + TITULO_TABELA_H, uw, itensSecao, ctx, bloco.cols) + 2;
+                    if (bloco.titulo) {
+                        tituloSecao(doc, m, y + 4, uw, bloco.titulo);
+                        y += TITULO_TABELA_H;
+                    }
+                    y = desenharGradeCardsKpi(doc, m, y, uw, itensSecao, ctx, bloco.cols) + 2;
                 }
             });
         }
