@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.73
+// @version      25.74
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2869,6 +2869,13 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Pedido do usuário: card extra com processos DISTINTOS — um mesmo processo
+            // pode ter mais de um mandado nesta fase, então "registros" (mandados) e
+            // "processos distintos" são números diferentes aqui (mesmo padrão já usado em
+            // CFG_APREENSOES, ver kpisExtras lá).
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando análise de retorno',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de retorno',
@@ -2941,6 +2948,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados pendentes de cumprimento',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados pendentes de cumprimento',
@@ -2994,6 +3005,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando distribuição ao oficial de justiça',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando distribuição ao oficial de justiça',
@@ -3037,6 +3052,10 @@
             sufixoPrioridade: 'URGENTE',
             rotuloPrioritarioLegenda: 'Urgentes',
             rotuloNormalLegenda: 'Não urgentes',
+            // Ver comentário em CFG_MANDADOS_RETORNO.pdf.kpisExtras.
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
             atosTitulo: 'Mandados aguardando análise de decurso de prazo',
             agingTitulo: 'Mandados por tempo de espera',
             tabelaTitulo: 'Tabela discriminada dos mandados aguardando análise de decurso de prazo',
