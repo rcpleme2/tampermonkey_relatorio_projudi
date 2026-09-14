@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.75
+// @version      25.78
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -174,6 +174,30 @@
             s += n.textContent;
         }
         return norm(s);
+    }
+
+    // Mesma ideia de textoAteBr, mas corta no primeiro <div> em vez de <br> — usado na
+    // célula "Número"/"Mandado" de Mandados de Prisão/Alvarás de Soltura A Regularizar,
+    // onde o número vem seguido de um <div> com o link "[Visualizar]" (ver
+    // CFG_ALVARAS_SOLTURA_REGULARIZAR/CFG_MANDADOS_PRISAO_REGULARIZAR).
+    function textoAteDiv(td) {
+        if (!td) return '';
+        let s = '';
+        for (const n of td.childNodes) {
+            if (n.nodeType === 1 && n.tagName === 'DIV') break;
+            s += n.textContent;
+        }
+        return norm(s);
+    }
+
+    // Célula "Referente a(s) parte(s)" (lista <ul><li>NOME (Papel)</li>...</ul>) —
+    // junta os itens com "; " em vez de deixar o textContent colado (usado por
+    // CFG_ALVARAS_SOLTURA_REGULARIZAR/CFG_MANDADOS_PRISAO_REGULARIZAR).
+    function partesLista(td) {
+        if (!td) return '';
+        const lis = td.querySelectorAll('li');
+        if (!lis.length) return textoCelula(td);
+        return [...lis].map(li => norm(li.textContent)).filter(Boolean).join('; ');
     }
 
     // Extrai a primeira data dd/mm/aaaa de um texto (ex.: "03/07/2026 04680494956.est")
@@ -3079,6 +3103,175 @@
                 { header: 'Processo', width: 34, get: (d) => d.processo },
                 { header: 'Natureza do Mandado', width: 40, get: (d) => d.natureza },
                 { header: 'Tipo de Urgência', width: 30, get: (d) => d.tipoUrgencia || '—' },
+            ],
+        },
+    };
+
+    // ── Mandados de Prisão A Regularizar / Alvarás de Soltura A Regularizar ───────────
+    // Telas NOVAS e INDEPENDENTES do cluster "Mandados" acima — endpoints próprios
+    // (processo/cumprimentoCartorioMandadoPrisao.do e
+    // processo/cumprimentoCartorioAlvaraSoltura.do), alcançados pelo menu topo
+    // "Cumprimentos" > "Mandados..."/"Alvarás de Soltura/Desinternações" > "A
+    // Regularizar" — não têm nenhuma relação com codStatusCumprimentoCartorio/
+    // tabelaMandados (isso é de outra tela, cumprimentoCartorioMandado.do). O link do
+    // menu já leva DIRETO à tabela de resultados filtrada em "A Regularizar" (mesmo
+    // padrão simples de CFG_RETORNO/CFG_JUNTADAS — sem formulário/pesquisa própria),
+    // então basta acharLinkMenu(urlDoEndpoint, /^a\s+regularizar$/i) em navegarMenu.
+    //
+    // Estrutura de colunas confirmada em amostra real (.mhtml) de Alvarás de Soltura A
+    // Regularizar (80 registros): [0]semáforo, [1]Número (+ícone "Vigente"+link
+    // [Visualizar]), [2]Tipo, [3]Ordenação, [4]Expedição, [5]Trâmite, [6]Processo,
+    // [7]Classe, [8]Motivo de Expedição, [9]Partes, [10]Status.
+    //
+    // A amostra de Mandados de Prisão A Regularizar enviada pelo usuário veio com ZERO
+    // registros ("Nenhum registro encontrado") — só o cabeçalho pôde ser confirmado:
+    // Mandado, Tipo, Documento, Ordenação, Expedição, Data Cumprimento, Trâmite,
+    // Processo, Classe, Motivo de Expedição, Partes, Status (2 colunas a mais que
+    // Alvarás: "Documento" e "Data Cumprimento"). Por decisão do usuário (sem amostra
+    // com dados disponível), a extração abaixo segue a MESMA ordem/posição de colunas do
+    // cabeçalho, por analogia direta com Alvarás — precisa ser validada com uma coleta
+    // real antes de confiar cegamente no resultado (usuário está ciente).
+    function textoNumeroComVisualizar(td) {
+        return textoAteDiv(td) || textoCelula(td);
+    }
+
+    const CFG_ALVARAS_SOLTURA_REGULARIZAR = {
+        prefixo: 'projudi_alvarassolturareg_',
+        mostrarSeVazio: true, // "zero alvarás a regularizar" é uma informação válida
+        totalIdentificadoNoResumo: true,
+        detecta: (cab) => /tr[âa]mite/i.test(cab) && /motivo\s+de\s+expedi[çc][ãa]o/i.test(cab) && !/documento/i.test(cab),
+        minTds: 11,
+        usaAtuacao: false,
+        nomeArquivo: 'alvaras_soltura_a_regularizar_projudi',
+        rotulos: { coletar: 'Extrair Alvarás de Soltura (A Regularizar)', coletarMais: 'Extrair mais (Alvarás de Soltura A Regularizar)', baixar: '⬇ Baixar Alvarás de Soltura (A Regularizar)' },
+        cabecalhos: ['Número', 'Tipo', 'Dt. Ordenação', 'Dt. Expedição', 'Trâmite', 'Processo', 'Classe', 'Motivo de Expedição', 'Partes', 'Status'],
+        larguras: [{ wch: 16 }, { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 26 }, { wch: 24 }, { wch: 26 }, { wch: 40 }, { wch: 22 }],
+        extrai: (tds) => {
+            const emProc = tds[6].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[6]);
+            return {
+                numero: textoNumeroComVisualizar(tds[1]),
+                tipo: textoCelula(tds[2]),
+                dataOrdenacao: textoCelula(tds[3]),
+                dataExpedicao: textoCelula(tds[4]),
+                tramite: textoCelula(tds[5]),
+                processo,
+                classe: textoCelula(tds[7]),
+                motivoExpedicao: textoCelula(tds[8]),
+                partes: partesLista(tds[9]),
+                status: textoCelula(tds[10]),
+                prioritario: emPrioritario(emProc),
+            };
+        },
+        linha: (d) => [d.numero, d.tipo, d.dataOrdenacao, d.dataExpedicao, d.tramite, d.processo, d.classe, d.motivoExpedicao, d.partes, d.status],
+        pdf: {
+            titulo: 'Alvarás de Soltura A Regularizar',
+            atosTitulo: 'Alvarás de soltura a regularizar',
+            agingTitulo: 'Alvarás por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos alvarás de soltura a regularizar',
+            dataCampo: 'dataExpedicao',
+            dataTitulo: 'Expedição mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'tipo',
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
+            distribuicoes: [
+                { titulo: 'Alvarás por Motivo de Expedição', campo: 'motivoExpedicao', topN: 12 },
+                { titulo: 'Alvarás por Classe Processual', campo: 'classe', topN: 12 },
+                // Lista dos 5 primeiros registros da coleta (pedido do usuário) — mesmo
+                // ponto de extensão `calc` já usado por CFG_BENS_PENDENTES_SNGB (pula
+                // contarPorCampo e usa a lista de {label, valor} devolvida direto).
+                // Sem quantidade natural por registro (cada linha é 1 alvará), então
+                // valor fica fixo em 1 — a coluna "Qtd./%" da tabela genérica de
+                // distribuições vira só um efeito colateral do formato, o que importa é
+                // a lista em si.
+                {
+                    titulo: 'Lista dos 5 primeiros registros',
+                    rotuloCategoria: 'Alvará (Processo)',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: `${d.numero} (${d.processo})`, valor: 1 })),
+                    }),
+                },
+            ],
+            colunas: [
+                { header: 'Número', width: 16, get: (d) => d.numero },
+                { header: 'Processo', width: 28, get: (d) => d.processo },
+                { header: 'Classe', width: 24, get: (d) => d.classe },
+                { header: 'Dt. Expedição', width: 16, get: (d) => d.dataExpedicao },
+                { header: 'Motivo de Expedição', width: 26, get: (d) => d.motivoExpedicao },
+                { header: 'Partes', width: 40, get: (d) => d.partes },
+                { header: 'Status', width: 22, get: (d) => d.status },
+            ],
+        },
+    };
+
+    const CFG_MANDADOS_PRISAO_REGULARIZAR = {
+        prefixo: 'projudi_mandadosprisaoreg_',
+        mostrarSeVazio: true, // "zero mandados a regularizar" é uma informação válida
+        totalIdentificadoNoResumo: true,
+        detecta: (cab) => /tr[âa]mite/i.test(cab) && /motivo\s+de\s+expedi[çc][ãa]o/i.test(cab) && /documento/i.test(cab),
+        minTds: 13,
+        usaAtuacao: false,
+        nomeArquivo: 'mandados_prisao_a_regularizar_projudi',
+        rotulos: { coletar: 'Extrair Mandados de Prisão (A Regularizar)', coletarMais: 'Extrair mais (Mandados de Prisão A Regularizar)', baixar: '⬇ Baixar Mandados de Prisão (A Regularizar)' },
+        cabecalhos: ['Mandado', 'Tipo', 'Documento', 'Dt. Ordenação', 'Dt. Expedição', 'Dt. Cumprimento', 'Trâmite', 'Processo', 'Classe', 'Motivo de Expedição', 'Partes', 'Status'],
+        larguras: [{ wch: 16 }, { wch: 20 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 24 }, { wch: 26 }, { wch: 40 }, { wch: 22 }],
+        extrai: (tds) => {
+            const emProc = tds[8].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[8]);
+            return {
+                mandado: textoNumeroComVisualizar(tds[1]),
+                tipo: textoCelula(tds[2]),
+                documento: textoCelula(tds[3]),
+                dataOrdenacao: textoCelula(tds[4]),
+                dataExpedicao: textoCelula(tds[5]),
+                dataCumprimento: textoCelula(tds[6]),
+                tramite: textoCelula(tds[7]),
+                processo,
+                classe: textoCelula(tds[9]),
+                motivoExpedicao: textoCelula(tds[10]),
+                partes: partesLista(tds[11]),
+                status: textoCelula(tds[12]),
+                prioritario: emPrioritario(emProc),
+            };
+        },
+        linha: (d) => [d.mandado, d.tipo, d.documento, d.dataOrdenacao, d.dataExpedicao, d.dataCumprimento, d.tramite, d.processo, d.classe, d.motivoExpedicao, d.partes, d.status],
+        pdf: {
+            titulo: 'Mandados de Prisão A Regularizar',
+            atosTitulo: 'Mandados de prisão a regularizar',
+            agingTitulo: 'Mandados por tempo de espera',
+            tabelaTitulo: 'Tabela discriminada dos mandados de prisão a regularizar',
+            dataCampo: 'dataExpedicao',
+            dataTitulo: 'Expedição mais antiga',
+            processoCampo: 'processo',
+            tipoCampo: 'tipo',
+            kpisExtras: [
+                { titulo: 'Processos distintos', calc: (dados) => new Set(dados.map(d => d.processo).filter(Boolean)).size, acento: 'azul' },
+            ],
+            distribuicoes: [
+                { titulo: 'Mandados por Motivo de Expedição', campo: 'motivoExpedicao', topN: 12 },
+                { titulo: 'Mandados por Classe Processual', campo: 'classe', topN: 12 },
+                // Ver comentário em CFG_ALVARAS_SOLTURA_REGULARIZAR.pdf.distribuicoes
+                // sobre esta lista (mesmo pedido do usuário, mesmo ponto de extensão
+                // `calc`, valor fixo em 1 por não haver quantidade natural por registro).
+                {
+                    titulo: 'Lista dos 5 primeiros registros',
+                    rotuloCategoria: 'Mandado (Processo)',
+                    calc: (dados) => ({
+                        itens: dados.slice(0, 5).map(d => ({ label: `${d.mandado} (${d.processo})`, valor: 1 })),
+                    }),
+                },
+            ],
+            colunas: [
+                { header: 'Mandado', width: 16, get: (d) => d.mandado },
+                { header: 'Processo', width: 28, get: (d) => d.processo },
+                { header: 'Classe', width: 24, get: (d) => d.classe },
+                { header: 'Documento', width: 18, get: (d) => d.documento },
+                { header: 'Dt. Expedição', width: 16, get: (d) => d.dataExpedicao },
+                { header: 'Motivo de Expedição', width: 26, get: (d) => d.motivoExpedicao },
+                { header: 'Partes', width: 40, get: (d) => d.partes },
+                { header: 'Status', width: 22, get: (d) => d.status },
             ],
         },
     };
@@ -8277,7 +8470,8 @@
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS,
-            CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO];
+            CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO,
+            CFG_MANDADOS_PRISAO_REGULARIZAR, CFG_ALVARAS_SOLTURA_REGULARIZAR];
         // Seções com cfg.mostrarSeVazio (Suspensos, Audiências Pendentes) aparecem mesmo
         // com dados.length === 0, desde que já tenham sido coletadas (ver KEY_COLETADO/
         // foiColetado) — "zero pendências" é um dado, não um vazio a esconder.
@@ -12864,6 +13058,13 @@
         else if (CFG_MANDADOS_DISTRIBUICAO.detecta(cab)) cfg = CFG_MANDADOS_DISTRIBUICAO;
         else if (CFG_MANDADOS_CUMPRIMENTO.detecta(cab)) cfg = CFG_MANDADOS_CUMPRIMENTO;
         else if (CFG_MANDADOS_DECURSO.detecta(cab)) cfg = CFG_MANDADOS_DECURSO;
+        // Mandados de Prisão A Regularizar / Alvarás de Soltura A Regularizar — telas
+        // novas e independentes do cluster de Mandados acima (ver comentário grande na
+        // definição dos dois cfgs). Cabeçalho com "Trâmite"+"Motivo de Expedição" é
+        // exclusivo dessas duas telas no arquivo inteiro; "Documento" distingue as duas
+        // entre si (só Mandados de Prisão tem essa coluna).
+        else if (CFG_MANDADOS_PRISAO_REGULARIZAR.detecta(cab)) cfg = CFG_MANDADOS_PRISAO_REGULARIZAR;
+        else if (CFG_ALVARAS_SOLTURA_REGULARIZAR.detecta(cab)) cfg = CFG_ALVARAS_SOLTURA_REGULARIZAR;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
@@ -15081,6 +15282,17 @@
         // CFG_BENS_PENDENTES_SNGB para o porquê deste relatório fugir do padrão de
         // criarColetor).
         { key: 'bensSngb', cfg: CFG_BENS_PENDENTES_SNGB, navAlvo: 'apreensoes', rotulo: 'Bens Pendentes de Cadastro no SNGB', curto: 'Bens SNGB', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Mandados de Prisão / Alvarás de Soltura A Regularizar (pedido do usuário: mover
+        // para a categoria Crime — mandado de prisão e alvará de soltura são conceitos
+        // exclusivamente criminais, mesmo raciocínio já aplicado a Medidas Alternativas
+        // em Atraso). Telas novas e independentes do cluster de Mandados de Cartório
+        // acima (endpoints/menu próprios, ver comentário grande na definição dos dois
+        // cfgs) — igual a Apreensões/Bens SNGB, chegam direto pelo menu de topo
+        // "Cumprimentos", sem passar pela aba "Mesa do Escrivão Criminal". Landing direto
+        // nos resultados (link de menu já filtra "A Regularizar"), sem formulário
+        // próprio — por isso precisaPreencher: false, mesmo esquema de Retorno/Juntadas.
+        { key: 'mandadosprisaoregularizar', cfg: CFG_MANDADOS_PRISAO_REGULARIZAR, navAlvo: 'mandadosprisaoregularizar', rotulo: 'Mandados de Prisão A Regularizar', curto: 'Mand. Prisão A Reg.', categoriaEspecifica: 'crime', precisaPreencher: false },
+        { key: 'alvarassolturaregularizar', cfg: CFG_ALVARAS_SOLTURA_REGULARIZAR, navAlvo: 'alvarassolturaregularizar', rotulo: 'Alvarás de Soltura A Regularizar', curto: 'Alv. Soltura A Reg.', categoriaEspecifica: 'crime', precisaPreencher: false },
         // Logo após Apreensões, mesma categoria (pedido do usuário) — tela "resumo
         // único" (sem preencher/pesquisar, a aba já chega pronta), mesmo esquema de
         // Outros Cumprimentos.
@@ -15503,6 +15715,15 @@
         // (link direto com href, não numa aba) — mesmo esquema simples de
         // acharLinkMenu usado por Apreensões.
         else if (alvo === 'medidasalternativasatraso') link = acharLinkMenu(/buscaMedidaAlternativa\.do/i, /cumprimento\s+de\s+medidas\s+alternativas/i);
+        // Mandados de Prisão A Regularizar / Alvarás de Soltura A Regularizar — o item de
+        // menu "A Regularizar" já leva DIRETO à tabela de resultados filtrada (mesmo
+        // esquema simples de acharLinkMenu usado por Apreensões/Medidas Alternativas),
+        // sem formulário/pesquisa própria. Cada endpoint (cumprimentoCartorioMandadoPrisao.do
+        // / cumprimentoCartorioAlvaraSoltura.do) tem VÁRIOS itens de submenu com o mesmo
+        // href base ("Para Expedir", "Aguardando Assinatura" etc.) — o texto do link
+        // "A Regularizar" é o que distingue o item certo.
+        else if (alvo === 'mandadosprisaoregularizar') link = acharLinkMenu(/cumprimentoCartorioMandadoPrisao\.do/i, /^a\s+regularizar$/i);
+        else if (alvo === 'alvarassolturaregularizar') link = acharLinkMenu(/cumprimentoCartorioAlvaraSoltura\.do/i, /^a\s+regularizar$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
