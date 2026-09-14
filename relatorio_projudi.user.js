@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.78
+// @version      25.79
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3394,6 +3394,21 @@
             tipoCampo: 'classe',
             semPrioridade: true,
             agingTitulo: 'Por tempo desde o início',
+            // Pedido do usuário: além do card de total, um card por cada valor distinto
+            // de "Medidas" encontrado (ex.: "Prestação pecuniária: 1", "Prestação
+            // pecuniária - Guia de Recolhimento de Custas: 2"), mais um card com o total
+            // de PROCESSOS distintos — diferente do card de total (que conta REGISTROS:
+            // com a busca por Motivo da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo
+            // processo pode aparecer mais de uma vez se tiver mais de uma
+            // suspensão/medida com motivos diferentes). topN 6 nas Medidas pra não
+            // espremer demais a linha de cards — o que sobra vira um card "Outros"
+            // (mesmo corte de contarPorCampo usado nos gráficos de distribuição).
+            kpisExtras: (dados) => {
+                const porMedida = contarPorCampo(dados, 'medidas', 6);
+                const cardsMedida = porMedida.map(it => ({ titulo: it.label === '(vazio)' ? 'Sem medida' : it.label, valor: it.valor, acento: 'azul' }));
+                const processosDistintos = new Set(dados.map(d => d.processo).filter(Boolean)).size;
+                return [...cardsMedida, { titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
+            },
             distribuicoes: [
                 { titulo: 'Por Classe Processual', campo: 'classe', topN: 12 },
                 { titulo: 'Por Status da Transação Penal', campo: 'statusTransacao', topN: 8 },
@@ -3420,12 +3435,24 @@
         return { coletar: `Extrair ${curto}`, coletarMais: `Extrair mais (${curto})`, baixar: `⬇ Baixar ${curto}` };
     }
     // cfg.contextoExtra — chamado 1x por página coletada (ver coletarPaginaAtual), não
-    // por linha. Devolve o rótulo do Motivo da Suspensão atualmente selecionado, pra
+    // por linha. Devolve o rótulo do Motivo da Suspensão da busca em andamento, pra
     // extrairLinhaTransacaoPenal marcar cada linha com ele (a tabela em si não expõe
     // essa informação por linha).
+    //
+    // Bug relatado pelo usuário: o resumo saía com "Por Motivo da Suspensão: (vazio)
+    // 100%" mesmo com a coleta funcionando (dados de verdade nas linhas). Lia
+    // #idMotivoSuspProcesso DIRETO DO DOM depois do reload — mas diferente de #tipo e
+    // #status (que o Projudi ecoa de volta corretamente no HTML da tela de resultados,
+    // confirmado em produção), o print do usuário mostrou esse select voltando pra
+    // "Todas" mesmo numa busca que claramente não foi feita com Motivo=Todas. Em vez de
+    // confiar no DOM pra isso, lê do NOSSO PRÓPRIO estado (cfg.prefixo+'motivo_atual',
+    // gravado por nós mesmos logo antes de cada busca em gateTransacaoPenal/
+    // avancarMotivoOuTerminar) — sempre correto, independente de como o Projudi
+    // renderiza esse campo de volta. Função regular (não arrow) porque é chamada como
+    // `cfg.contextoExtra()` — `this` vem amarrado ao cfg certo nessa chamada.
     function contextoExtraTransacaoPenal() {
-        const sel = document.getElementById('idMotivoSuspProcesso');
-        return sel ? rotuloMotivoSuspensao(sel.value) : '';
+        const valor = store.getItem(this.prefixo + 'motivo_atual');
+        return valor ? rotuloMotivoSuspensao(valor) : '';
     }
     // cfg.aoTerminarColeta — chamado por criarColetor/continuar() quando a paginação da
     // busca ATUAL termina (sem "próxima página"), no lugar de avancarAutomacao(cfg)
@@ -6916,10 +6943,20 @@
             const media = mediaPorDia(dados, p.dataCampo);
             kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.azul });
         }
-        // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
-        // "Com/Sem pré-análise"). Relatórios que não definem p.kpisExtras ficam
-        // byte-a-byte como antes desta mudança.
-        if (Array.isArray(p.kpisExtras)) {
+        // Ponto de extensão OPCIONAL — Relatórios que não definem p.kpisExtras ficam
+        // byte-a-byte como antes desta mudança. Duas formas aceitas:
+        //  - array de {titulo, calc, subs?, acento?} — lista FIXA de KPIs (ex.:
+        //    CFG_CONCLUSOES/CFG_APREENSOES), um card por item, titulo sempre o mesmo.
+        //  - função (dados) => [{titulo, valor, subs?, acento?}, ...] — pedido do usuário
+        //    (Benefícios/Medidas/Suspensões): quantidade e título dos cards SÓ SE SABE
+        //    depois de olhar os dados (ex.: 1 card por valor distinto de "Medidas"
+        //    encontrado, mais um de "processos distintos") — ver kpisExtras em
+        //    pdfTransacaoPenal.
+        if (typeof p.kpisExtras === 'function') {
+            (p.kpisExtras(dados) || []).forEach(k => {
+                kpis.push({ titulo: k.titulo, valor: String(k.valor), subs: k.subs || [], acento: COR[k.acento] || COR.azul });
+            });
+        } else if (Array.isArray(p.kpisExtras)) {
             p.kpisExtras.forEach(k => {
                 const valor = k.calc(dados);
                 kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.azul });
