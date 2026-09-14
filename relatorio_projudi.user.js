@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.71
+// @version      25.72
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -4753,11 +4753,27 @@
             // Captura o "N registro(s) encontrado(s)" mostrado pelo Projudi na 1ª página,
             // ANTES de qualquer paginação — pedido do usuário (Apreensões): o Projudi é um
             // sistema vivo, então o total pode mudar durante a coleta paginada (novas
-            // apreensões registradas no meio do caminho). Guardado uma única vez (idx===0)
-            // pra o KPI "Apreensões pendentes" no PDF sempre mostrar esse número, mesmo que
-            // a coleta em si acabe com outra contagem. Opt-in via cfg.totalIdentificadoNoResumo
-            // — outros relatórios continuam sem gravar essa chave.
-            if (idx === 0 && cfg.totalIdentificadoNoResumo) {
+            // apreensões registradas no meio do caminho). Guardado uma única vez por
+            // rodada pra o KPI "Apreensões pendentes" no PDF sempre mostrar esse número,
+            // mesmo que a coleta em si acabe com outra contagem. Opt-in via
+            // cfg.totalIdentificadoNoResumo — outros relatórios continuam sem gravar essa
+            // chave.
+            //
+            // idx===0 sozinho (comportamento original) só é verdade na PRIMEIRA página
+            // que este prefixo já viu DESDE SEMPRE — o botão "Extrair" ACRESCENTA aos
+            // dados já coletados (não limpa antes, só "Limpar" faz isso), então numa
+            // 2ª extração do mesmo relatório (ex.: gerar o relatório de novo dias
+            // depois) idx já vem >0 e total_identificado nunca era atualizado de novo —
+            // ficava CONGELADO no valor (ou na ausência de valor, caindo no fallback
+            // dados.length) da primeira vez que esse relatório foi extraído. Bug
+            // relatado pelo usuário: "Mandados Aguardando Análise de Retorno" mostrava
+            // sempre o mesmo total (igual ao nº de registros coletados) mesmo depois do
+            // fix do formato do texto, porque esse prefixo específico já tinha dados
+            // acumulados de antes do fix. numeroPaginaAtual()===1 (a página que o
+            // PRÓPRIO PROJUDI está mostrando agora, não o nosso contador acumulado)
+            // garante que o total seja recapturado toda vez que uma coleta REALMENTE
+            // recomeça da página 1, mesmo com dados antigos ainda acumulados.
+            if ((idx === 0 || numeroPaginaAtual() === 1) && cfg.totalIdentificadoNoResumo) {
                 // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
                 // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
                 // o comportamento de sempre (1º div#navigator do documento).
