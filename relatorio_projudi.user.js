@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.74
+// @version      25.75
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -35,11 +35,13 @@
         try { return JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]'); } catch (e) { return []; }
     }
     function atualizarLogDetalhadoUI() {
-        const caixa = document.getElementById('pa-log-detalhado');
-        if (!caixa) return;
-        const linhas = lerLogDetalhado();
-        caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
-        caixa.scrollTop = caixa.scrollHeight;
+        try {
+            const caixa = document.getElementById('pa-log-detalhado');
+            if (!caixa) return;
+            const linhas = lerLogDetalhado();
+            caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+            caixa.scrollTop = caixa.scrollHeight;
+        } catch (e) { /* nunca deixa o log detalhado quebrar quem chamou */ }
     }
     // Registra uma linha no log detalhado do painel E no console (console.log continua
     // funcionando exatamente como antes — isto é um ACRÉSCIMO, não substitui o console
@@ -47,15 +49,26 @@
     // que ajudam a diagnosticar decisões da automação (gates, "zero resultados", linhas
     // rejeitadas na coleta, avanço de fila) — não é pra logar TUDO, só o que interessa
     // pra depuração.
+    //
+    // TUDO abaixo do console.log fica dentro de um try/catch — bug relatado pelo usuário
+    // ("a extensão sequer aparece" depois deste recurso entrar): localStorage tem cota
+    // pequena (~5-10MB, ver comentário grande de IDB_NOME) e já estourou antes com dados
+    // grandes; logPainel ficou bem mais chamado que os console.log originais (toda
+    // página, toda linha coletada), então setItem pode lançar QuotaExceededError — sem
+    // proteção, isso quebrava a automação inteira só por causa do log de diagnóstico.
     function logPainel(msg, extra) {
         if (extra !== undefined) console.log(msg, extra); else console.log(msg);
-        const linhas = lerLogDetalhado();
-        let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${msg}`;
-        if (extra !== undefined) { try { linha += ' ' + JSON.stringify(extra); } catch (e) { /* não serializável, ignora */ } }
-        linhas.push(linha);
-        if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
-        store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
-        atualizarLogDetalhadoUI();
+        try {
+            const linhas = lerLogDetalhado();
+            let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${msg}`;
+            if (extra !== undefined) { try { linha += ' ' + JSON.stringify(extra); } catch (e) { /* não serializável, ignora */ } }
+            linhas.push(linha);
+            if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
+            store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
+            atualizarLogDetalhadoUI();
+        } catch (e) {
+            console.warn('[Projudi] logPainel falhou (provável localStorage cheio) — log do painel pode ficar incompleto, mas a automação continua normalmente:', e);
+        }
     }
 
     // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
