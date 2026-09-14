@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.78
+// @version      25.87
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18,6 +18,73 @@
     'use strict';
 
     const store = window.localStorage;
+
+    // ── Log detalhado dentro do painel (pedido do usuário: mesma ideia do projeto
+    // SEEU_correição — um "▼ Ver log detalhado" no próprio painel da extensão, sem
+    // precisar abrir o console do navegador pra acompanhar o que a automação está
+    // fazendo/decidindo) ──────────────────────────────────────────────────────────────
+    // Guardado em localStorage (não só memória) porque cada passo da automação costuma
+    // recarregar a página inteira (clique em Pesquisar/navegação de menu) — um buffer só
+    // em memória se perderia a cada reload. Como o Projudi roda o script em várias frames
+    // sem @noframes (ver comentário grande de IDB_NOME logo abaixo), duas frames podem
+    // gravar quase ao mesmo tempo e uma sobrescrever a linha da outra (leitura-e-escrita
+    // não é atômica entre frames) — aceitável para um log de diagnóstico, não crítico.
+    const CHAVE_LOG_DETALHADO = 'projudi_log_detalhado';
+    // Pedido do usuário: uma automação com vários relatórios (cada um com dezenas de
+    // chamadas de gate/página) facilmente passava de 400 linhas antes do usuário chegar a
+    // abrir o log — as entradas de um relatório problemático (ex.: Transação Penal, bem no
+    // início da fila) já tinham rotacionado pra fora quando ele foi investigar. 2000 dá
+    // bem mais margem sem aproximar a cota do localStorage (cada linha tem ~100-300
+    // bytes — 2000 linhas ainda fica na casa de poucos centenas de KB).
+    const LOG_DETALHADO_MAX = 2000;
+    // Bug relatado pelo usuário ("linhas.push is not a function", centenas de vezes no
+    // console): JSON.parse pode ter sucesso mas devolver algo que não é array (ex.: a
+    // chave já continha outro valor por algum motivo) — sem o Array.isArray abaixo, o
+    // valor não-array passava direto pra quem chama, que quebrava ao tentar .push nele.
+    // Também nunca deixa lerLogDetalhado() propagar exceção — quem chama sempre recebe um
+    // array de verdade, mesmo vazio.
+    function lerLogDetalhado() {
+        try {
+            const v = JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]');
+            return Array.isArray(v) ? v : [];
+        } catch (e) { return []; }
+    }
+    function atualizarLogDetalhadoUI() {
+        try {
+            const caixa = document.getElementById('pa-log-detalhado');
+            if (!caixa) return;
+            const linhas = lerLogDetalhado();
+            caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+            caixa.scrollTop = caixa.scrollHeight;
+        } catch (e) { /* nunca deixa o log detalhado quebrar quem chamou */ }
+    }
+    // Registra uma linha no log detalhado do painel E no console (console.log continua
+    // funcionando exatamente como antes — isto é um ACRÉSCIMO, não substitui o console
+    // pra quem prefere DevTools). Use nos pontos que já eram logados via console.log e
+    // que ajudam a diagnosticar decisões da automação (gates, "zero resultados", linhas
+    // rejeitadas na coleta, avanço de fila) — não é pra logar TUDO, só o que interessa
+    // pra depuração.
+    //
+    // TUDO abaixo do console.log fica dentro de um try/catch — bug relatado pelo usuário
+    // ("a extensão sequer aparece" depois deste recurso entrar): localStorage tem cota
+    // pequena (~5-10MB, ver comentário grande de IDB_NOME) e já estourou antes com dados
+    // grandes; logPainel ficou bem mais chamado que os console.log originais (toda
+    // página, toda linha coletada), então setItem pode lançar QuotaExceededError — sem
+    // proteção, isso quebrava a automação inteira só por causa do log de diagnóstico.
+    function logPainel(msg, extra) {
+        if (extra !== undefined) console.log(msg, extra); else console.log(msg);
+        try {
+            const linhas = lerLogDetalhado();
+            let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${msg}`;
+            if (extra !== undefined) { try { linha += ' ' + JSON.stringify(extra); } catch (e) { /* não serializável, ignora */ } }
+            linhas.push(linha);
+            if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
+            store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
+            atualizarLogDetalhadoUI();
+        } catch (e) {
+            console.warn('[Projudi] logPainel falhou (provável localStorage cheio) — log do painel pode ficar incompleto, mas a automação continua normalmente:', e);
+        }
+    }
 
     // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
     // localStorage para tudo mais) ──────────────────────────────────────────────────
@@ -3430,6 +3497,590 @@
     // comportamento padrão de criarColetor/continuar (avancarAutomacao(cfg) direto) já
     // basta, sem precisar encadear pra próxima fase.
 
+    // ── Benefícios/Medidas/Suspensões (processo/buscaTransacaoPenal.do) ───────────────
+    // Pedido do usuário: "relação de suspensões por tipo" — a mesma tela de busca serve
+    // 7 tipos diferentes (<select id="tipo">), cada um virando seu PRÓPRIO relatório
+    // independente (mesmo esquema dos 4 relatórios de Mandados: um <select> que precisa
+    // assumir valores diferentes para gerar sub-relatórios). Filtro sempre status="ATIVA"
+    // (pedido do usuário); os campos "Medida" (#codTipoMedida) e "Motivo da Suspensão"
+    // (#idMotivoSuspProcesso) ficam SEMPRE no default "-1" (Todas) — não são tocados por
+    // este script (pedido explícito do usuário).
+    //
+    // CONFIRMADO com amostra real (.mhtml enviado pelo usuário com dados de verdade,
+    // telas "Transações"/"Suspensões"/"Suspensão-Motivo da Suspensão"): a suposição
+    // original de 11 <td> DIRETOS por linha estava ERRADA — essa é a causa raiz do bug
+    // "retornou tudo zerado, mesmo havendo resultados" (todas as linhas eram descartadas
+    // por terem menos <td> que o esperado). O <tbody> na verdade renderiza só 9 <td>
+    // DIRETOS por linha: Processo, Nome da Parte, Data da Infração, Classe Processual,
+    // Assunto Principal, [6º td: uma <table> ANINHADA com Medidas/Status da
+    // Medida/Observação — pode vir vazia, sem nenhum <tr>, quando não há medida
+    // associada], Data de Início, Data Final, Status da Transação Penal. Dentro da
+    // tabela aninhada (quando não vazia): 1 <tr> com 3 <td> (Medidas — pode ter mais de
+    // um <li>, um por medida —, Status da Medida, Observação). Ver
+    // extrairLinhaTransacaoPenal.
+    function cabecalhoTransacaoPenal(cab) {
+        return /nome\s+da\s+parte/i.test(cab) && /status\s+da\s+transa[çc][ãa]o\s+penal/i.test(cab);
+    }
+    // Mesmo motivo de tabelaMandados() acima: não dá pra confiar em "a 1ª table.resultTable
+    // do documento" — busca a tabela certa pelo cabeçalho dela em todas as da página.
+    //
+    // DIAGNÓSTICO (usuário relatou "retornou tudo zerado, mesmo havendo resultados"): sem
+    // uma linha de dados real confirmada (ver comentário grande acima), a causa mais
+    // provável é esta função não achar a tabela certa (regex do cabeçalho não bate com o
+    // texto real, ou a tabela de verdade não tem <thead> como filho DIRETO) — nesse caso o
+    // gate conclui "zero resultados" mesmo com processos na tela. Loga sempre que NÃO
+    // encontra, com o texto de cabeçalho de cada table.resultTable candidata, pra
+    // conseguirmos comparar com o esperado direto do console do navegador.
+    function tabelaTransacaoPenal() {
+        const candidatas = [...document.querySelectorAll('table.resultTable')];
+        const encontrada = candidatas.find(t => {
+            const thead = t.querySelector(':scope > thead');
+            return cabecalhoTransacaoPenal(thead ? thead.textContent : '');
+        }) || null;
+        if (!encontrada) {
+            const cabecalhos = candidatas.map((t, i) => {
+                const thead = t.querySelector(':scope > thead');
+                const texto = (thead ? thead.textContent : '(sem thead)').replace(/\s+/g, ' ').trim();
+                return `[${i}] ${texto.slice(0, 150)}`;
+            });
+            logPainel(`[Auto Projudi Transação Penal] tabelaTransacaoPenal(): nenhuma das ${candidatas.length} table.resultTable da página bateu com o cabeçalho esperado (regex: nome da parte + status da transação penal).`, cabecalhos);
+        }
+        return encontrada;
+    }
+    function tipoTransacaoPenalSelecionado() {
+        const sel = document.getElementById('tipo');
+        return sel ? sel.value : null;
+    }
+    // Pedido do usuário: rodar a MESMA busca (Tipo + Motivo) uma 2ª vez, restrita a
+    // processos com "Situação do Processo" = Ativos — ver CFG_TRANSACAO_PENAL_ATIVOS/
+    // CFG_SUSPENSAO_COND_PROCESSO_ATIVOS. Diferente de #tipo/#status (<select>), esse
+    // filtro é um grupo de <input type="radio" name="situacaoProcesso">.
+    function situacaoProcessoSelecionada() {
+        const marcado = document.querySelector('input[name="situacaoProcesso"]:checked');
+        return marcado ? marcado.value : null;
+    }
+    // cfg.situacaoProcesso é 'ativos' (variantes "...ativos") ou 'todos' (as 2 variantes
+    // originais) — nunca compara direto com o VALUE bruto de "todos" (não confirmado,
+    // só o de "ativos" foi confirmado pelo usuário: <input value="ativos">) — em vez
+    // disso, "todos" só precisa dizer "o rádio marcado NÃO é o de ativos". Bug relatado
+    // pelo usuário: sem corrigir ativamente esse rádio nas 2 variantes originais
+    // (assumindo, errado, que o padrão do Projudi era sempre "Todos"), a tela às vezes
+    // chega com "Ativos" pré-marcado — a coleta de "Transação Penal" saía zerada porque
+    // detecta() (que exige NÃO ser "ativos") nunca batia.
+    function situacaoProcessoBate(esperada, atual) {
+        if (!esperada) return true; // não verifica
+        return esperada === 'ativos' ? atual === 'ativos' : atual !== 'ativos';
+    }
+    function radioSituacaoProcessoAlvo(esperada) {
+        const radios = [...document.querySelectorAll('input[name="situacaoProcesso"]')];
+        return esperada === 'ativos' ? radios.find(r => r.value === 'ativos') : radios.find(r => r.value !== 'ativos');
+    }
+    function formularioTransacaoPenal() {
+        const form = document.getElementById('buscaTransacaoPenalForm');
+        return form && form.querySelector('#tipo') && form.querySelector('#status') ? form : null;
+    }
+
+    // Pedido do usuário: percorrer cada Motivo da Suspensão INDIVIDUALMENTE dentro de
+    // cada um dos 7 Tipos (o campo #idMotivoSuspProcesso da tela, antes deixado sempre em
+    // "Todas") e discriminar isso no relatório. Como a tabela de resultados não tem uma
+    // coluna própria de "Motivo" (não dá pra descobrir isso só olhando a linha), a única
+    // forma é buscar 1 vez por Motivo e marcar cada linha coletada com qual busca a
+    // trouxe — ver contextoExtra em cada CFG_*/avancarMotivoOuTerminar abaixo. Valores e
+    // rótulos exatos do <select id="idMotivoSuspProcesso"> (confirmado na tela real);
+    // "Todas" (-1) fica de fora — cada um dos 10 motivos nomeados é buscado em separado,
+    // a soma deles já cobre o que "Todas" mostraria.
+    const MOTIVOS_SUSPENSAO = [
+        { valor: '1', rotulo: 'Questão Prejudicial (art. 92/93 CPP)' },
+        { valor: '2', rotulo: 'Art. 366 do CPP' },
+        { valor: '3', rotulo: 'Art. 89 da Lei 9.099/95' },
+        { valor: '4', rotulo: 'Insanidade Mental' },
+        { valor: '5', rotulo: 'Carta Precatória' },
+        { valor: '6', rotulo: 'Exceção' },
+        { valor: '7', rotulo: 'Incidentes' },
+        { valor: '8', rotulo: 'Art. 94 do CPP' },
+        { valor: '9', rotulo: 'Art. 4, §3º da Lei 12.850/13' },
+        { valor: '10', rotulo: 'Acordo de Não Persecução Penal' },
+    ];
+    function rotuloMotivoSuspensao(valor) {
+        const m = MOTIVOS_SUSPENSAO.find(x => x.valor === valor);
+        return m ? m.rotulo : '';
+    }
+
+    // `contexto` (3º argumento, vindo de cfg.contextoExtra — ver criarColetor/
+    // coletarPaginaAtual) é o rótulo do Motivo da Suspensão em busca no momento desta
+    // página, já que a tabela em si não expõe essa informação por linha.
+    function extrairLinhaTransacaoPenal(tds, atuacao, contexto) {
+        if (tds.length < 9) return null; // ver comentário grande acima — 9 <td> diretos, confirmado com amostra real
+        // Pedido do usuário: processos com mais de um réu aparecem em mais de uma <tr>
+        // (mesmo processo, "Nome da Parte" diferente) — o card "Processos distintos"
+        // contava errado quando o texto bruto da célula trazia ícones/rótulos extras que
+        // variavam entre as linhas (ex.: só uma delas com ícone de "histórico"), fazendo
+        // duas linhas do MESMO processo virarem chaves diferentes no Set de dedupe. Extrai
+        // só o número no formato CNJ (mesmo regex usado em Audiências Designadas, ver
+        // linha 1512) para normalizar — cai no texto bruto se não achar o padrão.
+        const processoBruto = textoCelula(tds[0]);
+        const processo = (processoBruto.match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [processoBruto])[0];
+        if (!processo) return null;
+        // tds[5] é o <td> com a <table> aninhada de Medidas/Status da Medida/Observação —
+        // pode vir sem nenhum <tr> (sem medida associada), daí medidaTds.length === 0 e os
+        // 3 campos ficam vazios (mesmo padrão de "sem dado", não é erro).
+        const medidaTds = tds[5] ? tds[5].querySelectorAll('td') : [];
+        let medidas = '';
+        if (medidaTds.length) {
+            const itensLi = [...medidaTds[0].querySelectorAll('li')].map(li => textoCelula(li)).filter(Boolean);
+            medidas = itensLi.length ? itensLi.join('; ') : textoCelula(medidaTds[0]);
+        }
+        return {
+            processo,
+            nomeParte: textoCelula(tds[1]),
+            dataInfracao: textoCelula(tds[2]),
+            classe: textoCelula(tds[3]),
+            assunto: textoCelula(tds[4]),
+            medidas,
+            statusMedida: medidaTds.length > 1 ? textoCelula(medidaTds[1]) : '',
+            observacao: medidaTds.length > 2 ? textoCelula(medidaTds[2]) : '',
+            dataInicio: textoCelula(tds[6]),
+            dataFinal: textoCelula(tds[7]),
+            statusTransacao: textoCelula(tds[8]),
+            motivoSuspensao: contexto || '',
+        };
+    }
+    const CABECALHOS_TRANSACAO_PENAL_XLSX = ['Processo', 'Nome da Parte', 'Data da Infração', 'Classe Processual',
+        'Assunto Principal', 'Medidas', 'Status da Medida', 'Observação', 'Data de Início', 'Data Final',
+        'Status da Transação Penal', 'Motivo da Suspensão'];
+    const LARGURAS_TRANSACAO_PENAL_XLSX = [{ wch: 26 }, { wch: 30 }, { wch: 16 }, { wch: 26 }, { wch: 26 },
+        { wch: 30 }, { wch: 18 }, { wch: 26 }, { wch: 16 }, { wch: 16 }, { wch: 26 }, { wch: 30 }];
+    const LINHA_TRANSACAO_PENAL_XLSX = (d) => [d.processo, d.nomeParte, d.dataInfracao, d.classe, d.assunto,
+        d.medidas, d.statusMedida, d.observacao, d.dataInicio, d.dataFinal, d.statusTransacao, d.motivoSuspensao];
+
+    // cfg.pdf compartilhado pelos 7 tipos — só título/atosTitulo mudam (ver cada CFG_*
+    // abaixo). semPrioridade: true porque não há noção de urgência nesta tela (mesmo
+    // motivo de CFG_APREENSOES). dataCampo usa "Data de Início" (do benefício/medida) —
+    // é o campo mais próximo de "há quanto tempo está pendente/em curso".
+    function pdfTransacaoPenal(titulo, atosTitulo) {
+        return {
+            titulo,
+            atosTitulo,
+            tabelaTitulo: `Tabela discriminada — ${atosTitulo.toLowerCase()}`,
+            dataCampo: 'dataInicio',
+            dataTitulo: 'Início mais antigo',
+            processoCampo: 'processo',
+            tipoCampo: 'classe',
+            semPrioridade: true,
+            agingTitulo: 'Por tempo desde o início',
+            // Pedido do usuário: card de total (atosTitulo) e "Processos distintos" ficam
+            // juntos no topo — diferente do card de total (que conta REGISTROS: com a
+            // busca por Motivo da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo processo pode
+            // aparecer mais de uma vez se tiver mais de uma suspensão com motivos
+            // diferentes), "Processos distintos" conta processos únicos.
+            kpisExtras: (dados) => {
+                const processosDistintos = new Set(dados.map(d => d.processo).filter(Boolean)).size;
+                return [{ titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
+            },
+            // Pedido do usuário: "Total vinculado a Processo Ativo"/"Processos distintos
+            // (Ativos)" numa linha, "Total vinculado a Processos Suspensos"/"Processos
+            // distintos (Suspensos)" (novo) noutra — 2 linhas de 2 cards cada, ambas ANTES
+            // do card "Início mais antigo" (que desce pra depois delas — ver
+            // p.cardsResumoExtra em montarResumoGenerico). "Suspensos" = total geral MENOS
+            // o vinculado a processo ativo (o caso normal, sem indício de baixa
+            // pendente). Só aparece quando a busca companheira (Situação do
+            // Processo=Ativos) já rodou.
+            cardsResumoExtra: (dados) => {
+                const ativos = dados.dadosAtivos || [];
+                if (!ativos.length) return [];
+                const setAtivos = new Set(ativos.map(d => d.processo).filter(Boolean));
+                const setTodos = new Set(dados.map(d => d.processo).filter(Boolean));
+                const processosDistintosAtivos = setAtivos.size;
+                const processosDistintosSuspensos = [...setTodos].filter(p => !setAtivos.has(p)).length;
+                return [
+                    { titulo: 'Total vinculado a Processo Ativo', valor: ativos.length, acento: 'vermelho' },
+                    { titulo: 'Processos distintos (Ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
+                    { titulo: 'Total vinculado a Processos Suspensos', valor: dados.length - ativos.length, acento: 'aqua' },
+                    { titulo: 'Processos distintos (Suspensos)', valor: processosDistintosSuspensos, acento: 'aqua' },
+                ];
+            },
+            cardsResumoExtraCols: 2,
+            secaoCardsExtra: [
+                // Pedido do usuário: os cards por Motivo da Suspensão (ex.: "Art. 366 do
+                // CPP: 45", "Art. 89 da Lei 9.099/95: 27") ganham seção PRÓPRIA, com título,
+                // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
+                // (o que estourava o texto dos cards com 6+ colunas). Explicitamente NÃO
+                // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
+                {
+                    titulo: 'Motivo da Suspensão',
+                    calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
+                        .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
+                },
+                // Pedido do usuário: suspensões ativas vinculadas a um processo cuja
+                // "Situação do Processo" no Projudi ainda consta como Ativos geram dúvida
+                // sobre alguma baixa que a secretaria não tenha feito. A mesma busca
+                // (Tipo + cada um dos 10 Motivos) roda uma 2ª vez com esse filtro (ver
+                // CFG_TRANSACAO_PENAL_ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS e o anexo
+                // de dadosAtivos em secoesColetadas) — os totais gerais já foram pro topo
+                // (1º bloco acima); aqui fica só a discriminação por Motivo. Fica vazio
+                // (não aparece) se essa 2ª busca ainda não rodou.
+                {
+                    titulo: '⚠ Vinculadas a Processo ATIVO (possível baixa pendente) — por Motivo',
+                    calc: (dados) => {
+                        const ativos = dados.dadosAtivos || [];
+                        if (!ativos.length) return [];
+                        return contarPorCampo(ativos, 'motivoSuspensao', 12)
+                            .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'vermelho' }));
+                    },
+                },
+            ],
+            distribuicoes: [
+                { titulo: 'Por Classe Processual', campo: 'classe', topN: 12 },
+                { titulo: 'Por Status da Transação Penal', campo: 'statusTransacao', topN: 8 },
+                // Pedido do usuário: discriminar por Motivo da Suspensão (ver
+                // MOTIVOS_SUSPENSAO/avancarMotivoOuTerminar — cada linha já vem marcada
+                // com o motivo da busca que a trouxe). topN 12 cobre os 10 motivos
+                // nomeados inteiros, sem cortar em "Outros".
+                { titulo: 'Por Motivo da Suspensão', campo: 'motivoSuspensao', topN: 12 },
+            ],
+            // Pedido do usuário: seção específica individualizando as suspensões por
+            // Motivo — reaproveita o mesmo mecanismo de CFG_APREENSOES (agruparPor/
+            // ordemGrupos), que separa a tabela discriminada em subtabelas por grupo.
+            agruparPor: 'motivoSuspensao',
+            ordemGrupos: MOTIVOS_SUSPENSAO.map(m => m.rotulo),
+            colunas: [
+                { header: 'Processo', width: 22, get: (d) => d.processo },
+                { header: 'Nome da Parte', width: 26, get: (d) => d.nomeParte },
+                { header: 'Classe Processual', width: 22, get: (d) => d.classe },
+                { header: 'Medidas', width: 22, get: (d) => d.medidas },
+                { header: 'Status da Medida', width: 16, get: (d) => d.statusMedida },
+                { header: 'Data de Início', width: 14, get: (d) => d.dataInicio },
+                { header: 'Data Final', width: 14, get: (d) => d.dataFinal },
+                { header: 'Status da Transação Penal', width: 20, get: (d) => d.statusTransacao },
+                { header: 'Motivo da Suspensão', width: 26, get: (d) => d.motivoSuspensao },
+            ],
+        };
+    }
+    function rotulosTransacaoPenal(curto) {
+        return { coletar: `Extrair ${curto}`, coletarMais: `Extrair mais (${curto})`, baixar: `⬇ Baixar ${curto}` };
+    }
+    // cfg.contextoExtra — chamado 1x por página coletada (ver coletarPaginaAtual), não
+    // por linha. Devolve o rótulo do Motivo da Suspensão da busca em andamento, pra
+    // extrairLinhaTransacaoPenal marcar cada linha com ele (a tabela em si não expõe
+    // essa informação por linha).
+    //
+    // Bug relatado pelo usuário: o resumo saía com "Por Motivo da Suspensão: (vazio)
+    // 100%" mesmo com a coleta funcionando (dados de verdade nas linhas). Lia
+    // #idMotivoSuspProcesso DIRETO DO DOM depois do reload — mas diferente de #tipo e
+    // #status (que o Projudi ecoa de volta corretamente no HTML da tela de resultados,
+    // confirmado em produção), o print do usuário mostrou esse select voltando pra
+    // "Todas" mesmo numa busca que claramente não foi feita com Motivo=Todas. Em vez de
+    // confiar no DOM pra isso, lê do NOSSO PRÓPRIO estado (cfg.prefixo+'motivo_atual',
+    // gravado por nós mesmos logo antes de cada busca em gateTransacaoPenal/
+    // avancarMotivoOuTerminar) — sempre correto, independente de como o Projudi
+    // renderiza esse campo de volta. Função regular (não arrow) porque é chamada como
+    // `cfg.contextoExtra()` — `this` vem amarrado ao cfg certo nessa chamada.
+    function contextoExtraTransacaoPenal() {
+        const valor = store.getItem(this.prefixo + 'motivo_atual');
+        return valor ? rotuloMotivoSuspensao(valor) : '';
+    }
+    // cfg.aoTerminarColeta — chamado por criarColetor/continuar() quando a paginação da
+    // busca ATUAL termina (sem "próxima página"), no lugar de avancarAutomacao(cfg)
+    // direto (mesmo gancho genérico usado por Tempo Médio pra buscar mês a mês, ver
+    // preencherEPesquisarTempoMedio). Função regular (não arrow) porque é chamada como
+    // `cfg.aoTerminarColeta()` — `this` vem amarrado ao cfg certo nessa chamada, sem
+    // precisar de closure por CFG individual.
+    // cfg.semIteracaoMotivo (Transação Penal — ver comentário em CFG_TRANSACAO_PENAL):
+    // pesquisa só 1 vez (Motivo="Todas"), então terminar a paginação já é terminar a
+    // coleta inteira — avança a automação direto, sem passar pela fila de Motivos.
+    function aoTerminarColetaTransacaoPenal() {
+        if (this.semIteracaoMotivo) avancarAutomacao(this);
+        else avancarMotivoOuTerminar(this);
+    }
+
+    const CFG_TRANSACAO_PENAL = {
+        prefixo: 'projudi_transacaopenal_t_',
+        mostrarSeVazio: true, // "zero transações penais ativas" é uma informação válida
+        // situacaoProcesso: 'todos' — ver comentário em situacaoProcessoBate. Corrige o
+        // rádio "Situação do Processo" ativamente (defensivo — não deixa herdar "ativos"
+        // de uma coleta anterior na mesma sessão), mas NÃO foi essa a causa do bug real
+        // relatado pelo usuário ("Transação Penal" sempre com 0 registros no PDF) — ver
+        // semIteracaoMotivo abaixo, essa sim confirmada pelo log.
+        situacaoProcesso: 'todos',
+        // Bug relatado pelo usuário, confirmado com o log detalhado baixado do painel:
+        // rodando o MESMO mecanismo de busca por Motivo da Suspensão (1 busca por cada um
+        // dos 10 valores nomeados) que funciona bem em Susp. Cond. Processo (291
+        // registros encontrados), Transação Penal batia ZERO em TODOS os 10 motivos, sem
+        // exceção — enquanto o card de total (Motivo="Todas", usado antes desta feature
+        // existir) trazia registros de verdade. Isso indica que "Motivo da Suspensão" —
+        // um campo conceitualmente ligado à SUSPENSÃO do processo — não é preenchido nos
+        // processos de Transação Penal desta vara (que pode não suspender o processo).
+        // semIteracaoMotivo: true faz gateTransacaoPenal() pesquisar só 1 vez, com
+        // Motivo="Todas" (valor "-1"), sem iterar pelos 10 — mesmo comportamento de antes
+        // da iteração por Motivo existir. Susp. Cond. Processo continua iterando
+        // normalmente (funciona). Decisão confirmada com o usuário antes de mudar.
+        semIteracaoMotivo: true,
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() !== 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'transacao_penal_projudi',
+        rotulos: rotulosTransacaoPenal('Transação Penal'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Transação Penal — Ativas', 'Transações penais ativas'),
+    };
+    const CFG_SUSPENSAO_COND_PROCESSO = {
+        prefixo: 'projudi_transacaopenal_s_',
+        mostrarSeVazio: true,
+        situacaoProcesso: 'todos', // ver comentário em CFG_TRANSACAO_PENAL.situacaoProcesso
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S' && situacaoProcessoSelecionada() !== 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'suspensao_condicional_processo_projudi',
+        rotulos: rotulosTransacaoPenal('Susp. Cond. Processo'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Suspensão Condicional do Processo — Ativas', 'Suspensões condicionais do processo ativas'),
+    };
+    // Pedido do usuário: rodar a MESMA busca (Tipo Transação Penal/Susp. Cond. Processo,
+    // Status=ATIVA, cada um dos 10 Motivos) uma 2ª vez com "Situação do Processo" =
+    // Ativos (<input type="radio" name="situacaoProcesso" value="ativos">) — suspensões
+    // ativas vinculadas a um processo AINDA ativo geram dúvida sobre alguma baixa que a
+    // secretaria não tenha feito. Prefixo/coleta própria (própria automação, própria
+    // paginação), mas SEM seção/página própria no PDF — os dados só alimentam os cards de
+    // alerta do relatório "pai" (ver secaoCardsExtra em pdfTransacaoPenal e o anexo de
+    // dadosAtivos em secoesColetadas). cfg.situacaoProcesso: 'ativos' é lido por
+    // gateTransacaoPenal pra saber que precisa corrigir esse rádio também.
+    const CFG_TRANSACAO_PENAL_ATIVOS = {
+        prefixo: 'projudi_transacaopenal_t_ativos_',
+        mostrarSeVazio: true,
+        situacaoProcesso: 'ativos',
+        // Mesmo motivo de CFG_TRANSACAO_PENAL.semIteracaoMotivo — Transação Penal não
+        // usa "Motivo da Suspensão" nos dados reais, então a variante Ativos deste Tipo
+        // também pesquisa só com Motivo="Todas", sem iterar.
+        semIteracaoMotivo: true,
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() === 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'transacao_penal_processo_ativo_projudi',
+        rotulos: rotulosTransacaoPenal('Transação Penal (Processo Ativo)'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Transação Penal — Ativas, Processo Ativo', 'Transações penais ativas em processos ativos'),
+    };
+    const CFG_SUSPENSAO_COND_PROCESSO_ATIVOS = {
+        prefixo: 'projudi_transacaopenal_s_ativos_',
+        mostrarSeVazio: true,
+        situacaoProcesso: 'ativos',
+        detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S' && situacaoProcessoSelecionada() === 'ativos',
+        minTds: 9,
+        usaAtuacao: false,
+        contextoExtra: contextoExtraTransacaoPenal,
+        aoTerminarColeta: aoTerminarColetaTransacaoPenal,
+        nomeArquivo: 'suspensao_condicional_processo_processo_ativo_projudi',
+        rotulos: rotulosTransacaoPenal('Susp. Cond. Processo (Processo Ativo)'),
+        cabecalhos: CABECALHOS_TRANSACAO_PENAL_XLSX,
+        larguras: LARGURAS_TRANSACAO_PENAL_XLSX,
+        extrai: extrairLinhaTransacaoPenal,
+        linha: LINHA_TRANSACAO_PENAL_XLSX,
+        pdf: pdfTransacaoPenal('Suspensão Condicional do Processo — Ativas, Processo Ativo', 'Suspensões condicionais do processo ativas em processos ativos'),
+    };
+    // Mapa "key do item de fila" -> valor do <select id="tipo"> — mesmo esquema de
+    // STATUS_POR_CHAVE_MANDADO/cfgMandadoPorChave acima. As variantes "...ativos" têm o
+    // MESMO valor de Tipo — o que muda é cfg.situacaoProcesso (ver cfgTransacaoPenalPorChave).
+    const TIPO_POR_CHAVE_TRANSACAO = {
+        transacaopenal: 'T',
+        suspcondprocesso: 'S',
+        transacaopenalativos: 'T',
+        suspcondprocessoativos: 'S',
+    };
+    function cfgTransacaoPenalPorChave(chave) {
+        if (chave === 'suspcondprocesso') return CFG_SUSPENSAO_COND_PROCESSO;
+        if (chave === 'transacaopenalativos') return CFG_TRANSACAO_PENAL_ATIVOS;
+        if (chave === 'suspcondprocessoativos') return CFG_SUSPENSAO_COND_PROCESSO_ATIVOS;
+        return CFG_TRANSACAO_PENAL;
+    }
+
+    // Avança para o próximo Motivo da Suspensão da fila deste CFG (ver MOTIVOS_SUSPENSAO)
+    // ou, se a fila já acabou, avança a automação de verdade para o próximo Tipo — mesmo
+    // papel de "próximo mês" em preencherEPesquisarTempoMedio, mas aqui chamado tanto do
+    // gate (zero resultados) quanto de aoTerminarColetaTransacaoPenal (paginação de um
+    // Motivo terminou com dados de verdade), então os dois caminhos convergem pra cá em
+    // vez de cada um decidir "avançar tipo" por conta própria.
+    function avancarMotivoOuTerminar(cfg) {
+        const chaveFila = cfg.prefixo + 'fila_motivos';
+        const fila = desembrulharArray(store.getItem(chaveFila)) || [];
+        if (!fila.length) {
+            // Nenhum Motivo restante — encerra este Tipo. "Zero em todos os Motivos" só
+            // marca coletado=1 aqui (não a cada Motivo individual) — mesma lógica de
+            // marcarColetaMandadosVazia (idempotente, não sobrescreve dado já coletado).
+            if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
+            store.removeItem(cfg.prefixo + 'motivo_atual');
+            store.removeItem(chaveFila);
+            // Resumo final desta busca (situacaoProcesso inclusive) — pedido do usuário:
+            // linha fácil de achar no log pra confirmar, sem adivinhar, quanto cada
+            // busca (Tipo × Situação do Processo) realmente coletou no final.
+            logPainel(`[Auto Projudi Transação Penal] "${cfg.prefixo}" — todos os Motivos da Suspensão percorridos (situacaoProcesso=${cfg.situacaoProcesso || '(não verificado)'}) `
+                + `— total coletado: ${contarRegistrosSync(cfg.prefixo)} registro(s) — avançando para o próximo Tipo`);
+            avancarAutomacao(cfg);
+            return;
+        }
+        const proximoMotivo = fila[0];
+        store.setItem(chaveFila, JSON.stringify(fila.slice(1)));
+        store.setItem(cfg.prefixo + 'motivo_atual', proximoMotivo);
+        const sel = document.getElementById('idMotivoSuspProcesso');
+        if (sel) sel.value = proximoMotivo;
+        const btn = document.getElementById('searchButton');
+        logPainel(`[Auto Projudi Transação Penal] Motivo da Suspensão concluído — avançando para "${rotuloMotivoSuspensao(proximoMotivo)}" (${fila.length} restante(s) na fila)`);
+        setTimeout(() => { if (btn) btn.click(); }, 400);
+    }
+
+    // Gate chamado no início de injetarBotoes() quando a URL é buscaTransacaoPenal.do.
+    // Corrige TRÊS selects (#tipo, #status e — pedido do usuário —
+    // #idMotivoSuspProcesso, percorrido individualmente por MOTIVOS_SUSPENSAO em vez de
+    // ficar em "Todas") sempre que algum não bate com o esperado da key/Motivo atual da
+    // automação, antes de clicar em Pesquisar de novo. #codTipoMedida continua SEMPRE
+    // intocado (pedido do usuário: default "-1"/Todas). Diferente de Mandados: aqui form
+    // e resultTable convivem na MESMA página desde a 1ª visita (mesmo esquema de
+    // Paralisados/Remessas via formularioParalisado) — não há painel/aba intermediária,
+    // então este gate cobre tanto "preenchendo_" (1ª busca) quanto "coletando_"
+    // (correção/zero resultados/avanço de Motivo).
+    function gateTransacaoPenal() {
+        // DIAGNÓSTICO — registrado ANTES de qualquer "return" antecipado (bug relatado
+        // pelo usuário: automação "travada", nada no log nem no console). Sem esta linha
+        // no topo, um early-return (form não encontrado, ou chave/tipoEsperado vazios por
+        // AUTO_ESTADO ainda não promovido de "ir_X" pra "preenchendo_X" no instante em que
+        // injetarBotoes() rodou) saía da função em silêncio total, sem deixar rastro de
+        // por que nada aconteceu.
+        const estadoAutoBruto = store.getItem(AUTO_ESTADO) || '';
+        const formOk = !!formularioTransacaoPenal();
+        logPainel(`[Auto Projudi Transação Penal] gate chamado — url=${location.pathname} estadoAuto="${estadoAutoBruto}" formularioEncontrado=${formOk}`);
+        if (!formOk) return false;
+        const chave = keyDoEstadoAtual(estadoAutoBruto);
+        const tipoEsperado = chave && TIPO_POR_CHAVE_TRANSACAO[chave];
+        if (!tipoEsperado) {
+            logPainel(`[Auto Projudi Transação Penal] gate saindo — chave="${chave}" não é um dos 7 tipos (fora da automação deste relatório, ou estado ainda não promovido)`);
+            return false; // fora da automação para este relatório — segue fluxo manual normal
+        }
+        const cfg = cfgTransacaoPenalPorChave(chave);
+
+        // cfg.semIteracaoMotivo (Transação Penal — ver comentário na definição do cfg,
+        // confirmado pelo log: 0 registros em TODOS os 10 Motivos nomeados, enquanto
+        // Susp. Cond. Processo com o MESMO mecanismo acha centenas) — pesquisa só 1 vez,
+        // com Motivo="Todas" (valor "-1"), sem popular/consumir fila_motivos nenhuma.
+        let motivoEsperado;
+        if (cfg.semIteracaoMotivo) {
+            motivoEsperado = '-1';
+            if (estadoAutoBruto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+        } else {
+            if (estadoAutoBruto.startsWith('preenchendo_')) {
+                store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+                // 1ª visita deste Tipo: (re)inicia a fila de Motivos da Suspensão do zero —
+                // pedido do usuário: cada um dos 10 motivos nomeados é buscado em separado
+                // dentro deste Tipo, em vez de deixar #idMotivoSuspProcesso em "Todas".
+                store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(MOTIVOS_SUSPENSAO.map(m => m.valor)));
+                store.removeItem(cfg.prefixo + 'motivo_atual');
+            }
+            // Garante que sempre há um Motivo "atual" definido antes de checar o filtro —
+            // tira o próximo da fila se ainda não tiver um (1ª passada deste Tipo, ou algo
+            // limpou motivo_atual sem popular a fila de novo).
+            motivoEsperado = store.getItem(cfg.prefixo + 'motivo_atual');
+            if (!motivoEsperado) {
+                const fila = desembrulharArray(store.getItem(cfg.prefixo + 'fila_motivos')) || [];
+                if (!fila.length) {
+                    // Defensivo — não deveria acontecer (a fila só some depois de já ter
+                    // processado todos os motivos, ver avancarMotivoOuTerminar).
+                    logPainel(`[Auto Projudi Transação Penal] "${chave}" sem Motivo atual nem fila — encerrando defensivamente`);
+                    avancarAutomacao(cfg);
+                    return true;
+                }
+                motivoEsperado = fila[0];
+                store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(fila.slice(1)));
+                store.setItem(cfg.prefixo + 'motivo_atual', motivoEsperado);
+            }
+        }
+
+        const selTipo = document.getElementById('tipo');
+        const selStatus = document.getElementById('status');
+        const selMotivo = document.getElementById('idMotivoSuspProcesso');
+        const tabela = tabelaTransacaoPenal();
+        // Conta só linhas com "cara de dado de verdade" (>= minTds células diretas) — a
+        // tela do Projudi mantém uma ÚNICA <tr> com <td colspan="6">Nenhum registro
+        // encontrado</td> mesmo com zero resultados (confirmado na amostra real), então
+        // "existe algum <tr>" NÃO significa "tem dado" (bug corrigido: antes isso fazia
+        // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
+        // genérico mesmo em telas vazias).
+        const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 9) : [];
+        // cfg.situacaoProcesso é 'ativos' ou 'todos' (ver comentário em
+        // situacaoProcessoBate acima) — as 4 variantes agora corrigem esse rádio
+        // ativamente, nenhuma "deixa como está".
+        const situacaoEsperada = cfg.situacaoProcesso || null;
+        const situacaoAtual = situacaoProcessoSelecionada();
+        const situacaoOk = situacaoProcessoBate(situacaoEsperada, situacaoAtual);
+        // motivoDisabled/motivoOptions — pedido do usuário: "Transação Penal" (tipo T)
+        // volta zerado do PDF mesmo depois da correção do rádio; hipótese ainda não
+        // confirmada é que o campo "Motivo da Suspensão" pode não se aplicar/ficar
+        // desabilitado pro Tipo Transação Penal no Projudi (diferente de Susp. Cond. do
+        // Processo, que funciona), fazendo o servidor devolver 0 pra qualquer Motivo
+        // específico mesmo havendo Transações Penais ativas de verdade (que só apareciam
+        // com Motivo="Todas", antes da iteração por Motivo existir). Log aqui em vez de
+        // adivinhar — confirma ou descarta isso direto no log baixado (▼ Ver log
+        // detalhado → ⬇ Baixar log completo).
+        logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} motivoEsperado=${motivoEsperado} (${rotuloMotivoSuspensao(motivoEsperado)}) `
+            + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} motivoAtual=${selMotivo ? selMotivo.value : 'n/d'} `
+            + `motivoDisabled=${selMotivo ? selMotivo.disabled : 'n/d'} motivoQtdOpcoes=${selMotivo && selMotivo.options ? selMotivo.options.length : 'n/d'} `
+            + `situacaoProcessoEsperada=${situacaoEsperada || '(não verificado)'} situacaoProcessoAtual=${situacaoAtual || 'n/d'} situacaoProcessoOk=${situacaoOk} `
+            + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
+            + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
+        if ((selTipo && selTipo.value !== tipoEsperado) || (selStatus && selStatus.value !== 'A') || (selMotivo && selMotivo.value !== motivoEsperado)
+            || !situacaoOk) {
+            if (selTipo) selTipo.value = tipoEsperado;
+            if (selStatus) selStatus.value = 'A';
+            if (selMotivo) selMotivo.value = motivoEsperado;
+            if (situacaoEsperada && !situacaoOk) {
+                // Clique real (não .checked=true) — mesma armadilha já documentada de
+                // checkbox/aba do Projudi só reagindo a um clique de usuário de verdade.
+                const radioAlvo = radioSituacaoProcessoAlvo(situacaoEsperada);
+                if (radioAlvo && !radioAlvo.checked) radioAlvo.click();
+            }
+            const btn = document.getElementById('searchButton');
+            logPainel(`[Auto Projudi Transação Penal] filtrando para tipo=${tipoEsperado} status=A motivo=${motivoEsperado}`
+                + `${situacaoEsperada ? ` situacaoProcesso=${situacaoEsperada}` : ''} (${chave}) e clicando Pesquisar`);
+            setTimeout(() => { if (btn) btn.click(); }, 400);
+            return true;
+        }
+        // Filtro já correto. Sem tabela de resultados ainda (1ª visita, antes de
+        // qualquer busca) — clica em Pesquisar mesmo assim, sem esperar ação manual.
+        if (!tabela) {
+            const btn = document.getElementById('searchButton');
+            logPainel(`[Auto Projudi Transação Penal] filtro já correto (${chave}) mas sem resultados na tela ainda — clicando Pesquisar`);
+            setTimeout(() => { if (btn) btn.click(); }, 400);
+            return true;
+        }
+        // "Zero resultados" — cfg.semIteracaoMotivo (Transação Penal, busca única com
+        // Motivo="Todas") encerra e avança a automação direto; os demais avançam para o
+        // próximo Motivo da fila (ou encerram o Tipo, se já era o último).
+        if (!linhasDeVerdade.length) {
+            if (cfg.semIteracaoMotivo) {
+                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados (Motivo=Todas)`);
+                marcarColetaMandadosVazia(cfg);
+                avancarAutomacao(cfg);
+            } else {
+                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados para o Motivo "${rotuloMotivoSuspensao(motivoEsperado)}"`);
+                avancarMotivoOuTerminar(cfg);
+            }
+            return true;
+        }
+        return false; // deixa o fluxo genérico (detectarConfig/criarColetor) coletar normalmente
+    }
+
     function formularioApreensoes() {
         const form = document.getElementById('apreensaoForm');
         return form && form.querySelector('#idMotivoEncerramentoApreensaoBusca') ? form : null;
@@ -4958,6 +5609,12 @@
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
             // (da área Crime) que não foi limpa antes de recomeçar.
             store.removeItem(cfg.prefixo + 'tem_motivo');
+            // Fila de Motivos da Suspensão em andamento (ver avancarMotivoOuTerminar/
+            // gateTransacaoPenal) — sem limpar aqui, um "Limpar" no meio da iteração
+            // deixaria a próxima coleta retomar de um Motivo no meio da lista, em vez de
+            // recomeçar do primeiro. Sem efeito para cfgs que não usam esse recurso.
+            store.removeItem(cfg.prefixo + 'fila_motivos');
+            store.removeItem(cfg.prefixo + 'motivo_atual');
         }
 
         async function adicionarPagina(dadosPagina) {
@@ -5097,9 +5754,9 @@
                     rejeitadas.push({ motivo: 'extrai() devolveu null', tds: tds.length, classe: tr.className, texto: [...tds].map(td => textoCelula(td).slice(0, 25)) });
                 }
             });
-            console.log(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
+            logPainel(`[Projudi] coletarPaginaAtual — ${linhas.length} linhas encontradas, ${dados.length} extraídas (minTds=${cfg.minTds})`);
             if (dados.length < linhas.length) {
-                console.log(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
+                logPainel(`[Projudi] coletarPaginaAtual — diagnóstico: ${tabelas.length} table.resultTable na página; até 5 linha(s) rejeitada(s):`, rejeitadas);
             }
             if (linhas.length === 0 && tabelas.length > 0) {
                 const cabecalhos = [...tabelas].map((t, i) => {
@@ -6126,6 +6783,34 @@
         return yLinha;
     }
 
+    // Grade de cards no MESMO estilo do topo do resumo (desenharCard, com barra de acento
+    // e texto centralizado) — usada por p.secaoCardsExtra (ver montarResumoGenerico) para
+    // uma seção dedicada com título próprio, quando a quantidade de cards (ex.: um por
+    // Motivo da Suspensão) não cabe numa única linha ao lado dos KPIs principais sem
+    // espremer o texto (pedido do usuário, Benefícios/Medidas/Suspensões: separar os
+    // cards de Motivo dos cards gerais). `cols` default 4 dá largura suficiente pro texto
+    // não estourar o card mesmo com títulos como "ART. 89 DA LEI 9.099/95".
+    function desenharGradeCardsKpi(doc, x, y, w, itens, ctx, cols) {
+        cols = cols || 4;
+        const ph = doc.internal.pageSize.getHeight();
+        const gap = 6, h = 28, colW = (w - gap * (cols - 1)) / cols;
+        let yLinha = y, col = 0;
+        const novaPagina = () => {
+            if (ctx.rodapeAntesDeVirar) ctx.rodapeAntesDeVirar();
+            doc.addPage();
+            ctx.cabecalhoContinuacao();
+            yLinha = ctx.topoContinuacao; col = 0;
+        };
+        itens.forEach(it => {
+            if (col === 0 && yLinha + h > ph - 14) novaPagina();
+            desenharCard(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.subs || [], true, it.acento);
+            col++;
+            if (col >= cols) { col = 0; yLinha += h + gap; }
+        });
+        if (col !== 0) yLinha += h + gap;
+        return yLinha;
+    }
+
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
     // cor: cor padrão das barras (acento semântico do gráfico); item.cor sobrepõe se definida.
     function desenharBarras(doc, x, y, w, h, titulo, itens, fmt, cor) {
@@ -6712,10 +7397,20 @@
             const media = mediaPorDia(dados, p.dataCampo);
             kpis.push({ titulo: 'Média por dia', valor: media ? media.toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : '—', subs: [p.mediaLabel], acento: COR.azul });
         }
-        // Ponto de extensão OPCIONAL — só CFG_CONCLUSOES define isso hoje (KPIs
-        // "Com/Sem pré-análise"). Relatórios que não definem p.kpisExtras ficam
-        // byte-a-byte como antes desta mudança.
-        if (Array.isArray(p.kpisExtras)) {
+        // Ponto de extensão OPCIONAL — Relatórios que não definem p.kpisExtras ficam
+        // byte-a-byte como antes desta mudança. Duas formas aceitas:
+        //  - array de {titulo, calc, subs?, acento?} — lista FIXA de KPIs (ex.:
+        //    CFG_CONCLUSOES/CFG_APREENSOES), um card por item, titulo sempre o mesmo.
+        //  - função (dados) => [{titulo, valor, subs?, acento?}, ...] — pedido do usuário
+        //    (Benefícios/Medidas/Suspensões): quantidade e título dos cards SÓ SE SABE
+        //    depois de olhar os dados (ex.: 1 card por valor distinto de "Medidas"
+        //    encontrado, mais um de "processos distintos") — ver kpisExtras em
+        //    pdfTransacaoPenal.
+        if (typeof p.kpisExtras === 'function') {
+            (p.kpisExtras(dados) || []).forEach(k => {
+                kpis.push({ titulo: k.titulo, valor: String(k.valor), subs: k.subs || [], acento: COR[k.acento] || COR.azul });
+            });
+        } else if (Array.isArray(p.kpisExtras)) {
             p.kpisExtras.forEach(k => {
                 const valor = k.calc(dados);
                 kpis.push({ titulo: k.titulo, valor: String(valor), subs: (k.subs ? k.subs(dados, valor) : []), acento: COR[k.acento] || COR.azul });
@@ -6724,8 +7419,39 @@
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
+        // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
+        // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
+        // números exatos a barras), e diferente da grade de gráficos antiga (altura fixa,
+        // nunca paginava sozinha), a grade de tabelas pode abrir página nova no meio do
+        // desenho — sem isso a página anterior ficaria sem rodapé/link. Definido ANTES do
+        // bloco de p.cardsResumoExtra (abaixo) — esse bloco pode paginar sozinho também.
+        const ctx = {
+            rodapeAntesDeVirar: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            topoContinuacao: m + 14,
+            cabecalhoContinuacao: () => {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${p.titulo} — detalhamento por categoria`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+            },
+        };
+
+        // Ponto de extensão OPCIONAL — cards extras logo abaixo da linha de kpis
+        // principais, mas ANTES do card "Início mais antigo" (pedido do usuário,
+        // Benefícios/Medidas/Suspensões: "INÍCIO MAIS ANTIGO deve ficar abaixo dos
+        // cards" de processo ativo/suspenso, agrupados em linhas de p.cardsResumoExtraCols
+        // cards cada — ver pdfTransacaoPenal). cfg.pdf que não define isso fica byte-a-
+        // byte como antes desta mudança (aY cai direto depois da linha de kpis).
+        let yAntesAntigo = kY + 28 + gap;
+        if (p.cardsResumoExtra) {
+            const itensResumoExtra = (p.cardsResumoExtra(dados) || [])
+                .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
+            if (itensResumoExtra.length) {
+                yAntesAntigo = desenharGradeCardsKpi(doc, m, yAntesAntigo, uw, itensResumoExtra, ctx, p.cardsResumoExtraCols || 2) + 2;
+            }
+        }
+
         // KPI do mais atrasado (card largo, texto centralizado)
-        const aY = kY + 28 + gap;
+        const aY = yAntesAntigo;
         const antigo = acharMaisAntigo(dados, p.dataCampo);
         let subsAntigo = ['Data não disponível'];
         let valAntigo = '—';
@@ -6738,24 +7464,40 @@
                 reg[p.tipoCampo] || '',
             ];
         }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
+        if (aY > ph - m - 28) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); }
+        const aYFinal = aY > ph - m - 28 ? ctx.topoContinuacao : aY;
+        desenharCard(doc, m, aYFinal, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
-        // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
-        // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
-        // números exatos a barras), e diferente da grade de gráficos antiga (altura fixa,
-        // nunca paginava sozinha), a grade de tabelas pode abrir página nova no meio do
-        // desenho — sem isso a página anterior ficaria sem rodapé/link.
-        const ctx = {
-            rodapeAntesDeVirar: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
-            topoContinuacao: m + 14,
-            cabecalhoContinuacao: () => {
-                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
-                doc.text(`${p.titulo} — detalhamento por categoria`, m, m + 4);
-                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
-            },
-        };
+        let y = aYFinal + 28 + gap + 2;
 
-        let y = aY + 28 + gap + 2;
+        // Seção dedicada de cards logo abaixo dos KPIs principais (pedido do usuário,
+        // Benefícios/Medidas/Suspensões: separar os cards de "Motivo da Suspensão" dos
+        // cards gerais — total e processos distintos ficam no topo, os cards por Motivo
+        // ganham seção própria com título, em vez de todos espremidos numa linha só,
+        // o que estourava o texto dos cards). Ponto de extensão OPCIONAL — cfg.pdf que
+        // não define p.secaoCardsExtra fica byte-a-byte como antes desta mudança.
+        if (p.secaoCardsExtra) {
+            // Aceita um único bloco {titulo, calc} ou uma lista deles (pedido do usuário,
+            // Benefícios/Medidas/Suspensões: mais de uma seção de cards — "Motivo da
+            // Suspensão" e, quando há dados da busca companheira por processo ativo,
+            // "Vinculadas a Processo ATIVO" — cada uma com seu próprio título). `titulo`
+            // é opcional — sem ele (pedido do usuário: cards de processo ativo/suspenso
+            // "na seção acima, abaixo do total"), o bloco vira só mais uma LINHA de
+            // cards, sem cabeçalho de seção, continuando visualmente a linha de kpis do
+            // topo em vez de virar uma seção separada.
+            const blocos = Array.isArray(p.secaoCardsExtra) ? p.secaoCardsExtra : [p.secaoCardsExtra];
+            blocos.forEach(bloco => {
+                const itensSecao = (bloco.calc(dados) || [])
+                    .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
+                if (itensSecao.length) {
+                    if (bloco.titulo) {
+                        tituloSecao(doc, m, y + 4, uw, bloco.titulo);
+                        y += TITULO_TABELA_H;
+                    }
+                    y = desenharGradeCardsKpi(doc, m, y, uw, itensSecao, ctx, bloco.cols) + 2;
+                }
+            });
+        }
 
         // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
         // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
@@ -8469,6 +9211,12 @@
 
         // Suspensos por Prazo Indeterminado é mais uma tarefa do Cartório (mesmo esquema
         // genérico de Juntadas/Retorno, via cfg.pdf) — não precisa de página própria.
+        // Benefícios/Medidas/Suspensões (Transação Penal/Suspensão Condicional/Pena
+        // Substitutiva/Medida Protetiva/Medida Cautelar/ANPP) saiu daqui — pedido do
+        // usuário: mover a seção para dentro da categoria Crime, mesmo padrão de
+        // Apreensões/Cumprimento de Medidas/Prescrições/Medidas Alternativas em Atraso
+        // (ver CFGS_GRUPO_TRANSACAO_PENAL/secaoApreensoes mais abaixo, dentro do bloco
+        // "Crime" que alimenta itensOutros).
         const CFGS_CARTORIO = [CFG_JUNTADAS, CFG_RETORNO, CFG_PARALISADOS, CFG_REMESSAS, CFG_SUSPENSOS,
             CFG_MANDADOS_RETORNO, CFG_MANDADOS_DISTRIBUICAO, CFG_MANDADOS_CUMPRIMENTO, CFG_MANDADOS_DECURSO,
             CFG_MANDADOS_PRISAO_REGULARIZAR, CFG_ALVARAS_SOLTURA_REGULARIZAR];
@@ -8569,6 +9317,10 @@
         const secaoSemInfracaoPenal = secoes.find(s => s.cfgOriginal === CFG_SEM_INFRACAO_PENAL);
         const secaoMonitoracaoExpiradas = secoes.find(s => s.cfgOriginal === CFG_MONITORACAO_EXPIRADAS);
         const secaoMedidasAlternativasAtraso = secoes.find(s => s.cfgOriginal === CFG_MEDIDAS_ALTERNATIVAS_ATRASO);
+        // Benefícios/Medidas/Suspensões (Crime) — 7 tipos, cada um sua própria seção (ver
+        // CFGS_GRUPO_TRANSACAO_PENAL mais abaixo, dentro do bloco que alimenta itensOutros).
+        const secaoTransacaoPenal = secoes.find(s => s.cfgOriginal === CFG_TRANSACAO_PENAL);
+        const secaoSuspCondProcesso = secoes.find(s => s.cfgOriginal === CFG_SUSPENSAO_COND_PROCESSO);
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
@@ -8712,6 +9464,33 @@
             };
             itensEstatisticasGerais.push(...comSubLinhasAtribuicao(linhaSuspensosPrazo, secaoSuspensosPrazo.dados, (n) => `${n} processo(s)`));
         }
+        // "Benefícios/Medidas/Suspensões" — pedido do usuário: aparecer no PDF final EM
+        // SEQUÊNCIA com "Suspensos com Prazo Determinado" (não mexe na categoria do
+        // painel/Menu, que continua Crime — ver categoriaEspecifica em REPORTS_AUTOMACAO;
+        // só a ORDEM DAS PÁGINAS no PDF muda, controlada pela posição do item na
+        // "tabela única do Cartório" — ver ordemNaCapa/outrasSecoes.sort em
+        // gerarPDFConjunto). A tela de origem só permite pesquisar UM tipo por vez (ver
+        // TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal), então continuam sendo 7
+        // CFGs/seções independentes — aqui aparecem agrupadas sob um cabeçalho só (mesmo
+        // mecanismo de linhaGrupo/grupoPai já usado por "Mandados" dentro de Pendências),
+        // sem classificação por situação/aging (mesmo motivo de Medidas Alternativas em
+        // Atraso — não é uma tarefa clássica de "dias parado").
+        const CFGS_GRUPO_TRANSACAO_PENAL = [
+            [CFG_TRANSACAO_PENAL, secaoTransacaoPenal, 'Transação Penal'],
+            [CFG_SUSPENSAO_COND_PROCESSO, secaoSuspCondProcesso, 'Susp. Cond. Processo'],
+        ].filter(([, secao]) => !!secao);
+        if (CFGS_GRUPO_TRANSACAO_PENAL.length) {
+            itensEstatisticasGerais.push(linhaGrupo('Benefícios/Medidas/Suspensões', ''));
+            CFGS_GRUPO_TRANSACAO_PENAL.forEach(([cfg, secao, curto]) => {
+                itensEstatisticasGerais.push({
+                    nome: curto,
+                    indicador: `${secao.dados.length} processo(s)`,
+                    detalhamento: '—',
+                    situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: cfg,
+                    grupoPai: 'Benefícios/Medidas/Suspensões',
+                });
+            });
+        }
         // "Em Instância Recursal" — indicador: total em instância recursal.
         // Detalhamento (pedido do usuário, item a): quantos foram enviados há mais de 2 anos.
         if (secaoInstanciaRecursal) {
@@ -8744,6 +9523,9 @@
         // Mandados (Retorno/Distribuição/Cumprimento/Decurso), que já têm 1 nível de
         // indentação (filhos do grupo "Mandados") e não ganham um 2º nível, por decisão do
         // usuário.
+        // Benefícios/Medidas/Suspensões saiu daqui — mesmo padrão de Apreensões/
+        // Cumprimento de Medidas/Prescrições: pedido do usuário, mora agora dentro da
+        // categoria Crime (ver bloco "Crime" mais abaixo, que alimenta itensOutros).
         const itensPendencias = itensCartorio
             .filter(t => !CFGS_GRUPO_MANDADOS.includes(t.secao.cfgOriginal) && t.secao.cfgOriginal !== CFG_SUSPENSOS)
             .flatMap(t => comSubLinhasAtribuicao(
@@ -13072,6 +13854,12 @@
         else if (CFG_MONITORACAO_EXPIRADAS.detecta(cab)) cfg = CFG_MONITORACAO_EXPIRADAS;
         else if (CFG_MEDIDAS_ALTERNATIVAS_ATRASO.detecta(cab)) cfg = CFG_MEDIDAS_ALTERNATIVAS_ATRASO;
         else if (CFG_ATIVOS_CLASSE.detecta(cab)) cfg = CFG_ATIVOS_CLASSE;
+        // Benefícios/Medidas/Suspensões — mesma tabela para os 7 tipos; distinguem-se
+        // pelo valor do <select id="tipo"> (ver detecta() de cada CFG_* acima).
+        else if (CFG_TRANSACAO_PENAL.detecta(cab)) cfg = CFG_TRANSACAO_PENAL;
+        else if (CFG_SUSPENSAO_COND_PROCESSO.detecta(cab)) cfg = CFG_SUSPENSAO_COND_PROCESSO;
+        else if (CFG_TRANSACAO_PENAL_ATIVOS.detecta(cab)) cfg = CFG_TRANSACAO_PENAL_ATIVOS;
+        else if (CFG_SUSPENSAO_COND_PROCESSO_ATIVOS.detecta(cab)) cfg = CFG_SUSPENSAO_COND_PROCESSO_ATIVOS;
         // Outros Cumprimentos não tem cabeçalho de table.resultTable reconhecível pelo
         // esquema genérico (a página tem DUAS tabelas) — detecção própria por conteúdo
         // (ver paginaOutrosCumprimentos), fora do fluxo de "cab" acima.
@@ -13673,7 +14461,7 @@
 
     function injetarBotoes() {
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
-        console.log(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
+        logPainel(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
 
         // Página de Outros Cumprimentos (painel de contadores, sem form/pesquisa e SEM
         // table.buttonBar — diferente de todas as outras telas de relatório) — tratada
@@ -13780,6 +14568,15 @@
         // (uso manual, ou coleta normal em andamento), o fluxo genérico abaixo
         // (detectarConfig/criarColetor) segue cuidando da paginação normalmente.
         if (/cumprimentoCartorioMandado\.do/i.test(location.pathname) && gateMandados()) {
+            return;
+        }
+
+        // Tela de resultados de Benefícios/Medidas/Suspensões (os 7 relatórios de
+        // transação penal/suspensão/medida) — gateTransacaoPenal() cuida de preencher a
+        // 1ª busca, corrigir o filtro errado e "zero resultados"; quando não tratou nada
+        // (uso manual, ou coleta normal em andamento), o fluxo genérico abaixo
+        // (detectarConfig/criarColetor) segue cuidando da paginação normalmente.
+        if (/buscaTransacaoPenal\.do/i.test(location.pathname) && gateTransacaoPenal()) {
             return;
         }
 
@@ -14867,6 +15664,30 @@
         }
     }
 
+    // Liga o comportamento "marcar o pai marca os filhos junto" no checklist de
+    // relatórios — pedido do usuário: marcar só "Medidas Alternativas em Atraso" já
+    // seleciona os 7 tipos de Benefícios/Medidas/Suspensões (ver campo opcional
+    // paiChecklist em REPORTS_AUTOMACAO), continuando possível desmarcar um filho
+    // manualmente depois. `seletorClasse` é a classe do checkbox (`.pa-check` no painel
+    // da página inicial, `.projudi-mu-rel-check` no popup de seleção de várias unidades —
+    // os dois têm o MESMO checklist duplicado, ver injetarPainel/injetarSeletorUnidades),
+    // e `escopo` é o elemento onde procurar tanto o pai quanto os filhos (precisa conter
+    // os dois — normalmente o painel inteiro, ou o bloco da categoria Crime já renderizado).
+    // Desmarcar o pai também desmarca os filhos (comportamento simétrico de "selecionar
+    // tudo/nada" — o pedido do usuário cobriu só a direção de marcar, mas desmarcar em
+    // bloco é o esperado de um checkbox-mestre).
+    function ligarCheckboxesPaiFilho(escopo, seletorClasse, aoMudar) {
+        escopo.querySelectorAll(`${seletorClasse}[data-filhos]`).forEach(pai => {
+            pai.addEventListener('change', () => {
+                pai.dataset.filhos.split(',').forEach(chave => {
+                    const filho = escopo.querySelector(`${seletorClasse}[data-key="${chave}"]`);
+                    if (filho) filho.checked = pai.checked;
+                });
+                if (aoMudar) aoMudar();
+            });
+        });
+    }
+
     // Injeta, na tela de seleção de área de atuação (página cheia ou popup), um checkbox
     // ao lado de cada unidade da árvore — ÚNICA forma de escolher unidades (pedido do
     // usuário: nada de dropdown/popup separado, só os checkboxes na própria página) — e
@@ -14905,25 +15726,53 @@
         // então "selecionar" a opção já exibida não disparava 'change' e o valor antigo
         // persistia silenciosamente (bug relatado pelo usuário).
         const periodoTmSalvo = store.getItem('projudi_auto_periodo_tm') || '1m';
-        function linhaRelatorio(r) {
+        function linhaRelatorio(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === periodoTmSalvo ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `<label class="${classeItem}">
                     <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                </label>`;
+        }
+        // Checkbox "pai" SINTÉTICO (ver ROTULOS_GRUPO_CHECKLIST) — não tem data-key
+        // (fica de fora da fila de automação e da persistência de seleções, ambas
+        // baseadas em dataset.key), só data-filhos pra ligarCheckboxesPaiFilho marcar os
+        // filhos reais junto.
+        function linhaGrupoChecklist(chave, filhosKeys) {
+            return `<label class="pa-item pa-item-pai-sintetico">
+                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                 </label>`;
         }
         // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
         // linhasComSubgrupos em injetarPainel) — pedido do usuário: reproduzir aqui os
         // itens/subitens do popup secundário (ex.: cabeçalho "Audiências" agrupando
         // Pendentes/Designadas/Realizadas, hoje só apareciam soltas sem o cabeçalho).
+        // Itens com paiChecklist (ver Benefícios/Medidas/Suspensões em REPORTS_AUTOMACAO)
+        // não aparecem soltos — são desenhados dentro do bloco do pai SINTÉTICO
+        // (linhaGrupoChecklist), indentados, na posição do 1º filho encontrado.
         function linhasComSubgruposMU(itens) {
             let html = '';
             let subgrupoAberto = null;
+            const filhosPorPai = new Map();
             itens.forEach(r => {
+                if (!r.paiChecklist) return;
+                if (!filhosPorPai.has(r.paiChecklist)) filhosPorPai.set(r.paiChecklist, []);
+                filhosPorPai.get(r.paiChecklist).push(r);
+            });
+            const gruposDesenhados = new Set();
+            itens.forEach(r => {
+                if (r.paiChecklist) {
+                    if (!gruposDesenhados.has(r.paiChecklist)) {
+                        gruposDesenhados.add(r.paiChecklist);
+                        const filhos = filhosPorPai.get(r.paiChecklist) || [];
+                        html += linhaGrupoChecklist(r.paiChecklist, filhos.map(f => f.key));
+                        html += `<div class="pa-item-filhos">${filhos.map(f => linhaRelatorio(f, true)).join('')}</div>`;
+                    }
+                    return; // filho: já desenhado dentro do bloco do pai acima
+                }
                 if (r.subgrupo !== subgrupoAberto) {
                     subgrupoAberto = r.subgrupo || null;
                     if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
@@ -15016,12 +15865,17 @@
         // mesmo, os dois ficam sincronizados via essa chave.
         function salvarSelecoesRelatorios() {
             const obj = lerSelecoesSalvasPainel();
-            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { obj[c.dataset.key] = c.checked; });
+            // if (c.dataset.key) — o checkbox "pai" sintético (ver linhaGrupoChecklist/
+            // ROTULOS_GRUPO_CHECKLIST) não tem data-key de propósito, fica de fora daqui.
+            painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
             store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
         }
         painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
             c.addEventListener('change', salvarSelecoesRelatorios);
         });
+        // Marcar o checkbox "pai" sintético (Suspensões por Tipo) já marca os 7 filhos
+        // junto — ver ligarCheckboxesPaiFilho/paiChecklist em REPORTS_AUTOMACAO.
+        ligarCheckboxesPaiFilho(painel, '.projudi-mu-rel-check', salvarSelecoesRelatorios);
         painel.querySelector('#projudi-mu-rel-marcar').onclick = () => {
             painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = true; });
             salvarSelecoesRelatorios();
@@ -15303,6 +16157,34 @@
         // do usuário: mover para a categoria Crime). Logo após Cumprimento de Medidas,
         // mesma categoria.
         { key: 'medidasalternativasatraso', cfg: CFG_MEDIDAS_ALTERNATIVAS_ATRASO, navAlvo: 'medidasalternativasatraso', rotulo: 'Medidas Alternativas em Atraso', curto: 'Med. Alternativas Atraso', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // Benefícios/Medidas/Suspensões — pedido do usuário: mover pra dentro da
+        // categoria Crime (antes era Cartório, ver CFGS_GRUPO_TRANSACAO_PENAL em
+        // gerarPDFConjunto/itensOutros). Continuam sendo 7 itens de fila INDEPENDENTES
+        // (a tela buscaTransacaoPenal.do só permite pesquisar 1 tipo por vez), mesmo
+        // esquema de Mandados: um único navAlvo, o <select id="tipo"> é que muda por
+        // item (ver TIPO_POR_CHAVE_TRANSACAO/gateTransacaoPenal). precisaPreencher: true
+        // porque status="ATIVA" precisa ser marcado (e o tipo corrigido, a partir do 2º
+        // item) antes de cada busca.
+        //
+        // paiChecklist: 'suspensoesportipo' — pedido do usuário: um checkbox NOVO e
+        // independente "Suspensões por Tipo" (não é um relatório de verdade, não existe
+        // como chave própria de REPORTS_AUTOMACAO — ver ROTULOS_GRUPO_CHECKLIST/
+        // linhasComSubgrupos/linhasComSubgruposMU) agrupa só estes 7 como submenu
+        // indentado embaixo dele; marcá-lo já marca os 7 juntos, desmarcar um filho
+        // manualmente continua possível depois (ver ligarCheckboxesPaiFilho). SEM
+        // relação com "Medidas Alternativas em Atraso" (relatório/branch diferente,
+        // não mexer). Não altera nada da coleta/PDF em si — é só um atalho de seleção
+        // no checklist.
+        { key: 'transacaopenal', cfg: CFG_TRANSACAO_PENAL, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal (Ativas)', rotuloChecklist: 'Transação Penal', curto: 'Transação Penal', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        { key: 'suspcondprocesso', cfg: CFG_SUSPENSAO_COND_PROCESSO, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo (Ativas)', rotuloChecklist: 'Susp. Cond. do Processo', curto: 'Susp. Cond. Processo', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesportipo' },
+        // paiChecklist: 'suspensoesprocessoativo' — pedido do usuário: mesma busca de
+        // Transação Penal/Susp. Cond. Processo (Tipo + cada um dos 10 Motivos) rodada uma
+        // 2ª vez com "Situação do Processo" = Ativos, pra sinalizar suspensões ativas
+        // vinculadas a processo ainda ativo (possível baixa não feita pela secretaria).
+        // Não vira seção própria no PDF — só alimenta cards de alerta dentro do
+        // relatório "pai" (ver secaoCardsExtra em pdfTransacaoPenal/secoesColetadas).
+        { key: 'transacaopenalativos', cfg: CFG_TRANSACAO_PENAL_ATIVOS, navAlvo: 'beneficiosmedidas', rotulo: 'Transação Penal — Processo Ativo (Ativas)', rotuloChecklist: 'Transação Penal (Processo Ativo)', curto: 'Transação Penal (Proc. Ativo)', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesprocessoativo' },
+        { key: 'suspcondprocessoativos', cfg: CFG_SUSPENSAO_COND_PROCESSO_ATIVOS, navAlvo: 'beneficiosmedidas', rotulo: 'Suspensão Condicional do Processo — Processo Ativo (Ativas)', rotuloChecklist: 'Susp. Cond. Processo (Processo Ativo)', curto: 'Susp. Cond. Processo (Proc. Ativo)', categoriaEspecifica: 'crime', precisaPreencher: true, paiChecklist: 'suspensoesprocessoativo' },
         // Mesa do Escrivão Criminal, link "Vencidas" do bloco "Prescrições" — ÚLTIMO item
         // de propósito (pedido do usuário: ordem cronológica/seção própria no PDF
         // conjunto segue a ordem de aparição aqui, ver "ordemNaCapa" em gerarPDFConjunto).
@@ -15331,6 +16213,16 @@
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
     ];
+    // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
+    // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
+    // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
+    // paiChecklist (ver linhasComSubgrupos/linhasComSubgruposMU/ligarCheckboxesPaiFilho).
+    // "suspensoesportipo" agrupa os 7 itens de Benefícios/Medidas/Suspensões — pedido do
+    // usuário: marcar só esse checkbox já marca os 7 juntos.
+    const ROTULOS_GRUPO_CHECKLIST = {
+        suspensoesportipo: 'Suspensões por Tipo',
+        suspensoesprocessoativo: 'Suspensões — Processo Ativo (Auditoria)',
+    };
     function relatorioPorChave(key) { return REPORTS_AUTOMACAO.find(r => r.key === key); }
     // Considera tanto r.cfg (cfg "representante" do item) quanto r.cfgs (lista completa,
     // opcional) — suporte genérico para um item de fila que precise agrupar mais de um
@@ -15606,6 +16498,26 @@
         return false;
     }
 
+    // Acha o link de menu para "Benefícios/Medidas/Suspensões" (processo/
+    // buscaTransacaoPenal.do) — não dá pra usar acharLinkMenu(urlRe, textoRe) direto
+    // porque a própria TELA DE RESULTADOS tem vários outros <a href> com essa mesma URL
+    // base (botões de calendário dos campos de data, links de ordenação das colunas),
+    // que casariam por engano se a busca rodasse já na tela de resultados (ver
+    // navegarMenu chamado de novo para os itens 2-7 da fila). Exclui esses pelo className
+    // e por não terem texto próprio (só um <span>&nbsp;</span> ou nada).
+    function acharLinkMenuBeneficiosMedidas() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const a of d.querySelectorAll('a[href]')) {
+                if (!/buscaTransacaoPenal\.do/i.test(a.href)) continue;
+                if (/calendarButton|orderOff/i.test(a.className)) continue;
+                if (!(a.textContent || '').trim()) continue;
+                return a;
+            }
+        }
+        return null;
+    }
+
     function navegarMenu(alvo) {
         let link = null;
         // Juntadas passa PELO painel "Para Realizar" da aba "Análise de Juntadas"
@@ -15711,6 +16623,15 @@
         // acharLinkArquivadosSaldoNaListagem, chamada por tratarPaginaArquivadosSaldo).
         else if (alvo === 'arquivadosaldo') link = acharLinkMenu(/administracao\/relatorio\.do/i, /^Relat[óo]rios\s+Din[âa]micos$/i);
         else if (alvo === 'cumprimentomedidas') return navegarAbaCumprimentoMedidas();
+        // Menu "Processos" > "Busca" > "Benefícios/Medidas/Suspensões" (link de topo,
+        // leva a processo/buscaTransacaoPenal.do) — os 7 relatórios de transação penal/
+        // suspensão/medida compartilham este mesmo navAlvo (só o filtro muda depois, ver
+        // gateTransacaoPenal). ATENÇÃO: não temos confirmação do TEXTO exato do link no
+        // menu (a amostra .mhtml disponível é só a tela de resultados, sem o menu que
+        // leva até ela) — por isso casa só pela URL, excluindo os <a> de calendário/
+        // ordenação da própria tela de resultados (mesma URL base, mas
+        // class="calendarButton"/"orderOff" e sem texto próprio de menu).
+        else if (alvo === 'beneficiosmedidas') link = acharLinkMenuBeneficiosMedidas();
         // "Cumprimento de Medidas Alternativas" fica no menu geral "Processos > Busca"
         // (link direto com href, não numa aba) — mesmo esquema simples de
         // acharLinkMenu usado por Apreensões.
@@ -16050,13 +16971,13 @@
         const estado = store.getItem(AUTO_ESTADO);
         const rel = relatorioPorCfg(cfg);
         if (!rel || estado !== 'coletando_' + rel.key) {
-            console.log(`[Auto Projudi] avancarAutomacao ignorado — estado="${estado}" cfg=${cfg ? cfg.prefixo : 'null'} rel=${rel ? rel.key : 'null'}`);
+            logPainel(`[Auto Projudi] avancarAutomacao ignorado — estado="${estado}" cfg=${cfg ? cfg.prefixo : 'null'} rel=${rel ? rel.key : 'null'}`);
             return;
         }
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
-        console.log(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
+        logPainel(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
         if (!prox && multiUnidadeEmCurso()) {
             console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
         }
@@ -16463,7 +17384,22 @@
                 'processo',
             );
         }
+        // Pedido do usuário: cards de alerta "vinculadas a Processo ATIVO" dentro do
+        // PRÓPRIO resumo de Transação Penal/Susp. Cond. Processo, não uma seção própria
+        // (ver secaoCardsExtra em pdfTransacaoPenal) — anexa os dados da busca
+        // companheira (mesmo Tipo/Motivo, "Situação do Processo" = Ativos, ver
+        // CFG_TRANSACAO_PENAL_ATIVOS/CFG_SUSPENSAO_COND_PROCESSO_ATIVOS) como propriedade
+        // no array de dados do relatório "pai", e some com a seção "ativos" isolada da
+        // lista final — ela nunca teve página própria, só alimenta os cards.
+        const anexarDadosAtivos = (cfgPrincipal, cfgAtivos) => {
+            const principal = secoes.find(s => s.cfg === cfgPrincipal);
+            const ativos = secoes.find(s => s.cfg === cfgAtivos);
+            if (principal && ativos) principal.dados.dadosAtivos = ativos.dados;
+        };
+        anexarDadosAtivos(CFG_TRANSACAO_PENAL, CFG_TRANSACAO_PENAL_ATIVOS);
+        anexarDadosAtivos(CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PROCESSO_ATIVOS);
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
+            .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
 
@@ -16974,16 +17910,26 @@
 
         // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
-        function linhaChecklistItem(r) {
+        function linhaChecklistItem(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
                 : '';
-            const classeItem = r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item';
+            const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `
                     <label class="${classeItem}">
                         <input type="checkbox" class="pa-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
+                    </label>`;
+        }
+        // Checkbox "pai" SINTÉTICO (ver ROTULOS_GRUPO_CHECKLIST) — não tem data-key
+        // (fica de fora da fila de automação e da persistência de seleções, ambas
+        // baseadas em dataset.key), só data-filhos pra ligarCheckboxesPaiFilho marcar os
+        // filhos reais junto.
+        function linhaGrupoChecklist(chave, filhosKeys) {
+            return `
+                    <label class="pa-item pa-item-pai-sintetico">
+                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -16992,10 +17938,29 @@
         // continuam soltos, sem cabeçalho, exatamente como antes deste recurso. Não é
         // uma estrutura de fila diferente: cada item continua sendo o mesmo
         // <input class="pa-check" data-key="...">, só com um wrapper visual em volta.
+        // Itens com paiChecklist (ver Benefícios/Medidas/Suspensões em REPORTS_AUTOMACAO)
+        // não aparecem soltos — são desenhados dentro do bloco do pai SINTÉTICO
+        // (linhaGrupoChecklist), indentados, na posição do 1º filho encontrado.
         function linhasComSubgrupos(itens) {
             let html = '';
             let subgrupoAberto = null;
+            const filhosPorPai = new Map();
             itens.forEach(r => {
+                if (!r.paiChecklist) return;
+                if (!filhosPorPai.has(r.paiChecklist)) filhosPorPai.set(r.paiChecklist, []);
+                filhosPorPai.get(r.paiChecklist).push(r);
+            });
+            const gruposDesenhados = new Set();
+            itens.forEach(r => {
+                if (r.paiChecklist) {
+                    if (!gruposDesenhados.has(r.paiChecklist)) {
+                        gruposDesenhados.add(r.paiChecklist);
+                        const filhos = filhosPorPai.get(r.paiChecklist) || [];
+                        html += linhaGrupoChecklist(r.paiChecklist, filhos.map(f => f.key));
+                        html += `<div class="pa-item-filhos">${filhos.map(f => linhaChecklistItem(f, true)).join('')}</div>`;
+                    }
+                    return; // filho: já desenhado dentro do bloco do pai acima
+                }
                 if (r.subgrupo !== subgrupoAberto) {
                     subgrupoAberto = r.subgrupo || null;
                     if (subgrupoAberto) html += `<p class="pa-subgroup-lbl">${subgrupoAberto}</p>`;
@@ -17065,6 +18030,14 @@
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF, ou marque as unidades desejadas na tela "Alterar Atuação"/login para automatizar todas de uma vez.</div>
+                <div class="pa-log">
+                    <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
+                    <div id="pa-log-wrap" style="display:none;">
+                        <pre id="pa-log-detalhado" class="pa-log-box"></pre>
+                        <button id="pa-log-baixar" class="pa-link" type="button" title="Salva o log completo (todas as linhas guardadas, não só o que cabe na caixa) num .txt para enviar/investigar">⬇ Baixar log completo</button>
+                        <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
+                    </div>
+                </div>
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = async () => {
@@ -17112,6 +18085,30 @@
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
+        // "▼ Ver log detalhado" — colapsado por padrão; ao abrir, preenche com o que já
+        // foi registrado por logPainel (persiste entre reloads, ver CHAVE_LOG_DETALHADO).
+        painel.querySelector('#pa-log-toggle').onclick = () => {
+            const wrap = painel.querySelector('#pa-log-wrap');
+            const btn = painel.querySelector('#pa-log-toggle');
+            const abrindo = wrap.style.display === 'none';
+            wrap.style.display = abrindo ? '' : 'none';
+            btn.textContent = abrindo ? '▲ Ocultar log detalhado' : '▼ Ver log detalhado';
+            if (abrindo) atualizarLogDetalhadoUI();
+        };
+        painel.querySelector('#pa-log-limpar').onclick = () => {
+            store.removeItem(CHAVE_LOG_DETALHADO);
+            atualizarLogDetalhadoUI();
+        };
+        // Pedido do usuário: "implementar algo no log pra encontrar o problema de vez,
+        // em vez de ficar adivinhando" — baixa TODAS as linhas guardadas (até
+        // LOG_DETALHADO_MAX) como .txt, pra anexar/colar ao relatar um bug. A caixa na
+        // tela já mostra tudo (não trunca à parte), mas um arquivo é mais fácil de
+        // copiar/colar inteiro do que selecionar texto dentro do painel.
+        painel.querySelector('#pa-log-baixar').onclick = () => {
+            const linhas = lerLogDetalhado();
+            const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+            baixarBlob(new Blob([texto], { type: 'text/plain;charset=utf-8' }), `projudi_log_${dataArquivo()}.txt`);
+        };
         // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
         // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
@@ -17158,6 +18155,10 @@
             // reanexado a esses elementos NOVOS a cada troca de aba, senão marcar/
             // desmarcar um item específico de uma categoria não-Cível não persistia.
             grupoEspecifico.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
+            // Marcar o checkbox "pai" sintético (ex.: Suspensões por Tipo) já marca os
+            // filhos junto — precisa reanexar aqui pelo mesmo motivo do listener acima
+            // (innerHTML recria os elementos do zero a cada troca de categoria).
+            ligarCheckboxesPaiFilho(grupoEspecifico, '.pa-check', salvarSelecoesPainel);
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
             atualizarPainel();
         }
@@ -17342,6 +18343,9 @@
         }
         #painel-automacao .pa-item , #projudi-mu-painel .pa-item { font-size: .76em; color: #1A1A1A; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
         #painel-automacao .pa-item-sub , #projudi-mu-painel .pa-item-sub { margin-left: 14px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item-filhos , #projudi-mu-painel .pa-item-filhos { margin-left: 6px; }
+        #painel-automacao .pa-item-filho , #projudi-mu-painel .pa-item-filho { margin-left: 20px; padding-left: 6px; border-left: 2px solid #DEDDD6; }
+        #painel-automacao .pa-item-pai-sintetico , #projudi-mu-painel .pa-item-pai-sintetico { font-weight: 600; }
         #painel-automacao .pa-item input[type="checkbox"] , #projudi-mu-painel .pa-item input[type="checkbox"] { margin: 0; }
         #painel-automacao .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select , #projudi-mu-painel .pa-item .sel-periodo, #painel-automacao .pa-item .projudi-select { margin-left: auto; padding: 1px 4px; font-size: .92em; }
         #painel-automacao .pa-placeholder , #projudi-mu-painel .pa-placeholder {
@@ -17369,6 +18373,13 @@
         #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; gap: 6px; }
 
         #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-log , #projudi-mu-painel .pa-log { margin-top: 8px; border-top: 1px solid #DEDDD6; padding-top: 8px; }
+        #painel-automacao .pa-log-toggle-btn , #projudi-mu-painel .pa-log-toggle-btn { font-size: .68em; }
+        #painel-automacao .pa-log-box , #projudi-mu-painel .pa-log-box {
+            max-height: 180px; overflow-y: auto; margin: 6px 0; padding: 6px;
+            background: #FAFAF7; border: 1px solid #DEDDD6; border-radius: 3px;
+            font-family: monospace; font-size: .62em; white-space: pre-wrap; word-break: break-word;
+        }
 
         /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
            window.confirm() nativo não permite customizar o texto dos botões, então este
