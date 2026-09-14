@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.74
+// @version      25.75
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5678,11 +5678,34 @@
 
         if (central) {
             const cx = x + w / 2;
-            // altura total do bloco: título (4) + valor (7) + subs (4 cada)
-            const blocoH = 4 + 8 + subs.length * 4.2;
-            let yy = y + (h - blocoH) / 2 + 4;
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
-            doc.text(String(titulo).toUpperCase(), cx, yy, { align: 'center' }); yy += 7;
+            // Título pode ser longo (ex. "Mandados Aguardando Análise de Decurso de
+            // Prazo") e vazar por cima do card vizinho quando há 3+ cards na mesma linha
+            // (w menor por card, ex. depois de acrescentar "Processos distintos" nos KPIs
+            // de Mandados) — bug relatado pelo usuário: título sem quebra nem truncamento
+            // nenhum (só o VALOR já passava por textoTruncadoParaLargura). Quebra em até
+            // 3 linhas (doc.splitTextToSize — 3 e não 2, senão um título como "Mandados
+            // Aguardando Distribuição ao Oficial de Justiça" perderia "Justiça" da 3ª
+            // linha SEM sinal nenhum de corte, já que a 2ª linha sozinha já cabia
+            // inteira). Só se sobrar uma 4ª linha (não deveria acontecer com os títulos
+            // reais dos relatórios) é que a 3ª ganha reticências.
+            const TITULO_MAX_LINHAS = 3;
+            const ALTURA_LINHA_TITULO = 3.2;
+            const todasLinhasTitulo = doc.splitTextToSize(String(titulo).toUpperCase(), w - 8);
+            const linhasTitulo = todasLinhasTitulo.slice(0, TITULO_MAX_LINHAS);
+            const ultima = linhasTitulo.length - 1;
+            linhasTitulo[ultima] = todasLinhasTitulo.length > TITULO_MAX_LINHAS
+                ? textoTruncadoParaLargura(doc, linhasTitulo[ultima].replace(/\s+$/, '') + '…', w - 8)
+                : textoTruncadoParaLargura(doc, linhasTitulo[ultima], w - 8);
+            const extraLinhas = (linhasTitulo.length - 1) * ALTURA_LINHA_TITULO;
+            // altura total do bloco: título (4 + extraLinhas) + valor (7) + subs (4 cada)
+            const blocoH = 4 + extraLinhas + 8 + subs.length * 4.2;
+            let yy = y + (h - blocoH) / 2 + 4;
+            linhasTitulo.forEach((linha, i) => {
+                if (i > 0) yy += ALTURA_LINHA_TITULO;
+                doc.text(linha, cx, yy, { align: 'center' });
+            });
+            yy += 7;
             // Escolhe a MAIOR fonte que caiba o valor por inteiro (medindo de verdade, não
             // só por número de caracteres) — o número de um processo (~25 caracteres) caía
             // no mesmo balde de fonte 15pt que valores bem mais curtos, estourava a largura
