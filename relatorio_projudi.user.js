@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.81
+// @version      25.82
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3437,20 +3437,24 @@
             tipoCampo: 'classe',
             semPrioridade: true,
             agingTitulo: 'Por tempo desde o início',
-            // Pedido do usuário: além do card de total, um card por cada Motivo da
-            // Suspensão encontrado (ex.: "Art. 366 do CPP: 45", "Art. 89 da Lei
-            // 9.099/95: 27"), mais um card com o total de PROCESSOS distintos —
-            // diferente do card de total (que conta REGISTROS: com a busca por Motivo
-            // da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo processo pode aparecer mais
-            // de uma vez se tiver mais de uma suspensão com motivos diferentes).
-            // Explicitamente NÃO agrupa por "Medidas" (coluna Doação, Comparecimento em
-            // juízo etc.) — pedido do usuário. topN 12 cobre os 10 motivos nomeados
-            // inteiros, sem cortar em "Outros".
+            // Pedido do usuário: card de total (atosTitulo) e "Processos distintos" ficam
+            // juntos no topo — diferente do card de total (que conta REGISTROS: com a
+            // busca por Motivo da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo processo pode
+            // aparecer mais de uma vez se tiver mais de uma suspensão com motivos
+            // diferentes), "Processos distintos" conta processos únicos.
             kpisExtras: (dados) => {
-                const porMotivo = contarPorCampo(dados, 'motivoSuspensao', 12);
-                const cardsMotivo = porMotivo.map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' }));
                 const processosDistintos = new Set(dados.map(d => d.processo).filter(Boolean)).size;
-                return [...cardsMotivo, { titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
+                return [{ titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
+            },
+            // Pedido do usuário: os cards por Motivo da Suspensão (ex.: "Art. 366 do
+            // CPP: 45", "Art. 89 da Lei 9.099/95: 27") ganham seção PRÓPRIA, com título,
+            // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
+            // (o que estourava o texto dos cards com 6+ colunas). Explicitamente NÃO
+            // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
+            secaoCardsExtra: {
+                titulo: 'Motivo da Suspensão',
+                calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
+                    .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
             },
             distribuicoes: [
                 { titulo: 'Por Classe Processual', campo: 'classe', topN: 12 },
@@ -6384,6 +6388,34 @@
         return yLinha;
     }
 
+    // Grade de cards no MESMO estilo do topo do resumo (desenharCard, com barra de acento
+    // e texto centralizado) — usada por p.secaoCardsExtra (ver montarResumoGenerico) para
+    // uma seção dedicada com título próprio, quando a quantidade de cards (ex.: um por
+    // Motivo da Suspensão) não cabe numa única linha ao lado dos KPIs principais sem
+    // espremer o texto (pedido do usuário, Benefícios/Medidas/Suspensões: separar os
+    // cards de Motivo dos cards gerais). `cols` default 4 dá largura suficiente pro texto
+    // não estourar o card mesmo com títulos como "ART. 89 DA LEI 9.099/95".
+    function desenharGradeCardsKpi(doc, x, y, w, itens, ctx, cols) {
+        cols = cols || 4;
+        const ph = doc.internal.pageSize.getHeight();
+        const gap = 6, h = 28, colW = (w - gap * (cols - 1)) / cols;
+        let yLinha = y, col = 0;
+        const novaPagina = () => {
+            if (ctx.rodapeAntesDeVirar) ctx.rodapeAntesDeVirar();
+            doc.addPage();
+            ctx.cabecalhoContinuacao();
+            yLinha = ctx.topoContinuacao; col = 0;
+        };
+        itens.forEach(it => {
+            if (col === 0 && yLinha + h > ph - 14) novaPagina();
+            desenharCard(doc, x + col * (colW + gap), yLinha, colW, h, it.titulo, String(it.valor), it.subs || [], true, it.acento);
+            col++;
+            if (col >= cols) { col = 0; yLinha += h + gap; }
+        });
+        if (col !== 0) yLinha += h + gap;
+        return yLinha;
+    }
+
     // Gráfico de barras horizontais. itens: [{label, valor, cor?}] na ordem de exibição.
     // cor: cor padrão das barras (acento semântico do gráfico); item.cor sobrepõe se definida.
     function desenharBarras(doc, x, y, w, h, titulo, itens, fmt, cor) {
@@ -7024,6 +7056,21 @@
         };
 
         let y = aY + 28 + gap + 2;
+
+        // Seção dedicada de cards logo abaixo dos KPIs principais (pedido do usuário,
+        // Benefícios/Medidas/Suspensões: separar os cards de "Motivo da Suspensão" dos
+        // cards gerais — total e processos distintos ficam no topo, os cards por Motivo
+        // ganham seção própria com título, em vez de todos espremidos numa linha só,
+        // o que estourava o texto dos cards). Ponto de extensão OPCIONAL — cfg.pdf que
+        // não define p.secaoCardsExtra fica byte-a-byte como antes desta mudança.
+        if (p.secaoCardsExtra) {
+            const itensSecao = (p.secaoCardsExtra.calc(dados) || [])
+                .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
+            if (itensSecao.length) {
+                tituloSecao(doc, m, y + 4, uw, p.secaoCardsExtra.titulo);
+                y = desenharGradeCardsKpi(doc, m, y + TITULO_TABELA_H, uw, itensSecao, ctx, p.secaoCardsExtra.cols) + 2;
+            }
+        }
 
         // Cards extras do painel "Mesa do Analista" (pedido do usuário, hoje só
         // CFG_JUNTADAS via painelExtraTitulo — ver capturarOutrosIndicadoresPainelJuntadas)
