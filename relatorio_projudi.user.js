@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.86
+// @version      25.87
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3592,19 +3592,36 @@
     // preencherEPesquisarTempoMedio). Função regular (não arrow) porque é chamada como
     // `cfg.aoTerminarColeta()` — `this` vem amarrado ao cfg certo nessa chamada, sem
     // precisar de closure por CFG individual.
-    function aoTerminarColetaTransacaoPenal() { avancarMotivoOuTerminar(this); }
+    // cfg.semIteracaoMotivo (Transação Penal — ver comentário em CFG_TRANSACAO_PENAL):
+    // pesquisa só 1 vez (Motivo="Todas"), então terminar a paginação já é terminar a
+    // coleta inteira — avança a automação direto, sem passar pela fila de Motivos.
+    function aoTerminarColetaTransacaoPenal() {
+        if (this.semIteracaoMotivo) avancarAutomacao(this);
+        else avancarMotivoOuTerminar(this);
+    }
 
     const CFG_TRANSACAO_PENAL = {
         prefixo: 'projudi_transacaopenal_t_',
         mostrarSeVazio: true, // "zero transações penais ativas" é uma informação válida
-        // situacaoProcesso: 'todos' — bug relatado pelo usuário: "Transação Penal" saiu
-        // zerada do PDF porque o rádio "Situação do Processo" do Projudi NÃO tem "Todos"
-        // como padrão em toda tela/Tipo (confirmado pelo usuário: a tela chega com
-        // "Ativos" pré-marcado); sem corrigir isso ativamente aqui (gateTransacaoPenal),
-        // o rádio ficava em "Ativos" e detecta() (que exige NÃO ser "ativos", pra não se
-        // confundir com CFG_TRANSACAO_PENAL_ATIVOS) nunca batia — a coleta toda ia parar
-        // no prefixo da variante Ativos, deixando este cfg com 0 registros.
+        // situacaoProcesso: 'todos' — ver comentário em situacaoProcessoBate. Corrige o
+        // rádio "Situação do Processo" ativamente (defensivo — não deixa herdar "ativos"
+        // de uma coleta anterior na mesma sessão), mas NÃO foi essa a causa do bug real
+        // relatado pelo usuário ("Transação Penal" sempre com 0 registros no PDF) — ver
+        // semIteracaoMotivo abaixo, essa sim confirmada pelo log.
         situacaoProcesso: 'todos',
+        // Bug relatado pelo usuário, confirmado com o log detalhado baixado do painel:
+        // rodando o MESMO mecanismo de busca por Motivo da Suspensão (1 busca por cada um
+        // dos 10 valores nomeados) que funciona bem em Susp. Cond. Processo (291
+        // registros encontrados), Transação Penal batia ZERO em TODOS os 10 motivos, sem
+        // exceção — enquanto o card de total (Motivo="Todas", usado antes desta feature
+        // existir) trazia registros de verdade. Isso indica que "Motivo da Suspensão" —
+        // um campo conceitualmente ligado à SUSPENSÃO do processo — não é preenchido nos
+        // processos de Transação Penal desta vara (que pode não suspender o processo).
+        // semIteracaoMotivo: true faz gateTransacaoPenal() pesquisar só 1 vez, com
+        // Motivo="Todas" (valor "-1"), sem iterar pelos 10 — mesmo comportamento de antes
+        // da iteração por Motivo existir. Susp. Cond. Processo continua iterando
+        // normalmente (funciona). Decisão confirmada com o usuário antes de mudar.
+        semIteracaoMotivo: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() !== 'ativos',
         minTds: 9,
         usaAtuacao: false,
@@ -3648,6 +3665,10 @@
         prefixo: 'projudi_transacaopenal_t_ativos_',
         mostrarSeVazio: true,
         situacaoProcesso: 'ativos',
+        // Mesmo motivo de CFG_TRANSACAO_PENAL.semIteracaoMotivo — Transação Penal não
+        // usa "Motivo da Suspensão" nos dados reais, então a variante Ativos deste Tipo
+        // também pesquisa só com Motivo="Todas", sem iterar.
+        semIteracaoMotivo: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T' && situacaoProcessoSelecionada() === 'ativos',
         minTds: 9,
         usaAtuacao: false,
@@ -3757,30 +3778,40 @@
         }
         const cfg = cfgTransacaoPenalPorChave(chave);
 
-        if (estadoAutoBruto.startsWith('preenchendo_')) {
-            store.setItem(AUTO_ESTADO, 'coletando_' + chave);
-            // 1ª visita deste Tipo: (re)inicia a fila de Motivos da Suspensão do zero —
-            // pedido do usuário: cada um dos 10 motivos nomeados é buscado em separado
-            // dentro deste Tipo, em vez de deixar #idMotivoSuspProcesso em "Todas".
-            store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(MOTIVOS_SUSPENSAO.map(m => m.valor)));
-            store.removeItem(cfg.prefixo + 'motivo_atual');
-        }
-        // Garante que sempre há um Motivo "atual" definido antes de checar o filtro —
-        // tira o próximo da fila se ainda não tiver um (1ª passada deste Tipo, ou algo
-        // limpou motivo_atual sem popular a fila de novo).
-        let motivoEsperado = store.getItem(cfg.prefixo + 'motivo_atual');
-        if (!motivoEsperado) {
-            const fila = desembrulharArray(store.getItem(cfg.prefixo + 'fila_motivos')) || [];
-            if (!fila.length) {
-                // Defensivo — não deveria acontecer (a fila só some depois de já ter
-                // processado todos os motivos, ver avancarMotivoOuTerminar).
-                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem Motivo atual nem fila — encerrando defensivamente`);
-                avancarAutomacao(cfg);
-                return true;
+        // cfg.semIteracaoMotivo (Transação Penal — ver comentário na definição do cfg,
+        // confirmado pelo log: 0 registros em TODOS os 10 Motivos nomeados, enquanto
+        // Susp. Cond. Processo com o MESMO mecanismo acha centenas) — pesquisa só 1 vez,
+        // com Motivo="Todas" (valor "-1"), sem popular/consumir fila_motivos nenhuma.
+        let motivoEsperado;
+        if (cfg.semIteracaoMotivo) {
+            motivoEsperado = '-1';
+            if (estadoAutoBruto.startsWith('preenchendo_')) store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+        } else {
+            if (estadoAutoBruto.startsWith('preenchendo_')) {
+                store.setItem(AUTO_ESTADO, 'coletando_' + chave);
+                // 1ª visita deste Tipo: (re)inicia a fila de Motivos da Suspensão do zero —
+                // pedido do usuário: cada um dos 10 motivos nomeados é buscado em separado
+                // dentro deste Tipo, em vez de deixar #idMotivoSuspProcesso em "Todas".
+                store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(MOTIVOS_SUSPENSAO.map(m => m.valor)));
+                store.removeItem(cfg.prefixo + 'motivo_atual');
             }
-            motivoEsperado = fila[0];
-            store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(fila.slice(1)));
-            store.setItem(cfg.prefixo + 'motivo_atual', motivoEsperado);
+            // Garante que sempre há um Motivo "atual" definido antes de checar o filtro —
+            // tira o próximo da fila se ainda não tiver um (1ª passada deste Tipo, ou algo
+            // limpou motivo_atual sem popular a fila de novo).
+            motivoEsperado = store.getItem(cfg.prefixo + 'motivo_atual');
+            if (!motivoEsperado) {
+                const fila = desembrulharArray(store.getItem(cfg.prefixo + 'fila_motivos')) || [];
+                if (!fila.length) {
+                    // Defensivo — não deveria acontecer (a fila só some depois de já ter
+                    // processado todos os motivos, ver avancarMotivoOuTerminar).
+                    logPainel(`[Auto Projudi Transação Penal] "${chave}" sem Motivo atual nem fila — encerrando defensivamente`);
+                    avancarAutomacao(cfg);
+                    return true;
+                }
+                motivoEsperado = fila[0];
+                store.setItem(cfg.prefixo + 'fila_motivos', JSON.stringify(fila.slice(1)));
+                store.setItem(cfg.prefixo + 'motivo_atual', motivoEsperado);
+            }
         }
 
         const selTipo = document.getElementById('tipo');
@@ -3840,11 +3871,18 @@
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
-        // "Zero resultados" neste Motivo — avança para o próximo Motivo da fila (ou
-        // encerra o Tipo, se já era o último) em vez de avançar a automação direto.
+        // "Zero resultados" — cfg.semIteracaoMotivo (Transação Penal, busca única com
+        // Motivo="Todas") encerra e avança a automação direto; os demais avançam para o
+        // próximo Motivo da fila (ou encerram o Tipo, se já era o último).
         if (!linhasDeVerdade.length) {
-            logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados para o Motivo "${rotuloMotivoSuspensao(motivoEsperado)}"`);
-            avancarMotivoOuTerminar(cfg);
+            if (cfg.semIteracaoMotivo) {
+                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados (Motivo=Todas)`);
+                marcarColetaMandadosVazia(cfg);
+                avancarAutomacao(cfg);
+            } else {
+                logPainel(`[Auto Projudi Transação Penal] "${chave}" sem resultados para o Motivo "${rotuloMotivoSuspensao(motivoEsperado)}"`);
+                avancarMotivoOuTerminar(cfg);
+            }
             return true;
         }
         return false; // deixa o fluxo genérico (detectarConfig/criarColetor) coletar normalmente
