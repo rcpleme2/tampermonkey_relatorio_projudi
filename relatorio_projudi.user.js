@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.76
+// @version      25.77
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3264,18 +3264,18 @@
     // (#idMotivoSuspProcesso) ficam SEMPRE no default "-1" (Todas) — não são tocados por
     // este script (pedido explícito do usuário).
     //
-    // ATENÇÃO — dado de referência incompleto: a amostra real da tela (.mhtml enviado
-    // pelo usuário, decodificado em scratchpad/busca.html) mostra o formulário completo e
-    // a estrutura do <thead>, mas a busca não trouxe NENHUM resultado ("Nenhum registro
-    // encontrado") — não há uma única <tr> real de dados para confirmar o formato exato
-    // das células quando há dados de verdade. A suposição usada abaixo (extrairLinha
-    // TransacaoPenal) é que o <tbody> renderiza 11 <td> DIRETOS por linha, na mesma ordem
-    // dos 11 cabeçalhos "de folha" do <thead> — mesmo quando o 6º <th> do cabeçalho é uma
-    // tabela ANINHADA com 3 sub-cabeçalhos (Medidas/Status da Medida/Observação) — padrão
-    // comum no Projudi (cabeçalho aninhado, corpo "achatado"), mas NÃO confirmado com uma
-    // linha real. Se a produção mostrar outro formato (ex.: uma célula única juntando
-    // Medidas/Status/Observação com <br>), extrairLinhaTransacaoPenal() vai descartar as
-    // linhas (retorna null, tds.length < 11) até ser ajustado com uma amostra real.
+    // CONFIRMADO com amostra real (.mhtml enviado pelo usuário com dados de verdade,
+    // telas "Transações"/"Suspensões"/"Suspensão-Motivo da Suspensão"): a suposição
+    // original de 11 <td> DIRETOS por linha estava ERRADA — essa é a causa raiz do bug
+    // "retornou tudo zerado, mesmo havendo resultados" (todas as linhas eram descartadas
+    // por terem menos <td> que o esperado). O <tbody> na verdade renderiza só 9 <td>
+    // DIRETOS por linha: Processo, Nome da Parte, Data da Infração, Classe Processual,
+    // Assunto Principal, [6º td: uma <table> ANINHADA com Medidas/Status da
+    // Medida/Observação — pode vir vazia, sem nenhum <tr>, quando não há medida
+    // associada], Data de Início, Data Final, Status da Transação Penal. Dentro da
+    // tabela aninhada (quando não vazia): 1 <tr> com 3 <td> (Medidas — pode ter mais de
+    // um <li>, um por medida —, Status da Medida, Observação). Ver
+    // extrairLinhaTransacaoPenal.
     function cabecalhoTransacaoPenal(cab) {
         return /nome\s+da\s+parte/i.test(cab) && /status\s+da\s+transa[çc][ãa]o\s+penal/i.test(cab);
     }
@@ -3315,21 +3315,30 @@
     }
 
     function extrairLinhaTransacaoPenal(tds) {
-        if (tds.length < 11) return null; // ver comentário grande acima sobre a suposição de 11 <td>
+        if (tds.length < 9) return null; // ver comentário grande acima — 9 <td> diretos, confirmado com amostra real
         const processo = textoCelula(tds[0]);
         if (!processo) return null;
+        // tds[5] é o <td> com a <table> aninhada de Medidas/Status da Medida/Observação —
+        // pode vir sem nenhum <tr> (sem medida associada), daí medidaTds.length === 0 e os
+        // 3 campos ficam vazios (mesmo padrão de "sem dado", não é erro).
+        const medidaTds = tds[5] ? tds[5].querySelectorAll('td') : [];
+        let medidas = '';
+        if (medidaTds.length) {
+            const itensLi = [...medidaTds[0].querySelectorAll('li')].map(li => textoCelula(li)).filter(Boolean);
+            medidas = itensLi.length ? itensLi.join('; ') : textoCelula(medidaTds[0]);
+        }
         return {
             processo,
             nomeParte: textoCelula(tds[1]),
             dataInfracao: textoCelula(tds[2]),
             classe: textoCelula(tds[3]),
             assunto: textoCelula(tds[4]),
-            medidas: textoCelula(tds[5]),
-            statusMedida: textoCelula(tds[6]),
-            observacao: textoCelula(tds[7]),
-            dataInicio: textoCelula(tds[8]),
-            dataFinal: textoCelula(tds[9]),
-            statusTransacao: textoCelula(tds[10]),
+            medidas,
+            statusMedida: medidaTds.length > 1 ? textoCelula(medidaTds[1]) : '',
+            observacao: medidaTds.length > 2 ? textoCelula(medidaTds[2]) : '',
+            dataInicio: textoCelula(tds[6]),
+            dataFinal: textoCelula(tds[7]),
+            statusTransacao: textoCelula(tds[8]),
         };
     }
     const CABECALHOS_TRANSACAO_PENAL_XLSX = ['Processo', 'Nome da Parte', 'Data da Infração', 'Classe Processual',
@@ -3378,7 +3387,7 @@
         prefixo: 'projudi_transacaopenal_t_',
         mostrarSeVazio: true, // "zero transações penais ativas" é uma informação válida
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'T',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'transacao_penal_projudi',
         rotulos: rotulosTransacaoPenal('Transação Penal'),
@@ -3392,7 +3401,7 @@
         prefixo: 'projudi_transacaopenal_s_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'S',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'suspensao_condicional_processo_projudi',
         rotulos: rotulosTransacaoPenal('Susp. Cond. Processo'),
@@ -3406,7 +3415,7 @@
         prefixo: 'projudi_transacaopenal_u_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'U',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'suspensao_condicional_pena_projudi',
         rotulos: rotulosTransacaoPenal('Susp. Cond. Pena'),
@@ -3420,7 +3429,7 @@
         prefixo: 'projudi_transacaopenal_p_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'P',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'pena_substitutiva_projudi',
         rotulos: rotulosTransacaoPenal('Pena Substitutiva'),
@@ -3434,7 +3443,7 @@
         prefixo: 'projudi_transacaopenal_m_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'M',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'medida_protetiva_projudi',
         rotulos: rotulosTransacaoPenal('Medida Protetiva'),
@@ -3448,7 +3457,7 @@
         prefixo: 'projudi_transacaopenal_c_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'C',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'medida_cautelar_projudi',
         rotulos: rotulosTransacaoPenal('Medida Cautelar'),
@@ -3462,7 +3471,7 @@
         prefixo: 'projudi_transacaopenal_n_',
         mostrarSeVazio: true,
         detecta: () => !!tabelaTransacaoPenal() && tipoTransacaoPenalSelecionado() === 'N',
-        minTds: 11,
+        minTds: 9,
         usaAtuacao: false,
         nomeArquivo: 'acordo_nao_persecucao_penal_projudi',
         rotulos: rotulosTransacaoPenal('ANPP'),
@@ -3531,7 +3540,7 @@
         // "existe algum <tr>" NÃO significa "tem dado" (bug corrigido: antes isso fazia
         // o gate nunca detectar "zero resultados" de verdade, empurrando pro fluxo
         // genérico mesmo em telas vazias).
-        const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 11) : [];
+        const linhasDeVerdade = tabela ? [...tabela.querySelectorAll('tbody tr')].filter(tr => tr.querySelectorAll(':scope > td').length >= 9) : [];
         logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} `
             + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
