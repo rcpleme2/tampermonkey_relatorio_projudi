@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.72
+// @version      25.73
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5162,6 +5162,26 @@
         return m ? parseInt(m[1], 10) : null;
     }
 
+    // Total mostrado no KPI/resumo de um relatório: o total IDENTIFICADO na 1ª página da
+    // busca (ver adicionarPagina/cfg.totalIdentificadoNoResumo), não dados.length —
+    // pedido do usuário (Apreensões): o Projudi é um sistema vivo, então a coleta
+    // paginada pode acabar com uma contagem diferente da que o próprio Projudi reportou
+    // no início da busca; o número identificado deve sempre prevalecer, mesmo que a
+    // coleta em si traga outro total. Sem cfg.totalIdentificadoNoResumo (demais
+    // relatórios), cai direto em dados.length, comportamento de sempre.
+    //
+    // Extraído de montarResumoGenerico (KPI do PDF individual) para ser reaproveitado
+    // também pela capa unificada (gerarPDFConjunto/itensCartorio) — bug relatado pelo
+    // usuário: a capa mostrava "Mandados Aguardando Análise de Retorno: 39 pendente(s)"
+    // enquanto a seção detalhada do MESMO PDF já mostrava corretamente 44 — a capa
+    // calculava "pendentes" direto como dados.length, sem passar por essa mesma lógica.
+    function totalIdentificadoOuColetado(cfg, dados) {
+        const totalIdentificado = cfg.totalIdentificadoNoResumo
+            ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
+            : NaN;
+        return Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
+    }
+
     // ── Download genérico (dispara a partir de um clique do usuário) ─────────────
 
     function dataArquivo() { return new Date().toISOString().slice(0, 10); }
@@ -6443,16 +6463,7 @@
         // KPIs numéricos (média por dia só quando o relatório define mediaLabel)
         const kY = hy + 6;
         const prio = contarPrioritarios(dados);
-        // "Apreensões pendentes" mostra o total IDENTIFICADO na 1ª página da busca (ver
-        // adicionarPagina/cfg.totalIdentificadoNoResumo), não dados.length — pedido do
-        // usuário: o Projudi é um sistema vivo, então a coleta paginada pode acabar com uma
-        // contagem diferente da que o próprio Projudi reportou no início da busca; o KPI
-        // deve sempre mostrar esse número identificado, mesmo que a coleta em si traga
-        // outro total. Sem esse cfg (demais relatórios), comportamento igual a antes.
-        const totalIdentificado = cfg.totalIdentificadoNoResumo
-            ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
-            : NaN;
-        const valorAtos = Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
+        const valorAtos = totalIdentificadoOuColetado(cfg, dados);
         const kpis = [
             // atosAcento (opcional, nome da cor — ver acento de kpisExtras/mesmo motivo de
             // TDZ) troca a cor deste 1º card; sem ele, cai no azul de sempre (comportamento
@@ -8271,8 +8282,15 @@
                 // Suspensos por Prazo Indeterminado: indicador da capa usa o total do
                 // card da home (ver totalHomeOuColetadoSuspensos), não s.dados.length —
                 // pedido do usuário, mesmo motivo do KPI/título no PDF individual (ver
-                // montarResumoSuspensos).
-                pendentes: s.cfgOriginal === CFG_SUSPENSOS ? totalHomeOuColetadoSuspensos(s.dados) : s.dados.length,
+                // montarResumoSuspensos). Os demais relatórios com
+                // cfg.totalIdentificadoNoResumo (Mandados, Apreensões, Juntadas, Retorno,
+                // Remessas) usam totalIdentificadoOuColetado — mesma lógica do KPI da
+                // seção detalhada (ver comentário ali); bug relatado pelo usuário: a capa
+                // mostrava dados.length puro, divergindo do total já corrigido na seção
+                // detalhada do mesmo PDF.
+                pendentes: s.cfgOriginal === CFG_SUSPENSOS
+                    ? totalHomeOuColetadoSuspensos(s.dados)
+                    : totalIdentificadoOuColetado(s.cfgOriginal, s.dados),
                 prioritarios: contarPrioritarios(s.dados),
                 maisAntiga,
                 status: classificarSituacaoPorDias(maisAntiga, LIMITES_CARTORIO.atencao, LIMITES_CARTORIO.critico),
