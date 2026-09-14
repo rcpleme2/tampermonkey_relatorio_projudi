@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.85
+// @version      25.86
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -30,7 +30,13 @@
     // gravar quase ao mesmo tempo e uma sobrescrever a linha da outra (leitura-e-escrita
     // não é atômica entre frames) — aceitável para um log de diagnóstico, não crítico.
     const CHAVE_LOG_DETALHADO = 'projudi_log_detalhado';
-    const LOG_DETALHADO_MAX = 400;
+    // Pedido do usuário: uma automação com vários relatórios (cada um com dezenas de
+    // chamadas de gate/página) facilmente passava de 400 linhas antes do usuário chegar a
+    // abrir o log — as entradas de um relatório problemático (ex.: Transação Penal, bem no
+    // início da fila) já tinham rotacionado pra fora quando ele foi investigar. 2000 dá
+    // bem mais margem sem aproximar a cota do localStorage (cada linha tem ~100-300
+    // bytes — 2000 linhas ainda fica na casa de poucos centenas de KB).
+    const LOG_DETALHADO_MAX = 2000;
     // Bug relatado pelo usuário ("linhas.push is not a function", centenas de vezes no
     // console): JSON.parse pode ter sucesso mas devolver algo que não é array (ex.: a
     // chave já continha outro valor por algum motivo) — sem o Array.isArray abaixo, o
@@ -3473,37 +3479,35 @@
             // juntos no topo — diferente do card de total (que conta REGISTROS: com a
             // busca por Motivo da Suspensão, ver MOTIVOS_SUSPENSAO, o mesmo processo pode
             // aparecer mais de uma vez se tiver mais de uma suspensão com motivos
-            // diferentes), "Processos distintos" conta processos únicos. Fica só com essas
-            // 2 (não uma 3ª/4ª/5ª linha aqui) pra não voltar a espremer o texto dos cards —
-            // os cards de processo ativo/suspenso viram uma 2ª LINHA logo abaixo, sem
-            // título próprio (ver 1º bloco de secaoCardsExtra), não squeezados nesta linha.
+            // diferentes), "Processos distintos" conta processos únicos.
             kpisExtras: (dados) => {
                 const processosDistintos = new Set(dados.map(d => d.processo).filter(Boolean)).size;
                 return [{ titulo: 'Processos distintos', valor: processosDistintos, acento: 'aqua' }];
             },
+            // Pedido do usuário: "Total vinculado a Processo Ativo"/"Processos distintos
+            // (Ativos)" numa linha, "Total vinculado a Processos Suspensos"/"Processos
+            // distintos (Suspensos)" (novo) noutra — 2 linhas de 2 cards cada, ambas ANTES
+            // do card "Início mais antigo" (que desce pra depois delas — ver
+            // p.cardsResumoExtra em montarResumoGenerico). "Suspensos" = total geral MENOS
+            // o vinculado a processo ativo (o caso normal, sem indício de baixa
+            // pendente). Só aparece quando a busca companheira (Situação do
+            // Processo=Ativos) já rodou.
+            cardsResumoExtra: (dados) => {
+                const ativos = dados.dadosAtivos || [];
+                if (!ativos.length) return [];
+                const setAtivos = new Set(ativos.map(d => d.processo).filter(Boolean));
+                const setTodos = new Set(dados.map(d => d.processo).filter(Boolean));
+                const processosDistintosAtivos = setAtivos.size;
+                const processosDistintosSuspensos = [...setTodos].filter(p => !setAtivos.has(p)).length;
+                return [
+                    { titulo: 'Total vinculado a Processo Ativo', valor: ativos.length, acento: 'vermelho' },
+                    { titulo: 'Processos distintos (Ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
+                    { titulo: 'Total vinculado a Processos Suspensos', valor: dados.length - ativos.length, acento: 'aqua' },
+                    { titulo: 'Processos distintos (Suspensos)', valor: processosDistintosSuspensos, acento: 'aqua' },
+                ];
+            },
+            cardsResumoExtraCols: 2,
             secaoCardsExtra: [
-                // Pedido do usuário: "Total vinculado a Processo Ativo"/"Processos
-                // distintos (Ativos)" ficam na seção de cima, logo abaixo do total — e
-                // "Total vinculado a Processos Suspensos" (o total geral MENOS o
-                // vinculado a processo ativo — o "caso normal", sem indício de baixa
-                // pendente) é novo. Sem `titulo` (bloco sem cabeçalho próprio) — é uma
-                // continuação visual da linha de cards gerais, não uma seção separada
-                // como "Motivo da Suspensão"/o alerta por Motivo abaixo. `cols: 3` pra
-                // ocupar a largura toda numa única linha de 3 cards. Só aparece quando a
-                // busca companheira (Situação do Processo=Ativos) já rodou.
-                {
-                    cols: 3,
-                    calc: (dados) => {
-                        const ativos = dados.dadosAtivos || [];
-                        if (!ativos.length) return [];
-                        const processosDistintosAtivos = new Set(ativos.map(d => d.processo).filter(Boolean)).size;
-                        return [
-                            { titulo: 'Total vinculado a Processo Ativo', valor: ativos.length, acento: 'vermelho' },
-                            { titulo: 'Processos distintos (Ativos)', valor: processosDistintosAtivos, acento: 'vermelho' },
-                            { titulo: 'Total vinculado a Processos Suspensos', valor: dados.length - ativos.length, acento: 'aqua' },
-                        ];
-                    },
-                },
                 // Pedido do usuário: os cards por Motivo da Suspensão (ex.: "Art. 366 do
                 // CPP: 45", "Art. 89 da Lei 9.099/95: 27") ganham seção PRÓPRIA, com título,
                 // logo abaixo dos cards gerais — em vez de tudo espremido na mesma linha
@@ -3706,7 +3710,11 @@
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
             store.removeItem(cfg.prefixo + 'motivo_atual');
             store.removeItem(chaveFila);
-            logPainel(`[Auto Projudi Transação Penal] "${cfg.prefixo}" — todos os Motivos da Suspensão percorridos, avançando para o próximo Tipo`);
+            // Resumo final desta busca (situacaoProcesso inclusive) — pedido do usuário:
+            // linha fácil de achar no log pra confirmar, sem adivinhar, quanto cada
+            // busca (Tipo × Situação do Processo) realmente coletou no final.
+            logPainel(`[Auto Projudi Transação Penal] "${cfg.prefixo}" — todos os Motivos da Suspensão percorridos (situacaoProcesso=${cfg.situacaoProcesso || '(não verificado)'}) `
+                + `— total coletado: ${contarRegistrosSync(cfg.prefixo)} registro(s) — avançando para o próximo Tipo`);
             avancarAutomacao(cfg);
             return;
         }
@@ -3792,8 +3800,18 @@
         const situacaoEsperada = cfg.situacaoProcesso || null;
         const situacaoAtual = situacaoProcessoSelecionada();
         const situacaoOk = situacaoProcessoBate(situacaoEsperada, situacaoAtual);
+        // motivoDisabled/motivoOptions — pedido do usuário: "Transação Penal" (tipo T)
+        // volta zerado do PDF mesmo depois da correção do rádio; hipótese ainda não
+        // confirmada é que o campo "Motivo da Suspensão" pode não se aplicar/ficar
+        // desabilitado pro Tipo Transação Penal no Projudi (diferente de Susp. Cond. do
+        // Processo, que funciona), fazendo o servidor devolver 0 pra qualquer Motivo
+        // específico mesmo havendo Transações Penais ativas de verdade (que só apareciam
+        // com Motivo="Todas", antes da iteração por Motivo existir). Log aqui em vez de
+        // adivinhar — confirma ou descarta isso direto no log baixado (▼ Ver log
+        // detalhado → ⬇ Baixar log completo).
         logPainel(`[Auto Projudi Transação Penal] diagnóstico — chave=${chave} tipoEsperado=${tipoEsperado} motivoEsperado=${motivoEsperado} (${rotuloMotivoSuspensao(motivoEsperado)}) `
             + `tipoAtual=${selTipo ? selTipo.value : 'n/d'} statusAtual=${selStatus ? selStatus.value : 'n/d'} motivoAtual=${selMotivo ? selMotivo.value : 'n/d'} `
+            + `motivoDisabled=${selMotivo ? selMotivo.disabled : 'n/d'} motivoQtdOpcoes=${selMotivo && selMotivo.options ? selMotivo.options.length : 'n/d'} `
             + `situacaoProcessoEsperada=${situacaoEsperada || '(não verificado)'} situacaoProcessoAtual=${situacaoAtual || 'n/d'} situacaoProcessoOk=${situacaoOk} `
             + `tabelaEncontrada=${!!tabela} tbodyTrTotal=${tabela ? tabela.querySelectorAll('tbody tr').length : 'n/d'} linhasDeVerdade=${linhasDeVerdade.length} `
             + `totalResultTableNaPagina=${document.querySelectorAll('table.resultTable').length}`);
@@ -7170,8 +7188,39 @@
         const kW = (uw - (kpis.length - 1) * gap) / kpis.length;
         kpis.forEach((k, i) => desenharCard(doc, m + i * (kW + gap), kY, kW, 28, k.titulo, k.valor, k.subs, true, k.acento));
 
+        // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
+        // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
+        // números exatos a barras), e diferente da grade de gráficos antiga (altura fixa,
+        // nunca paginava sozinha), a grade de tabelas pode abrir página nova no meio do
+        // desenho — sem isso a página anterior ficaria sem rodapé/link. Definido ANTES do
+        // bloco de p.cardsResumoExtra (abaixo) — esse bloco pode paginar sozinho também.
+        const ctx = {
+            rodapeAntesDeVirar: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
+            topoContinuacao: m + 14,
+            cabecalhoContinuacao: () => {
+                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
+                doc.text(`${p.titulo} — detalhamento por categoria`, m, m + 4);
+                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
+            },
+        };
+
+        // Ponto de extensão OPCIONAL — cards extras logo abaixo da linha de kpis
+        // principais, mas ANTES do card "Início mais antigo" (pedido do usuário,
+        // Benefícios/Medidas/Suspensões: "INÍCIO MAIS ANTIGO deve ficar abaixo dos
+        // cards" de processo ativo/suspenso, agrupados em linhas de p.cardsResumoExtraCols
+        // cards cada — ver pdfTransacaoPenal). cfg.pdf que não define isso fica byte-a-
+        // byte como antes desta mudança (aY cai direto depois da linha de kpis).
+        let yAntesAntigo = kY + 28 + gap;
+        if (p.cardsResumoExtra) {
+            const itensResumoExtra = (p.cardsResumoExtra(dados) || [])
+                .map(it => ({ titulo: it.titulo, valor: it.valor, subs: it.subs, acento: COR[it.acento] || COR.azul }));
+            if (itensResumoExtra.length) {
+                yAntesAntigo = desenharGradeCardsKpi(doc, m, yAntesAntigo, uw, itensResumoExtra, ctx, p.cardsResumoExtraCols || 2) + 2;
+            }
+        }
+
         // KPI do mais atrasado (card largo, texto centralizado)
-        const aY = kY + 28 + gap;
+        const aY = yAntesAntigo;
         const antigo = acharMaisAntigo(dados, p.dataCampo);
         let subsAntigo = ['Data não disponível'];
         let valAntigo = '—';
@@ -7184,24 +7233,11 @@
                 reg[p.tipoCampo] || '',
             ];
         }
-        desenharCard(doc, m, aY, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
+        if (aY > ph - m - 28) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); }
+        const aYFinal = aY > ph - m - 28 ? ctx.topoContinuacao : aY;
+        desenharCard(doc, m, aYFinal, uw, 28, p.dataTitulo, valAntigo, subsAntigo, true, COR.azul);
 
-        // Antes de qualquer addPage a partir daqui, sempre selar o rodapé da página
-        // corrente — pedido de layout: tabelas no lugar de gráficos (usuário prefere
-        // números exatos a barras), e diferente da grade de gráficos antiga (altura fixa,
-        // nunca paginava sozinha), a grade de tabelas pode abrir página nova no meio do
-        // desenho — sem isso a página anterior ficaria sem rodapé/link.
-        const ctx = {
-            rodapeAntesDeVirar: () => desenharRodape(doc, p.titulo, carimbo, pw, ph, m, comIndice),
-            topoContinuacao: m + 14,
-            cabecalhoContinuacao: () => {
-                doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.tinta);
-                doc.text(`${p.titulo} — detalhamento por categoria`, m, m + 4);
-                doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
-            },
-        };
-
-        let y = aY + 28 + gap + 2;
+        let y = aYFinal + 28 + gap + 2;
 
         // Seção dedicada de cards logo abaixo dos KPIs principais (pedido do usuário,
         // Benefícios/Medidas/Suspensões: separar os cards de "Motivo da Suspensão" dos
@@ -17739,6 +17775,7 @@
                     <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
                     <div id="pa-log-wrap" style="display:none;">
                         <pre id="pa-log-detalhado" class="pa-log-box"></pre>
+                        <button id="pa-log-baixar" class="pa-link" type="button" title="Salva o log completo (todas as linhas guardadas, não só o que cabe na caixa) num .txt para enviar/investigar">⬇ Baixar log completo</button>
                         <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
                     </div>
                 </div>
@@ -17802,6 +17839,16 @@
         painel.querySelector('#pa-log-limpar').onclick = () => {
             store.removeItem(CHAVE_LOG_DETALHADO);
             atualizarLogDetalhadoUI();
+        };
+        // Pedido do usuário: "implementar algo no log pra encontrar o problema de vez,
+        // em vez de ficar adivinhando" — baixa TODAS as linhas guardadas (até
+        // LOG_DETALHADO_MAX) como .txt, pra anexar/colar ao relatar um bug. A caixa na
+        // tela já mostra tudo (não trunca à parte), mas um arquivo é mais fácil de
+        // copiar/colar inteiro do que selecionar texto dentro do painel.
+        painel.querySelector('#pa-log-baixar').onclick = () => {
+            const linhas = lerLogDetalhado();
+            const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+            baixarBlob(new Blob([texto], { type: 'text/plain;charset=utf-8' }), `projudi_log_${dataArquivo()}.txt`);
         };
         // Salva um snapshot {key: true/false} de TODOS os .pa-check (ver
         // relatorioMarcadoPorPadrao/CHAVE_RELATORIOS_SELECIONADOS) — chamado a cada
