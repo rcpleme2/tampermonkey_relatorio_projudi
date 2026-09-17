@@ -2708,9 +2708,11 @@
     ];
     const CFG_CAMPOS_OBRIGATORIOS_VD = {
         prefixo: 'projudi_camposobrigatoriosvd_',
-        // Zero pendências é informação válida (mesmo padrão de CFG_SEM_INFRACAO_PENAL) —
-        // mostra a linha mesmo vazia, desde que já coletado.
-        mostrarSeVazio: true,
+        // SEM mostrarSeVazio (pedido do usuário, diferente do padrão de CFG_SEM_INFRACAO_
+        // PENAL/CFG_SEM_RG/CFG_SEM_CPF): com 0 registros, a seção própria (resumo com
+        // cards + tabela) NÃO entra em "outrasSecoes" no PDF conjunto do Cartório — só a
+        // linha do sumário/capa continua aparecendo (essa linha vem de itensOutros.push,
+        // que não depende de mostrarSeVazio — ver secaoCamposObrigatoriosVD mais abaixo).
         detecta: () => {
             const form = document.getElementById('mesaAnalistaEscrivaoForm');
             return !!(form && /actionType=pesquisarCamposObrigatoriosPendentes/i.test(form.action));
