@@ -2705,7 +2705,6 @@
     const TITULO_CAMPOS_OBRIGATORIOS_VD = 'Campos Obrigatórios Pendentes da Parte em Proc. VD';
     const PARAGRAFOS_OBSERVACAO_CAMPOS_OBRIGATORIOS_VD = [
         'A secretaria deverá diligenciar para o preenchimento dos campos obrigatórios da parte nos processos de violência doméstica, providência indispensável para a correta tramitação do feito e para a alimentação dos sistemas de estatística e monitoramento da Lei Maria da Penha.',
-        'Recomenda-se solicitar a informação junto à autoridade policial ou aos órgãos competentes, promovendo a atualização do cadastro processual assim que o dado estiver disponível.',
     ];
     const CFG_CAMPOS_OBRIGATORIOS_VD = {
         prefixo: 'projudi_camposobrigatoriosvd_',
