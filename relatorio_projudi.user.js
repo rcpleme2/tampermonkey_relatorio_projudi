@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.87
+// @version      25.88
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -7876,7 +7876,9 @@
         // atribuições coletadas, cada magistrado(a) com processos em mais de uma delas
         // gerava várias páginas IDÊNTICAS (mesmo título "Juiz(a): X"), sem indicar qual
         // era o resumo geral e qual era de qual atribuição específica.
-        const textoJuiz = 'Juiz(a): ' + juiz + (rotuloBloco ? ` — ${rotuloBloco}` : '');
+        // rotuloJuizComPapel: "Juiz: X"/"Juíza: X" para magistrado(a) de verdade,
+        // "Juiz(a) Leigo(a): X" para Juiz Leigo (ver capturarPapeisUsuarios).
+        const textoJuiz = rotuloJuizComPapel(juiz) + (rotuloBloco ? ` — ${rotuloBloco}` : '');
         const linhasJuiz = doc.splitTextToSize(textoJuiz, uw);
         doc.text(linhasJuiz, m, hy);
         hy += linhasJuiz.length * 5.2 + 1.5;
@@ -13887,6 +13889,47 @@
         return form && form.querySelector('input[name="situacao"]') ? form : null;
     }
 
+    // Papel de cada magistrado(a)/Juiz Leigo, capturado do <select name="usuario"> desta
+    // mesma tela (rótulos "Nome (Magistrado)"/"Nome (Magistrada)"/"Nome (Juiz Leigo)") —
+    // pedido do usuário: o título "Juiz(a): Nome" do PDF por Juiz (ver
+    // montarResumoJuizConclusoes) deve virar "Juiz Nome"/"Juíza Nome" para magistrados(as)
+    // de verdade, mas sempre "Juiz(a) Leigo(a): Nome" para Juiz Leigo — o Projudi não
+    // marca gênero para Juiz Leigo no select (sempre "(Juiz Leigo)", mesmo para mulheres),
+    // então não dá pra flexionar com segurança; combinado com o usuário usar sempre a
+    // forma neutra nesse caso. Persistido em localStorage (não por prefixo de relatório —
+    // o select aparece tanto na tela de Conclusões quanto na de Tempo Médio) para
+    // continuar disponível na hora de montar o PDF, mesmo que a tela ativa nesse momento
+    // já não tenha mais o select (ex.: PDF gerado depois de navegar para outra página).
+    const CHAVE_PAPEIS_USUARIOS = 'projudi_papeis_usuarios';
+
+    function capturarPapeisUsuarios() {
+        const select = document.querySelector('select#usuario');
+        if (!select) return;
+        const mapa = desembrulharObjeto(store.getItem(CHAVE_PAPEIS_USUARIOS)) || {};
+        let mudou = false;
+        [...select.options].forEach(o => {
+            const m = /^(.*?)\s*\((Juiz Leigo|Magistrado|Magistrada)\)\s*$/i.exec((o.textContent || '').trim());
+            if (!m) return;
+            const nome = m[1].trim();
+            const rotulo = m[2].toLowerCase();
+            const papel = rotulo === 'juiz leigo' ? 'leigo' : (rotulo === 'magistrada' ? 'magistrada' : 'magistrado');
+            if (nome && mapa[nome] !== papel) { mapa[nome] = papel; mudou = true; }
+        });
+        if (mudou) store.setItem(CHAVE_PAPEIS_USUARIOS, JSON.stringify(mapa));
+    }
+
+    // "Juiz(a): Nome" com o papel certo quando já capturado (ver capturarPapeisUsuarios);
+    // sem informação de papel (nome nunca visto no select#usuario desta sessão), cai no
+    // rótulo genérico de sempre.
+    function rotuloJuizComPapel(nome) {
+        const mapa = desembrulharObjeto(store.getItem(CHAVE_PAPEIS_USUARIOS)) || {};
+        const papel = mapa[(nome || '').trim()];
+        if (papel === 'leigo') return 'Juiz(a) Leigo(a): ' + nome;
+        if (papel === 'magistrada') return 'Juíza: ' + nome;
+        if (papel === 'magistrado') return 'Juiz: ' + nome;
+        return 'Juiz(a): ' + nome;
+    }
+
     // Quantidade de meses completos buscados pelo relatório de Tempo Médio. Um período
     // grande (ex.: 1 ano de uma vez) deixa a pesquisa do Projudi lenta — em vez de um único
     // intervalo, cada opção dispara N pesquisas separadas, uma por mês completo (ver
@@ -18529,6 +18572,7 @@
         chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas'); // demais cards do mesmo painel
         chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
         chamarSeguro(capturarContadorHomeSuspensos, 'capturarContadorHomeSuspensos'); // total do card da home pro KPI de Suspensos por Prazo Indeterminado
+        chamarSeguro(capturarPapeisUsuarios, 'capturarPapeisUsuarios'); // Magistrado(a)/Juiz Leigo do select#usuario (Conclusões/Tempo Médio), pro título do PDF por Juiz
         // Checkboxes/dropdown de seleção de unidades (só age na tela "Selecione a Área de
         // Atuação" — página cheia OU dentro do iframe do popup "Alterar Atuação", ver
         // comentário grande acima de CHAVE_MU_ATIVO).
@@ -18545,6 +18589,7 @@
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
             chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
             chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno');
+            chamarSeguro(capturarPapeisUsuarios, 'capturarPapeisUsuarios');
             chamarSeguro(passoAutomacao, 'passoAutomacao');
             chamarSeguro(verificarTravamentoAutomacao, 'verificarTravamentoAutomacao');
         }, 2000);
