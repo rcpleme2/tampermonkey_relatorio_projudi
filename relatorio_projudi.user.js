@@ -2698,7 +2698,11 @@
     // Colunas da tabela real (.mhtml enviado pelo usuário): [0] Processo [1] Classe
     // Processual (Assunto Principal) [2] Data de Distribuição [3] Data Último Movimento
     // [4] Dias Paralisado — sem coluna "Parte" (mesmo formato de CFG_SEM_INFRACAO_PENAL).
-    const TITULO_CAMPOS_OBRIGATORIOS_VD = 'Campos Obrigatórios Pendentes da Parte em Processos de Violência Doméstica';
+    // Título curto (mesmo texto do rótulo do card na Mesa do Escrivão Criminal) — o
+    // nome completo ("...em Processos de Violência Doméstica") estourava a largura útil
+    // da página no título do resumo (fontSize 16 bold), cortando o texto (confirmado
+    // com preview real gerado via jsPDF/pdfjs: 214.7mm de texto para 186mm úteis de A4).
+    const TITULO_CAMPOS_OBRIGATORIOS_VD = 'Campos Obrigatórios Pendentes da Parte em Proc. VD';
     const PARAGRAFOS_OBSERVACAO_CAMPOS_OBRIGATORIOS_VD = [
         'A secretaria deverá diligenciar para o preenchimento dos campos obrigatórios da parte nos processos de violência doméstica, providência indispensável para a correta tramitação do feito e para a alimentação dos sistemas de estatística e monitoramento da Lei Maria da Penha.',
         'Recomenda-se solicitar a informação junto à autoridade policial ou aos órgãos competentes, promovendo a atualização do cadastro processual assim que o dado estiver disponível.',
