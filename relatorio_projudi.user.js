@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.88
+// @version      25.89
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2674,6 +2674,83 @@
                 { header: 'Parte', width: 28, get: (d) => d.parte },
                 { header: 'Data de Distribuição', width: 18, get: (d) => d.dataDistribuicao },
                 { header: 'Data Último Movimento', width: 18, get: (d) => d.dataUltimoMovimento },
+                { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
+    };
+
+    // Campos Obrigatórios Pendentes da Parte em Processos de Violência Doméstica (Mesa do
+    // Escrivão Criminal, card "Campos obrigatórios pendentes da parte em proc. VD" dentro
+    // do #tbMesa, mesmo bloco de Sem RG/Sem CPF, logo abaixo do card "Violência doméstica
+    // sem assunto correspondente") — mesaAnalistaEscrivao.do?actionType=pesquisarCampos
+    // ObrigatoriosPendentes. Categoria Crime, mesmo esquema de navegação de Sem Infração
+    // Penal: card sem <a href> (só um <label> dentro de um <div
+    // class="quadroCorregedoriaEven/Odd">, confirmado no .mhtml enviado pelo usuário —
+    // ver acharCardCamposObrigatoriosVD), clique leva DIRETO para a tela de resultados,
+    // que já chega com table.buttonBar pronta (diferente de Sem Infração Penal/
+    // Reavaliação de Prisão Provisória).
+    //
+    // Mesmo cabeçalho de CFG_SEM_INFRACAO_PENAL ("Processo/Classe Processual/Data de
+    // Distribuição/Data Último Movimento/Dias Paralisado" — casa com o regex largo de
+    // CFG_PARALISADOS), então a detecção também precisa ser própria (pelo actionType do
+    // form) e checada em detectarConfig() ANTES de CFG_PARALISADOS.
+    //
+    // Colunas da tabela real (.mhtml enviado pelo usuário): [0] Processo [1] Classe
+    // Processual (Assunto Principal) [2] Data de Distribuição [3] Data Último Movimento
+    // [4] Dias Paralisado — sem coluna "Parte" (mesmo formato de CFG_SEM_INFRACAO_PENAL).
+    // Título curto (mesmo texto do rótulo do card na Mesa do Escrivão Criminal) — o
+    // nome completo ("...em Processos de Violência Doméstica") estourava a largura útil
+    // da página no título do resumo (fontSize 16 bold), cortando o texto (confirmado
+    // com preview real gerado via jsPDF/pdfjs: 214.7mm de texto para 186mm úteis de A4).
+    const TITULO_CAMPOS_OBRIGATORIOS_VD = 'Campos Obrigatórios Pendentes da Parte em Proc. VD';
+    const PARAGRAFOS_OBSERVACAO_CAMPOS_OBRIGATORIOS_VD = [
+        'A secretaria deverá diligenciar para o preenchimento dos campos obrigatórios da parte nos processos de violência doméstica, providência indispensável para a correta tramitação do feito e para a alimentação dos sistemas de estatística e monitoramento da Lei Maria da Penha.',
+    ];
+    const CFG_CAMPOS_OBRIGATORIOS_VD = {
+        prefixo: 'projudi_camposobrigatoriosvd_',
+        // SEM mostrarSeVazio (pedido do usuário, diferente do padrão de CFG_SEM_INFRACAO_
+        // PENAL/CFG_SEM_RG/CFG_SEM_CPF): com 0 registros, a seção própria (resumo com
+        // cards + tabela) NÃO entra em "outrasSecoes" no PDF conjunto do Cartório — só a
+        // linha do sumário/capa continua aparecendo (essa linha vem de itensOutros.push,
+        // que não depende de mostrarSeVazio — ver secaoCamposObrigatoriosVD mais abaixo).
+        detecta: () => {
+            const form = document.getElementById('mesaAnalistaEscrivaoForm');
+            return !!(form && /actionType=pesquisarCamposObrigatoriosPendentes/i.test(form.action));
+        },
+        minTds: 5,
+        usaAtuacao: false,
+        nomeArquivo: 'campos_obrigatorios_pendentes_vd_projudi',
+        rotulos: { coletar: 'Extrair Campos Obrig. VD', coletarMais: 'Extrair mais (Campos Obrig. VD)', baixar: '⬇ Baixar Campos Obrig. VD' },
+        cabecalhos: ['Processo', 'Classe Processual (Assunto Principal)', 'Data de Distribuição', 'Data Último Movimento', 'Dias Paralisado'],
+        larguras: [{ wch: 26 }, { wch: 46 }, { wch: 16 }, { wch: 16 }, { wch: 14 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[0]);
+            const diasTexto = textoCelula(tds[4]);
+            const dias = /^\d+$/.test(diasTexto) ? parseInt(diasTexto, 10) : null;
+            return {
+                processo,
+                classe: textoCelula(tds[1]),
+                dataDistribuicao: textoCelula(tds[2]),
+                dataUltimoMovimento: textoCelula(tds[3]),
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.classe, d.dataDistribuicao, d.dataUltimoMovimento, (d.dias == null ? '' : String(d.dias))],
+        pdfCustom: (dados, somenteResumo) => gerarPDFCamposObrigatoriosVD(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_CAMPOS_OBRIGATORIOS_VD,
+            tabelaTitulo: 'Tabela discriminada dos processos com campos obrigatórios pendentes da parte (VD)',
+            dataCampo: 'dataUltimoMovimento',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 30, get: (d) => d.processo },
+                { header: 'Classe Processual (Assunto Principal)', width: 46, get: (d) => d.classe },
+                { header: 'Data de Distribuição', width: 20, get: (d) => d.dataDistribuicao },
+                { header: 'Data Último Movimento', width: 20, get: (d) => d.dataUltimoMovimento },
                 { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
             ],
         },
@@ -5389,6 +5466,19 @@
         for (const d of docs) {
             for (const label of d.querySelectorAll('#tbMesa label')) {
                 if (!/^feitos\s+com\s+r[ée]u\s+sem\s+cpf\s*\/\s*cnpj$/i.test((label.textContent || '').trim())) continue;
+                return label;
+            }
+        }
+        return null;
+    }
+    // Card "Campos obrigatórios pendentes da parte em proc. VD" — mesmo bloco #tbMesa de
+    // Sem RG/Sem CPF, mesmo molde de acharCardSemRg/acharCardSemCpf acima (label sem <a
+    // href>, clique real no nó mais profundo).
+    function acharCardCamposObrigatoriosVD() {
+        const docs = todosDocumentosAcessiveis();
+        for (const d of docs) {
+            for (const label of d.querySelectorAll('#tbMesa label')) {
+                if (!/^campos\s+obrigat[óo]rios\s+pendentes\s+da\s+parte\s+em\s+proc\.?\s+vd$/i.test((label.textContent || '').trim())) continue;
                 return label;
             }
         }
@@ -8577,6 +8667,16 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_SEM_CPF, comIndice),
             };
         }
+        if (cfg === CFG_CAMPOS_OBRIGATORIOS_VD) {
+            return {
+                rotulo: TITULO_CAMPOS_OBRIGATORIOS_VD,
+                // Resumo dedicado (mesmo padrão de Sem Infração Penal) — não usa
+                // montarResumoGenerico; a tabela discriminada reaproveita o genérico sem
+                // alteração (ver CFG_CAMPOS_OBRIGATORIOS_VD.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoCamposObrigatoriosVD(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_CAMPOS_OBRIGATORIOS_VD, comIndice),
+            };
+        }
         if (cfg === CFG_REAVALIACAO_PRISAO_PROVISORIA) {
             return {
                 rotulo: TITULO_REAVALIACAO_PRISAO_PROVISORIA,
@@ -9326,6 +9426,7 @@
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
+        const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -9884,6 +9985,22 @@
                 indicador: `${secaoReavaliacaoPrisaoProvisoria.dados.length} preso(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
+            });
+        }
+        // "Campos Obrigatórios Pendentes da Parte (VD)" — ÚLTIMO da categoria Crime
+        // (mesma ordem de REPORTS_AUTOMACAO). Indicador: total de processos pendentes;
+        // detalhamento compacta a pendência mais antiga (por Data Último Movimento, mesmo
+        // campo usado no card "Pendência mais antiga" do PDF individual, ver
+        // montarResumoCamposObrigatoriosVD).
+        if (secaoCamposObrigatoriosVD) {
+            const antigo = acharMaisAntigo(secaoCamposObrigatoriosVD.dados, 'dataUltimoMovimento');
+            const prejudicado = prejudicadoInfo(CFG_CAMPOS_OBRIGATORIOS_VD);
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: 'Campos Obrigatórios Pendentes da Parte (VD)',
+                indicador: `${secaoCamposObrigatoriosVD.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -11880,6 +11997,100 @@
         desenharRodape(doc, TITULO_SEM_CPF, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
+    // ── PDF de Campos Obrigatórios Pendentes da Parte em Proc. VD (Mesa do Escrivão
+    // Criminal) — mesmo padrão de gerarPDFSemInfracaoPenal/montarResumoSemInfracaoPenal
+    // acima (mesma aba de origem, mesma categoria Crime, mesmo formato de tabela sem
+    // coluna "Parte").
+    function gerarPDFCamposObrigatoriosVD(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoCamposObrigatoriosVD(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_CAMPOS_OBRIGATORIOS_VD, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_CAMPOS_OBRIGATORIOS_VD.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Só 2 cards (mesmo padrão de Sem Infração Penal/Sem RG/Sem CPF): total de processos
+    // pendentes e a pendência mais antiga (menor Data Último Movimento), com o processo
+    // correspondente como sub-linha.
+    function montarResumoCamposObrigatoriosVD(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_CAMPOS_OBRIGATORIOS_VD, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(r.length), [], true, COR.vermelho, COR.vermelho);
+
+        const antigo = acharMaisAntigo(r, 'dataUltimoMovimento');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo ? [`Processo ${antigo.registro.processo || ''}`] : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Movimento mais antigo', valAntigo, subsAntigo, true, COR.ambar);
+
+        // Tabela embutida com os 5 PRIMEIROS processos (mesmo limite de Sem Infração
+        // Penal/Sem RG/Sem CPF — precisa caber tudo numa única página junto com os cards
+        // e a observação).
+        const LIMITE_TABELA_EMBUTIDA_CAMPOS_OBRIGATORIOS_VD = 5;
+        const primeirosDaLista = r.slice(0, LIMITE_TABELA_EMBUTIDA_CAMPOS_OBRIGATORIOS_VD);
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_CAMPOS_OBRIGATORIOS_VD
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_CAMPOS_OBRIGATORIOS_VD} Processos`
+                : 'Lista dos Processos Com Campos Obrigatórios Pendentes da Parte (VD)';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_CAMPOS_OBRIGATORIOS_VD.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: primeirosDaLista.map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_CAMPOS_OBRIGATORIOS_VD, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação — só com processos listados, sem forçar 2ª página se não
+        // couber (mesmo padrão de Sem Infração Penal/Sem RG/Sem CPF).
+        if (r.length > 0) {
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_CAMPOS_OBRIGATORIOS_VD);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_CAMPOS_OBRIGATORIOS_VD, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_CAMPOS_OBRIGATORIOS_VD, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF de Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP) ─────────
     function gerarPDFReavaliacaoPrisaoProvisoria(dados, somenteResumo) {
         const doc = novoDocPDF();
@@ -13827,6 +14038,10 @@
         // (cabeçalho com "Dias Paralisado", detecção própria pelo actionType do form).
         else if (CFG_SEM_RG.detecta(cab)) cfg = CFG_SEM_RG;
         else if (CFG_SEM_CPF.detecta(cab)) cfg = CFG_SEM_CPF;
+        // CFG_CAMPOS_OBRIGATORIOS_VD também vem ANTES de CFG_PARALISADOS pelo mesmo
+        // motivo (cabeçalho com "Dias Paralisado", detecção própria pelo actionType do
+        // form).
+        else if (CFG_CAMPOS_OBRIGATORIOS_VD.detecta(cab)) cfg = CFG_CAMPOS_OBRIGATORIOS_VD;
         else if (CFG_PARALISADOS.detecta(cab)) cfg = CFG_PARALISADOS;
         else if (CFG_REMESSAS.detecta(cab)) cfg = CFG_REMESSAS;
         else if (CFG_JUNTADAS.detecta(cab)) cfg = CFG_JUNTADAS;
@@ -14708,6 +14923,20 @@
                 cartao.click();
             } else {
                 console.log('[Projudi Sem CPF/CNPJ] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+            }
+            return;
+        }
+
+        // Mesmo esquema acima, para "Campos Obrigatórios Pendentes da Parte em Proc. VD"
+        // — card sem <a href>, mesma aba, sem etapa de filtro/checkbox.
+        if (estadoAutoNoInicio === 'preenchendo_camposobrigatoriosvd' && !document.querySelector('table.resultTable')) {
+            const cartao = acharCardCamposObrigatoriosVD();
+            if (cartao) {
+                console.log('[Projudi Campos Obrig. VD] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Campos obrigatórios pendentes da parte em proc. VD"');
+                store.setItem(AUTO_ESTADO, 'coletando_camposobrigatoriosvd');
+                cartao.click();
+            } else {
+                console.log('[Projudi Campos Obrig. VD] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -16248,9 +16477,12 @@
         { key: 'semcpf', cfg: CFG_SEM_CPF, navAlvo: 'semcpf', rotulo: 'Feitos com Réu Sem CPF/CNPJ', curto: 'Sem CPF/CNPJ', categoriaEspecifica: 'crime', precisaPreencher: true },
         // "Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP)" — mesma aba
         // "Mesa do Escrivão Criminal" de Prescrições/Sem Infração Penal (card sem link,
-        // ver acharCardReavaliacaoPrisaoProvisoria); ÚLTIMO da categoria Crime, logo após
-        // Sem Infração Penal.
+        // ver acharCardReavaliacaoPrisaoProvisoria); logo após Sem Infração Penal.
         { key: 'reavaliacaoprisao', cfg: CFG_REAVALIACAO_PRISAO_PROVISORIA, navAlvo: 'reavaliacaoprisao', rotulo: 'Reavaliação de Prisão Provisória (Art 316, CPP)', curto: 'Reavaliação Prisão Prov.', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Campos Obrigatórios Pendentes da Parte em Proc. VD" — mesma aba "Mesa do
+        // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
+        // da categoria Crime.
+        { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
@@ -16654,6 +16886,7 @@
         // "Mesa do Escrivão Criminal"; o clique no card em si acontece em injetarBotoes.
         else if (alvo === 'semrg') return navegarAbaMesaEscrivaoCriminalParaSemRg();
         else if (alvo === 'semcpf') return navegarAbaMesaEscrivaoCriminalParaSemCpf();
+        else if (alvo === 'camposobrigatoriosvd') return navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD();
         // "Reavaliação da Prisão Provisória" fica na mesma aba "Mesa do Escrivão
         // Criminal" de Prescrições/Sem Infração Penal — abre a aba aqui; o clique no
         // card em si (sem link, ver acharCardReavaliacaoPrisaoProvisoria) acontece em
@@ -16829,6 +17062,19 @@
             return false;
         }
         console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemCpf — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        link.click();
+        return true;
+    }
+    // Mesmo esquema acima, mas para "Campos Obrigatórios Pendentes da Parte em Proc. VD"
+    // — mesma aba ("Mesa do Escrivão Criminal"); o clique no card específico (ver
+    // acharCardCamposObrigatoriosVD) acontece à parte, no gate de injetarBotoes.
+    function navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD() {
+        const link = acharAbaMesaEscrivaoCriminal();
+        if (!link) {
+            console.warn('[Auto Projudi] link de menu não encontrado: camposobrigatoriosvd (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            return false;
+        }
+        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
