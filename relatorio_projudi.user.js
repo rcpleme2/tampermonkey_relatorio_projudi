@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.89
+// @version      25.90
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -16625,19 +16625,37 @@
     // mesma cautela de capturarContadoresPainelJuntadas: não mexe no valor já gravado
     // quando o usuário está noutra tela. Indicadores ausentes na tela (não fazem parte da
     // competência atual) ficam de fora do array salvo, não entram como zero.
+    //
+    // Acumulador em memória (NÃO persiste entre navegações — reseta sozinho a cada
+    // carregamento de página, já que o userscript inteiro roda de novo) dos indicadores
+    // extras já vistos nesta tela, por id. Bug relatado pelo usuário: "Processos com
+    // suspeita de incompetência - Juiz das Garantias" às vezes ficava de fora do PDF
+    // mesmo a automação tendo passado pela tela certa — causa provável: os 14
+    // indicadores extras vêm de consultas separadas no banco (ver comentário de
+    // LEITURAS_ESTAVEIS_NECESSARIAS) e o poll de 2s do bootstrap chama esta função de
+    // novo bem depois da 1ª captura; se nessa chamada POSTERIOR o span desse indicador
+    // específico não estiver presente no DOM naquele instante (ex. o painel re-renderiza
+    // aquele trecho), a versão antiga sobrescrevia a lista INTEIRA sem ele. Acumulando por
+    // id em vez de substituir a cada chamada, um indicador já visto com sucesso nesta
+    // tela nunca mais desaparece do PDF por causa de uma leitura posterior incompleta.
+    let acumuladorIndicadoresExtraJuntadas = {};
     function capturarOutrosIndicadoresPainelJuntadas() {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
             if (!d.getElementById) continue;
-            const encontrados = [];
+            let achouAlgum = false;
             for (const ind of INDICADORES_EXTRA_JUNTADAS) {
                 const span = d.getElementById(ind.id);
                 if (!span) continue;
+                achouAlgum = true;
                 const n = parseInt((span.textContent || '').trim(), 10);
-                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico });
+                acumuladorIndicadoresExtraJuntadas[ind.id] = { label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico };
             }
-            if (!encontrados.length) continue;
-            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores encontrados (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
+            if (!achouAlgum) continue;
+            const encontrados = INDICADORES_EXTRA_JUNTADAS
+                .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
+                .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
+            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
             store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
             return;
         }
