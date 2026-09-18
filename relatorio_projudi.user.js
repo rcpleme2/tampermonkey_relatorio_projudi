@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.93
+// @version      25.94
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18078,6 +18078,16 @@
     function atualizarPainel() {
         const painel = document.getElementById('painel-automacao');
         if (!painel) return;
+        // Log detalhado: antes só era relido do localStorage quando o próprio
+        // logPainel() rodava NESTA MESMA frame, ou ao clicar em abrir/fechar o log —
+        // como o Projudi roda o script em várias frames sem @noframes (ver comentário
+        // grande de CHAVE_LOG_DETALHADO), a coleta normalmente grava o log numa frame
+        // de CONTEÚDO diferente da que exibe este painel (a do menu), então a caixa
+        // ficava presa em "(sem entradas ainda)" mesmo com a automação avançando.
+        // Chamado aqui (já dentro do polling de 2s que atualiza o resto do painel)
+        // garante que o log apareça ao vivo, como no SEEU_correição — a própria
+        // atualizarLogDetalhadoUI() já é barata e não faz nada se a caixa não existir.
+        atualizarLogDetalhadoUI();
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
         const contagens = REPORTS_AUTOMACAO.map(r => ({ r, n: cfgsDoRelatorio(r).reduce((s, cfg) => s + contarRegistrosSync(cfg.prefixo), 0) }));
         const total = contagens.reduce((s, c) => s + c.n, 0);
