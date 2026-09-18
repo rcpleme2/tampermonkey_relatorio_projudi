@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.91
+// @version      25.92
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2828,7 +2828,7 @@
         },
         cabecalhos: ['Data da Prisão', 'Processo', 'Vara', 'Guia de Prisão', 'Motivo da Prisão', 'Parte', 'Período de Prisão'],
         larguras: [{ wch: 14 }, { wch: 26 }, { wch: 30 }, { wch: 22 }, { wch: 16 }, { wch: 30 }, { wch: 22 }],
-        extrai: (tds) => {
+        extrai: (tds, atuacao) => {
             const periodo = textoCelula(tds[6]);
             const mDias = periodo.match(/\((\d+)\s*dias?\)/i);
             return {
@@ -2840,6 +2840,13 @@
                 parte: textoCelula(tds[5]),
                 periodo,
                 dias: mDias ? parseInt(mDias[1], 10) : null,
+                // Mesmo bug/correção de extrairLinhaTransacaoPenal: sem atuacao/
+                // competencia aqui, filtrarSecoesPorAtribuicoes (gerarPDFConjunto)
+                // descartava TODOS os presos sempre que a sessão já tinha coletado mais
+                // de 1 atuação — relatório saía com "0 preso(s)" no PDF mesmo com dados
+                // de verdade acumulados.
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
             };
         },
         linha: (d) => [d.dataPrisao, d.processo, d.vara, d.guia, d.motivo, d.parte, d.periodo],
@@ -3720,6 +3727,17 @@
             dataFinal: textoCelula(tds[7]),
             statusTransacao: textoCelula(tds[8]),
             motivoSuspensao: contexto || '',
+            // Bug relatado pelo usuário: "Transação Penal"/"Susp. Cond. Processo" saíam
+            // ZERADOS no PDF conjunto mesmo com a coleta funcionando (log detalhado
+            // confirmava centenas de registros acumulados) — a linha nunca gravava
+            // atuacao/competencia (usaAtuacao:false neste cfg só desliga o texto de
+            // progresso "troque de atuação e colete mais", não isenta o registro do
+            // filtro por atribuição). filtrarSecoesPorAtribuicoes/gerarPDFConjunto
+            // descartam todo registro sem competencia sempre que há mais de 1 atuação
+            // já coletada nesta sessão — mesmo padrão de correção já usado em
+            // coletarOutrosCumprimentosAgora (competenciaDe(atuacao)).
+            atuacao: atuacao || '',
+            competencia: competenciaDe(atuacao),
         };
     }
     const CABECALHOS_TRANSACAO_PENAL_XLSX = ['Processo', 'Nome da Parte', 'Data da Infração', 'Classe Processual',
@@ -4335,7 +4353,15 @@
             selecionarFormatoCSVBensSngb(form);
             const corpo = new URLSearchParams(new FormData(form));
             const texto = await coletarViaFetchBensSngb(form.action, corpo);
-            const registros = texto ? parseCsvBensPendentesSngb(texto) : [];
+            const registrosBrutos = texto ? parseCsvBensPendentesSngb(texto) : [];
+            // Mesmo bug/correção de extrairLinhaTransacaoPenal/CFG_REAVALIACAO_PRISAO_
+            // PROVISORIA: sem atuacao/competencia aqui, filtrarSecoesPorAtribuicoes
+            // (gerarPDFConjunto) descartava TODOS os processos deste CSV sempre que a
+            // sessão já tinha coletado mais de 1 atuação — relatório saía com "0
+            // processo(s)" no PDF mesmo com o CSV trazendo dados de verdade.
+            const atuacao = lerAtuacao();
+            const competencia = competenciaDe(atuacao);
+            const registros = registrosBrutos.map(r => ({ ...r, atuacao, competencia }));
             console.log(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
             store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'pagina_0', JSON.stringify(registros));
             store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'num_paginas', '1');
