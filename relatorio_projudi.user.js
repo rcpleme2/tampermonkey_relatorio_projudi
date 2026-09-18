@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.90
+// @version      25.91
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3785,7 +3785,10 @@
                 // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
                 {
                     titulo: 'Motivo da Suspensão',
-                    calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
+                    // ordenarPorOrdemFixa (MOTIVOS_SUSPENSAO) — ver comentário grande na
+                    // função: garante que esta seção e a de "Vinculadas a Processo ATIVO"
+                    // logo abaixo listem os motivos na MESMA ordem, card a card.
+                    calc: (dados) => ordenarPorOrdemFixa(contarPorCampo(dados, 'motivoSuspensao', 12), MOTIVOS_SUSPENSAO.map(m => m.rotulo))
                         .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
                 },
                 // Pedido do usuário: suspensões ativas vinculadas a um processo cuja
@@ -3801,7 +3804,7 @@
                     calc: (dados) => {
                         const ativos = dados.dadosAtivos || [];
                         if (!ativos.length) return [];
-                        return contarPorCampo(ativos, 'motivoSuspensao', 12)
+                        return ordenarPorOrdemFixa(contarPorCampo(ativos, 'motivoSuspensao', 12), MOTIVOS_SUSPENSAO.map(m => m.rotulo))
                             .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'vermelho' }));
                     },
                 },
@@ -6294,6 +6297,28 @@
             }
         }
         return arr;
+    }
+
+    // Reordena o resultado de contarPorCampo (que vem ordenado por CONTAGEM decrescente,
+    // específica de cada conjunto de dados) por uma ORDEM FIXA de rótulos — pedido do
+    // usuário (CFG_TRANSACAO_PENAL/Suspensões): os cards de "Motivo da Suspensão" e de
+    // "Vinculadas a Processo ATIVO — por Motivo" precisam aparecer na MESMA ordem entre
+    // si (uma seção logo abaixo da outra, card a card), para comparar visualmente motivo
+    // a motivo. Ordenar cada seção pela própria contagem (o padrão de contarPorCampo)
+    // embaralhava a ordem sempre que os totais de cada conjunto divergiam — ex.:
+    // "Insanidade Mental" em 2º lugar geral, mas "Art. 89 da Lei 9.099/95" em 2º lugar
+    // entre os vinculados a processo ativo, deixando os cards das duas seções
+    // desalinhados um embaixo do outro. Rótulos fora de `ordem` (ex. "(vazio)"/"Outros")
+    // vão para o final, em ordem alfabética entre si — mesmo fallback já usado por
+    // desenharGrupos (ver p.ordemGrupos).
+    function ordenarPorOrdemFixa(itens, ordem) {
+        return [...itens].sort((a, b) => {
+            const ia = ordem.indexOf(a.label), ib = ordem.indexOf(b.label);
+            if (ia !== -1 && ib !== -1) return ia - ib;
+            if (ia !== -1) return -1;
+            if (ib !== -1) return 1;
+            return a.label.localeCompare(b.label, 'pt-BR');
+        });
     }
 
     // Variante de contarPorCampo que SOMA um campo numérico por chave, em vez de contar
