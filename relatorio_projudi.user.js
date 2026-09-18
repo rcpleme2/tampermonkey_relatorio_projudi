@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.92
+// @version      25.93
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5761,7 +5761,14 @@
             // PRÓPRIO PROJUDI está mostrando agora, não o nosso contador acumulado)
             // garante que o total seja recapturado toda vez que uma coleta REALMENTE
             // recomeça da página 1, mesmo com dados antigos ainda acumulados.
-            if ((idx === 0 || numeroPaginaAtual() === 1) && cfg.totalIdentificadoNoResumo) {
+            //
+            // Gravado incondicionalmente (não só para cfg.totalIdentificadoNoResumo) desde
+            // que virou a fonte da barra "Nesta etapa" do painel (ver atualizarPainel) —
+            // cfg.totalIdentificadoNoResumo continua sendo o único gate para o KPI/resumo
+            // usar este valor (totalIdentificadoOuColetado), então isso não muda o
+            // comportamento de nenhum relatório já em produção, só passa a alimentar a
+            // barra de progresso da etapa também para relatórios que não usam esse KPI.
+            if (idx === 0 || numeroPaginaAtual() === 1) {
                 // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
                 // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
                 // o comportamento de sempre (1º div#navigator do documento).
@@ -18231,6 +18238,38 @@
             barra.classList.toggle('pa-progress-completo', estado === 'concluido');
             label.innerHTML = `<span>${concluidos} de ${fila.length} concluído(s)</span><span>${pct}%</span>`;
         }
+
+        // "Nesta etapa": progresso do relatório em coleta agora (registros já
+        // extraídos / total identificado na 1ª página da busca — ver
+        // total_identificado em adicionarPagina). Só aparece quando o total já é
+        // conhecido; relatórios sem contagem no cabeçalho da tela (ou ainda na
+        // primeira página, antes do total chegar) ficam só com a barra geral acima —
+        // mesma ideia das duas barras empilhadas (geral + etapa) do painel da
+        // extensão SEEU_correição que o usuário pediu para espelhar aqui.
+        const wrapEtapa = painel.querySelector('.pa-progress-etapa');
+        if (wrapEtapa) {
+            let mostrarEtapa = false;
+            if (estado.startsWith('coletando_')) {
+                const rel = relatorioPorChave(estado.slice(10));
+                if (rel) {
+                    const cfgs = cfgsDoRelatorio(rel);
+                    const atual = cfgs.reduce((s, cfg) => s + contarRegistrosSync(cfg.prefixo), 0);
+                    const totalEtapa = cfgs.reduce((s, cfg) => {
+                        const t = parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10);
+                        return s + (Number.isFinite(t) && t > 0 ? t : 0);
+                    }, 0);
+                    if (totalEtapa > 0) {
+                        mostrarEtapa = true;
+                        const atualLimitado = Math.min(atual, totalEtapa);
+                        const pctEtapa = Math.round((atualLimitado / totalEtapa) * 100);
+                        wrapEtapa.querySelector('.pa-progress-bar-etapa').style.width = pctEtapa + '%';
+                        wrapEtapa.querySelector('.pa-progress-lbl').innerHTML =
+                            `<span>${atualLimitado} de ${totalEtapa} concluído(s)</span><span>${pctEtapa}%</span>`;
+                    }
+                }
+            }
+            wrapEtapa.style.display = mostrarEtapa ? '' : 'none';
+        }
     }
 
     // Categorias do painel: Cível-Geral é a base (todos os relatórios já existentes);
@@ -18364,7 +18403,13 @@
                 <div class="pa-unidades" style="display:none;" title="Atribuições/atuações onde o botão Automatizar já foi clicado — persistem até 'Limpar'"></div>
                 <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
+                    <div class="pa-progress-title">Progresso geral</div>
                     <div class="pa-progress-track"><div class="pa-progress-bar"></div></div>
+                    <div class="pa-progress-lbl">—</div>
+                </div>
+                <div class="pa-progress-etapa" style="display:none;">
+                    <div class="pa-progress-title">Nesta etapa</div>
+                    <div class="pa-progress-track"><div class="pa-progress-bar pa-progress-bar-etapa"></div></div>
                     <div class="pa-progress-lbl">—</div>
                 </div>
                 <div class="pa-checklist">
@@ -18667,11 +18712,19 @@
         #painel-automacao .pa-unidades strong , #projudi-mu-painel .pa-unidades strong { color: #1A1A1A; font-weight: 600; }
 
         #painel-automacao .pa-progress , #projudi-mu-painel .pa-progress { margin-bottom: 10px; }
+        #painel-automacao .pa-progress-etapa , #projudi-mu-painel .pa-progress-etapa { margin-bottom: 10px; }
+        #painel-automacao .pa-progress-title , #projudi-mu-painel .pa-progress-title {
+            font-size: .62em; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: #82807A; margin-bottom: 3px;
+        }
         #painel-automacao .pa-progress-track , #projudi-mu-painel .pa-progress-track { background: #DEDDD6; border-radius: 4px; height: 6px; overflow: hidden; }
         #painel-automacao .pa-progress-bar , #projudi-mu-painel .pa-progress-bar {
             background: #3A5A7D; height: 100%; width: 0%; border-radius: 4px; transition: width .4s ease;
         }
         #painel-automacao .pa-progress-bar.pa-progress-completo , #projudi-mu-painel .pa-progress-bar.pa-progress-completo { background: #527467; }
+        /* Barra "Nesta etapa" (relatório em coleta agora) em verde — cor diferente da
+           "Progresso geral" (azul-marinho acima) pra distinguir as duas à primeira
+           vista, mesma ideia da extensão SEEU_correição que inspirou este recurso. */
+        #painel-automacao .pa-progress-bar-etapa , #projudi-mu-painel .pa-progress-bar-etapa { background: #527467; }
         #painel-automacao .pa-progress-lbl , #projudi-mu-painel .pa-progress-lbl { display: flex; justify-content: space-between; font-size: .66em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-tempo , #projudi-mu-painel .pa-tempo { font-size: .66em; color: #82807A; margin: -4px 0 8px; }
 
