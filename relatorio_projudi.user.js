@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.90
+// @version      25.92
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3803,7 +3803,10 @@
                 // agrupa por "Medidas" (coluna Doação, Comparecimento em juízo etc.).
                 {
                     titulo: 'Motivo da Suspensão',
-                    calc: (dados) => contarPorCampo(dados, 'motivoSuspensao', 12)
+                    // ordenarPorOrdemFixa (MOTIVOS_SUSPENSAO) — ver comentário grande na
+                    // função: garante que esta seção e a de "Vinculadas a Processo ATIVO"
+                    // logo abaixo listem os motivos na MESMA ordem, card a card.
+                    calc: (dados) => ordenarPorOrdemFixa(contarPorCampo(dados, 'motivoSuspensao', 12), MOTIVOS_SUSPENSAO.map(m => m.rotulo))
                         .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'azul' })),
                 },
                 // Pedido do usuário: suspensões ativas vinculadas a um processo cuja
@@ -3819,7 +3822,7 @@
                     calc: (dados) => {
                         const ativos = dados.dadosAtivos || [];
                         if (!ativos.length) return [];
-                        return contarPorCampo(ativos, 'motivoSuspensao', 12)
+                        return ordenarPorOrdemFixa(contarPorCampo(ativos, 'motivoSuspensao', 12), MOTIVOS_SUSPENSAO.map(m => m.rotulo))
                             .map(it => ({ titulo: it.label === '(vazio)' ? 'Sem motivo' : it.label, valor: it.valor, acento: 'vermelho' }));
                     },
                 },
@@ -6320,6 +6323,28 @@
             }
         }
         return arr;
+    }
+
+    // Reordena o resultado de contarPorCampo (que vem ordenado por CONTAGEM decrescente,
+    // específica de cada conjunto de dados) por uma ORDEM FIXA de rótulos — pedido do
+    // usuário (CFG_TRANSACAO_PENAL/Suspensões): os cards de "Motivo da Suspensão" e de
+    // "Vinculadas a Processo ATIVO — por Motivo" precisam aparecer na MESMA ordem entre
+    // si (uma seção logo abaixo da outra, card a card), para comparar visualmente motivo
+    // a motivo. Ordenar cada seção pela própria contagem (o padrão de contarPorCampo)
+    // embaralhava a ordem sempre que os totais de cada conjunto divergiam — ex.:
+    // "Insanidade Mental" em 2º lugar geral, mas "Art. 89 da Lei 9.099/95" em 2º lugar
+    // entre os vinculados a processo ativo, deixando os cards das duas seções
+    // desalinhados um embaixo do outro. Rótulos fora de `ordem` (ex. "(vazio)"/"Outros")
+    // vão para o final, em ordem alfabética entre si — mesmo fallback já usado por
+    // desenharGrupos (ver p.ordemGrupos).
+    function ordenarPorOrdemFixa(itens, ordem) {
+        return [...itens].sort((a, b) => {
+            const ia = ordem.indexOf(a.label), ib = ordem.indexOf(b.label);
+            if (ia !== -1 && ib !== -1) return ia - ib;
+            if (ia !== -1) return -1;
+            if (ib !== -1) return 1;
+            return a.label.localeCompare(b.label, 'pt-BR');
+        });
     }
 
     // Variante de contarPorCampo que SOMA um campo numérico por chave, em vez de contar
@@ -16651,19 +16676,37 @@
     // mesma cautela de capturarContadoresPainelJuntadas: não mexe no valor já gravado
     // quando o usuário está noutra tela. Indicadores ausentes na tela (não fazem parte da
     // competência atual) ficam de fora do array salvo, não entram como zero.
+    //
+    // Acumulador em memória (NÃO persiste entre navegações — reseta sozinho a cada
+    // carregamento de página, já que o userscript inteiro roda de novo) dos indicadores
+    // extras já vistos nesta tela, por id. Bug relatado pelo usuário: "Processos com
+    // suspeita de incompetência - Juiz das Garantias" às vezes ficava de fora do PDF
+    // mesmo a automação tendo passado pela tela certa — causa provável: os 14
+    // indicadores extras vêm de consultas separadas no banco (ver comentário de
+    // LEITURAS_ESTAVEIS_NECESSARIAS) e o poll de 2s do bootstrap chama esta função de
+    // novo bem depois da 1ª captura; se nessa chamada POSTERIOR o span desse indicador
+    // específico não estiver presente no DOM naquele instante (ex. o painel re-renderiza
+    // aquele trecho), a versão antiga sobrescrevia a lista INTEIRA sem ele. Acumulando por
+    // id em vez de substituir a cada chamada, um indicador já visto com sucesso nesta
+    // tela nunca mais desaparece do PDF por causa de uma leitura posterior incompleta.
+    let acumuladorIndicadoresExtraJuntadas = {};
     function capturarOutrosIndicadoresPainelJuntadas() {
         const docs = todosDocumentosAcessiveis();
         for (const d of docs) {
             if (!d.getElementById) continue;
-            const encontrados = [];
+            let achouAlgum = false;
             for (const ind of INDICADORES_EXTRA_JUNTADAS) {
                 const span = d.getElementById(ind.id);
                 if (!span) continue;
+                achouAlgum = true;
                 const n = parseInt((span.textContent || '').trim(), 10);
-                encontrados.push({ label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico });
+                acumuladorIndicadoresExtraJuntadas[ind.id] = { label: ind.label, valor: Number.isFinite(n) ? n : 0, critico: !!ind.critico };
             }
-            if (!encontrados.length) continue;
-            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores encontrados (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
+            if (!achouAlgum) continue;
+            const encontrados = INDICADORES_EXTRA_JUNTADAS
+                .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
+                .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
+            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
             store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
             return;
         }
