@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.95
+// @version      25.96
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10342,11 +10342,13 @@
             desenharSumarioTabelas(doc, sumarioItens);
         }
 
-        // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
-        // [Unidades]" no modo resumo, "Tabelas [Unidades]" no modo tabelas — em vez do
-        // nome genérico de antes (relatorio_conjunto_projudi), que não dizia quais
-        // unidades tinham sido combinadas no PDF.
-        const prefixoNomeArquivo = modo === 'tabelas' ? 'Tabelas' : 'Relatório';
+        // Nome do arquivo com as unidades incluídas (pedido do usuário) — no modo resumo
+        // sempre começa com "Relatório de Correição PROJUDI - [Vara]" (mesmo nome de
+        // Competência já usado no PDF), pra padronizar o que cai na pasta de Downloads;
+        // "Tabelas [Unidades]" no modo tabelas — em vez do nome genérico de antes
+        // (relatorio_conjunto_projudi), que não dizia quais unidades tinham sido
+        // combinadas no PDF.
+        const prefixoNomeArquivo = modo === 'tabelas' ? 'Tabelas' : 'Relatório de Correição PROJUDI -';
         const rotuloUnidadesArquivo = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDoPDFConjunto(secoesEntrada, opcoes)));
         const nomeArquivoConjunto = rotuloUnidadesArquivo ? `${prefixoNomeArquivo} ${rotuloUnidadesArquivo}` : `${prefixoNomeArquivo} Projudi`;
         baixarBlob(doc.output('blob'), `${nomeArquivoConjunto}_${dataArquivo()}.pdf`);
