@@ -2045,6 +2045,14 @@
         'Acessórios de Armas de Fogo e Produtos Controlados pelo EB',
     ];
 
+    // REGRA FIXA (decidida com o usuário na sessão de design do Dashboard/Paisagem,
+    // ainda não implementada): quando o card "Bens Apreendidos" do Dashboard mostrar a
+    // distribuição por tipo em gráfico (ver desenharDashboardPaisagem), "Veículos
+    // Automotores" SEMPRE aparece como categoria própria — mesmo com contagem baixa ou
+    // zero, mesmo fora do top N por volume — nunca escondido dentro de "Outros" (ao
+    // contrário do corte "top 5 + Outros" que a linha "Bens Apreendidos" da capa em
+    // lista já usa hoje via contarPorCampo, em gerarPDFConjunto — aquele comportamento
+    // da capa continua como está; esta regra vale só para o gráfico do Dashboard).
     const CFG_APREENSOES = {
         prefixo: 'projudi_apreensoes_',
         // Mostra a linha "Bens Apreendidos" mesmo com zero pendências, desde que já
