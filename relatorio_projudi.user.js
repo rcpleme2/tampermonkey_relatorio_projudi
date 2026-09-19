@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.95
+// @version      25.96
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9269,12 +9269,233 @@
         }
     }
 
-    // Página em paisagem — cartões-resumo (visão geral) seguidos da grade de
-    // indicadores do Cartório e, quando coletado, do Gabinete. `cartorio`/`gabinete` são
-    // os MESMOS objetos já montados em gerarPDFConjunto para a capa em lista (nenhum
-    // dado é recalculado aqui) — ver gabinete.itens/rotulo/pendentes/prioritarios/
-    // maisAntiga/status em gerarPDFConjunto (bloco "if (secaoGabinete) {...}").
-    function desenharDashboardPaisagem(doc, cartorio, gabinete, agora) {
+    // ═══ Placar ponderado — pedido do usuário: em vez do veredito "pior caso manda"
+    // (piorSituacao), 12 critérios com pesos definidos numa sessão de design (ver
+    // histórico de commits), somando 100 pontos. Os 4 de maior peso usam a FRAÇÃO de
+    // itens que violam seu próprio prazo (não só o pior item — um processo ruim não
+    // derruba os outros); os 8 restantes reaproveitam a classificação Regular/Atenção/
+    // Crítico já existente no resto do relatório, convertida em % de retenção do peso
+    // (100%/50%/10%). Isto é uma REGRA DE NEGÓCIO nova, confirmada com o usuário — não
+    // substitui cartorio.situacao/piorSituacao (a capa em lista continua igual). ═══
+    const RETENCAO_POR_STATUS_PLACAR = { regular: 1, atencao: 0.5, critico: 0.1 };
+
+    // Fração (0 a 1) dos itens {dias, prioritario} (ver itensParaClassificacao) que
+    // violam seu próprio limite de dias. `limiteOuFn` pode ser um número fixo ou uma
+    // função (item) => limite — usado por Juntadas, cujo limite depende de `prioritario`
+    // (>5d se urgente, >30d se não). Sem itens coletados/pendentes: 0 (não penaliza o
+    // que não foi medido).
+    function fracaoViolacaoPlacar(itens, limiteOuFn) {
+        if (!itens || !itens.length) return 0;
+        const limite = (it) => (typeof limiteOuFn === 'function' ? limiteOuFn(it) : limiteOuFn);
+        const violam = itens.filter(it => it.dias != null && it.dias > limite(it)).length;
+        return violam / itens.length;
+    }
+
+    // Cada critério: { chave, nome, peso, pontos, disponivel }. `disponivel: false`
+    // (relatório correspondente nem foi coletado) recebe o peso INTEIRO — mesma regra de
+    // "zero pendências é regular" já usada em classificarSituacaoPorDias(null,...), só
+    // que aqui por "não fica pior por não ter sido medido" em vez de fingir um dado.
+    function calcularPlacarCartorio(secoes, itensCartorio, now) {
+        const itemDe = (cfg) => itensCartorio.find(t => t.secao.cfgOriginal === cfg);
+        const secaoDe = (cfg) => secoes.find(s => s.cfgOriginal === cfg);
+
+        const paralisados = itemDe(CFG_PARALISADOS);
+        const retorno = itemDe(CFG_RETORNO);
+        const juntadas = itemDe(CFG_JUNTADAS);
+        const mandadosRetorno = itemDe(CFG_MANDADOS_RETORNO);
+        const remessas = itemDe(CFG_REMESSAS);
+        const suspensos = itemDe(CFG_SUSPENSOS);
+        const secaoTempoMedio = secaoDe(CFG_TEMPOMEDIO);
+        const secaoApreensoes = secaoDe(CFG_APREENSOES);
+        const secaoBensSngb = secaoDe(CFG_BENS_PENDENTES_SNGB);
+        const secaoOutrosCumprimentos = secaoDe(CFG_OUTROS_CUMPRIMENTOS);
+
+        // Tempo médio geral (dias) — mesmo cálculo da linha "Tempo médio de cumprimento"
+        // da capa em lista (ver itensOutros em gerarPDFConjunto); recalculado aqui porque
+        // aquele `media` é local ao bloco que monta a linha de lá.
+        let mediaTempoMedio = null;
+        if (secaoTempoMedio) {
+            const validos = secaoTempoMedio.dados.filter(d => d.dias != null);
+            mediaTempoMedio = validos.length ? validos.reduce((s, d) => s + d.dias, 0) / validos.length : null;
+        }
+
+        // Bens Apreendidos pendentes de destinação (sem dataEncerramento) — dias desde o
+        // registro (mesma lógica de itensParaClassificacao, mas CFG_APREENSOES não passa
+        // por ela hoje — não é uma "tarefa" do esquema Cartório).
+        let itensApreensoesPendentes = null;
+        if (secaoApreensoes) {
+            itensApreensoesPendentes = secaoApreensoes.dados
+                .filter(d => !d.dataEncerramento)
+                .map(d => ({ dias: diasNum(d.dataRegistro, now) }));
+        }
+
+        // % do total de apreensões sem registro no SNGB.
+        const fracaoSngb = (secaoBensSngb && secaoApreensoes && secaoApreensoes.dados.length)
+            ? secaoBensSngb.dados.length / secaoApreensoes.dados.length : null;
+
+        // % de urgentes entre pendentes — BNMP (origem 'bnmp') e Outros Cumprimentos
+        // (todas as origens, mesmo total da linha "Outros Cumprimentos" da capa em
+        // lista) — proxy combinado enquanto não houver idade por item nesses dois (ver
+        // comentário-registro perto de CFG_APREENSOES sobre "Veículos Automotores" —
+        // mesma limitação de dado agregado sem data individual).
+        function fracaoUrgentes(dados, origem) {
+            const regs = origem ? dados.filter(d => d.origem === origem) : dados;
+            const pendentes = regs.reduce((s, d) => s + (d.pendentes || 0), 0);
+            const urgentes = regs.reduce((s, d) => s + (d.urgentes || 0), 0);
+            return pendentes > 0 ? urgentes / pendentes : null;
+        }
+        const fracaoBnmp = secaoOutrosCumprimentos ? fracaoUrgentes(secaoOutrosCumprimentos.dados, 'bnmp') : null;
+        const fracaoOutrosCumprimentos = secaoOutrosCumprimentos ? fracaoUrgentes(secaoOutrosCumprimentos.dados, null) : null;
+
+        // Regular/Atenção/Crítico por PROPORÇÃO (não por dias) — mesmas 3 faixas do
+        // resto do relatório, aplicadas a uma fração 0-1 em vez de "dias da mais antiga".
+        function statusPorFracao(fracao, limiteAtencao, limiteCritico) {
+            if (fracao == null) return null;
+            if (fracao > limiteCritico) return 'critico';
+            if (fracao > limiteAtencao) return 'atencao';
+            return 'regular';
+        }
+
+        const criteriosViolacao = [
+            { chave: 'paralisados90', nome: 'Paralisados > 90 dias', peso: 16, disponivel: !!paralisados, fracao: paralisados ? fracaoViolacaoPlacar(paralisados._itens, 90) : 0 },
+            { chave: 'retorno5', nome: 'Retorno de Conclusão > 5 dias', peso: 14, disponivel: !!retorno, fracao: retorno ? fracaoViolacaoPlacar(retorno._itens, 5) : 0 },
+            { chave: 'juntadas', nome: 'Juntadas (>5d urgente / >30d não urgente)', peso: 12, disponivel: !!juntadas, fracao: juntadas ? fracaoViolacaoPlacar(juntadas._itens, (it) => (it.prioritario ? 5 : 30)) : 0 },
+            { chave: 'paralisados30', nome: 'Paralisados > 30 dias', peso: 10, disponivel: !!paralisados, fracao: paralisados ? fracaoViolacaoPlacar(paralisados._itens, 30) : 0 },
+        ];
+        criteriosViolacao.forEach(c => { c.pontos = c.peso * (1 - c.fracao); });
+
+        const criteriosDiscretos = [
+            { chave: 'mandadosRetorno', nome: 'Mandados Aguardando Análise de Retorno', peso: 8, status: mandadosRetorno ? mandadosRetorno.status : null },
+            { chave: 'remessas', nome: 'Remessas em Aberto', peso: 7, status: remessas ? remessas.status : null },
+            { chave: 'suspensosIndeterminado', nome: 'Suspensos por Prazo Indeterminado', peso: 7, status: suspensos ? suspensos.status : null },
+            { chave: 'tempoMedio', nome: 'Tempo Médio p/ Cumprimento de Decisões', peso: 7, status: mediaTempoMedio != null ? classificarSituacaoPorDias(mediaTempoMedio, 3, 7) : null },
+            { chave: 'bensApreendidos', nome: 'Bens Apreendidos (pendentes de destinação)', peso: 6, status: itensApreensoesPendentes ? classificarSituacaoPorDias(maiorDias(itensApreensoesPendentes), 30, 90) : null },
+            { chave: 'bensSngb', nome: 'Bens Pendentes de Cadastro no SNGB', peso: 5, status: statusPorFracao(fracaoSngb, 0.10, 0.25) },
+            { chave: 'bnmp', nome: 'Pendências no BNMP', peso: 4, status: statusPorFracao(fracaoBnmp, 0.10, 0.30) },
+            { chave: 'outrosCumprimentos', nome: 'Outros Cumprimentos (proxy: % urgentes)', peso: 4, status: statusPorFracao(fracaoOutrosCumprimentos, 0.10, 0.30) },
+        ];
+        criteriosDiscretos.forEach(c => {
+            c.disponivel = c.status != null;
+            c.pontos = c.peso * (c.disponivel ? RETENCAO_POR_STATUS_PLACAR[c.status] : 1);
+        });
+
+        const criterios = [...criteriosViolacao, ...criteriosDiscretos];
+        const total = criterios.reduce((s, c) => s + c.pontos, 0);
+        const situacao = total >= 85 ? 'regular' : (total >= 60 ? 'atencao' : 'critico');
+        return { total, situacao, criterios };
+    }
+
+    // Anel (donut/gauge) preenchido entre rInner/rOuter, do ângulo a0 ao a1 (graus,
+    // convenção matemática — 0=direita, sentido anti-horário; não precisa corresponder a
+    // nada externo, só ser consistente dentro de um mesmo gráfico). jsPDF não tem um
+    // comando de "arco" nativo — contorna desenhando um polígono fechado ao longo do
+    // arco (`doc.lines` com uma lista de deltas relativos) e preenchendo.
+    function anelPreenchidoPlacar(doc, cx, cy, rOuter, rInner, a0, a1, cor, steps) {
+        const toRad = (deg) => (deg * Math.PI) / 180;
+        const n = steps || 40;
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+            const a = a0 + (a1 - a0) * (i / n);
+            pts.push([cx + rOuter * Math.cos(toRad(a)), cy + rOuter * Math.sin(toRad(a))]);
+        }
+        for (let i = n; i >= 0; i--) {
+            const a = a0 + (a1 - a0) * (i / n);
+            pts.push([cx + rInner * Math.cos(toRad(a)), cy + rInner * Math.sin(toRad(a))]);
+        }
+        const deltas = [];
+        for (let i = 1; i < pts.length; i++) deltas.push([pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]]);
+        doc.setFillColor(...cor);
+        doc.lines(deltas, pts[0][0], pts[0][1], [1, 1], 'F', true);
+    }
+
+    // Medidor semicircular (0-100) com 3 faixas coloridas (Crítico <60/Atenção 60-84/
+    // Regular 85+) e uma agulha apontando pro score — sem rótulos "0"/"100" (colidiam
+    // com a ponta do arco; a legenda de cores ao lado já explica a escala, bug relatado
+    // pelo usuário na 1ª versão deste gauge).
+    function desenharGaugePlacar(doc, cx, cy, r, score) {
+        const toRad = (deg) => (deg * Math.PI) / 180;
+        const angParaScore = (s) => 180 - (s / 100) * 180;
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(0), angParaScore(60), COR.vermelho);
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(60), angParaScore(85), COR.ambar);
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(85), angParaScore(100), COR.aqua);
+        const a = toRad(angParaScore(score));
+        const tipX = cx + (r - 11) * Math.cos(a), tipY = cy - (r - 11) * Math.sin(a);
+        doc.setDrawColor(...COR.tinta); doc.setLineWidth(1.1);
+        doc.line(cx, cy, tipX, tipY);
+        doc.setFillColor(...COR.tinta); doc.circle(cx, cy, 1.8, 'F');
+        const situacao = score >= 85 ? 'regular' : (score >= 60 ? 'atencao' : 'critico');
+        const info = SITUACAO_INFO[situacao] || SITUACAO_INFO.regular;
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(19); doc.setTextColor(...COR.tinta);
+        doc.text(score.toFixed(0), cx, cy + 12, { align: 'center' });
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...info.cor);
+        doc.text(info.rotulo.toUpperCase(), cx, cy + 17.5, { align: 'center' });
+    }
+
+    // Barra de progresso simples (fundo COR.grade + preenchimento proporcional), usada
+    // tanto pelas barras de critério do placar quanto (indiretamente) pode ser
+    // reaproveitada por outras grades futuras — comportamento idêntico ao protótipo já
+    // validado com o usuário.
+    function desenharBarraPlacar(doc, x, y, w, h, frac, cor) {
+        doc.setFillColor(...COR.grade); doc.roundedRect(x, y, w, h, h / 2, h / 2, 'F');
+        if (frac > 0) { doc.setFillColor(...cor); doc.roundedRect(x, y, Math.max(w * frac, h), h, h / 2, h / 2, 'F'); }
+    }
+
+    // Página 1 do Dashboard — "Placar ponderado": gauge + ranking dos critérios por
+    // peso. `placar` vem de calcularPlacarCartorio (já calculado antes de chamar aqui,
+    // ver modo 'dashboard' em gerarPDFConjunto).
+    function desenharPlacarPaisagem(doc, placar, agora) {
+        const pw = doc.internal.pageSize.getWidth();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const colW = (uw - 10) / 2;
+        const xR = m + colW + 10;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 22, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(255, 255, 255);
+        doc.text('Dashboard — Placar Ponderado', m, 14);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, pw - m, 14, { align: 'right' });
+
+        const y = 30;
+        const panelH = 84;
+        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
+
+        // Painel esquerdo: gauge
+        doc.roundedRect(m, y, colW, panelH, 2, 2, 'D');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...COR.tinta);
+        doc.text('Placar ponderado — Cartório', m + 6, y + 9);
+        desenharGaugePlacar(doc, m + colW / 2, y + 46, 27, placar.total);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
+        doc.text(`${placar.total.toFixed(1).replace('.', ',')} / 100 pontos — ${placar.criterios.length} critérios ponderados`, m + colW / 2, y + 70, { align: 'center' });
+
+        // Painel direito: ranking dos critérios (ordenados por peso, maior primeiro)
+        doc.roundedRect(xR, y, colW, panelH, 2, 2, 'D');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...COR.tinta);
+        doc.text('Pontos por critério (ordenado por peso)', xR + 6, y + 9);
+        const ordenados = placar.criterios.slice().sort((a, b) => b.peso - a.peso);
+        const linhaH = (panelH - 16) / ordenados.length;
+        ordenados.forEach((c, i) => {
+            const ry = y + 16 + i * linhaH;
+            const cor = !c.disponivel ? COR.muted
+                : (c.pontos / c.peso >= 0.9 ? COR.aqua : (c.pontos / c.peso >= 0.5 ? COR.ambar : COR.vermelho));
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...COR.tintaSec);
+            doc.text(textoTruncadoParaLargura(doc, `${c.nome} (${c.peso})`, colW - 24), xR + 6, ry - 1);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.8); doc.setTextColor(...COR.tinta);
+            doc.text(c.pontos.toFixed(1), xR + colW - 6, ry - 1, { align: 'right' });
+            desenharBarraPlacar(doc, xR + 6, ry, colW - 12, Math.min(linhaH * 0.42, 3.2), c.disponivel ? c.pontos / c.peso : 1, cor);
+        });
+
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.muted);
+        doc.text('Faixas do placar: Crítico < 60 · Atenção 60–84 · Regular 85+. Critérios cinza: relatório correspondente não coletado nesta rodada.', m, y + panelH + 8);
+    }
+
+    // Página 2 do Dashboard — "Visão Geral" (grade de cartões; ver desenharPlacarPaisagem
+    // para a página 1, "Placar ponderado"). Nome antigo desta função era
+    // desenharDashboardPaisagem — renomeada quando o Dashboard virou 2 páginas no mesmo
+    // arquivo (pedido do usuário).
+    function desenharVisaoGeralPaisagem(doc, cartorio, gabinete, agora) {
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
         const m = 12;
@@ -9285,7 +9506,7 @@
 
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 22, 'F');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(255, 255, 255);
-        doc.text('Dashboard — Situação da Unidade', m, 14);
+        doc.text('Dashboard — Visão Geral', m, 14);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
         doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, pw - m, 14, { align: 'right' });
 
@@ -10338,12 +10559,19 @@
             || atuacoesAtivas.length > 0 || outrasSecoes.length > 0 || !!secaoAtivosClasse;
         let usouPagina1 = false;
 
-        // ═══ Modo 'dashboard': só a grade em paisagem (ver desenharDashboardPaisagem) e
-        // sai — nenhuma página de resumo/tabela individual entra aqui, é só a visão
-        // geral. Nome de arquivo próprio ("Dashboard [Unidades]"), mesmo padrão de data
-        // dos outros dois modos. ═══
+        // ═══ Modo 'dashboard': 2 páginas em paisagem NO MESMO ARQUIVO (pedido do
+        // usuário) — "Placar Ponderado" (calcularPlacarCartorio/desenharPlacarPaisagem)
+        // seguida de "Visão Geral" (desenharVisaoGeralPaisagem, grade de cartões) — e
+        // sai; nenhuma página de resumo/tabela individual dos modos 'resumo'/'tabelas'
+        // entra aqui. Nome de arquivo próprio ("Dashboard [Unidades]"), mesmo padrão de
+        // data dos outros dois modos. ═══
         if (modo === 'dashboard') {
-            if (temConteudo) desenharDashboardPaisagem(doc, cartorio, gabinete, agora);
+            if (temConteudo) {
+                const placar = calcularPlacarCartorio(secoes, itensCartorio, now);
+                desenharPlacarPaisagem(doc, placar, agora);
+                doc.addPage('a4', 'landscape');
+                desenharVisaoGeralPaisagem(doc, cartorio, gabinete, agora);
+            }
             const rotuloUnidadesArquivoDash = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDoPDFConjunto(secoesEntrada, opcoes)));
             const nomeArquivoDash = rotuloUnidadesArquivoDash ? `Dashboard ${rotuloUnidadesArquivoDash}` : 'Dashboard Projudi';
             baixarBlob(doc.output('blob'), `${nomeArquivoDash}_${dataArquivo()}.pdf`);
@@ -15832,6 +16060,10 @@
     // — usados só para mostrar o tempo decorrido no painel (ver atualizarPainel).
     const CHAVE_AUTO_INICIO = 'projudi_auto_inicio';
     const CHAVE_AUTO_FIM = 'projudi_auto_fim';
+    // '1' quando o checkbox "Dashboard" estava marcado ao clicar em "Automatizar" — lido
+    // (e limpo) só uma vez, no fim de verdade da automação (estado 'ir_fim' em
+    // passoAutomacao). Ver onclick de #pa-iniciar / gerarDashboardAutomatico.
+    const CHAVE_AUTO_GERAR_DASHBOARD = 'projudi_auto_gerar_dashboard';
 
     // "Xh Ym Zs" / "Ym Zs" / "Zs", sempre com o menor número de unidades necessário.
     function formatarDuracao(ms) {
@@ -15891,7 +16123,10 @@
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
     function relatorioMarcadoPorPadrao(key) {
         const salvas = lerSelecoesSalvasPainel();
-        return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+        if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
+        // Dashboard é opt-in (pedido do usuário: "deve ser elaborado apenas se
+        // selecionado") — ao contrário dos demais, que vêm todos marcados por padrão.
+        return key !== 'dashboard';
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -16164,8 +16399,16 @@
     // relatórios uma vez no painel, marca as unidades aqui, e os dois ficam combinados.
     function iniciarAutomacaoMultiUnidade(titulos, periodoTM) {
         if (!titulos || !titulos.length) { alert('Selecione ao menos uma unidade.'); return; }
-        const fila = REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
+        // Dashboard (semColeta: true) nunca entra na fila de navegação — mesmo motivo/
+        // mecanismo do onclick de #pa-iniciar (ver CHAVE_AUTO_GERAR_DASHBOARD). Sem este
+        // filtro, marcar "Dashboard" aqui empurraria a chave 'dashboard' pra dentro de
+        // 'projudi_auto_fila' e passoAutomacao tentaria navegar pra uma página que não
+        // existe, travando a automação em várias unidades.
+        const gerarDashboard = relatorioMarcadoPorPadrao('dashboard');
+        store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, gerarDashboard ? '1' : '0');
+        const fila = REPORTS_AUTOMACAO.filter(r => r.key !== 'dashboard' && relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
         if (!fila.length) {
+            store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, '0'); // aborta sem iniciar — não deixa o flag "preso" pra uma rodada futura
             alert('Nenhum relatório está marcado. Marque ao menos um relatório no painel desta mesma tela.');
             return;
         }
@@ -16191,6 +16434,7 @@
             alert(`Não foi possível localizar a unidade "${titulos[0]}" nesta tela.`);
             finalizarMultiUnidade();
             store.removeItem(AUTO_ESTADO);
+            store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, '0');
         } else {
             console.log(`[Projudi MultiUnidade] clique em "${titulos[0]}" disparado — aguardando a página recarregar`);
         }
@@ -16656,6 +16900,16 @@
         { key: 'arquivadosaldo', cfg: CFG_ARQUIVADOS_SALDO, navAlvo: 'arquivadosaldo', rotulo: 'Processos Arquivados com Saldo', curto: 'Arq. c/ Saldo', dominio: 'cartorio', precisaPreencher: true },
         // ── Gabinete ────────────────────────────────────────────────────────────────
         { key: 'conclusoes',  cfg: CFG_CONCLUSOES,  navAlvo: 'conclusoes',  rotulo: 'Conclusões',             curto: 'Conclusões',  dominio: 'gabinete', precisaPreencher: true },
+        // ── Dashboard (pedido do usuário) ──────────────────────────────────────────
+        // Não é um relatório com página própria pra navegar/coletar — é uma SÍNTESE dos
+        // demais relatórios já coletados (ver gerarDashboardAutomatico/calcularPlacarCartorio).
+        // semColeta: true faz o item NUNCA entrar na fila de navegação passada a
+        // iniciarAutomacao (ver onclick de #pa-iniciar) — fica só como um checkbox comum
+        // no Cível-Geral; quando marcado, o Dashboard é gerado automaticamente ao FINAL
+        // da automação (estado 'ir_fim' em passoAutomacao), não por um botão à parte.
+        // cfg ausente de propósito (ver guarda em cfgsDoRelatorio) — sem prefixo/
+        // localStorage próprio, sem contagem de registros, sem progresso "nesta etapa".
+        { key: 'dashboard', rotulo: 'Dashboard (Placar + Visão Geral)', curto: 'Dashboard', semColeta: true },
         // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
@@ -16768,7 +17022,13 @@
     function relatorioPorCfg(cfg) {
         return REPORTS_AUTOMACAO.find(r => r.cfg === cfg || (r.cfgs && r.cfgs.includes(cfg)));
     }
-    function cfgsDoRelatorio(r) { return r.cfgs || [r.cfg]; }
+    // [] (não [undefined]) quando o item não tem cfg próprio — caso do Dashboard
+    // (key 'dashboard', semColeta: true em REPORTS_AUTOMACAO): é uma síntese de outras
+    // seções já coletadas, não um relatório com prefixo/localStorage próprio. Sem essa
+    // guarda, todo `.reduce`/`.forEach`/`.some` sobre cfgsDoRelatorio(item) quebraria em
+    // `undefined.prefixo` nos vários lugares que iteram REPORTS_AUTOMACAO inteiro (ver
+    // atualizarPainel/secoesColetadas).
+    function cfgsDoRelatorio(r) { return r.cfgs || (r.cfg ? [r.cfg] : []); }
 
     function lerFilaAutomacao() {
         // Mesma proteção usada em lerFilaMesesTempoMedio/desembrulharArray: o valor às
@@ -17779,6 +18039,13 @@
             store.setItem(AUTO_ESTADO, 'concluido');
             store.setItem(CHAVE_AUTO_FIM, String(agora));
             if (multiUnidadeEmCurso()) finalizarMultiUnidade(); // rodada de várias unidades chegou ao fim de verdade
+            // Dashboard marcado antes de "Automatizar" (ver onclick de #pa-iniciar) —
+            // gera agora, no fim de verdade da fila (não em cada troca de unidade do
+            // modo multi-unidade, só quando não há próxima unidade a rodar).
+            if (store.getItem(CHAVE_AUTO_GERAR_DASHBOARD) === '1') {
+                store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, '0');
+                gerarDashboardAutomatico();
+            }
             navegarMenu('inicio');
             return;
         }
@@ -18004,8 +18271,9 @@
     }
 
     // modo: 'resumo' (botão "Relatório PDF"), 'tabelas' (botão "Tabelas
-    // Discriminadas") ou 'dashboard' (botão "Dashboard (Paisagem)") — ver
-    // gerarPDFConjunto. As atribuições são derivadas dos PRÓPRIOS
+    // Discriminadas") ou 'dashboard' (sem botão — gerado automaticamente ao final da
+    // automação via gerarDashboardAutomatico, ver checkbox "Dashboard" no Cível-Geral)
+    // — ver gerarPDFConjunto. As atribuições são derivadas dos PRÓPRIOS
     // DADOS coletados (campo competencia/atuacao de cada registro), e NÃO do mapa de
     // Processos Ativos (lerMapaAtivos): aquele mapa só é gravado quando a opção "Ativos"
     // está marcada e pode não refletir todas as atribuições realmente coletadas.
@@ -18047,6 +18315,28 @@
             // dados existentes — ver onclick de #pa-iniciar em injetarPainel).
         }
         catch (err) { alert('Erro ao gerar PDF: ' + err.message); console.error(err); }
+    }
+
+    // Gera o Dashboard (modo 'dashboard' de gerarPDFConjunto) sem NENHUMA interação —
+    // chamado automaticamente ao final de uma automação onde o checkbox "Dashboard"
+    // estava marcado (ver estado 'ir_fim' em passoAutomacao/CHAVE_AUTO_GERAR_DASHBOARD),
+    // ou direto pelo onclick de #pa-iniciar quando só o Dashboard foi marcado (nada a
+    // navegar). Diferente de baixarPDFConjunto: nunca abre o diálogo de escolha de
+    // atribuições (escolherAtribuicoesPDFConjunto) — não há usuário presente pra
+    // respondê-lo nesse momento — sempre inclui TODAS as atribuições já coletadas.
+    async function gerarDashboardAutomatico() {
+        try {
+            const secoes = await secoesColetadas();
+            if (!secoes.some(s => s.dados.length)) {
+                logPainel('[Auto Projudi] Dashboard marcado, mas nenhum dado coletado ainda — nada a gerar.');
+                return;
+            }
+            gerarPDFConjunto(secoes, 'dashboard', {});
+            logPainel('[Auto Projudi] Dashboard gerado automaticamente ao final da automação.');
+        } catch (err) {
+            console.error('[Auto Projudi] erro ao gerar Dashboard automaticamente:', err);
+            logPainel(`[Auto Projudi] erro ao gerar Dashboard: ${err.message}`);
+        }
     }
 
     // ── Relatório conjunto em Word (editável) — pedido do usuário ───────────────────
@@ -18641,7 +18931,6 @@
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com o resumo (cartões de KPI e tabela comparativa por competência) de cada relatório já coletado, sem tabelas discriminadas">⬇ Relatório PDF</button>
                         <button id="pa-tabelas" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com as tabelas discriminadas de cada relatório já coletado">⬇ Tabelas Discriminadas</button>
-                        <button id="pa-dashboard" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF em página única A4 paisagem com os mesmos indicadores da capa, em grade de cartões — visão geral rápida, sem tabelas discriminadas">⬇ Dashboard (Paisagem)</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
@@ -18661,12 +18950,28 @@
             // Itens de outra categoria ficam com o checkbox oculto (display:none no
             // .pa-group), não desmarcado — sem esse filtro, marcar um item específico,
             // trocar de aba e clicar Automatizar rodaria um relatório invisível na tela.
-            const fila = [...painel.querySelectorAll('.pa-check:checked')]
+            const filaMarcada = [...painel.querySelectorAll('.pa-check:checked')]
                 .filter(c => { const grupo = c.closest('.pa-group'); return !grupo || grupo.style.display !== 'none'; })
                 .map(c => c.dataset.key).filter(Boolean);
+            // Dashboard (pedido do usuário: "elaborado apenas se selecionado antes de
+            // iniciar a extração") não é navegável — nunca entra na fila que
+            // iniciarAutomacao/passoAutomacao percorrem (ver semColeta em
+            // REPORTS_AUTOMACAO). Fica só marcado num flag lido no fim da automação
+            // (estado 'ir_fim' em passoAutomacao) — ver gerarDashboardAutomatico.
+            const gerarDashboard = filaMarcada.includes('dashboard');
+            const fila = filaMarcada.filter(k => k !== 'dashboard');
+            store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, gerarDashboard ? '1' : '0');
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
             const periodoTM = periodoSelTM ? periodoSelTM.value : '1m';
+            // Só o Dashboard marcado, nada mais pra automatizar: gera direto dos dados
+            // já coletados (não há nada a navegar) em vez de cair no alerta "selecione
+            // ao menos um relatório" de iniciarAutomacao.
+            if (!fila.length && gerarDashboard) {
+                store.setItem(CHAVE_AUTO_GERAR_DASHBOARD, '0');
+                gerarDashboardAutomatico();
+                return;
+            }
             // Pedido do usuário: desde que "Limpar" deixou de rodar sozinho depois do PDF
             // (ver baixarPDFConjunto), reiniciar "Automatizar" por cima de dados já
             // coletados dos relatórios marcados precisa de uma escolha explícita —
@@ -18697,7 +19002,12 @@
         };
         painel.querySelector('#pa-pdf').onclick = () => baixarPDFConjunto('resumo');
         painel.querySelector('#pa-tabelas').onclick = () => baixarPDFConjunto('tabelas');
-        painel.querySelector('#pa-dashboard').onclick = () => baixarPDFConjunto('dashboard');
+        // Sem botão próprio pro Dashboard (pedido do usuário): vira um checkbox comum no
+        // Cível-Geral (key 'dashboard') e é gerado sozinho ao final da automação, se
+        // marcado — ver onclick de #pa-iniciar / gerarDashboardAutomatico (que chama
+        // gerarPDFConjunto direto, sem passar por baixarPDFConjunto — este último
+        // continua aceitando modo 'dashboard', só que sem nenhum botão que o chame assim
+        // mais).
         // Botão "Relatório Word" removido temporariamente do painel (pedido do usuário —
         // "não estou satisfeito" com o resultado) — a função baixarWordConjunto() e todo
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
