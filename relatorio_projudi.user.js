@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.94
+// @version      25.95
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8089,10 +8089,6 @@
             ? tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
                 { semMedia: true, diasNaColunaAntiga: true }) + 6
             : gY0;
-        const blocos = [
-            { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
-            { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
-        ].filter(b => b.itens.length);
         const ctx = {
             rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false),
             topoContinuacao: m + 14,
@@ -8102,6 +8098,26 @@
                 doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
             },
         };
+        // Pedido do usuário: com total > 0, listar os 5 processos pendentes há mais tempo
+        // (mesmo `dias`/`dtRemessa` já usados na tabela discriminada) — reaproveita
+        // tabelaRanking, o mesmo padrão já usado em Tempo Médio/Paralisados/Remessas para
+        // "processos com X mais demorado".
+        if (sub.length) {
+            const maisAntigos = sub.map(d => ({ ...d, dias: diasDecorridos(d.dtRemessa, now) }))
+                .sort((a, b) => (b.dias ?? -Infinity) - (a.dias ?? -Infinity))
+                .slice(0, 5);
+            if (y + medirTabela(maisAntigos.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            y = tabelaRanking(doc, m, y, uw, '5 Processos Mais Antigos', maisAntigos, [
+                { header: 'Processo', get: d => d.processo, width: 40 },
+                { header: 'Classe Processual', get: d => d.classe, width: 40 },
+                { header: 'Dt. Conclusão', get: d => d.dtRemessa, width: 20 },
+                { header: 'Dias', get: d => d.dias, width: 14, halign: 'right' },
+            ], COR.vermelho) + 8;
+        }
+        const blocos = [
+            { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
+            { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
+        ].filter(b => b.itens.length);
         if (blocos.length) desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
         ctx.rodapeAntesDeVirar();
     }
