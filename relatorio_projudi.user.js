@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.94
+// @version      25.95
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -17276,7 +17276,20 @@
         } else {
             leiturasEstaveisPainelJuntadas = 0;
         }
-        const estavel = leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
+        // Bug relatado pelo usuário (3ª rodada): mesmo com 3 leituras iguais seguidas
+        // exigidas, indicadores com valor > 0 (ex. "Autuação da Guia de Execução",
+        // "Multas Fupen vencidas e pendentes de ordenação", "Processos com suspeita de
+        // incompetência - Juiz das Garantias") ainda ficavam de fora do PDF — a
+        // assinatura podia ficar PARADA num platô com só uma PARTE dos ids presentes
+        // (ex. 3 dos 18) por mais de 1,5s antes do restante (consultas mais lentas no
+        // banco) aparecer, e essas 3 leituras iguais bastavam pra "estavel" ficar true
+        // cedo demais. Agora só aceita o caminho rápido quando TODOS os ids de
+        // IDS_PAINEL_ANALISE_JUNTADAS já apareceram no DOM (qtd da assinatura == total) —
+        // um platô parcial nunca conta como pronto, só o teto de tentativas (~17s) abaixo
+        // captura mesmo incompleto nesse caso.
+        const qtdAtual = parseInt(assinaturaAtual.split('|')[0], 10) || 0;
+        const completo = qtdAtual >= IDS_PAINEL_ANALISE_JUNTADAS.length;
+        const estavel = completo && leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
         console.log(`[Auto Projudi Juntadas] leitura ${tentativa} do painel — assinatura="${assinaturaAtual}" (qtd|soma), estáveis seguidas=${leiturasEstaveisPainelJuntadas}/${LEITURAS_ESTAVEIS_NECESSARIAS}`);
         if (estavel || tentativa >= 35) {
             if (!estavel) {
