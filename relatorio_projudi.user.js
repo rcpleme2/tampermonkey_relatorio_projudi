@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.05
+// @version      26.06
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9291,13 +9291,23 @@
     }
 
     // ═══ Placar ponderado — pedido do usuário: em vez do veredito "pior caso manda"
-    // (piorSituacao), 12 critérios com pesos definidos numa sessão de design (ver
-    // histórico de commits), somando 100 pontos. Os 4 de maior peso usam a FRAÇÃO de
+    // (piorSituacao), critérios com pesos definidos numa sessão de design (ver
+    // histórico de commits), somando 100 pontos. Os 3 de maior peso usam a FRAÇÃO de
     // itens que violam seu próprio prazo (não só o pior item — um processo ruim não
-    // derruba os outros); os 8 restantes reaproveitam a classificação Regular/Atenção/
+    // derruba os outros); os demais reaproveitam a classificação Regular/Atenção/
     // Crítico já existente no resto do relatório, convertida em % de retenção do peso
     // (100%/50%/10%). Isto é uma REGRA DE NEGÓCIO nova, confirmada com o usuário — não
-    // substitui cartorio.situacao/piorSituacao (a capa em lista continua igual). ═══
+    // substitui cartorio.situacao/piorSituacao (a capa em lista continua igual).
+    //
+    // REBALANCEAMENTO (pedido do usuário, 2ª rodada): a 1ª versão tinha Paralisados
+    // dominando o placar sozinho (26 de 100 pontos, em 2 critérios) e 19 pontos em 3
+    // métricas reconhecidamente imprecisas (Bens Apreendidos/SNGB/BNMP/Outros
+    // Cumprimentos — sem data por item, só proxy por %), enquanto Alvarás de Soltura
+    // (3012 dias no relatório real!) e Mandados de Cumprimento — os dois piores
+    // indicadores do veredito antigo — nem entravam na conta. Ajustado: Paralisados
+    // consolidado num critério só (severidadeMediaPorDias, mantém a distinção "crônico é
+    // pior" sem precisar de 2 linhas), Alvarás e Mandados-Cumprimento entram na lista, e
+    // a fatia das 4 métricas-proxy cai de 19 para 10 pontos. ═══
     const RETENCAO_POR_STATUS_PLACAR = { regular: 1, atencao: 0.5, critico: 0.1 };
 
     // Fração (0 a 1) dos itens {dias, prioritario} (ver itensParaClassificacao) que
@@ -9312,6 +9322,22 @@
         return violam / itens.length;
     }
 
+    // Severidade MÉDIA (0 a 1) dos itens {dias} — 0 se dentro do limite "regular", 0.5 se
+    // na faixa "atenção", 1 se "crítico". Diferente de fracaoViolacaoPlacar (que só
+    // enxerga um limite por vez, tudo-ou-nada): usada por Processos Paralisados pra
+    // consolidar os 2 critérios antigos (>30d e >90d) num só sem perder a distinção
+    // "processo crônico (>90d) é pior que só-passou-do-prazo (31-90d)".
+    function severidadeMediaPorDias(itens, limiteAtencao, limiteCritico) {
+        if (!itens || !itens.length) return 0;
+        const soma = itens.reduce((s, it) => {
+            if (it.dias == null) return s;
+            if (it.dias > limiteCritico) return s + 1;
+            if (it.dias > limiteAtencao) return s + 0.5;
+            return s;
+        }, 0);
+        return soma / itens.length;
+    }
+
     // Cada critério: { chave, nome, peso, pontos, disponivel }. `disponivel: false`
     // (relatório correspondente nem foi coletado) recebe o peso INTEIRO — mesma regra de
     // "zero pendências é regular" já usada em classificarSituacaoPorDias(null,...), só
@@ -9324,6 +9350,8 @@
         const retorno = itemDe(CFG_RETORNO);
         const juntadas = itemDe(CFG_JUNTADAS);
         const mandadosRetorno = itemDe(CFG_MANDADOS_RETORNO);
+        const mandadosCumprimento = itemDe(CFG_MANDADOS_CUMPRIMENTO);
+        const alvaras = itemDe(CFG_ALVARAS_SOLTURA_REGULARIZAR);
         const remessas = itemDe(CFG_REMESSAS);
         const suspensos = itemDe(CFG_SUSPENSOS);
         const secaoTempoMedio = secaoDe(CFG_TEMPOMEDIO);
@@ -9378,22 +9406,31 @@
         }
 
         const criteriosViolacao = [
-            { chave: 'paralisados90', nome: 'Paralisados > 90 dias', peso: 16, disponivel: !!paralisados, fracao: paralisados ? fracaoViolacaoPlacar(paralisados._itens, 90) : 0 },
-            { chave: 'retorno5', nome: 'Retorno de Conclusão > 5 dias', peso: 14, disponivel: !!retorno, fracao: retorno ? fracaoViolacaoPlacar(retorno._itens, 5) : 0 },
-            { chave: 'juntadas', nome: 'Juntadas (>5d urgente / >30d não urgente)', peso: 12, disponivel: !!juntadas, fracao: juntadas ? fracaoViolacaoPlacar(juntadas._itens, (it) => (it.prioritario ? 5 : 30)) : 0 },
-            { chave: 'paralisados30', nome: 'Paralisados > 30 dias', peso: 10, disponivel: !!paralisados, fracao: paralisados ? fracaoViolacaoPlacar(paralisados._itens, 30) : 0 },
+            { chave: 'retorno5', nome: 'Retorno de Conclusão > 5 dias', peso: 12, disponivel: !!retorno, fracao: retorno ? fracaoViolacaoPlacar(retorno._itens, 5) : 0 },
+            { chave: 'juntadas', nome: 'Juntadas (>5d urgente / >30d não urgente)', peso: 10, disponivel: !!juntadas, fracao: juntadas ? fracaoViolacaoPlacar(juntadas._itens, (it) => (it.prioritario ? 5 : 30)) : 0 },
+            // Consolidado (era 2 critérios, 26 pontos ao todo — reduzido e unificado no
+            // rebalanceamento, ver comentário grande acima). severidadeMediaPorDias
+            // preserva a distinção "crônico (>90d) é pior que só-passou-do-prazo".
+            { chave: 'paralisados', nome: 'Processos Paralisados', peso: 14, disponivel: !!paralisados, fracao: paralisados ? severidadeMediaPorDias(paralisados._itens, 30, 90) : 0 },
         ];
         criteriosViolacao.forEach(c => { c.pontos = c.peso * (1 - c.fracao); });
 
         const criteriosDiscretos = [
-            { chave: 'mandadosRetorno', nome: 'Mandados Aguardando Análise de Retorno', peso: 8, status: mandadosRetorno ? mandadosRetorno.status : null },
-            { chave: 'remessas', nome: 'Remessas em Aberto', peso: 7, status: remessas ? remessas.status : null },
-            { chave: 'suspensosIndeterminado', nome: 'Suspensos por Prazo Indeterminado', peso: 7, status: suspensos ? suspensos.status : null },
-            { chave: 'tempoMedio', nome: 'Tempo Médio p/ Cumprimento de Decisões', peso: 7, status: mediaTempoMedio != null ? classificarSituacaoPorDias(mediaTempoMedio, 3, 7) : null },
-            { chave: 'bensApreendidos', nome: 'Bens Apreendidos (pendentes de destinação)', peso: 6, status: itensApreensoesPendentes ? classificarSituacaoPorDias(maiorDias(itensApreensoesPendentes), 30, 90) : null },
-            { chave: 'bensSngb', nome: 'Bens Pendentes de Cadastro no SNGB', peso: 5, status: statusPorFracao(fracaoSngb, 0.10, 0.25) },
-            { chave: 'bnmp', nome: 'Pendências no BNMP', peso: 4, status: statusPorFracao(fracaoBnmp, 0.10, 0.30) },
-            { chave: 'outrosCumprimentos', nome: 'Outros Cumprimentos (proxy: % urgentes)', peso: 4, status: statusPorFracao(fracaoOutrosCumprimentos, 0.10, 0.30) },
+            // Alvarás de Soltura e Mandados de Cumprimento entraram no rebalanceamento —
+            // eram os 2 indicadores mais graves do veredito antigo (piorSituacao) e não
+            // contavam ponto nenhum no placar da 1ª versão.
+            { chave: 'alvaras', nome: 'Alvarás de Soltura a Regularizar', peso: 14, status: alvaras ? alvaras.status : null },
+            { chave: 'mandadosCumprimento', nome: 'Mandados — Cumprimento', peso: 10, status: mandadosCumprimento ? mandadosCumprimento.status : null },
+            { chave: 'remessas', nome: 'Remessas em Aberto', peso: 12, status: remessas ? remessas.status : null },
+            { chave: 'mandadosRetorno', nome: 'Mandados Aguardando Análise de Retorno', peso: 6, status: mandadosRetorno ? mandadosRetorno.status : null },
+            { chave: 'suspensosIndeterminado', nome: 'Suspensos por Prazo Indeterminado', peso: 6, status: suspensos ? suspensos.status : null },
+            { chave: 'tempoMedio', nome: 'Tempo Médio p/ Cumprimento de Decisões', peso: 6, status: mediaTempoMedio != null ? classificarSituacaoPorDias(mediaTempoMedio, 3, 7) : null },
+            // As 4 métricas-proxy (dado impreciso, ver comentário grande acima) caem de
+            // 19 para 10 pontos no total no rebalanceamento.
+            { chave: 'bensApreendidos', nome: 'Bens Apreendidos (pendentes de destinação)', peso: 3, status: itensApreensoesPendentes ? classificarSituacaoPorDias(maiorDias(itensApreensoesPendentes), 30, 90) : null },
+            { chave: 'bensSngb', nome: 'Bens Pendentes de Cadastro no SNGB', peso: 3, status: statusPorFracao(fracaoSngb, 0.10, 0.25) },
+            { chave: 'bnmp', nome: 'Pendências no BNMP', peso: 2, status: statusPorFracao(fracaoBnmp, 0.10, 0.30) },
+            { chave: 'outrosCumprimentos', nome: 'Outros Cumprimentos (proxy: % urgentes)', peso: 2, status: statusPorFracao(fracaoOutrosCumprimentos, 0.10, 0.30) },
         ];
         criteriosDiscretos.forEach(c => {
             c.disponivel = c.status != null;
