@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.00
+// @version      26.01
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -6470,6 +6470,11 @@
     // tabelaComparativoCompetencias) e sua legenda de critérios, não só a capa.
     const LIMITES_CARTORIO = { atencao: 30, critico: 90 };
     const LIMITES_GABINETE = { atencao: 30, critico: 120 };
+    // Faixas do Placar Ponderado do Dashboard (0-100 pontos) — definidas com o usuário:
+    // Crítico 0-50 (inclusive), Atenção 50,1-79,9, Regular 80-100. Fonte única usada por
+    // calcularPlacarCartorio (veredito) e desenharGaugePlacar (cores/agulha/legenda) —
+    // nunca duplicar o número solto, senão os dois podem divergir (já aconteceu).
+    const LIMITES_PLACAR = { atencao: 50, regular: 80 };
 
     // A pior situação entre várias — usada para o veredito geral de um domínio (Cartório
     // ou Gabinete) a partir da situação de cada item que o compõe.
@@ -9397,7 +9402,7 @@
 
         const criterios = [...criteriosViolacao, ...criteriosDiscretos];
         const total = criterios.reduce((s, c) => s + c.pontos, 0);
-        const situacao = total >= 85 ? 'regular' : (total >= 60 ? 'atencao' : 'critico');
+        const situacao = total >= LIMITES_PLACAR.regular ? 'regular' : (total > LIMITES_PLACAR.atencao ? 'atencao' : 'critico');
         return { total, situacao, criterios };
     }
 
@@ -9429,22 +9434,22 @@
         doc.lines(deltas, pts[0][0], pts[0][1], [1, 1], 'F', true);
     }
 
-    // Medidor semicircular (0-100) com 3 faixas coloridas (Crítico <60/Atenção 60-84/
-    // Regular 85+) e uma agulha apontando pro score — sem rótulos "0"/"100" (colidiam
-    // com a ponta do arco; a legenda de cores ao lado já explica a escala, bug relatado
-    // pelo usuário na 1ª versão deste gauge).
+    // Medidor semicircular (0-100) com 3 faixas coloridas (ver LIMITES_PLACAR: Crítico
+    // 0-50/Atenção 50,1-79,9/Regular 80+) e uma agulha apontando pro score — sem rótulos
+    // "0"/"100" (colidiam com a ponta do arco; a legenda de cores ao lado já explica a
+    // escala, bug relatado pelo usuário na 1ª versão deste gauge).
     function desenharGaugePlacar(doc, cx, cy, r, score) {
         const toRad = (deg) => (deg * Math.PI) / 180;
         const angParaScore = (s) => 180 - (s / 100) * 180;
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(0), angParaScore(60), COR.vermelho);
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(60), angParaScore(85), COR.ambar);
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(85), angParaScore(100), COR.aqua);
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(0), angParaScore(LIMITES_PLACAR.atencao), COR.vermelho);
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(LIMITES_PLACAR.atencao), angParaScore(LIMITES_PLACAR.regular), COR.ambar);
+        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(LIMITES_PLACAR.regular), angParaScore(100), COR.aqua);
         const a = toRad(angParaScore(score));
         const tipX = cx + (r - 11) * Math.cos(a), tipY = cy - (r - 11) * Math.sin(a);
         doc.setDrawColor(...COR.tinta); doc.setLineWidth(1.1);
         doc.line(cx, cy, tipX, tipY);
         doc.setFillColor(...COR.tinta); doc.circle(cx, cy, 1.8, 'F');
-        const situacao = score >= 85 ? 'regular' : (score >= 60 ? 'atencao' : 'critico');
+        const situacao = score >= LIMITES_PLACAR.regular ? 'regular' : (score > LIMITES_PLACAR.atencao ? 'atencao' : 'critico');
         const info = SITUACAO_INFO[situacao] || SITUACAO_INFO.regular;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(19); doc.setTextColor(...COR.tinta);
         doc.text(score.toFixed(0), cx, cy + 12, { align: 'center' });
@@ -9509,7 +9514,8 @@
         });
 
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.muted);
-        doc.text('Faixas do placar: Crítico < 60 · Atenção 60–84 · Regular 85+. Critérios cinza: relatório correspondente não coletado nesta rodada.', m, y + panelH + 8);
+        const limiteAtencaoTexto = String((LIMITES_PLACAR.regular - 0.1).toFixed(1)).replace('.', ',');
+        doc.text(`Faixas do placar: Crítico 0–${LIMITES_PLACAR.atencao} · Atenção ${LIMITES_PLACAR.atencao},1–${limiteAtencaoTexto} · Regular ${LIMITES_PLACAR.regular}+. Critérios cinza: relatório correspondente não coletado nesta rodada.`, m, y + panelH + 8);
     }
 
     // Página 2 do Dashboard — "Visão Geral" (grade de cartões; ver desenharPlacarPaisagem
