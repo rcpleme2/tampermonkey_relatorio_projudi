@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.01
+// @version      26.02
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9434,16 +9434,40 @@
         doc.lines(deltas, pts[0][0], pts[0][1], [1, 1], 'F', true);
     }
 
-    // Medidor semicircular (0-100) com 3 faixas coloridas (ver LIMITES_PLACAR: Crítico
-    // 0-50/Atenção 50,1-79,9/Regular 80+) e uma agulha apontando pro score — sem rótulos
-    // "0"/"100" (colidiam com a ponta do arco; a legenda de cores ao lado já explica a
-    // escala, bug relatado pelo usuário na 1ª versão deste gauge).
+    // Menor mistura de cor (o resto é branco) no ponto mais "claro" do gradiente de cada
+    // faixa do gauge — 0 seria branco puro (ilegível contra o cartão), 1 seria a cor
+    // sólida de sempre. Ver faixaGaugeGradiente/desenharGaugePlacar.
+    const ALPHA_MIN_GRADIENTE_PLACAR = 0.32;
+
+    // Desenha uma faixa do gauge como VÁRIOS segmentos finos, cada um com uma cor
+    // interpolada entre `alphaIni` (em scoreIni) e `alphaFim` (em scoreFim) — pedido do
+    // usuário: gradação de intensidade dentro de cada faixa, não uma cor sólida só.
+    // Reaproveita corClara (mistura `corBase` com branco na proporção alpha) já usada
+    // pelo chip de situação em desenharChip.
+    function faixaGaugeGradiente(doc, cx, cy, rOuter, rInner, scoreIni, scoreFim, corBase, alphaIni, alphaFim, angParaScore) {
+        const N = 24;
+        for (let i = 0; i < N; i++) {
+            const t0 = i / N, t1 = (i + 1) / N;
+            const s0 = scoreIni + (scoreFim - scoreIni) * t0;
+            const s1 = scoreIni + (scoreFim - scoreIni) * t1;
+            const alphaMeio = alphaIni + (alphaFim - alphaIni) * ((t0 + t1) / 2);
+            anelPreenchidoPlacar(doc, cx, cy, rOuter, rInner, angParaScore(s0), angParaScore(s1), corClara(corBase, alphaMeio), 3);
+        }
+    }
+
+    // Medidor semicircular (0-100) com 3 faixas coloridas em GRADIENTE (ver
+    // LIMITES_PLACAR: Crítico 0-50/Atenção 50,1-79,9/Regular 80+) e uma agulha apontando
+    // pro score — sem rótulos "0"/"100" (colidiam com a ponta do arco; a legenda de
+    // cores ao lado já explica a escala, bug relatado pelo usuário na 1ª versão deste
+    // gauge). Gradiente pedido pelo usuário: dentro de Crítico/Atenção, quanto MENOR a
+    // pontuação mais forte a cor (pior = mais intenso); dentro de Regular é o
+    // contrário — quanto MAIOR a pontuação mais forte o verde (melhor = mais intenso).
     function desenharGaugePlacar(doc, cx, cy, r, score) {
         const toRad = (deg) => (deg * Math.PI) / 180;
         const angParaScore = (s) => 180 - (s / 100) * 180;
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(0), angParaScore(LIMITES_PLACAR.atencao), COR.vermelho);
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(LIMITES_PLACAR.atencao), angParaScore(LIMITES_PLACAR.regular), COR.ambar);
-        anelPreenchidoPlacar(doc, cx, cy, r, r - 7, angParaScore(LIMITES_PLACAR.regular), angParaScore(100), COR.aqua);
+        faixaGaugeGradiente(doc, cx, cy, r, r - 7, 0, LIMITES_PLACAR.atencao, COR.vermelho, 1, ALPHA_MIN_GRADIENTE_PLACAR, angParaScore);
+        faixaGaugeGradiente(doc, cx, cy, r, r - 7, LIMITES_PLACAR.atencao, LIMITES_PLACAR.regular, COR.ambar, 1, ALPHA_MIN_GRADIENTE_PLACAR, angParaScore);
+        faixaGaugeGradiente(doc, cx, cy, r, r - 7, LIMITES_PLACAR.regular, 100, COR.aqua, ALPHA_MIN_GRADIENTE_PLACAR, 1, angParaScore);
         const a = toRad(angParaScore(score));
         const tipX = cx + (r - 11) * Math.cos(a), tipY = cy - (r - 11) * Math.sin(a);
         doc.setDrawColor(...COR.tinta); doc.setLineWidth(1.1);
