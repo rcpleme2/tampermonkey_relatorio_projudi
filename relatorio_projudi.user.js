@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.98
+// @version      25.99
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -16929,7 +16929,7 @@
         // da automação (estado 'ir_fim' em passoAutomacao), não por um botão à parte.
         // cfg ausente de propósito (ver guarda em cfgsDoRelatorio) — sem prefixo/
         // localStorage próprio, sem contagem de registros, sem progresso "nesta etapa".
-        { key: 'dashboard', rotulo: 'Dashboard (Placar + Visão Geral)', curto: 'Dashboard', semColeta: true },
+        { key: 'dashboard', rotulo: 'Dashboard (Placar + Visão Geral)', curto: 'Dashboard', semColeta: true, dominio: 'dashboard' },
         // ── Exclusivo da categoria Crime (ver CATEGORIAS_PAINEL/categoriaEspecifica em
         // injetarPainel) — não entra nos grupos Cartório/Gabinete do Cível-Geral, só
         // aparece na seção própria da aba Crime. Apreensões pendentes; internamente roda em
@@ -17018,9 +17018,16 @@
         // da categoria Crime.
         { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
     ];
+    // Bug relatado pelo usuário: o checkbox "Dashboard" nunca aparecia no painel —
+    // tanto aqui quanto no popup de várias unidades, a lista de checkboxes é montada
+    // filtrando itensCivel por `dominio` (ver `itensCivel.filter(r => r.dominio ===
+    // g.chave)` nos dois pontos de renderização), então um item SEM `dominio` (como o
+    // Dashboard, que não é Cartório nem Gabinete) ficava de fora de toda e qualquer
+    // seção — silenciosamente, sem erro. Grupo próprio resolve e dá um rótulo claro.
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
+        { chave: 'dashboard', rotulo: 'Dashboard' },
     ];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
