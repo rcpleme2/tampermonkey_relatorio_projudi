@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.04
+// @version      26.05
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9481,6 +9481,17 @@
         doc.text(info.rotulo.toUpperCase(), cx, cy + 17.5, { align: 'center' });
     }
 
+    // Um item da legenda de faixas do placar: bolinha colorida + texto, da esquerda pra
+    // direita — devolve o X onde o próximo item deve começar (mesmo espírito do dot da
+    // legenda em desenharCabecalhoDominio, só que crescendo pra direita em vez de vir da
+    // direita pra esquerda).
+    function itemLegendaFaixaPlacar(doc, x, y, cor, texto) {
+        doc.setFillColor(...cor); doc.circle(x + 1, y - 1, 1, 'F');
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.6); doc.setTextColor(...COR.tintaSec);
+        doc.text(texto, x + 4.5, y);
+        return x + 4.5 + doc.getTextWidth(texto) + 10;
+    }
+
     // Barra de progresso simples (fundo COR.grade + preenchimento proporcional), usada
     // tanto pelas barras de critério do placar quanto (indiretamente) pode ser
     // reaproveitada por outras grades futuras — comportamento idêntico ao protótipo já
@@ -9537,9 +9548,17 @@
             desenharBarraPlacar(doc, xR + 6, ry, colW - 12, Math.min(linhaH * 0.42, 3.2), c.disponivel ? c.pontos / c.peso : 1, cor);
         });
 
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7); doc.setTextColor(...COR.muted);
+        // Legenda das faixas — pedido do usuário: bolinha colorida (mesma cor do gauge/
+        // das barras) ao lado de cada faixa, não só texto puro.
         const limiteAtencaoTexto = String((LIMITES_PLACAR.regular - 0.1).toFixed(1)).replace('.', ',');
-        doc.text(`Faixas do placar: Crítico 0–${LIMITES_PLACAR.atencao} · Atenção ${LIMITES_PLACAR.atencao},1–${limiteAtencaoTexto} · Regular ${LIMITES_PLACAR.regular}+. Critérios cinza: relatório correspondente não coletado nesta rodada.`, m, y + panelH + 8);
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.2); doc.setTextColor(...COR.muted);
+        doc.text('FAIXAS DO PLACAR', m, y + panelH + 8);
+        let lx = m + doc.getTextWidth('FAIXAS DO PLACAR') + 8;
+        lx = itemLegendaFaixaPlacar(doc, lx, y + panelH + 8, COR.vermelho, `Crítico 0–${LIMITES_PLACAR.atencao}`);
+        lx = itemLegendaFaixaPlacar(doc, lx, y + panelH + 8, COR.ambar, `Atenção ${LIMITES_PLACAR.atencao},1–${limiteAtencaoTexto}`);
+        itemLegendaFaixaPlacar(doc, lx, y + panelH + 8, COR.aqua, `Regular ${LIMITES_PLACAR.regular}+`);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
+        doc.text('Critérios cinza no ranking à direita: relatório correspondente não coletado nesta rodada.', m, y + panelH + 14.5);
     }
 
     // Página 2 do Dashboard — "Visão Geral" (grade de cartões; ver desenharPlacarPaisagem
