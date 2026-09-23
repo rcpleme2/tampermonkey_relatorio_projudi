@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.99
+// @version      26.00
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9402,21 +9402,26 @@
     }
 
     // Anel (donut/gauge) preenchido entre rInner/rOuter, do ângulo a0 ao a1 (graus,
-    // convenção matemática — 0=direita, sentido anti-horário; não precisa corresponder a
-    // nada externo, só ser consistente dentro de um mesmo gráfico). jsPDF não tem um
-    // comando de "arco" nativo — contorna desenhando um polígono fechado ao longo do
-    // arco (`doc.lines` com uma lista de deltas relativos) e preenchendo.
+    // convenção matemática — 0=direita, sentido anti-horário — MAS com o y invertido
+    // (`cy - r*sin`, não `cy + r*sin`): em coordenadas de página (jsPDF/PDF, y cresce pra
+    // BAIXO), sem essa inversão um ângulo de 90° (que devia apontar pra CIMA, formando um
+    // domo ∩) desenhava um ponto ABAIXO do centro — o gauge saía de cabeça pra baixo (uma
+    // "tigela" ∪, bug relatado pelo usuário com uma pontuação Regular/85 mostrando
+    // Atenção e a agulha apontando pro vermelho). A agulha em desenharGaugePlacar sempre
+    // usou `cy - r*sin` corretamente; o anel é que estava com o sinal trocado. jsPDF não
+    // tem um comando de "arco" nativo — contorna desenhando um polígono fechado ao longo
+    // do arco (`doc.lines` com uma lista de deltas relativos) e preenchendo.
     function anelPreenchidoPlacar(doc, cx, cy, rOuter, rInner, a0, a1, cor, steps) {
         const toRad = (deg) => (deg * Math.PI) / 180;
         const n = steps || 40;
         const pts = [];
         for (let i = 0; i <= n; i++) {
             const a = a0 + (a1 - a0) * (i / n);
-            pts.push([cx + rOuter * Math.cos(toRad(a)), cy + rOuter * Math.sin(toRad(a))]);
+            pts.push([cx + rOuter * Math.cos(toRad(a)), cy - rOuter * Math.sin(toRad(a))]);
         }
         for (let i = n; i >= 0; i--) {
             const a = a0 + (a1 - a0) * (i / n);
-            pts.push([cx + rInner * Math.cos(toRad(a)), cy + rInner * Math.sin(toRad(a))]);
+            pts.push([cx + rInner * Math.cos(toRad(a)), cy - rInner * Math.sin(toRad(a))]);
         }
         const deltas = [];
         for (let i = 1; i < pts.length; i++) deltas.push([pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]]);
