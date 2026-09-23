@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.96
+// @version      25.98
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8100,10 +8100,6 @@
             ? tabelaComparativoCompetencias(doc, m, gY0, uw, sub, CFG_CONCLUSOES.pdf, now, LIMITES_GABINETE,
                 { semMedia: true, diasNaColunaAntiga: true }) + 6
             : gY0;
-        const blocos = [
-            { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
-            { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
-        ].filter(b => b.itens.length);
         const ctx = {
             rodapeAntesDeVirar: () => desenharRodape(doc, TITULO_CONCLUSOES_POR_JUIZ, `${hoje} ${hora}`, pw, ph, m, false),
             topoContinuacao: m + 14,
@@ -8113,6 +8109,26 @@
                 doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, m + 7, pw - m, m + 7);
             },
         };
+        // Pedido do usuário: com total > 0, listar os 5 processos pendentes há mais tempo
+        // (mesmo `dias`/`dtRemessa` já usados na tabela discriminada) — reaproveita
+        // tabelaRanking, o mesmo padrão já usado em Tempo Médio/Paralisados/Remessas para
+        // "processos com X mais demorado".
+        if (sub.length) {
+            const maisAntigos = sub.map(d => ({ ...d, dias: diasDecorridos(d.dtRemessa, now) }))
+                .sort((a, b) => (b.dias ?? -Infinity) - (a.dias ?? -Infinity))
+                .slice(0, 5);
+            if (y + medirTabela(maisAntigos.length, true) > ph - 14) { ctx.rodapeAntesDeVirar(); doc.addPage(); ctx.cabecalhoContinuacao(); y = ctx.topoContinuacao; }
+            y = tabelaRanking(doc, m, y, uw, '5 Processos Mais Antigos', maisAntigos, [
+                { header: 'Processo', get: d => d.processo, width: 40 },
+                { header: 'Classe Processual', get: d => d.classe, width: 40 },
+                { header: 'Dt. Conclusão', get: d => d.dtRemessa, width: 20 },
+                { header: 'Dias', get: d => d.dias, width: 14, halign: 'right' },
+            ], COR.vermelho) + 8;
+        }
+        const blocos = [
+            { titulo: 'Pendentes por Tipo de Conclusão', itens: contarPorCampo(sub, 'tipoConclusao', 10) },
+            { titulo: 'Pendentes por Classe Processual', itens: contarPorCampo(sub, 'classe', 10) },
+        ].filter(b => b.itens.length);
         if (blocos.length) desenharGradeTabelas(doc, m, y, uw, blocos, ctx);
         ctx.rodapeAntesDeVirar();
     }
@@ -10756,14 +10772,18 @@
             desenharSumarioTabelas(doc, sumarioItens);
         }
 
-        // Nome do arquivo com as unidades incluídas (pedido do usuário) — "Relatório
-        // [Unidades]" no modo resumo, "Tabelas [Unidades]" no modo tabelas — em vez do
-        // nome genérico de antes (relatorio_conjunto_projudi), que não dizia quais
-        // unidades tinham sido combinadas no PDF.
-        const prefixoNomeArquivo = modo === 'tabelas' ? 'Tabelas' : 'Relatório';
+        // Nome do arquivo com as unidades incluídas (pedido do usuário) — no modo resumo
+        // sempre começa com "Relatório de Correição PROJUDI - [Vara]" (mesmo nome de
+        // Competência já usado no PDF), SEM sufixo de data (pedido do usuário: nome
+        // fixo, sem "_AAAA-MM-DD" no final), pra padronizar o que cai na pasta de
+        // Downloads; "Tabelas [Unidades]_data" no modo tabelas — em vez do nome
+        // genérico de antes (relatorio_conjunto_projudi), que não dizia quais unidades
+        // tinham sido combinadas no PDF.
+        const prefixoNomeArquivo = modo === 'tabelas' ? 'Tabelas' : 'Relatório de Correição PROJUDI -';
         const rotuloUnidadesArquivo = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDoPDFConjunto(secoesEntrada, opcoes)));
         const nomeArquivoConjunto = rotuloUnidadesArquivo ? `${prefixoNomeArquivo} ${rotuloUnidadesArquivo}` : `${prefixoNomeArquivo} Projudi`;
-        baixarBlob(doc.output('blob'), `${nomeArquivoConjunto}_${dataArquivo()}.pdf`);
+        const nomeArquivoFinal = modo === 'tabelas' ? `${nomeArquivoConjunto}_${dataArquivo()}` : nomeArquivoConjunto;
+        baixarBlob(doc.output('blob'), `${nomeArquivoFinal}.pdf`);
         overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
         return doc;
     }
@@ -17738,7 +17758,20 @@
         } else {
             leiturasEstaveisPainelJuntadas = 0;
         }
-        const estavel = leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
+        // Bug relatado pelo usuário (3ª rodada): mesmo com 3 leituras iguais seguidas
+        // exigidas, indicadores com valor > 0 (ex. "Autuação da Guia de Execução",
+        // "Multas Fupen vencidas e pendentes de ordenação", "Processos com suspeita de
+        // incompetência - Juiz das Garantias") ainda ficavam de fora do PDF — a
+        // assinatura podia ficar PARADA num platô com só uma PARTE dos ids presentes
+        // (ex. 3 dos 18) por mais de 1,5s antes do restante (consultas mais lentas no
+        // banco) aparecer, e essas 3 leituras iguais bastavam pra "estavel" ficar true
+        // cedo demais. Agora só aceita o caminho rápido quando TODOS os ids de
+        // IDS_PAINEL_ANALISE_JUNTADAS já apareceram no DOM (qtd da assinatura == total) —
+        // um platô parcial nunca conta como pronto, só o teto de tentativas (~17s) abaixo
+        // captura mesmo incompleto nesse caso.
+        const qtdAtual = parseInt(assinaturaAtual.split('|')[0], 10) || 0;
+        const completo = qtdAtual >= IDS_PAINEL_ANALISE_JUNTADAS.length;
+        const estavel = completo && leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
         console.log(`[Auto Projudi Juntadas] leitura ${tentativa} do painel — assinatura="${assinaturaAtual}" (qtd|soma), estáveis seguidas=${leiturasEstaveisPainelJuntadas}/${LEITURAS_ESTAVEIS_NECESSARIAS}`);
         if (estavel || tentativa >= 35) {
             if (!estavel) {
