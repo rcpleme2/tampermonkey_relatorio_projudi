@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.07
+// @version      26.08
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -9315,7 +9315,11 @@
     // um erro real recorrente, e no BNMP os problemas não se repetem). Os 14 pontos que
     // eram dele foram redistribuídos entre os indicadores de problema ATIVO (Retorno,
     // Juntadas, Paralisados, Remessas, Mandados-Cumprimento — todos ganharam peso), não
-    // entre as métricas-proxy. ═══
+    // entre as métricas-proxy.
+    //
+    // 4ª RODADA (Dashboard nova versão): critério sem dado sai da conta e o peso é
+    // redistribuído; os critérios de itens passaram todos a ser proporcionais — ver
+    // comentário acima de calcularPlacarCartorio. ═══
     const RETENCAO_POR_STATUS_PLACAR = { regular: 1, atencao: 0.5, critico: 0.1 };
 
     // Fração (0 a 1) dos itens {dias, prioritario} (ver itensParaClassificacao) que
@@ -9346,21 +9350,39 @@
         return soma / itens.length;
     }
 
-    // Cada critério: { chave, nome, peso, pontos, disponivel }. `disponivel: false`
-    // (relatório correspondente nem foi coletado) recebe o peso INTEIRO — mesma regra de
-    // "zero pendências é regular" já usada em classificarSituacaoPorDias(null,...), só
-    // que aqui por "não fica pior por não ter sido medido" em vez de fingir um dado.
+    // Cada critério: { chave, nome, peso, regra, disponivel, motivoExclusao, fracao,
+    // status, pontos, pesoEfetivo, pontosEfetivos }.
+    //
+    // REDISTRIBUIÇÃO (pedido do usuário, 4ª rodada — Dashboard pode juntar várias
+    // unidades, e nem todo relatório se aplica a todas; ex. BNMP/bens apreendidos numa
+    // vara cível): antes, critério sem dado recebia o peso INTEIRO ("não fica pior por
+    // não ter sido medido"), o que inflava a nota. Agora ele SAI da conta
+    // (`disponivel: false`, `motivoExclusao` 'nao_coletado' ou 'sem_base') e o total é
+    // reescalonado sobre os pesos que sobraram: total = 100 × Σpontos / Σpeso incluído.
+    // "Sem dado" = relatório não coletado, OU métrica sem base de medida (Tempo Médio
+    // sem nenhum dia válido; proxies com denominador zero). Relatório coletado com
+    // ZERO pendências continua disponível, com pontuação cheia — é dado real e bom.
+    // A disponibilidade dos critérios de itens usa foiColetado(cfg), não a presença em
+    // itensCartorio: Paralisados/Retorno/Juntadas/Remessas não têm mostrarSeVazio, então
+    // "coletado vazio" some de itensCartorio e seria confundido com "não coletado".
+    //
+    // PROPORCIONALIDADE (mesma rodada): Mandados-Cumprimento, Remessas, Mandados-Retorno,
+    // Suspensos e Bens Apreendidos usavam a situação do item MAIS ANTIGO (um único
+    // processo >90d derrubava o critério inteiro para 10%). Passaram a usar
+    // severidadeMediaPorDias com os mesmos limites de LIMITES_CARTORIO (30/90), igual a
+    // Paralisados — cada item pesa na proporção. Pesos inalterados. Tempo Médio (um valor
+    // só) e as 3 proxies (frações agregadas) mantêm a regra discreta 100%/50%/10%.
     function calcularPlacarCartorio(secoes, itensCartorio, now) {
         const itemDe = (cfg) => itensCartorio.find(t => t.secao.cfgOriginal === cfg);
         const secaoDe = (cfg) => secoes.find(s => s.cfgOriginal === cfg);
+        // Itens {dias, prioritario} de um relatório do esquema Cartório — null quando nem
+        // foi coletado; [] quando coletado sem nenhum registro (ver comentário acima).
+        const itensDe = (cfg) => {
+            const it = itemDe(cfg);
+            if (it) return it._itens;
+            return foiColetado(cfg) ? [] : null;
+        };
 
-        const paralisados = itemDe(CFG_PARALISADOS);
-        const retorno = itemDe(CFG_RETORNO);
-        const juntadas = itemDe(CFG_JUNTADAS);
-        const mandadosRetorno = itemDe(CFG_MANDADOS_RETORNO);
-        const mandadosCumprimento = itemDe(CFG_MANDADOS_CUMPRIMENTO);
-        const remessas = itemDe(CFG_REMESSAS);
-        const suspensos = itemDe(CFG_SUSPENSOS);
         const secaoTempoMedio = secaoDe(CFG_TEMPOMEDIO);
         const secaoApreensoes = secaoDe(CFG_APREENSOES);
         const secaoBensSngb = secaoDe(CFG_BENS_PENDENTES_SNGB);
@@ -9383,6 +9405,8 @@
             itensApreensoesPendentes = secaoApreensoes.dados
                 .filter(d => !d.dataEncerramento)
                 .map(d => ({ dias: diasNum(d.dataRegistro, now) }));
+        } else if (foiColetado(CFG_APREENSOES)) {
+            itensApreensoesPendentes = [];
         }
 
         // % do total de apreensões sem registro no SNGB.
@@ -9412,45 +9436,66 @@
             return 'regular';
         }
 
-        const criteriosViolacao = [
-            { chave: 'retorno5', nome: 'Retorno de Conclusão > 5 dias', peso: 15, disponivel: !!retorno, fracao: retorno ? fracaoViolacaoPlacar(retorno._itens, 5) : 0 },
-            { chave: 'juntadas', nome: 'Juntadas (>5d urgente / >30d não urgente)', peso: 13, disponivel: !!juntadas, fracao: juntadas ? fracaoViolacaoPlacar(juntadas._itens, (it) => (it.prioritario ? 5 : 30)) : 0 },
-            // Consolidado (era 2 critérios, 26 pontos ao todo — reduzido e unificado no
-            // rebalanceamento, ver comentário grande acima). severidadeMediaPorDias
-            // preserva a distinção "crônico (>90d) é pior que só-passou-do-prazo".
-            { chave: 'paralisados', nome: 'Processos Paralisados', peso: 17, disponivel: !!paralisados, fracao: paralisados ? severidadeMediaPorDias(paralisados._itens, 30, 90) : 0 },
-        ];
-        criteriosViolacao.forEach(c => { c.pontos = c.peso * (1 - c.fracao); });
-
-        const criteriosDiscretos = [
-            // Alvarás de Soltura a Regularizar SAIU da lista (pedido do usuário, 3ª
-            // rodada): é um indicador de LEGADO — a imensa maioria é mera correção
-            // cadastral (o alvará já foi cumprido de fato; falta só regularizar o
-            // registro), não um erro real recorrente, então não deveria pesar contra a
-            // unidade. Os 14 pontos que eram dele foram redistribuídos entre os
-            // indicadores de problema ATIVO (Retorno/Juntadas/Paralisados/Remessas/
-            // Mandados-Cumprimento — todos ganharam peso), não entre as métricas-proxy.
-            { chave: 'mandadosCumprimento', nome: 'Mandados — Cumprimento', peso: 12, status: mandadosCumprimento ? mandadosCumprimento.status : null },
-            { chave: 'remessas', nome: 'Remessas em Aberto', peso: 15, status: remessas ? remessas.status : null },
-            { chave: 'mandadosRetorno', nome: 'Mandados Aguardando Análise de Retorno', peso: 6, status: mandadosRetorno ? mandadosRetorno.status : null },
-            { chave: 'suspensosIndeterminado', nome: 'Suspensos por Prazo Indeterminado', peso: 6, status: suspensos ? suspensos.status : null },
-            { chave: 'tempoMedio', nome: 'Tempo Médio p/ Cumprimento de Decisões', peso: 6, status: mediaTempoMedio != null ? classificarSituacaoPorDias(mediaTempoMedio, 3, 7) : null },
-            // As 4 métricas-proxy (dado impreciso, ver comentário grande acima) caem de
-            // 19 para 10 pontos no total no rebalanceamento.
-            { chave: 'bensApreendidos', nome: 'Bens Apreendidos (pendentes de destinação)', peso: 3, status: itensApreensoesPendentes ? classificarSituacaoPorDias(maiorDias(itensApreensoesPendentes), 30, 90) : null },
-            { chave: 'bensSngb', nome: 'Bens Pendentes de Cadastro no SNGB', peso: 3, status: statusPorFracao(fracaoSngb, 0.10, 0.25) },
-            { chave: 'bnmp', nome: 'Pendências no BNMP', peso: 2, status: statusPorFracao(fracaoBnmp, 0.10, 0.30) },
-            { chave: 'outrosCumprimentos', nome: 'Outros Cumprimentos (proxy: % urgentes)', peso: 2, status: statusPorFracao(fracaoOutrosCumprimentos, 0.10, 0.30) },
-        ];
-        criteriosDiscretos.forEach(c => {
-            c.disponivel = c.status != null;
-            c.pontos = c.peso * (c.disponivel ? RETENCAO_POR_STATUS_PLACAR[c.status] : 1);
+        const { atencao: A, critico: C } = LIMITES_CARTORIO;
+        const regraSeveridade = `Proporcional: cada item >${A}d perde metade do seu peso, >${C}d perde o peso inteiro`;
+        // Critério proporcional: fração 0-1 de "perda"; itens null = não coletado.
+        const proporcional = (chave, nome, peso, itens, regra, fracaoFn) => ({
+            chave, nome, peso, regra,
+            disponivel: itens != null, motivoExclusao: itens != null ? null : 'nao_coletado',
+            fracao: itens != null ? fracaoFn(itens) : null,
         });
+        // Critério discreto: status Regular/Atenção/Crítico → retém 100%/50%/10% do peso.
+        // `coletado` distingue "não coletado" de "coletado, mas sem base de medida".
+        const discreto = (chave, nome, peso, coletado, status, regra) => ({
+            chave, nome, peso, regra, status,
+            disponivel: status != null,
+            motivoExclusao: status != null ? null : (coletado ? 'sem_base' : 'nao_coletado'),
+            fracao: status != null ? 1 - RETENCAO_POR_STATUS_PLACAR[status] : null,
+        });
+        const sev = (itens) => severidadeMediaPorDias(itens, A, C);
 
-        const criterios = [...criteriosViolacao, ...criteriosDiscretos];
-        const total = criterios.reduce((s, c) => s + c.pontos, 0);
-        const situacao = total >= LIMITES_PLACAR.regular ? 'regular' : (total > LIMITES_PLACAR.atencao ? 'atencao' : 'critico');
-        return { total, situacao, criterios };
+        // Alvarás de Soltura a Regularizar SAIU da lista (3ª rodada — indicador de
+        // legado, ver comentário grande acima de RETENCAO_POR_STATUS_PLACAR).
+        const criterios = [
+            proporcional('retorno5', 'Retorno de Conclusão > 5 dias', 15, itensDe(CFG_RETORNO),
+                'Proporcional: % de itens com mais de 5 dias', (its) => fracaoViolacaoPlacar(its, 5)),
+            proporcional('juntadas', 'Juntadas (>5d urgente / >30d não urgente)', 13, itensDe(CFG_JUNTADAS),
+                'Proporcional: % de itens acima do prazo (5d urgente, 30d demais)', (its) => fracaoViolacaoPlacar(its, (it) => (it.prioritario ? 5 : 30))),
+            proporcional('paralisados', 'Processos Paralisados', 17, itensDe(CFG_PARALISADOS), regraSeveridade, sev),
+            proporcional('mandadosCumprimento', 'Mandados — Cumprimento', 12, itensDe(CFG_MANDADOS_CUMPRIMENTO), regraSeveridade, sev),
+            proporcional('remessas', 'Remessas em Aberto', 15, itensDe(CFG_REMESSAS), regraSeveridade, sev),
+            proporcional('mandadosRetorno', 'Mandados Aguardando Análise de Retorno', 6, itensDe(CFG_MANDADOS_RETORNO), regraSeveridade, sev),
+            proporcional('suspensosIndeterminado', 'Suspensos por Prazo Indeterminado', 6, itensDe(CFG_SUSPENSOS), regraSeveridade, sev),
+            discreto('tempoMedio', 'Tempo Médio p/ Cumprimento de Decisões', 6, !!secaoTempoMedio || foiColetado(CFG_TEMPOMEDIO),
+                mediaTempoMedio != null ? classificarSituacaoPorDias(mediaTempoMedio, 3, 7) : null,
+                'Discreto pela média: ≤3d 100%, ≤7d 50%, >7d 10% do peso'),
+            // As 4 métricas-proxy (dado impreciso, ver comentário grande acima) somam 10
+            // pontos no total desde o 2º rebalanceamento.
+            proporcional('bensApreendidos', 'Bens Apreendidos (pendentes de destinação)', 3, itensApreensoesPendentes, regraSeveridade + ' (desde o registro)', sev),
+            discreto('bensSngb', 'Bens Pendentes de Cadastro no SNGB', 3, !!secaoBensSngb || foiColetado(CFG_BENS_PENDENTES_SNGB),
+                statusPorFracao(fracaoSngb, 0.10, 0.25), 'Discreto por % sem SNGB: ≤10% 100%, ≤25% 50%, >25% 10%'),
+            discreto('bnmp', 'Pendências no BNMP', 2, !!secaoOutrosCumprimentos || foiColetado(CFG_OUTROS_CUMPRIMENTOS),
+                statusPorFracao(fracaoBnmp, 0.10, 0.30), 'Discreto por % urgentes: ≤10% 100%, ≤30% 50%, >30% 10%'),
+            discreto('outrosCumprimentos', 'Outros Cumprimentos (proxy: % urgentes)', 2, !!secaoOutrosCumprimentos || foiColetado(CFG_OUTROS_CUMPRIMENTOS),
+                statusPorFracao(fracaoOutrosCumprimentos, 0.10, 0.30), 'Discreto por % urgentes: ≤10% 100%, ≤30% 50%, >30% 10%'),
+        ];
+
+        const pesoTotal = criterios.reduce((s, c) => s + c.peso, 0);
+        const pesoIncluido = criterios.reduce((s, c) => s + (c.disponivel ? c.peso : 0), 0);
+        const escala = pesoIncluido > 0 ? pesoTotal / pesoIncluido : 0;
+        criterios.forEach(c => {
+            c.pontos = c.disponivel ? c.peso * (1 - c.fracao) : null;
+            c.pesoEfetivo = c.disponivel ? c.peso * escala : 0;
+            c.pontosEfetivos = c.disponivel ? c.pontos * escala : null;
+        });
+        const total = pesoIncluido > 0 ? criterios.reduce((s, c) => s + (c.disponivel ? c.pontosEfetivos : 0), 0) : null;
+        const situacao = total == null ? null
+            : (total >= LIMITES_PLACAR.regular ? 'regular' : (total > LIMITES_PLACAR.atencao ? 'atencao' : 'critico'));
+        return {
+            total, situacao, criterios, pesoTotal, pesoIncluido,
+            excluidos: criterios.filter(c => !c.disponivel),
+            redistribuido: pesoIncluido > 0 && pesoIncluido < pesoTotal,
+        };
     }
 
     // Anel (donut/gauge) preenchido entre rInner/rOuter, do ângulo a0 ao a1 (graus,
@@ -9548,51 +9593,88 @@
         if (frac > 0) { doc.setFillColor(...cor); doc.roundedRect(x, y, Math.max(w * frac, h), h, h / 2, h / 2, 'F'); }
     }
 
+    // Número com vírgula decimal (1 casa) — usado nos textos do placar.
+    const fmtPlacar = (n) => n.toFixed(1).replace('.', ',');
+
+    // Cabeçalho azul comum às 3 páginas do Dashboard. `unidades` (opcional) vai numa
+    // 2ª linha menor — o placar é consolidado, então o leitor precisa saber de quais
+    // unidades ele fala (pedido do usuário: dashboard único para várias unidades).
+    function desenharCabecalhoDashboard(doc, titulo, agora, unidades) {
+        const pw = doc.internal.pageSize.getWidth();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 22, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(255, 255, 255);
+        doc.text(titulo, m, unidades && unidades.length ? 11 : 14);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, pw - m, unidades && unidades.length ? 11 : 14, { align: 'right' });
+        if (unidades && unidades.length) {
+            doc.setFontSize(7.4);
+            const rotulo = `${unidades.length > 1 ? 'Unidades' : 'Unidade'}: ${unidades.join('; ')}`;
+            doc.text(textoTruncadoParaLargura(doc, rotulo, pw - 2 * m), m, 18);
+        }
+    }
+
     // Página 1 do Dashboard — "Placar ponderado": gauge + ranking dos critérios por
     // peso. `placar` vem de calcularPlacarCartorio (já calculado antes de chamar aqui,
-    // ver modo 'dashboard' em gerarPDFConjunto).
-    function desenharPlacarPaisagem(doc, placar, agora) {
+    // ver modo 'dashboard' em gerarPDFConjunto). Pesos/pontos mostrados já são os
+    // EFETIVOS (após redistribuição dos critérios sem dado — ver calcularPlacarCartorio).
+    function desenharPlacarPaisagem(doc, placar, agora, unidades) {
         const pw = doc.internal.pageSize.getWidth();
         const m = 12;
         const uw = pw - 2 * m;
         const colW = (uw - 10) / 2;
         const xR = m + colW + 10;
-        const hoje = agora.toLocaleDateString('pt-BR');
-        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 22, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(14); doc.setTextColor(255, 255, 255);
-        doc.text('Dashboard — Placar Ponderado', m, 14);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
-        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, pw - m, 14, { align: 'right' });
+        desenharCabecalhoDashboard(doc, 'Dashboard — Placar Ponderado', agora, unidades);
 
         const y = 30;
         const panelH = 84;
+        const nAvaliados = placar.criterios.length - placar.excluidos.length;
         doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
 
         // Painel esquerdo: gauge
         doc.roundedRect(m, y, colW, panelH, 2, 2, 'D');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...COR.tinta);
         doc.text('Placar ponderado — Cartório', m + 6, y + 9);
-        desenharGaugePlacar(doc, m + colW / 2, y + 46, 27, placar.total);
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
-        doc.text(`${placar.total.toFixed(1).replace('.', ',')} / 100 pontos — ${placar.criterios.length} critérios ponderados`, m + colW / 2, y + 70, { align: 'center' });
+        if (placar.total != null) {
+            desenharGaugePlacar(doc, m + colW / 2, y + 46, 27, placar.total);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
+            doc.text(`${fmtPlacar(placar.total)} / 100 pontos — ${nAvaliados} de ${placar.criterios.length} critérios avaliados`, m + colW / 2, y + 70, { align: 'center' });
+            if (placar.redistribuido) {
+                doc.setFontSize(6.8); doc.setTextColor(...COR.muted);
+                doc.text(`${fmtPlacar(placar.pesoTotal - placar.pesoIncluido)} pontos redistribuídos (critérios sem dado)`, m + colW / 2, y + 75, { align: 'center' });
+            }
+        } else {
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(12); doc.setTextColor(...COR.muted);
+            doc.text('Sem dados suficientes', m + colW / 2, y + 44, { align: 'center' });
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4);
+            doc.text('Nenhum relatório que compõe o placar foi coletado.', m + colW / 2, y + 51, { align: 'center' });
+        }
 
-        // Painel direito: ranking dos critérios (ordenados por peso, maior primeiro)
+        // Painel direito: ranking dos critérios (incluídos por peso efetivo, maior
+        // primeiro; excluídos no fim, em cinza).
+        // desenharGaugePlacar muda cor/espessura de linha (agulha) — restaura antes da
+        // borda deste painel, senão ela saía preta e grossa.
+        doc.setDrawColor(...COR.grade); doc.setLineWidth(0.3);
         doc.roundedRect(xR, y, colW, panelH, 2, 2, 'D');
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(10.5); doc.setTextColor(...COR.tinta);
-        doc.text('Pontos por critério (ordenado por peso)', xR + 6, y + 9);
-        const ordenados = placar.criterios.slice().sort((a, b) => b.peso - a.peso);
+        doc.text(placar.redistribuido ? 'Pontos por critério (peso original / efetivo)' : 'Pontos por critério (ordenado por peso)', xR + 6, y + 9);
+        const ordenados = placar.criterios.slice().sort((a, b) => (b.disponivel - a.disponivel) || (b.peso - a.peso));
         const linhaH = (panelH - 16) / ordenados.length;
         ordenados.forEach((c, i) => {
             const ry = y + 16 + i * linhaH;
-            const cor = !c.disponivel ? COR.muted
-                : (c.pontos / c.peso >= 0.9 ? COR.aqua : (c.pontos / c.peso >= 0.5 ? COR.ambar : COR.vermelho));
-            doc.setFont('PublicSans', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...COR.tintaSec);
-            doc.text(textoTruncadoParaLargura(doc, `${c.nome} (${c.peso})`, colW - 24), xR + 6, ry - 1);
-            doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.8); doc.setTextColor(...COR.tinta);
-            doc.text(c.pontos.toFixed(1), xR + colW - 6, ry - 1, { align: 'right' });
-            desenharBarraPlacar(doc, xR + 6, ry, colW - 12, Math.min(linhaH * 0.42, 3.2), c.disponivel ? c.pontos / c.peso : 1, cor);
+            const frac = c.disponivel ? c.pontos / c.peso : 0;
+            const cor = !c.disponivel ? COR.muted : (frac >= 0.9 ? COR.aqua : (frac >= 0.5 ? COR.ambar : COR.vermelho));
+            const rotulo = c.disponivel
+                ? `${c.nome} (${c.peso}${placar.redistribuido ? ` / ${fmtPlacar(c.pesoEfetivo)}` : ''})`
+                : `${c.nome} (${c.peso} — excluído)`;
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(6.8); doc.setTextColor(...(c.disponivel ? COR.tintaSec : COR.muted));
+            doc.text(textoTruncadoParaLargura(doc, rotulo, colW - 24), xR + 6, ry - 1);
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.8); doc.setTextColor(...(c.disponivel ? COR.tinta : COR.muted));
+            doc.text(c.disponivel ? fmtPlacar(c.pontosEfetivos) : '—', xR + colW - 6, ry - 1, { align: 'right' });
+            desenharBarraPlacar(doc, xR + 6, ry, colW - 12, Math.min(linhaH * 0.42, 3.2), frac, cor);
         });
 
         // Legenda das faixas — pedido do usuário: bolinha colorida (mesma cor do gauge/
@@ -9605,7 +9687,103 @@
         lx = itemLegendaFaixaPlacar(doc, lx, y + panelH + 8, COR.ambar, `Atenção ${LIMITES_PLACAR.atencao},1–${limiteAtencaoTexto}`);
         itemLegendaFaixaPlacar(doc, lx, y + panelH + 8, COR.aqua, `Regular ${LIMITES_PLACAR.regular}+`);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
-        doc.text('Critérios cinza no ranking à direita: relatório correspondente não coletado nesta rodada.', m, y + panelH + 14.5);
+        const nota = placar.redistribuido
+            ? `Critérios em cinza: sem dado nesta seleção — excluídos do cálculo; seus ${fmtPlacar(placar.pesoTotal - placar.pesoIncluido)} pontos foram redistribuídos proporcionalmente entre os demais (peso efetivo = peso × ${placar.pesoTotal} ÷ ${placar.pesoIncluido}).`
+            : 'Todos os critérios têm dado nesta seleção — nenhuma redistribuição de pesos.';
+        doc.text(textoTruncadoParaLargura(doc, nota, uw), m, y + panelH + 14.5);
+        doc.text('Critérios, regras de cálculo e redistribuição detalhados na página "Metodologia do Placar".', m, y + panelH + 19.5);
+    }
+
+    // Página 3 do Dashboard — "Metodologia do Placar" (pedido do usuário: deixar claros
+    // os critérios da pontuação e a redistribuição dos que não têm dado). Tabela com
+    // cada critério (regra, peso original, peso efetivo, pontos, incluído/excluído) +
+    // blocos de texto explicativos.
+    function desenharMetodologiaPlacarPaisagem(doc, placar, agora, unidades) {
+        const pw = doc.internal.pageSize.getWidth();
+        const m = 12;
+        const uw = pw - 2 * m;
+
+        desenharCabecalhoDashboard(doc, 'Dashboard — Metodologia do Placar', agora, unidades);
+
+        const MOTIVOS = { nao_coletado: 'Excluído — não coletado', sem_base: 'Excluído — sem base de medida' };
+        const corpo = placar.criterios.map(c => ({
+            nome: c.nome,
+            regra: c.regra,
+            peso: String(c.peso),
+            efetivo: c.disponivel ? fmtPlacar(c.pesoEfetivo) : '—',
+            pontos: c.disponivel ? fmtPlacar(c.pontosEfetivos) : '—',
+            situacao: c.disponivel ? 'Incluído' : MOTIVOS[c.motivoExclusao],
+            _excluido: !c.disponivel,
+        }));
+        corpo.push({
+            nome: 'Total', regra: '', peso: String(placar.pesoTotal),
+            efetivo: placar.pesoIncluido > 0 ? String(placar.pesoTotal) : '—',
+            pontos: placar.total != null ? fmtPlacar(placar.total) : '—',
+            situacao: `${placar.criterios.length - placar.excluidos.length} de ${placar.criterios.length} incluídos`,
+            _total: true,
+        });
+        const wPeso = 18, wEf = 18, wPts = 18, wSit = 44, wNome = 64;
+        doc.autoTable({
+            ...estiloTabelaCompacta(m, uw),
+            startY: 28,
+            columns: [
+                { header: 'Critério', dataKey: 'nome' },
+                { header: 'Regra de cálculo', dataKey: 'regra' },
+                { header: 'Peso original', dataKey: 'peso' },
+                { header: 'Peso efetivo', dataKey: 'efetivo' },
+                { header: 'Pontos', dataKey: 'pontos' },
+                { header: 'Situação', dataKey: 'situacao' },
+            ],
+            columnStyles: {
+                nome: { cellWidth: wNome, textColor: COR.tinta },
+                regra: { cellWidth: uw - wNome - wPeso - wEf - wPts - wSit },
+                peso: { cellWidth: wPeso, halign: 'right' },
+                efetivo: { cellWidth: wEf, halign: 'right' },
+                pontos: { cellWidth: wPts, halign: 'right', fontStyle: 'bold', textColor: COR.tinta },
+                situacao: { cellWidth: wSit },
+            },
+            body: corpo,
+            didParseCell: (d) => {
+                if (d.section !== 'body') return;
+                if (d.row.raw._excluido) d.cell.styles.textColor = COR.muted;
+                if (d.row.raw._total) { d.cell.styles.fontStyle = 'bold'; d.cell.styles.textColor = COR.tinta; }
+            },
+        });
+
+        const { atencao: A, critico: C } = LIMITES_CARTORIO;
+        const limiteAtencaoTexto = String((LIMITES_PLACAR.regular - 0.1).toFixed(1)).replace('.', ',');
+        const blocos = [
+            ['Como a nota é formada',
+                `A nota vai de 0 a 100 e soma ${placar.criterios.length} critérios do Cartório, cada um com um peso (coluna "Peso original", total ${placar.pesoTotal}). ` +
+                `Nos critérios proporcionais, cada processo pesa igual dentro do critério: o critério perde a fração de itens fora do prazo ` +
+                `(nos de ${A}/${C} dias, item acima de ${A} dias conta metade e acima de ${C} dias conta inteiro). ` +
+                'Nos critérios discretos, a situação Regular/Atenção/Crítico retém 100%, 50% ou 10% do peso. Relatório coletado sem nenhuma pendência recebe o peso inteiro.'],
+            ['Redistribuição de critérios sem dado',
+                'Quando um critério não tem dado nesta seleção (relatório não coletado, ou sem base de medida — ex.: nenhum bem apreendido, nenhuma pendência no BNMP), ' +
+                'ele é excluído do cálculo em vez de receber nota. Os pesos dos critérios restantes são reescalonados para voltar a somar 100: ' +
+                `peso efetivo = peso original × ${placar.pesoTotal} ÷ soma dos pesos incluídos (${placar.pesoIncluido} nesta seleção). ` +
+                (placar.redistribuido
+                    ? `Nesta rodada, ${fmtPlacar(placar.pesoTotal - placar.pesoIncluido)} pontos de ${placar.excluidos.length} critério(s) excluído(s) foram redistribuídos.`
+                    : 'Nesta rodada nenhum critério foi excluído.')],
+            ['Várias unidades',
+                'O placar é consolidado: os processos de todas as unidades selecionadas são somados antes do cálculo, então unidades com mais processos pesam mais. ' +
+                'Um critério só é excluído se não houver dado em nenhuma das unidades.' +
+                (unidades && unidades.length ? ` Unidades incluídas: ${unidades.join('; ')}.` : '')],
+            ['Faixas',
+                `Crítico: 0 a ${LIMITES_PLACAR.atencao} pontos. Atenção: ${LIMITES_PLACAR.atencao},1 a ${limiteAtencaoTexto}. Regular: ${LIMITES_PLACAR.regular} ou mais.`],
+        ];
+        const ph = doc.internal.pageSize.getHeight();
+        let y = doc.lastAutoTable.finalY + 7;
+        blocos.forEach(([titulo, texto]) => {
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4);
+            const linhas = doc.splitTextToSize(texto, uw);
+            if (y + 5 + linhas.length * 3.4 > ph - 10) { doc.addPage('a4', 'landscape'); y = 16; }
+            doc.setFont('PublicSans', 'bold'); doc.setFontSize(8.2); doc.setTextColor(...COR.tinta);
+            doc.text(titulo, m, y);
+            doc.setFont('PublicSans', 'normal'); doc.setFontSize(7.4); doc.setTextColor(...COR.tintaSec);
+            doc.text(linhas, m, y + 4.5);
+            y += 4.5 + linhas.length * 3.4 + 4;
+        });
     }
 
     // Página 2 do Dashboard — "Visão Geral" (grade de cartões; ver desenharPlacarPaisagem
@@ -10676,20 +10854,24 @@
             || atuacoesAtivas.length > 0 || outrasSecoes.length > 0 || !!secaoAtivosClasse;
         let usouPagina1 = false;
 
-        // ═══ Modo 'dashboard': 2 páginas em paisagem NO MESMO ARQUIVO (pedido do
-        // usuário) — "Placar Ponderado" (calcularPlacarCartorio/desenharPlacarPaisagem)
-        // seguida de "Visão Geral" (desenharVisaoGeralPaisagem, grade de cartões) — e
+        // ═══ Modo 'dashboard': 3 páginas em paisagem NO MESMO ARQUIVO (pedido do
+        // usuário) — "Placar Ponderado" (calcularPlacarCartorio/desenharPlacarPaisagem),
+        // "Visão Geral" (desenharVisaoGeralPaisagem, grade de cartões) e "Metodologia do
+        // Placar" (desenharMetodologiaPlacarPaisagem — critérios e redistribuição) — e
         // sai; nenhuma página de resumo/tabela individual dos modos 'resumo'/'tabelas'
         // entra aqui. Nome de arquivo próprio ("Dashboard [Unidades]"), mesmo padrão de
         // data dos outros dois modos. ═══
         if (modo === 'dashboard') {
+            const unidadesDash = unidadesDoPDFConjunto(secoesEntrada, opcoes);
             if (temConteudo) {
                 const placar = calcularPlacarCartorio(secoes, itensCartorio, now);
-                desenharPlacarPaisagem(doc, placar, agora);
+                desenharPlacarPaisagem(doc, placar, agora, unidadesDash);
                 doc.addPage('a4', 'landscape');
                 desenharVisaoGeralPaisagem(doc, cartorio, gabinete, agora);
+                doc.addPage('a4', 'landscape');
+                desenharMetodologiaPlacarPaisagem(doc, placar, agora, unidadesDash);
             }
-            const rotuloUnidadesArquivoDash = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDoPDFConjunto(secoesEntrada, opcoes)));
+            const rotuloUnidadesArquivoDash = sanitizarNomeArquivo(rotuloUnidadesParaArquivo(unidadesDash));
             const nomeArquivoDash = rotuloUnidadesArquivoDash ? `Dashboard ${rotuloUnidadesArquivoDash}` : 'Dashboard Projudi';
             baixarBlob(doc.output('blob'), `${nomeArquivoDash}_${dataArquivo()}.pdf`);
             overrideMapaAtivos = null;
@@ -18412,9 +18594,9 @@
     }
 
     // modo: 'resumo' (botão "Relatório PDF"), 'tabelas' (botão "Tabelas
-    // Discriminadas") ou 'dashboard' (sem botão — gerado automaticamente ao final da
-    // automação via gerarDashboardAutomatico, ver checkbox "Dashboard" no Cível-Geral)
-    // — ver gerarPDFConjunto. As atribuições são derivadas dos PRÓPRIOS
+    // Discriminadas") ou 'dashboard' (botão "Dashboard"; também gerado automaticamente
+    // ao final da automação via gerarDashboardAutomatico, ver checkbox "Dashboard" no
+    // Cível-Geral) — ver gerarPDFConjunto. As atribuições são derivadas dos PRÓPRIOS
     // DADOS coletados (campo competencia/atuacao de cada registro), e NÃO do mapa de
     // Processos Ativos (lerMapaAtivos): aquele mapa só é gravado quando a opção "Ativos"
     // está marcada e pode não refletir todas as atribuições realmente coletadas.
@@ -19072,6 +19254,7 @@
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com o resumo (cartões de KPI e tabela comparativa por competência) de cada relatório já coletado, sem tabelas discriminadas">⬇ Relatório PDF</button>
                         <button id="pa-tabelas" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com as tabelas discriminadas de cada relatório já coletado">⬇ Tabelas Discriminadas</button>
+                        <button id="pa-dashboard" class="pa-btn pa-btn-secondary" type="button" title="Gera o Dashboard em paisagem (placar ponderado, visão geral e metodologia) com os relatórios já coletados">⬇ Dashboard</button>
                         <button id="pa-limpar" class="pa-btn pa-btn-ghost" type="button" title="Apaga os dados acumulados de todos os relatórios">Limpar</button>
                     </div>
                     <button id="pa-pular" class="pa-btn pa-btn-ghost pa-btn-alerta" type="button" style="display:none;" title="Pula a extração do relatório atual (use em caso de travamento) — ele consta no Relatório PDF como interrompido por erro">⏭ Pular extração atual</button>
@@ -19143,6 +19326,7 @@
         };
         painel.querySelector('#pa-pdf').onclick = () => baixarPDFConjunto('resumo');
         painel.querySelector('#pa-tabelas').onclick = () => baixarPDFConjunto('tabelas');
+        painel.querySelector('#pa-dashboard').onclick = () => baixarPDFConjunto('dashboard');
         // Sem botão próprio pro Dashboard (pedido do usuário): vira um checkbox comum no
         // Cível-Geral (key 'dashboard') e é gerado sozinho ao final da automação, se
         // marcado — ver onclick de #pa-iniciar / gerarDashboardAutomatico (que chama
@@ -19447,7 +19631,9 @@
         #painel-automacao .pa-btn-secondary , #projudi-mu-painel .pa-btn-secondary { background: #FFFFFF; color: #3A5A7D; border-color: #3A5A7D; }
         #painel-automacao .pa-btn-ghost , #projudi-mu-painel .pa-btn-ghost { background: none; color: #923A3A; border-color: #DEDDD6; font-weight: 500; }
         #painel-automacao .pa-btn-alerta , #projudi-mu-painel .pa-btn-alerta { width: 100%; border-color: #E3B98A; background: #FBF2E7; color: #9C742E; }
-        #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; gap: 6px; }
+        #painel-automacao .pa-btn-row , #projudi-mu-painel .pa-btn-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        /* 4 botões (Relatório PDF / Tabelas / Dashboard / Limpar) não cabem numa linha de 308px — 2 por linha. */
+        #painel-automacao .pa-btn-row .pa-btn , #projudi-mu-painel .pa-btn-row .pa-btn { min-width: 40%; }
 
         #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
         #painel-automacao .pa-log , #projudi-mu-painel .pa-log { margin-top: 8px; border-top: 1px solid #DEDDD6; padding-top: 8px; }
