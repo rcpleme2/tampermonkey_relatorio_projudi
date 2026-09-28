@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.97
+// @version      26.01
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2870,6 +2870,236 @@
         },
     };
 
+    // ── Crianças/Adolescentes Acolhidos (menu "Infância e Juventude" > "Crianças/
+    // Adolescentes Acolhidos" — processo/infanciaJuventude/buscaAcolhimento.do).
+    // Grupo "VIJ - Seção Infracional" do painel (dominio: 'vji', ver GRUPOS_AUTOMACAO):
+    // unidade sem esse menu é marcada "Prejudicado" depois de 3 tentativas, como na
+    // categoria Crime (ver LIMITE_TENTATIVAS_CRIME em passoAutomacao).
+    //
+    // Tela de busca com filtros (form#buscaAcolhimentoForm) — o rádio "Continuam
+    // Acolhidos/Internados" (name="opcao") = Sim (value="acolhidos") é o filtro que o
+    // relatório quer; já vem marcado por padrão, mas preencherEPesquisarAcolhidos garante
+    // com clique real (ver armadilha "clique sintético" no CLAUDE.md) antes de Pesquisar.
+    // Form + table.resultTable convivem na MESMA página depois da pesquisa (e o menu
+    // "Prisões/Acolhimentos/Internações" leva à MESMA URL), por isso a detecção é pelo
+    // <form> — o cabeçalho da tabela varia com a unidade: numa Seção Infracional
+    // (.mhtml enviado pelo usuário) as colunas dizem "Adolescente Internado"/"Internação"/
+    // "Desinternação"/"Período de Internação"; numa Seção de Proteção presumivelmente
+    // "Acolhido"/"Acolhimento". A extração é por POSIÇÃO de coluna (iguais nas duas):
+    // [0] Processo/Comarca [1] Criança/Adolescente (+ table.form aninhada com Mãe/Pai)
+    // [2] Nascimento/Idade [3] Acolhimento (table.form: Data/Guia/Motivo/Local[/Fiança])
+    // [4] Desacolhimento (vazio com "Continuam acolhidos = Sim") [5] Período (texto tipo
+    // "6 meses e 23 dias (207 dias)" — ou só "13 dias", sem parênteses, abaixo de 1 mês).
+    //
+    // Uma linha por criança/adolescente (o mesmo processo pode ter mais de um) — dedupe
+    // pelo registro inteiro (chaveDuplicata: '*'), mesmo caso de CFG_REAVALIACAO_PRISAO_
+    // PROVISORIA. Resumo dedicado (card total + card acolhimento mais antigo + tabela dos
+    // 5 acolhidos há mais tempo); a tabela discriminada completa ("Tabelas
+    // Discriminadas") reaproveita montarTabelaGenerico, ordenada pela data do acolhimento.
+    const TITULO_ACOLHIDOS = 'Crianças/Adolescentes Acolhidos';
+
+    function formularioAcolhidos() {
+        const form = document.getElementById('buscaAcolhimentoForm');
+        return form && /buscaAcolhimento\.do/i.test(form.action || '') ? form : null;
+    }
+
+    // Lê a table.form aninhada de uma célula ("Mãe:"/"Pai:" ou "Data:"/"Guia:"/"Motivo:"/
+    // "Local:") como { rótulo em minúsculas, sem ":" -> valor }.
+    function camposTabelaAninhada(td) {
+        const campos = {};
+        if (!td) return campos;
+        td.querySelectorAll('table.form tr').forEach(tr => {
+            const cels = tr.querySelectorAll(':scope > td');
+            if (cels.length < 2) return;
+            const rotulo = textoCelula(cels[0]).replace(/\s+/g, ' ').replace(/:\s*$/, '').trim().toLowerCase();
+            if (rotulo) campos[rotulo] = textoCelula(cels[1]).replace(/\s+/g, ' ');
+        });
+        return campos;
+    }
+
+    // "6 meses e 23 dias (207 dias)" -> 207; "13 dias" -> 13; senão, calcula pela data.
+    function diasAcolhimento(periodo, dataAcolhimento) {
+        const mParen = periodo.match(/\((\d+)\s*dias?\)/i);
+        if (mParen) return parseInt(mParen[1], 10);
+        const mSo = periodo.match(/^(\d+)\s*dias?$/i);
+        if (mSo) return parseInt(mSo[1], 10);
+        const ts = parseDataBR(dataAcolhimento);
+        return ts == null ? null : Math.floor((Date.now() - ts) / 86400000);
+    }
+
+    // Acolhidos há mais tempo primeiro (data do acolhimento mais antiga; sem data, no fim).
+    function ordenarAcolhidosMaisAntigos(dados) {
+        return (dados || []).slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataAcolhimento); const tb = parseDataBR(b.dataAcolhimento);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+    }
+
+    const CFG_ACOLHIDOS = {
+        prefixo: 'projudi_acolhidos_',
+        // Zero acolhidos é informação válida — mostra a linha mesmo vazia, desde que já
+        // coletado (mesmo padrão de CFG_REAVALIACAO_PRISAO_PROVISORIA).
+        mostrarSeVazio: true,
+        chaveDuplicata: '*',
+        detecta: () => !!formularioAcolhidos(),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'criancas_adolescentes_acolhidos_projudi',
+        rotulos: {
+            coletar: 'Extrair Acolhidos',
+            coletarMais: 'Extrair mais (Acolhidos)',
+            baixar: '⬇ Baixar Acolhidos',
+        },
+        cabecalhos: ['Data do Acolhimento', 'Processo', 'Criança/Adolescente', 'Nascimento', 'Idade', 'Mãe', 'Pai',
+            'Guia', 'Motivo', 'Local', 'Período de Acolhimento', 'Dias'],
+        larguras: [{ wch: 14 }, { wch: 26 }, { wch: 34 }, { wch: 12 }, { wch: 28 }, { wch: 30 }, { wch: 30 },
+            { wch: 14 }, { wch: 36 }, { wch: 36 }, { wch: 26 }, { wch: 8 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? textoCelula(emProc)
+                : ((textoCelula(tds[0]).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [''])[0]);
+            const linkNome = tds[1].querySelector('a');
+            const pais = camposTabelaAninhada(tds[1]);
+            const nascTexto = textoCelula(tds[2]).replace(/\s+/g, ' ');
+            const mNasc = nascTexto.match(/\d{2}\/\d{2}\/\d{4}/);
+            const mIdade = nascTexto.match(/\(([^)]*)\)/);
+            const ac = camposTabelaAninhada(tds[3]);
+            const dataAcolhimento = ((ac.data || '').match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0];
+            const periodo = textoCelula(tds[5]).replace(/\s+/g, ' ');
+            return {
+                dataAcolhimento,
+                processo,
+                nome: (linkNome ? textoCelula(linkNome) : '').replace(/\s+/g, ' '),
+                nascimento: mNasc ? mNasc[0] : '',
+                idade: mIdade ? mIdade[1].trim() : '',
+                mae: pais['mãe'] || pais.mae || '',
+                pai: pais.pai || '',
+                guia: ac.guia || '',
+                motivo: ac.motivo || '',
+                local: ac.local || '',
+                periodo,
+                dias: diasAcolhimento(periodo, dataAcolhimento),
+                // Mesmo cuidado de CFG_REAVALIACAO_PRISAO_PROVISORIA: sem atuacao/
+                // competencia, filtrarSecoesPorAtribuicoes descartaria os registros.
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.dataAcolhimento, d.processo, d.nome, d.nascimento, d.idade, d.mae, d.pai,
+            d.guia, d.motivo, d.local, d.periodo, d.dias == null ? '' : d.dias],
+        pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoAcolhidos).
+        pdf: {
+            titulo: TITULO_ACOLHIDOS,
+            tabelaTitulo: 'Tabela discriminada das crianças/adolescentes acolhidos',
+            dataCampo: 'dataAcolhimento',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Acolhimento', width: 19, get: (d) => d.dataAcolhimento },
+                { header: 'Processo', width: 33, get: (d) => d.processo },
+                { header: 'Criança/Adolescente', width: 32, get: (d) => d.nome },
+                { header: 'Nascimento', width: 19, get: (d) => d.nascimento },
+                { header: 'Motivo', width: 30, get: (d) => d.motivo },
+                { header: 'Local', width: 30, get: (d) => d.local },
+                { header: 'Período', width: 22, get: (d) => d.periodo },
+            ],
+        },
+    };
+
+    // ── Habilitações para Adoção (menu "Infância e Juventude" > "Habilitações para
+    // Adoção" — processo/infanciaJuventude/casalHabilitadoAdocao.do). Grupo "VIJ - Seção
+    // Infracional" do painel, junto com Acolhidos. Pedido do usuário: "Status da
+    // Habilitação" (select#filtroStatusHabilitacao) = "Aguardando Oportuna Indicação"
+    // (value="1"), depois Pesquisar (#searchButton, type=submit). Os demais filtros ficam
+    // no padrão da tela (Comarca já vem com a única opção do usuário; Vara = Todas).
+    //
+    // ATENÇÃO: o .mhtml enviado pelo usuário tinha a busca VAZIA ("Nenhum registro
+    // encontrado", uma única <td colspan=4> — descartada por minTds), então o formato
+    // exato de cada célula de dado não foi conferido. A extração é por POSIÇÃO das 16
+    // colunas do cabeçalho (confirmadas no .mhtml): [0] Comarca/Vara [1] Processo de
+    // Habilitação [2] Pretendentes/Status [3] UF [4] Idade [5] Sexo [6] Raça/Cor
+    // [7] Tamanho do Grupo de Irmãos; Saúde da Criança/Adolescente: [8] DF [9] PM
+    // [10] HIV [11] DOE; Pais da Criança/Adolescente: [12] D [13] PM [14] PD [15] HIV —
+    // o texto de cada célula é guardado inteiro (espaços normalizados), sem interpretar.
+    // Mesma forma da tela de Acolhidos: form + resultados na mesma página, detecção
+    // pelo <form>. Uma linha por habilitação (dedupe pelo registro inteiro).
+    const TITULO_HABILITACOES_ADOCAO = 'Habilitações para Adoção — Aguardando Oportuna Indicação';
+    const STATUS_HABILITACAO_AGUARDANDO_INDICACAO = '1';
+
+    function formularioHabilitacoesAdocao() {
+        const form = document.getElementById('casalHabilitadoAdocaoForm');
+        return form && form.querySelector('select#filtroStatusHabilitacao') ? form : null;
+    }
+
+    const textoCelulaNormalizado = (td) => textoCelula(td).replace(/\s+/g, ' ');
+    // Só no PDF (16 colunas em retrato): "Sim"/"Não" -> "S"/"N", "Indiferente" ->
+    // "Indif."; a planilha Excel mantém o texto original da tela.
+    const abreviarHabilitacao = (v) => String(v || '').replace(/^sim$/i, 'S').replace(/^n[ãa]o$/i, 'N').replace(/indiferente/i, 'Indif.');
+
+    const CFG_HABILITACOES_ADOCAO = {
+        prefixo: 'projudi_habilitacoesadocao_',
+        mostrarSeVazio: true,
+        chaveDuplicata: '*',
+        detecta: () => !!formularioHabilitacoesAdocao(),
+        minTds: 16,
+        usaAtuacao: false,
+        nomeArquivo: 'habilitacoes_adocao_projudi',
+        rotulos: {
+            coletar: 'Extrair Habilitações para Adoção',
+            coletarMais: 'Extrair mais (Habilitações para Adoção)',
+            baixar: '⬇ Baixar Habilitações para Adoção',
+        },
+        cabecalhos: ['Comarca/Vara', 'Processo de Habilitação', 'Pretendentes/Status', 'UF', 'Idade', 'Sexo', 'Raça/Cor',
+            'Tamanho do Grupo de Irmãos', 'Saúde: DF', 'Saúde: PM', 'Saúde: HIV', 'Saúde: DOE',
+            'Pais: D', 'Pais: PM', 'Pais: PD', 'Pais: HIV'],
+        larguras: [{ wch: 34 }, { wch: 26 }, { wch: 44 }, { wch: 6 }, { wch: 14 }, { wch: 12 }, { wch: 16 },
+            { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }],
+        extrai: (tds, atuacao) => {
+            const t = (i) => textoCelulaNormalizado(tds[i]);
+            const emProc = tds[1].querySelector('em');
+            const processo = emProc ? textoCelulaNormalizado(emProc)
+                : ((t(1).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [t(1)])[0]);
+            return {
+                comarcaVara: t(0), processo, pretendentes: t(2), uf: t(3), idade: t(4), sexo: t(5), raca: t(6),
+                grupoIrmaos: t(7), saudeDF: t(8), saudePM: t(9), saudeHIV: t(10), saudeDOE: t(11),
+                paisD: t(12), paisPM: t(13), paisPD: t(14), paisHIV: t(15),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.comarcaVara, d.processo, d.pretendentes, d.uf, d.idade, d.sexo, d.raca, d.grupoIrmaos,
+            d.saudeDF, d.saudePM, d.saudeHIV, d.saudeDOE, d.paisD, d.paisPM, d.paisPD, d.paisHIV],
+        pdfCustom: (dados, somenteResumo) => gerarPDFHabilitacoesAdocao(dados, somenteResumo),
+        // Sem data por registro — dataCampo aponta para um campo inexistente, então
+        // montarTabelaGenerico mantém a ordem da tela (sort estável com tudo "sem data").
+        pdf: {
+            titulo: TITULO_HABILITACOES_ADOCAO,
+            tabelaTitulo: 'Tabela discriminada das habilitações para adoção (aguardando oportuna indicação)',
+            dataCampo: 'semData',
+            processoCampo: 'processo',
+            colunas: [
+                // Cabeçalhos curtos (S- = Saúde da Criança/Adolescente, P- = Pais da
+                // Criança/Adolescente, siglas da legenda do Projudi) — 16 colunas em retrato.
+                { header: 'Comarca/Vara', width: 24, get: (d) => d.comarcaVara },
+                { header: 'Processo', width: 33, get: (d) => d.processo },
+                { header: 'Pretendentes/Status', width: 28, get: (d) => d.pretendentes },
+                { header: 'UF', width: 6, get: (d) => d.uf },
+                { header: 'Idade', width: 11, get: (d) => d.idade },
+                { header: 'Sexo', width: 9, get: (d) => abreviarHabilitacao(d.sexo) },
+                { header: 'Raça/Cor', width: 10, get: (d) => abreviarHabilitacao(d.raca) },
+                { header: 'Irmãos', width: 8, get: (d) => d.grupoIrmaos },
+                { header: 'S-DF', width: 5, get: (d) => abreviarHabilitacao(d.saudeDF) },
+                { header: 'S-PM', width: 5, get: (d) => abreviarHabilitacao(d.saudePM) },
+                { header: 'S-HIV', width: 5, get: (d) => abreviarHabilitacao(d.saudeHIV) },
+                { header: 'S-DOE', width: 5, get: (d) => abreviarHabilitacao(d.saudeDOE) },
+                { header: 'P-D', width: 5, get: (d) => abreviarHabilitacao(d.paisD) },
+                { header: 'P-PM', width: 5, get: (d) => abreviarHabilitacao(d.paisPM) },
+                { header: 'P-PD', width: 5, get: (d) => abreviarHabilitacao(d.paisPD) },
+                { header: 'P-HIV', width: 5, get: (d) => abreviarHabilitacao(d.paisHIV) },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
     // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
     // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
@@ -4597,6 +4827,41 @@
                     console.warn('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
+        }, 1500);
+    }
+
+    // Seleciona "Status da Habilitação" = Aguardando Oportuna Indicação e pesquisa. É um
+    // <select> comum (não um elemento que só reage a clique real) — value + 'change'.
+    function preencherEPesquisarHabilitacoesAdocao() {
+        const form = formularioHabilitacoesAdocao();
+        if (!form) return;
+        const sel = form.querySelector('select#filtroStatusHabilitacao');
+        if (sel && sel.value !== STATUS_HABILITACAO_AGUARDANDO_INDICACAO) {
+            sel.value = STATUS_HABILITACAO_AGUARDANDO_INDICACAO;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        console.log(`[Projudi Habilitações Adoção] status=${sel ? sel.value : '(select ausente)'}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Habilitações Adoção] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+        }, 1500);
+    }
+
+    // Garante "Continuam Acolhidos/Internados" = Sim (rádio name="opcao",
+    // value="acolhidos" — já é o padrão da tela, mas uma pesquisa anterior pode ter
+    // deixado "Não"/"Ambos") com clique real, e clica em Pesquisar. Não mexe nos demais
+    // filtros (todos vazios/"Todos" por padrão).
+    function preencherEPesquisarAcolhidos() {
+        const form = formularioAcolhidos();
+        if (!form) return;
+        const radio = form.querySelector('input[name="opcao"][value="acolhidos"]');
+        if (radio && !radio.checked) radio.click();
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[name="btPesquisar"]');
+        console.log(`[Projudi Acolhidos] opcao=acolhidos marcada=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            console.log('[Projudi Acolhidos] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
     }
 
@@ -8761,6 +9026,22 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_REAVALIACAO_PRISAO_PROVISORIA, comIndice),
             };
         }
+        if (cfg === CFG_HABILITACOES_ADOCAO) {
+            return {
+                rotulo: TITULO_HABILITACOES_ADOCAO,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoHabilitacoesAdocao(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_HABILITACOES_ADOCAO, comIndice),
+            };
+        }
+        if (cfg === CFG_ACOLHIDOS) {
+            return {
+                rotulo: TITULO_ACOLHIDOS,
+                // Resumo dedicado (mesmo padrão de CFG_REAVALIACAO_PRISAO_PROVISORIA); a
+                // tabela discriminada reaproveita o genérico (ver CFG_ACOLHIDOS.pdf).
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAcolhidos(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, comIndice),
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -9501,6 +9782,8 @@
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
+        const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
+        const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -10078,6 +10361,32 @@
             });
         }
         empilharSubgrupo('Outros', itensOutros);
+
+        // ── VIJ - Seção Infracional (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) —
+        // subgrupo à parte na capa, depois de "Outros". Acolhidos: total + acolhimento
+        // mais antigo com processo; Habilitações para Adoção: total.
+        const itensInfancia = [];
+        if (secaoAcolhidos) {
+            const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
+            const prejudicado = prejudicadoInfo(CFG_ACOLHIDOS);
+            const detalheAntigo = antigo ? `Mais antigo: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensInfancia.push({
+                nome: TITULO_ACOLHIDOS,
+                indicador: `${secaoAcolhidos.dados.length} acolhido(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_ACOLHIDOS,
+            });
+        }
+        if (secaoHabilitacoesAdocao) {
+            const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
+            itensInfancia.push({
+                nome: 'Habilitações para Adoção (Aguardando Oportuna Indicação)',
+                indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
+                detalhamento: prejudicado || '—',
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
+            });
+        }
+        empilharSubgrupo('VIJ - Seção Infracional', itensInfancia);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
@@ -12266,6 +12575,166 @@
     }
 
 
+    // ── PDF de Crianças/Adolescentes Acolhidos ──────────────────────────────────────
+    function gerarPDFAcolhidos(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoAcolhidos(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_ACOLHIDOS.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Mesmo padrão de montarResumoReavaliacaoPrisaoProvisoria: 2 cards (total de
+    // acolhidos + acolhimento mais antigo, com o nº do processo) + tabela embutida com os
+    // 5 acolhidos HÁ MAIS TEMPO (ordenados pela data do acolhimento — pedido do usuário,
+    // não a ordem de chegada da tela). Sem balão de observação (nenhuma regra legal foi
+    // pedida para esta seção).
+    function montarResumoAcolhidos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_ACOLHIDOS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+
+        // Total de REGISTROS (uma linha por criança/adolescente, não por processo
+        // distinto), igual ao "N registro(s) encontrado(s)" da tela do Projudi.
+        desenharCard(doc, m, kY, kW, kH, 'Crianças/adolescentes acolhidos', String(r.length), [], true, COR.azul, COR.azul);
+
+        const antigo = acharMaisAntigo(r, 'dataAcolhimento');
+        const valAntigo = antigo ? antigo.dataStr : '—';
+        const subsAntigo = antigo
+            ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
+            : ['Data não disponível'];
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Acolhimento mais antigo', valAntigo, subsAntigo, true, COR.ambar);
+
+        const LIMITE_TABELA_EMBUTIDA_ACOLHIDOS = 5;
+        if (r.length > 0) {
+            const yTab = kY + kH + gap;
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_ACOLHIDOS
+                ? `Os ${LIMITE_TABELA_EMBUTIDA_ACOLHIDOS} Acolhimentos Mais Antigos`
+                : 'Acolhimentos (do mais antigo ao mais recente)';
+            tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
+            const colunas = CFG_ACOLHIDOS.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: ordenarAcolhidosMaisAntigos(r).slice(0, LIMITE_TABELA_EMBUTIDA_ACOLHIDOS).map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yTab + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+        }
+
+        desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de Habilitações para Adoção ─────────────────────────────────────────────
+    function gerarPDFHabilitacoesAdocao(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoHabilitacoesAdocao(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_HABILITACOES_ADOCAO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_HABILITACOES_ADOCAO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Pedido do usuário: 1 card com o total + lista dos PRIMEIROS 15 habilitados (ordem
+    // da tela), com todas as colunas. A lista completa fica em "Tabelas Discriminadas".
+    function montarResumoHabilitacoesAdocao(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text('Habilitações para Adoção', m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Status: Aguardando Oportuna Indicação  •  Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+        // Card único centralizado na largura útil (pedido do usuário).
+        desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Habilitados aguardando oportuna indicação', String(r.length), [], true, COR.azul, COR.azul);
+
+        const LIMITE_TABELA_EMBUTIDA_HABILITACOES = 15;
+        if (r.length > 0) {
+            const yTab = kY + kH + gap;
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_HABILITACOES
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_HABILITACOES} Habilitados`
+                : 'Lista dos Habilitados';
+            tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
+            const colunas = CFG_HABILITACOES_ADOCAO.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: r.slice(0, LIMITE_TABELA_EMBUTIDA_HABILITACOES).map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yTab + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                // 16 colunas em retrato — fonte um pouco menor que o padrão (7.5).
+                styles: { font: 'PublicSans', fontSize: 6, cellPadding: 1, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 6 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            const yLegenda = doc.lastAutoTable.finalY + 4;
+            if (yLegenda + 8 <= ph - 14) {
+                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
+                doc.text(doc.splitTextToSize('Legenda (Projudi): S- = Saúde da Criança/Adolescente — (DF) aceita com deficiência física, (PM) com problemas mentais, (HIV) portador de HIV, (DOE) com outro tipo de doença; P- = Pais da Criança/Adolescente — (D) aceita de pais desconhecidos, (PM) com problemas mentais, (PD) com problemas com drogas, (HIV) portadores de HIV. S = Sim, N = Não, Indif. = Indiferente.', uw), m, yLegenda);
+            }
+        }
+
+        desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
     // montarResumoGenerico/montarTabelaGenerico (dependem de p.dataCampo/p.processoCampo
@@ -14142,6 +14611,11 @@
         // entre si (só Mandados de Prisão tem essa coluna).
         else if (CFG_MANDADOS_PRISAO_REGULARIZAR.detecta(cab)) cfg = CFG_MANDADOS_PRISAO_REGULARIZAR;
         else if (CFG_ALVARAS_SOLTURA_REGULARIZAR.detecta(cab)) cfg = CFG_ALVARAS_SOLTURA_REGULARIZAR;
+        // Crianças/Adolescentes Acolhidos — detecção pelo <form id="buscaAcolhimentoForm">
+        // (cabeçalho varia entre Seção Infracional/Proteção, ver CFG_ACOLHIDOS). Antes de
+        // CFG_RETORNO: sem isto a tela caía no fallback de Retorno (visto no .mhtml).
+        else if (CFG_HABILITACOES_ADOCAO.detecta(cab)) cfg = CFG_HABILITACOES_ADOCAO;
+        else if (CFG_ACOLHIDOS.detecta(cab)) cfg = CFG_ACOLHIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
         else if (CFG_APREENSOES.detecta(cab)) cfg = CFG_APREENSOES;
@@ -14571,6 +15045,8 @@
         if (navAlvo === 'audienciasdesignadas') return /audiencia\/pautaAudiencia\.do/i;
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
+        if (navAlvo === 'habilitacoesadocao') return /infanciaJuventude\/casalHabilitadoAdocao\.do/i;
+        if (navAlvo === 'acolhidos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'monitoracaoexpiradas') return /buscaMonitoracaoEletronica\.do/i;
         // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
         // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
@@ -15443,6 +15919,49 @@
             }
         }
 
+        // Tela de busca de Habilitações para Adoção (casalHabilitadoAdocao.do) — mesmo
+        // padrão de Acolhidos logo abaixo: decide pelo ESTADO da automação.
+        if (formularioHabilitacoesAdocao()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_habilitacoesadocao') {
+                console.log('[Projudi Habilitações Adoção] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_habilitacoesadocao');
+                preencherEPesquisarHabilitacoesAdocao();
+                return;
+            }
+            if (estadoAtual !== 'coletando_habilitacoesadocao' && mostrarBotoesIndividuais()) {
+                const bHabilitacoes = document.createElement('button');
+                bHabilitacoes.type = 'button';
+                bHabilitacoes.className = 'projudi-btn';
+                bHabilitacoes.title = 'Seleciona Status = Aguardando Oportuna Indicação e pesquisa';
+                bHabilitacoes.textContent = 'Preencher e Pesquisar (Habilitações para Adoção)';
+                bHabilitacoes.onclick = () => preencherEPesquisarHabilitacoesAdocao();
+                buttonBar.appendChild(bHabilitacoes);
+            }
+        }
+
+        // Tela de busca de Crianças/Adolescentes Acolhidos (buscaAcolhimento.do) — mesmo
+        // padrão de Suspensos com Prazo abaixo: decide pelo ESTADO da automação, não pela
+        // presença de resultados (form e resultados convivem na mesma página).
+        if (formularioAcolhidos()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_acolhidos') {
+                console.log('[Projudi Acolhidos] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_acolhidos');
+                preencherEPesquisarAcolhidos();
+                return;
+            }
+            if (estadoAtual !== 'coletando_acolhidos' && mostrarBotoesIndividuais()) {
+                const bAcolhidos = document.createElement('button');
+                bAcolhidos.type = 'button';
+                bAcolhidos.className = 'projudi-btn';
+                bAcolhidos.title = 'Marca "Continuam acolhidos" = Sim e pesquisa';
+                bAcolhidos.textContent = 'Preencher e Pesquisar (Acolhidos)';
+                bAcolhidos.onclick = () => preencherEPesquisarAcolhidos();
+                buttonBar.appendChild(bAcolhidos);
+            }
+        }
+
         // Tela de filtros de Suspensos com Prazo (processoBuscaSuspenso.do, alcançada pelo
         // menu "Suspensos" — mesmo padrão de Apreensões acima: decide pelo ESTADO da
         // automação, não pela presença de resultados).
@@ -15707,9 +16226,26 @@
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
+    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Infracional"
+    // (dominio: 'vji') vêm DESMARCADOS por padrão — seleção sempre manual.
     function relatorioMarcadoPorPadrao(key) {
+        migrarSelecoesVjiDesmarcadas();
         const salvas = lerSelecoesSalvasPainel();
-        return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+        if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
+        const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
+        return !(rel && rel.dominio === 'vji');
+    }
+    // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
+    // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
+    // esse "true" sem o usuário ter escolhido. Apaga só essas chaves uma vez, para
+    // valer o novo padrão desmarcado; depois disso, vale o que o usuário marcar.
+    const CHAVE_MIGRACAO_VJI_DESMARCADO = 'projudi_pa_vji_desmarcado_migrado';
+    function migrarSelecoesVjiDesmarcadas() {
+        if (store.getItem(CHAVE_MIGRACAO_VJI_DESMARCADO) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.dominio === 'vji').forEach(r => { delete salvas[r.key]; });
+        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -16561,10 +17097,16 @@
         // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
         // da categoria Crime.
         { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // ── Grupo "VIJ - Seção Infracional" (pedido do usuário: seção própria no painel,
+        // abaixo de Gabinete — ver GRUPOS_AUTOMACAO). Sem categoriaEspecifica: aparece em
+        // todas as abas; unidade sem esses menus vira "Prejudicado" após 3 tentativas.
+        { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vji', precisaPreencher: true },
+        { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vji', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
+        { chave: 'vji', rotulo: 'VIJ - Seção Infracional' },
     ];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
@@ -17017,6 +17559,14 @@
         // "A Regularizar" é o que distingue o item certo.
         else if (alvo === 'mandadosprisaoregularizar') link = acharLinkMenu(/cumprimentoCartorioMandadoPrisao\.do/i, /^a\s+regularizar$/i);
         else if (alvo === 'alvarassolturaregularizar') link = acharLinkMenu(/cumprimentoCartorioAlvaraSoltura\.do/i, /^a\s+regularizar$/i);
+        // "Habilitações para Adoção" — a MESMA URL base (casalHabilitadoAdocao.do) tem
+        // outros itens de menu ("Pretendentes Habilitados à Adoção", "Busca de Processos
+        // de Habilitação... com Pendência de Cadastro") — o texto exato distingue.
+        else if (alvo === 'habilitacoesadocao') link = acharLinkMenu(/infanciaJuventude\/casalHabilitadoAdocao\.do/i, /^habilita[çc][õo]es\s+para\s+ado[çc][ãa]o$/i);
+        // "Crianças/Adolescentes Acolhidos" (menu Infância e Juventude). Casa também pelo
+        // TEXTO: "Prisões/Acolhimentos/Internações" (menu Processos) tem a MESMA URL, e
+        // em unidades sem competência de Infância não deve contar como este relatório.
+        else if (alvo === 'acolhidos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
@@ -17657,7 +18207,9 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            if (rel.categoriaEspecifica === 'crime' && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+            // Mesma regra para o grupo "VIJ - Seção Infracional" (Acolhidos/Habilitações
+            // para Adoção) — unidade sem competência de Infância não tem esses menus.
+            if ((rel.categoriaEspecifica === 'crime' || rel.dominio === 'vji') && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
                 marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
                 return;
