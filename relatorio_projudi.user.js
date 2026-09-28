@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      25.99
+// @version      26.00
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -16226,9 +16226,26 @@
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
+    // Exceção (pedido do usuário): os itens do grupo "VJI - Seção Infracional"
+    // (dominio: 'vji') vêm DESMARCADOS por padrão — seleção sempre manual.
     function relatorioMarcadoPorPadrao(key) {
+        migrarSelecoesVjiDesmarcadas();
         const salvas = lerSelecoesSalvasPainel();
-        return Object.prototype.hasOwnProperty.call(salvas, key) ? !!salvas[key] : true;
+        if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
+        const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
+        return !(rel && rel.dominio === 'vji');
+    }
+    // Migração única: nas versões 25.98/25.99 os itens VJI vinham marcados por padrão, e
+    // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
+    // esse "true" sem o usuário ter escolhido. Apaga só essas chaves uma vez, para
+    // valer o novo padrão desmarcado; depois disso, vale o que o usuário marcar.
+    const CHAVE_MIGRACAO_VJI_DESMARCADO = 'projudi_pa_vji_desmarcado_migrado';
+    function migrarSelecoesVjiDesmarcadas() {
+        if (store.getItem(CHAVE_MIGRACAO_VJI_DESMARCADO) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.dominio === 'vji').forEach(r => { delete salvas[r.key]; });
+        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
