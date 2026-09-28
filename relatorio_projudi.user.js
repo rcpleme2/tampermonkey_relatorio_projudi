@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.00
+// @version      26.01
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2872,7 +2872,7 @@
 
     // ── Crianças/Adolescentes Acolhidos (menu "Infância e Juventude" > "Crianças/
     // Adolescentes Acolhidos" — processo/infanciaJuventude/buscaAcolhimento.do).
-    // Grupo "VJI - Seção Infracional" do painel (dominio: 'vji', ver GRUPOS_AUTOMACAO):
+    // Grupo "VIJ - Seção Infracional" do painel (dominio: 'vji', ver GRUPOS_AUTOMACAO):
     // unidade sem esse menu é marcada "Prejudicado" depois de 3 tentativas, como na
     // categoria Crime (ver LIMITE_TENTATIVAS_CRIME em passoAutomacao).
     //
@@ -3007,7 +3007,7 @@
     };
 
     // ── Habilitações para Adoção (menu "Infância e Juventude" > "Habilitações para
-    // Adoção" — processo/infanciaJuventude/casalHabilitadoAdocao.do). Grupo "VJI - Seção
+    // Adoção" — processo/infanciaJuventude/casalHabilitadoAdocao.do). Grupo "VIJ - Seção
     // Infracional" do painel, junto com Acolhidos. Pedido do usuário: "Status da
     // Habilitação" (select#filtroStatusHabilitacao) = "Aguardando Oportuna Indicação"
     // (value="1"), depois Pesquisar (#searchButton, type=submit). Os demais filtros ficam
@@ -10362,7 +10362,7 @@
         }
         empilharSubgrupo('Outros', itensOutros);
 
-        // ── VJI - Seção Infracional (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) —
+        // ── VIJ - Seção Infracional (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) —
         // subgrupo à parte na capa, depois de "Outros". Acolhidos: total + acolhimento
         // mais antigo com processo; Habilitações para Adoção: total.
         const itensInfancia = [];
@@ -10386,7 +10386,7 @@
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
-        empilharSubgrupo('VJI - Seção Infracional', itensInfancia);
+        empilharSubgrupo('VIJ - Seção Infracional', itensInfancia);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
@@ -16226,7 +16226,7 @@
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
-    // Exceção (pedido do usuário): os itens do grupo "VJI - Seção Infracional"
+    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Infracional"
     // (dominio: 'vji') vêm DESMARCADOS por padrão — seleção sempre manual.
     function relatorioMarcadoPorPadrao(key) {
         migrarSelecoesVjiDesmarcadas();
@@ -16235,7 +16235,7 @@
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
         return !(rel && rel.dominio === 'vji');
     }
-    // Migração única: nas versões 25.98/25.99 os itens VJI vinham marcados por padrão, e
+    // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
     // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
     // esse "true" sem o usuário ter escolhido. Apaga só essas chaves uma vez, para
     // valer o novo padrão desmarcado; depois disso, vale o que o usuário marcar.
@@ -17097,7 +17097,7 @@
         // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
         // da categoria Crime.
         { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
-        // ── Grupo "VJI - Seção Infracional" (pedido do usuário: seção própria no painel,
+        // ── Grupo "VIJ - Seção Infracional" (pedido do usuário: seção própria no painel,
         // abaixo de Gabinete — ver GRUPOS_AUTOMACAO). Sem categoriaEspecifica: aparece em
         // todas as abas; unidade sem esses menus vira "Prejudicado" após 3 tentativas.
         { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vji', precisaPreencher: true },
@@ -17106,7 +17106,7 @@
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
-        { chave: 'vji', rotulo: 'VJI - Seção Infracional' },
+        { chave: 'vji', rotulo: 'VIJ - Seção Infracional' },
     ];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
@@ -18207,7 +18207,7 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            // Mesma regra para o grupo "VJI - Seção Infracional" (Acolhidos/Habilitações
+            // Mesma regra para o grupo "VIJ - Seção Infracional" (Acolhidos/Habilitações
             // para Adoção) — unidade sem competência de Infância não tem esses menus.
             if ((rel.categoriaEspecifica === 'crime' || rel.dominio === 'vji') && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
