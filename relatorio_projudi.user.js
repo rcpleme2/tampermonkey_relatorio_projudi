@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.04
+// @version      26.05
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10447,7 +10447,7 @@
 
         // ── VIJ - Seção Cível (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) — subgrupo à
         // parte na capa, depois de "Outros". Acolhidos: total + acolhimento mais antigo
-        // com processo; Habilitações para Adoção: total (+ nº de pretendentes).
+        // com processo; Habilitações para Adoção: total.
         const itensVijCivel = [];
         if (secaoAcolhidos) {
             const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
@@ -10462,12 +10462,11 @@
         }
         if (secaoHabilitacoesAdocao) {
             const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
-            const pessoas = secaoHabilitacoesAdocao.dados.reduce((soma, d) => soma + (d.nPretendentes || 0), 0);
-            const detalhe = pessoas ? `${pessoas} pretendente(s)` : '—';
             itensVijCivel.push({
                 nome: 'Habilitações para Adoção (Aguardando Oportuna Indicação)',
                 indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
-                detalhamento: prejudicado ? `${prejudicado} · ${detalhe}` : detalhe,
+                // Sem o nº de pretendentes (pedido do usuário) — só o total no indicador.
+                detalhamento: prejudicado || '—',
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
