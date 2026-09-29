@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.02
+// @version      26.03
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2873,7 +2873,7 @@
     // ── Crianças/Adolescentes Acolhidos (menu "Infância e Juventude" > "Crianças/
     // Adolescentes Acolhidos" — processo/infanciaJuventude/buscaAcolhimento.do).
     // Grupo "VIJ - Seção Cível" do painel (dominio: 'vijcivel', ver GRUPOS_AUTOMACAO —
-    // pedido do usuário: saiu de "VIJ - Seção Infracional"): unidade sem esse menu é
+    // única seção VIJ do painel, pedido do usuário): unidade sem esse menu é
     // marcada "Prejudicado" depois de 3 tentativas, como na categoria Crime (ver
     // LIMITE_TENTATIVAS_CRIME em passoAutomacao).
     //
@@ -3043,19 +3043,21 @@
 
     // ── Habilitações para Adoção (menu "Infância e Juventude" > "Habilitações para
     // Adoção" — processo/infanciaJuventude/casalHabilitadoAdocao.do). Grupo "VIJ - Seção
-    // Infracional" do painel, junto com Acolhidos. Pedido do usuário: "Status da
+    // Cível" do painel, junto com Acolhidos. Pedido do usuário: "Status da
     // Habilitação" (select#filtroStatusHabilitacao) = "Aguardando Oportuna Indicação"
     // (value="1"), depois Pesquisar (#searchButton, type=submit). Os demais filtros ficam
     // no padrão da tela (Comarca já vem com a única opção do usuário; Vara = Todas).
     //
-    // ATENÇÃO: o .mhtml enviado pelo usuário tinha a busca VAZIA ("Nenhum registro
-    // encontrado", uma única <td colspan=4> — descartada por minTds), então o formato
-    // exato de cada célula de dado não foi conferido. A extração é por POSIÇÃO das 16
-    // colunas do cabeçalho (confirmadas no .mhtml): [0] Comarca/Vara [1] Processo de
-    // Habilitação [2] Pretendentes/Status [3] UF [4] Idade [5] Sexo [6] Raça/Cor
-    // [7] Tamanho do Grupo de Irmãos; Saúde da Criança/Adolescente: [8] DF [9] PM
-    // [10] HIV [11] DOE; Pais da Criança/Adolescente: [12] D [13] PM [14] PD [15] HIV —
-    // o texto de cada célula é guardado inteiro (espaços normalizados), sem interpretar.
+    // Extração por POSIÇÃO das 16 colunas (conferidas no .mhtml com 12 registros reais
+    // enviado pelo usuário): [0] Comarca/Vara (duas linhas separadas por <br>)
+    // [1] Processo de Habilitação [2] Pretendentes/Status — <a> com os nomes (um por
+    // linha), <div> opcional de "Observação", <a> com o status e o texto "(Status no
+    // CNA/SNA: ...)"; cada parte vira um campo próprio [3] UF [4] Idade ("0 Anos e 0
+    // Meses <br> a <br> 7 Anos e 0 Meses") [5] Sexo [6] Raça/Cor [7] Tamanho do Grupo de
+    // Irmãos (várias linhas); Saúde da Criança/Adolescente: [8] DF [9] PM [10] HIV
+    // [11] DOE; Pais da Criança/Adolescente: [12] D [13] PM [14] PD [15] HIV. As quebras
+    // de linha da tela são preservadas (textoComQuebras) em vez de colar tudo numa linha.
+    // Linha "Nenhum registro encontrado" (1 td com colspan) é descartada por minTds.
     // Mesma forma da tela de Acolhidos: form + resultados na mesma página, detecção
     // pelo <form>. Uma linha por habilitação (dedupe pelo registro inteiro).
     const TITULO_HABILITACOES_ADOCAO = 'Habilitações para Adoção — Aguardando Oportuna Indicação';
@@ -3067,6 +3069,23 @@
     }
 
     const textoCelulaNormalizado = (td) => textoCelula(td).replace(/\s+/g, ' ');
+    // Linhas de texto de um elemento respeitando <br>/<div> da tela (textContent puro
+    // colaria "NOME 1NOME 2"). Cada linha com espaços normalizados; vazias descartadas.
+    function textoComQuebras(el) {
+        if (!el) return [];
+        let out = '';
+        const visitar = (n) => {
+            if (n.nodeType === 3) { out += n.textContent; return; }
+            if (n.nodeType !== 1) return;
+            if (n.tagName === 'BR') { out += '\n'; return; }
+            const bloco = /^(DIV|P)$/.test(n.tagName);
+            if (bloco) out += '\n';
+            [...n.childNodes].forEach(visitar);
+            if (bloco) out += '\n';
+        };
+        [...el.childNodes].forEach(visitar);
+        return out.split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+    }
     // Só no PDF (16 colunas em retrato): "Sim"/"Não" -> "S"/"N", "Indiferente" ->
     // "Indif."; a planilha Excel mantém o texto original da tela.
     const abreviarHabilitacao = (v) => String(v || '').replace(/^sim$/i, 'S').replace(/^n[ãa]o$/i, 'N').replace(/indiferente/i, 'Indif.');
@@ -3084,25 +3103,43 @@
             coletarMais: 'Extrair mais (Habilitações para Adoção)',
             baixar: '⬇ Baixar Habilitações para Adoção',
         },
-        cabecalhos: ['Comarca/Vara', 'Processo de Habilitação', 'Pretendentes/Status', 'UF', 'Idade', 'Sexo', 'Raça/Cor',
+        // Pedido do usuário: todas as colunas/informações da tela — na planilha, cada
+        // parte de uma célula composta (Comarca/Vara, Pretendentes/Status) vira coluna.
+        cabecalhos: ['Comarca', 'Vara', 'Processo de Habilitação', 'Pretendentes', 'Nº de Pretendentes', 'Observação',
+            'Status da Habilitação', 'Status no CNA/SNA', 'UF', 'Idade', 'Sexo', 'Raça/Cor',
             'Tamanho do Grupo de Irmãos', 'Saúde: DF', 'Saúde: PM', 'Saúde: HIV', 'Saúde: DOE',
             'Pais: D', 'Pais: PM', 'Pais: PD', 'Pais: HIV'],
-        larguras: [{ wch: 34 }, { wch: 26 }, { wch: 44 }, { wch: 6 }, { wch: 14 }, { wch: 12 }, { wch: 16 },
-            { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }],
+        larguras: [{ wch: 20 }, { wch: 44 }, { wch: 26 }, { wch: 50 }, { wch: 10 }, { wch: 36 },
+            { wch: 30 }, { wch: 24 }, { wch: 24 }, { wch: 22 }, { wch: 8 }, { wch: 22 },
+            { wch: 30 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 9 }],
         extrai: (tds, atuacao) => {
             const t = (i) => textoCelulaNormalizado(tds[i]);
+            const linhas = (i) => textoComQuebras(tds[i]);
             const emProc = tds[1].querySelector('em');
             const processo = emProc ? textoCelulaNormalizado(emProc)
                 : ((t(1).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [t(1)])[0]);
+            const [comarca, vara] = linhas(0);
+            // Pretendentes/Status: 1º <a> = nomes (um por linha); último <a> = status;
+            // <div> = observação (opcional); "(Status no CNA/SNA: X)" em texto solto.
+            const links = [...tds[2].querySelectorAll('a')];
+            const nomes = links.length ? textoComQuebras(links[0]) : [];
+            const status = links.length > 1 ? textoCelulaNormalizado(links[links.length - 1]) : '';
+            const divObs = tds[2].querySelector('div');
+            const mCna = t(2).match(/Status no CNA\/SNA:\s*([^)]*)\)/i);
             return {
-                comarcaVara: t(0), processo, pretendentes: t(2), uf: t(3), idade: t(4), sexo: t(5), raca: t(6),
-                grupoIrmaos: t(7), saudeDF: t(8), saudePM: t(9), saudeHIV: t(10), saudeDOE: t(11),
+                comarca: comarca || '', vara: vara || '', processo,
+                pretendentes: nomes.join(' e '), nPretendentes: nomes.length,
+                observacao: divObs ? textoCelulaNormalizado(divObs) : '',
+                status, statusCNA: mCna ? mCna[1].trim() : '',
+                uf: t(3), idade: linhas(4).join(' '), sexo: t(5), raca: t(6),
+                grupoIrmaos: linhas(7).join('\n'), saudeDF: t(8), saudePM: t(9), saudeHIV: t(10), saudeDOE: t(11),
                 paisD: t(12), paisPM: t(13), paisPD: t(14), paisHIV: t(15),
                 atuacao: atuacao || '',
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.comarcaVara, d.processo, d.pretendentes, d.uf, d.idade, d.sexo, d.raca, d.grupoIrmaos,
+        linha: (d) => [d.comarca, d.vara, d.processo, d.pretendentes, d.nPretendentes, d.observacao, d.status, d.statusCNA,
+            d.uf, d.idade, d.sexo, d.raca, d.grupoIrmaos,
             d.saudeDF, d.saudePM, d.saudeHIV, d.saudeDOE, d.paisD, d.paisPM, d.paisPD, d.paisHIV],
         pdfCustom: (dados, somenteResumo) => gerarPDFHabilitacoesAdocao(dados, somenteResumo),
         // Sem data por registro — dataCampo aponta para um campo inexistente, então
@@ -3115,14 +3152,20 @@
             colunas: [
                 // Cabeçalhos curtos (S- = Saúde da Criança/Adolescente, P- = Pais da
                 // Criança/Adolescente, siglas da legenda do Projudi) — 16 colunas em retrato.
-                { header: 'Comarca/Vara', width: 24, get: (d) => d.comarcaVara },
-                { header: 'Processo', width: 33, get: (d) => d.processo },
-                { header: 'Pretendentes/Status', width: 28, get: (d) => d.pretendentes },
-                { header: 'UF', width: 6, get: (d) => d.uf },
-                { header: 'Idade', width: 11, get: (d) => d.idade },
-                { header: 'Sexo', width: 9, get: (d) => abreviarHabilitacao(d.sexo) },
-                { header: 'Raça/Cor', width: 10, get: (d) => abreviarHabilitacao(d.raca) },
-                { header: 'Irmãos', width: 8, get: (d) => d.grupoIrmaos },
+                // Mesmas células compostas da tela (várias linhas por célula).
+                { header: 'Comarca / Vara', width: 20, get: (d) => [d.comarca, d.vara].filter(Boolean).join('\n') },
+                { header: 'Processo', width: 32, get: (d) => d.processo },
+                { header: 'Pretendentes / Status', width: 36, get: (d) => [
+                    (d.pretendentes || '').split(' e ').join('\n'),
+                    d.observacao ? `Observação: ${d.observacao}` : '',
+                    d.status,
+                    d.statusCNA ? `(Status no CNA/SNA: ${d.statusCNA})` : '',
+                ].filter(Boolean).join('\n') },
+                { header: 'UF', width: 11, get: (d) => d.uf },
+                { header: 'Idade', width: 13, get: (d) => d.idade },
+                { header: 'Sexo', width: 7, get: (d) => abreviarHabilitacao(d.sexo) },
+                { header: 'Raça/Cor', width: 12, get: (d) => abreviarHabilitacao(d.raca) },
+                { header: 'Irmãos', width: 15, get: (d) => d.grupoIrmaos },
                 { header: 'S-DF', width: 5, get: (d) => abreviarHabilitacao(d.saudeDF) },
                 { header: 'S-PM', width: 5, get: (d) => abreviarHabilitacao(d.saudePM) },
                 { header: 'S-HIV', width: 5, get: (d) => abreviarHabilitacao(d.saudeHIV) },
@@ -9065,7 +9108,7 @@
             return {
                 rotulo: TITULO_HABILITACOES_ADOCAO,
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoHabilitacoesAdocao(doc, dados, primeira, comIndice, rotuloBloco),
-                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_HABILITACOES_ADOCAO, comIndice),
+                montarTabela: (doc, dados, comIndice) => montarTabelaHabilitacoesAdocao(doc, dados, comIndice),
             };
         }
         if (cfg === CFG_ACOLHIDOS) {
@@ -10402,10 +10445,9 @@
         }
         empilharSubgrupo('Outros', itensOutros);
 
-        // ── VIJ - Seção Infracional e VIJ - Seção Cível (mesmos grupos do painel, ver
-        // GRUPOS_AUTOMACAO) — subgrupos à parte na capa, depois de "Outros". Habilitações
-        // para Adoção: total; Acolhidos: total + acolhimento mais antigo com processo.
-        const itensInfancia = [];
+        // ── VIJ - Seção Cível (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) — subgrupo à
+        // parte na capa, depois de "Outros". Acolhidos: total + acolhimento mais antigo
+        // com processo; Habilitações para Adoção: total (+ nº de pretendentes).
         const itensVijCivel = [];
         if (secaoAcolhidos) {
             const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
@@ -10420,14 +10462,15 @@
         }
         if (secaoHabilitacoesAdocao) {
             const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
-            itensInfancia.push({
+            const pessoas = secaoHabilitacoesAdocao.dados.reduce((soma, d) => soma + (d.nPretendentes || 0), 0);
+            const detalhe = pessoas ? `${pessoas} pretendente(s)` : '—';
+            itensVijCivel.push({
                 nome: 'Habilitações para Adoção (Aguardando Oportuna Indicação)',
                 indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
-                detalhamento: prejudicado || '—',
+                detalhamento: prejudicado ? `${prejudicado} · ${detalhe}` : detalhe,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
-        empilharSubgrupo('VIJ - Seção Infracional', itensInfancia);
         empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
@@ -12760,7 +12803,7 @@
         montarResumoHabilitacoesAdocao(doc, dados, true, false);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
         if (!somenteResumo) {
-            const pgTabela = montarTabelaGenerico(doc, dados, CFG_HABILITACOES_ADOCAO, false);
+            const pgTabela = montarTabelaHabilitacoesAdocao(doc, dados, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
@@ -12793,7 +12836,11 @@
         const kH = 28;
         const kW = (uw - gap) / 2;
         // Card único centralizado na largura útil (pedido do usuário).
-        desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Habilitados aguardando oportuna indicação', String(r.length), [], true, COR.azul, COR.azul);
+        // Subtítulo com o total de PESSOAS (pretendentes — um casal conta 2), já que
+        // cada registro da tela é uma habilitação.
+        const totalPessoas = r.reduce((soma, d) => soma + (d.nPretendentes || 0), 0);
+        desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Habilitações aguardando oportuna indicação', String(r.length),
+            totalPessoas ? [`${totalPessoas} pretendente(s)`] : [], true, COR.azul, COR.azul);
 
         const LIMITE_TABELA_EMBUTIDA_HABILITACOES = 15;
         if (r.length > 0) {
@@ -12802,33 +12849,58 @@
                 ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_HABILITACOES} Habilitados`
                 : 'Lista dos Habilitados';
             tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
-            const colunas = CFG_HABILITACOES_ADOCAO.pdf.colunas;
-            doc.autoTable({
-                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-                body: r.slice(0, LIMITE_TABELA_EMBUTIDA_HABILITACOES).map(d => {
-                    const o = {};
-                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
-                    return o;
-                }),
-                startY: yTab + 8,
-                margin: { left: m, right: m, top: m, bottom: 14 },
-                theme: 'grid',
-                // 16 colunas em retrato — fonte um pouco menor que o padrão (7.5).
-                styles: { font: 'PublicSans', fontSize: 6, cellPadding: 1, textColor: COR.tintaSec,
-                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
-                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 6 },
-                alternateRowStyles: { fillColor: COR.cartao },
-                columnStyles: columnStylesEscalados(colunas, uw),
-                didDrawPage: () => desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, `${hoje} ${hora}`, pw, ph, m, comIndice),
-            });
-            const yLegenda = doc.lastAutoTable.finalY + 4;
-            if (yLegenda + 8 <= ph - 14) {
-                doc.setFont('PublicSans', 'italic'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
-                doc.text(doc.splitTextToSize('Legenda (Projudi): S- = Saúde da Criança/Adolescente — (DF) aceita com deficiência física, (PM) com problemas mentais, (HIV) portador de HIV, (DOE) com outro tipo de doença; P- = Pais da Criança/Adolescente — (D) aceita de pais desconhecidos, (PM) com problemas mentais, (PD) com problemas com drogas, (HIV) portadores de HIV. S = Sim, N = Não, Indif. = Indiferente.', uw), m, yLegenda);
-            }
+            desenharTabelaHabilitacoes(doc, r.slice(0, LIMITE_TABELA_EMBUTIDA_HABILITACOES), yTab + 8, comIndice);
         }
 
         desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Tabela compacta (fonte 6, 16 colunas em retrato) + legenda das siglas — usada pelo
+    // resumo (15 primeiros) e pela tabela discriminada completa (montarTabelaHabilitacoes
+    // Adocao). A tabela genérica (fonte 7,5) ficava apertada demais para 16 colunas.
+    function desenharTabelaHabilitacoes(doc, registros, startY, comIndice) {
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const colunas = CFG_HABILITACOES_ADOCAO.pdf.colunas;
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: registros.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 6, cellPadding: 1, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 6 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: columnStylesEscalados(colunas, uw),
+            rowPageBreak: 'avoid',
+            didDrawPage: () => desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, carimbo, pw, ph, m, comIndice),
+        });
+        const yLegenda = doc.lastAutoTable.finalY + 4;
+        if (yLegenda + 8 <= ph - 14) {
+            doc.setFont('PublicSans', 'italic'); doc.setFontSize(7); doc.setTextColor(...COR.tintaSec);
+            doc.text(doc.splitTextToSize('Legenda (Projudi): S- = Saúde da Criança/Adolescente — (DF) aceita com deficiência física, (PM) com problemas mentais, (HIV) portador de HIV, (DOE) com outro tipo de doença; P- = Pais da Criança/Adolescente — (D) aceita de pais desconhecidos, (PM) com problemas mentais, (PD) com problemas com drogas, (HIV) portadores de HIV. S = Sim, N = Não, Indif. = Indiferente.', uw), m, yLegenda);
+        }
+    }
+
+    // Tabela discriminada completa (todas as habilitações, todas as colunas) — página
+    // própria, mesmo formato compacto do resumo. Devolve a página inicial (para o índice).
+    function montarTabelaHabilitacoesAdocao(doc, dados, comIndice) {
+        doc.addPage();
+        const pg = doc.internal.getNumberOfPages();
+        const m = 12;
+        const uw = doc.internal.pageSize.getWidth() - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, CFG_HABILITACOES_ADOCAO.pdf.tabelaTitulo);
+        desenharTabelaHabilitacoes(doc, dados || [], m + 8, comIndice);
+        return pg;
     }
 
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
@@ -16322,11 +16394,11 @@
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
-    // Exceção (pedido do usuário): os itens dos grupos "VIJ - Seção Infracional" e
-    // "VIJ - Seção Cível" (DOMINIOS_VIJ) vêm DESMARCADOS por padrão — seleção manual.
+    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Cível" (DOMINIOS_VIJ)
+    // vêm DESMARCADOS por padrão — seleção manual.
     function relatorioMarcadoPorPadrao(key) {
         migrarSelecoesVjiDesmarcadas();
-        migrarAcolhidosParaSecaoCivel();
+        migrarItensParaSecaoCivel();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
@@ -16343,20 +16415,20 @@
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
         store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
-        // Acolhidos mudou de seção (Infracional -> Cível) e deve reaparecer desmarcado
-        // na seção nova (pedido do usuário) — marca também a 2ª migração como feita.
-        store.setItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL, '1');
+        // Já apagou as chaves VIJ — a 2ª migração (abaixo) não tem o que fazer.
+        store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
     }
-    // 2ª migração única (v26.02): Acolhidos passou para "VIJ - Seção Cível" e deve vir
-    // desmarcado lá, mesmo que tenha sido marcado quando ainda estava no grupo
-    // Infracional. Só apaga essa chave; as demais seleções ficam como estão.
-    const CHAVE_MIGRACAO_ACOLHIDOS_CIVEL = 'projudi_pa_acolhidos_civel_migrado';
-    function migrarAcolhidosParaSecaoCivel() {
-        if (store.getItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL) === '1') return;
+    // 2ª migração única (v26.03): Acolhidos e Habilitações para Adoção passaram da antiga
+    // "VIJ - Seção Infracional" para "VIJ - Seção Cível" e devem aparecer desmarcados lá,
+    // mesmo que tenham sido marcados na seção antiga. Só apaga essas duas chaves; as
+    // demais seleções ficam como estão.
+    const CHAVE_MIGRACAO_VIJ_CIVEL = 'projudi_pa_vij_civel_migrado';
+    function migrarItensParaSecaoCivel() {
+        if (store.getItem(CHAVE_MIGRACAO_VIJ_CIVEL) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
-        delete salvas.acolhidos;
+        REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
         store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
-        store.setItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL, '1');
+        store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -17208,23 +17280,21 @@
         // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
         // da categoria Crime.
         { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
-        // ── Grupo "VIJ - Seção Infracional" (pedido do usuário: seção própria no painel,
-        // abaixo de Gabinete — ver GRUPOS_AUTOMACAO). Sem categoriaEspecifica: aparece em
-        // todas as abas; unidade sem esses menus vira "Prejudicado" após 3 tentativas.
-        { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vji', precisaPreencher: true },
-        // ── Grupo "VIJ - Seção Cível" (pedido do usuário: Acolhidos saiu do grupo
-        // Infracional para esta seção própria, logo abaixo dele) — mesmas regras.
+        // ── Grupo "VIJ - Seção Cível" (pedido do usuário: seção própria no painel, abaixo
+        // de Gabinete — ver GRUPOS_AUTOMACAO; substituiu a antiga "VIJ - Seção
+        // Infracional"). Sem categoriaEspecifica: aparece em todas as abas; unidade sem
+        // esses menus vira "Prejudicado" após 3 tentativas.
         { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vijcivel', precisaPreencher: true },
+        { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vijcivel', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
-        { chave: 'vji', rotulo: 'VIJ - Seção Infracional' },
         { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
     ];
     // Grupos cujos itens vêm DESMARCADOS por padrão no painel (seleção sempre manual —
     // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
-    const DOMINIOS_VIJ = ['vji', 'vijcivel'];
+    const DOMINIOS_VIJ = ['vijcivel'];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -18324,8 +18394,8 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            // Mesma regra para os grupos "VIJ - Seção Infracional"/"VIJ - Seção Cível"
-            // (DOMINIOS_VIJ) — unidade sem competência de Infância não tem esses menus.
+            // Mesma regra para o grupo "VIJ - Seção Cível" (DOMINIOS_VIJ) — unidade sem
+            // competência de Infância não tem esses menus.
             if ((rel.categoriaEspecifica === 'crime' || DOMINIOS_VIJ.includes(rel.dominio)) && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
                 marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
