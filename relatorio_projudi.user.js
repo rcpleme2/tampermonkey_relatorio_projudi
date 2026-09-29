@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.06
+// @version      26.07
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -16756,6 +16756,7 @@
     // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Cível" (DOMINIOS_VIJ)
     // vêm DESMARCADOS por padrão — seleção manual.
     function relatorioMarcadoPorPadrao(key) {
+        restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
         const salvas = lerSelecoesSalvasPainel();
@@ -16788,6 +16789,22 @@
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
         store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
+    }
+
+    // Restauração única (v26.07, pedido do usuário): o snapshot salvo tinha ficado com
+    // itens do Cível-Geral desmarcados (marcações feitas durante os testes das seções
+    // VIJ/FAMÍLIA, ex. "Desmarcar tudo"), e o snapshot prevalece sobre o padrão. Apaga
+    // TODAS as marcações salvas uma vez, para voltar ao padrão (Cível-Geral/Crime
+    // marcados, VIJ - Seção Cível e FAMÍLIA desmarcados); dali em diante as marcações
+    // do usuário voltam a ser lembradas normalmente. Com o snapshot vazio, as duas
+    // migrações acima não têm mais o que limpar — marca as duas como feitas.
+    const CHAVE_RESTAURACAO_PADRAO_2607 = 'projudi_pa_padrao_restaurado_2607';
+    function restaurarSelecoesPadraoUmaVez() {
+        if (store.getItem(CHAVE_RESTAURACAO_PADRAO_2607) === '1') return;
+        store.removeItem(CHAVE_RELATORIOS_SELECIONADOS);
+        store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
+        store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
+        store.setItem(CHAVE_RESTAURACAO_PADRAO_2607, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
