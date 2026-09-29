@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.01
+// @version      26.02
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2872,9 +2872,10 @@
 
     // ── Crianças/Adolescentes Acolhidos (menu "Infância e Juventude" > "Crianças/
     // Adolescentes Acolhidos" — processo/infanciaJuventude/buscaAcolhimento.do).
-    // Grupo "VIJ - Seção Infracional" do painel (dominio: 'vji', ver GRUPOS_AUTOMACAO):
-    // unidade sem esse menu é marcada "Prejudicado" depois de 3 tentativas, como na
-    // categoria Crime (ver LIMITE_TENTATIVAS_CRIME em passoAutomacao).
+    // Grupo "VIJ - Seção Cível" do painel (dominio: 'vijcivel', ver GRUPOS_AUTOMACAO —
+    // pedido do usuário: saiu de "VIJ - Seção Infracional"): unidade sem esse menu é
+    // marcada "Prejudicado" depois de 3 tentativas, como na categoria Crime (ver
+    // LIMITE_TENTATIVAS_CRIME em passoAutomacao).
     //
     // Tela de busca com filtros (form#buscaAcolhimentoForm) — o rádio "Continuam
     // Acolhidos/Internados" (name="opcao") = Sim (value="acolhidos") é o filtro que o
@@ -2884,8 +2885,10 @@
     // "Prisões/Acolhimentos/Internações" leva à MESMA URL), por isso a detecção é pelo
     // <form> — o cabeçalho da tabela varia com a unidade: numa Seção Infracional
     // (.mhtml enviado pelo usuário) as colunas dizem "Adolescente Internado"/"Internação"/
-    // "Desinternação"/"Período de Internação"; numa Seção de Proteção presumivelmente
-    // "Acolhido"/"Acolhimento". A extração é por POSIÇÃO de coluna (iguais nas duas):
+    // "Desinternação"/"Período de Internação"; na Seção Cível (.mhtml enviado pelo
+    // usuário, 21 registros em 2 páginas) "Criança Acolhida"/"Acolhimento"/
+    // "Desacolhimento"/"Período de Acolhimento". A extração é por POSIÇÃO de coluna
+    // (iguais nas duas, confirmado nas duas amostras):
     // [0] Processo/Comarca [1] Criança/Adolescente (+ table.form aninhada com Mãe/Pai)
     // [2] Nascimento/Idade [3] Acolhimento (table.form: Data/Guia/Motivo/Local[/Fiança])
     // [4] Desacolhimento (vazio com "Continuam acolhidos = Sim") [5] Período (texto tipo
@@ -2915,6 +2918,22 @@
             if (rotulo) campos[rotulo] = textoCelula(cels[1]).replace(/\s+/g, ' ');
         });
         return campos;
+    }
+
+    // Textos soltos (nós de texto filhos diretos, separados por <br>) de uma célula — na
+    // coluna "Processo/Comarca" são a Comarca e a Vara, depois do link do processo.
+    function linhasTextoDiretas(td) {
+        if (!td) return [];
+        return [...td.childNodes]
+            .filter(n => n.nodeType === 3)
+            .map(n => (n.textContent || '').replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+    }
+
+    // Monta uma célula de várias linhas ("Rótulo: valor") para o PDF, só com os campos
+    // preenchidos — mesmo arranjo visual das table.form aninhadas da tela do Projudi.
+    function linhasRotuladas(pares) {
+        return pares.filter(([, v]) => v).map(([r, v]) => `${r}: ${v}`).join('\n');
     }
 
     // "6 meses e 23 dias (207 dias)" -> 207; "13 dias" -> 13; senão, calcula pela data.
@@ -2950,10 +2969,16 @@
             coletarMais: 'Extrair mais (Acolhidos)',
             baixar: '⬇ Baixar Acolhidos',
         },
-        cabecalhos: ['Data do Acolhimento', 'Processo', 'Criança/Adolescente', 'Nascimento', 'Idade', 'Mãe', 'Pai',
-            'Guia', 'Motivo', 'Local', 'Período de Acolhimento', 'Dias'],
-        larguras: [{ wch: 14 }, { wch: 26 }, { wch: 34 }, { wch: 12 }, { wch: 28 }, { wch: 30 }, { wch: 30 },
-            { wch: 14 }, { wch: 36 }, { wch: 36 }, { wch: 26 }, { wch: 8 }],
+        // Pedido do usuário: TODAS as colunas da tela (cada campo das table.form aninhadas
+        // vira uma coluna própria na planilha).
+        cabecalhos: ['Processo', 'Comarca', 'Vara', 'Criança/Adolescente', 'Mãe', 'Pai', 'Nascimento', 'Idade',
+            'Data do Acolhimento', 'Guia do Acolhimento', 'Motivo do Acolhimento', 'Local do Acolhimento',
+            'Data do Desacolhimento', 'Guia do Desacolhimento', 'Motivo do Desacolhimento',
+            'Período de Acolhimento', 'Dias'],
+        larguras: [{ wch: 26 }, { wch: 20 }, { wch: 44 }, { wch: 34 }, { wch: 30 }, { wch: 30 }, { wch: 12 }, { wch: 28 },
+            { wch: 14 }, { wch: 18 }, { wch: 40 }, { wch: 36 },
+            { wch: 14 }, { wch: 18 }, { wch: 30 },
+            { wch: 26 }, { wch: 8 }],
         extrai: (tds, atuacao) => {
             const emProc = tds[0].querySelector('em');
             const processo = emProc ? textoCelula(emProc)
@@ -2965,10 +2990,14 @@
             const mIdade = nascTexto.match(/\(([^)]*)\)/);
             const ac = camposTabelaAninhada(tds[3]);
             const dataAcolhimento = ((ac.data || '').match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0];
+            const desac = camposTabelaAninhada(tds[4]);
             const periodo = textoCelula(tds[5]).replace(/\s+/g, ' ');
+            const [comarca, vara] = linhasTextoDiretas(tds[0]);
             return {
                 dataAcolhimento,
                 processo,
+                comarca: comarca || '',
+                vara: vara || '',
                 nome: (linkNome ? textoCelula(linkNome) : '').replace(/\s+/g, ' '),
                 nascimento: mNasc ? mNasc[0] : '',
                 idade: mIdade ? mIdade[1].trim() : '',
@@ -2977,6 +3006,9 @@
                 guia: ac.guia || '',
                 motivo: ac.motivo || '',
                 local: ac.local || '',
+                dataDesacolhimento: desac.data || '',
+                guiaDesacolhimento: desac.guia || '',
+                motivoDesacolhimento: desac.motivo || '',
                 periodo,
                 dias: diasAcolhimento(periodo, dataAcolhimento),
                 // Mesmo cuidado de CFG_REAVALIACAO_PRISAO_PROVISORIA: sem atuacao/
@@ -2985,8 +3017,10 @@
                 competencia: competenciaDe(atuacao),
             };
         },
-        linha: (d) => [d.dataAcolhimento, d.processo, d.nome, d.nascimento, d.idade, d.mae, d.pai,
-            d.guia, d.motivo, d.local, d.periodo, d.dias == null ? '' : d.dias],
+        linha: (d) => [d.processo, d.comarca, d.vara, d.nome, d.mae, d.pai, d.nascimento, d.idade,
+            d.dataAcolhimento, d.guia, d.motivo, d.local,
+            d.dataDesacolhimento, d.guiaDesacolhimento, d.motivoDesacolhimento,
+            d.periodo, d.dias == null ? '' : d.dias],
         pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo),
         // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoAcolhidos).
         pdf: {
@@ -2994,14 +3028,15 @@
             tabelaTitulo: 'Tabela discriminada das crianças/adolescentes acolhidos',
             dataCampo: 'dataAcolhimento',
             processoCampo: 'processo',
+            // Mesmas 6 colunas da tela do Projudi, cada célula com as várias linhas que a
+            // tela mostra (pedido do usuário: todas as colunas apresentadas).
             colunas: [
-                { header: 'Acolhimento', width: 19, get: (d) => d.dataAcolhimento },
-                { header: 'Processo', width: 33, get: (d) => d.processo },
-                { header: 'Criança/Adolescente', width: 32, get: (d) => d.nome },
-                { header: 'Nascimento', width: 19, get: (d) => d.nascimento },
-                { header: 'Motivo', width: 30, get: (d) => d.motivo },
-                { header: 'Local', width: 30, get: (d) => d.local },
-                { header: 'Período', width: 22, get: (d) => d.periodo },
+                { header: 'Processo/Comarca', width: 38, get: (d) => [d.processo, d.comarca, d.vara].filter(Boolean).join('\n') },
+                { header: 'Criança Acolhida', width: 34, get: (d) => [d.nome, linhasRotuladas([['Mãe', d.mae], ['Pai', d.pai]])].filter(Boolean).join('\n') },
+                { header: 'Nascimento / Idade', width: 24, get: (d) => [d.nascimento, d.idade ? `(${d.idade})` : ''].filter(Boolean).join('\n') },
+                { header: 'Acolhimento', width: 40, get: (d) => linhasRotuladas([['Data', d.dataAcolhimento], ['Guia', d.guia], ['Motivo', d.motivo], ['Local', d.local]]) },
+                { header: 'Desacolhimento', width: 26, get: (d) => linhasRotuladas([['Data', d.dataDesacolhimento], ['Guia', d.guiaDesacolhimento], ['Motivo', d.motivoDesacolhimento]]) || '—' },
+                { header: 'Período de Acolhimento', width: 20, get: (d) => d.periodo },
             ],
         },
     };
@@ -9039,7 +9074,12 @@
                 // Resumo dedicado (mesmo padrão de CFG_REAVALIACAO_PRISAO_PROVISORIA); a
                 // tabela discriminada reaproveita o genérico (ver CFG_ACOLHIDOS.pdf).
                 montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAcolhidos(doc, dados, primeira, comIndice, rotuloBloco),
-                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, comIndice),
+                // Tabela completa + "Total de Acolhidos por Motivo" logo abaixo dela.
+                montarTabela: (doc, dados, comIndice) => {
+                    const pg = montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, comIndice);
+                    desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, comIndice);
+                    return pg;
+                },
             };
         }
         return {
@@ -10362,15 +10402,16 @@
         }
         empilharSubgrupo('Outros', itensOutros);
 
-        // ── VIJ - Seção Infracional (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) —
-        // subgrupo à parte na capa, depois de "Outros". Acolhidos: total + acolhimento
-        // mais antigo com processo; Habilitações para Adoção: total.
+        // ── VIJ - Seção Infracional e VIJ - Seção Cível (mesmos grupos do painel, ver
+        // GRUPOS_AUTOMACAO) — subgrupos à parte na capa, depois de "Outros". Habilitações
+        // para Adoção: total; Acolhidos: total + acolhimento mais antigo com processo.
         const itensInfancia = [];
+        const itensVijCivel = [];
         if (secaoAcolhidos) {
             const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
             const prejudicado = prejudicadoInfo(CFG_ACOLHIDOS);
             const detalheAntigo = antigo ? `Mais antigo: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
-            itensInfancia.push({
+            itensVijCivel.push({
                 nome: TITULO_ACOLHIDOS,
                 indicador: `${secaoAcolhidos.dados.length} acolhido(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
@@ -10387,6 +10428,7 @@
             });
         }
         empilharSubgrupo('VIJ - Seção Infracional', itensInfancia);
+        empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
@@ -12582,6 +12624,7 @@
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
         if (!somenteResumo) {
             const pgTabela = montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, false);
+            desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, false);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
@@ -12653,9 +12696,62 @@
                 columnStyles: columnStylesEscalados(colunas, uw),
                 didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
+            desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice);
         }
 
         desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Pedido do usuário: total de crianças/adolescentes acolhidos por Motivo do
+    // Acolhimento (campo "Motivo" da coluna Acolhimento) — contado a partir dos próprios
+    // registros coletados (sem pesquisa extra por motivo no Projudi), do maior para o
+    // menor, com linha de total. Usado no resumo (Relatório PDF) e nas Tabelas
+    // Discriminadas (ver descreverSecaoPDF). Quebra de página fica a cargo do autoTable.
+    function contarAcolhidosPorMotivo(dados) {
+        const mapa = new Map();
+        (dados || []).forEach(d => {
+            const motivo = (d.motivo || '').trim() || 'Não informado';
+            mapa.set(motivo, (mapa.get(motivo) || 0) + 1);
+        });
+        return [...mapa.entries()].map(([motivo, total]) => ({ motivo, total }))
+            .sort((a, b) => b.total - a.total || a.motivo.localeCompare(b.motivo, 'pt-BR'));
+    }
+    function desenharTabelaAcolhidosPorMotivo(doc, dados, y, comIndice) {
+        const r = dados || [];
+        if (!r.length) return;
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        // A tabela é curta (uma linha por motivo) — não deixa partir entre páginas: se o
+        // título + cabeçalho + linhas + total (~7,5 mm cada) não couberem, vai inteira
+        // para a próxima página.
+        const linhasMotivo = contarAcolhidosPorMotivo(r);
+        const alturaEstimada = 10 + (linhasMotivo.length + 2) * 7.5;
+        if (y + alturaEstimada > ph - 14) {
+            doc.addPage();
+            desenharRodape(doc, TITULO_ACOLHIDOS, carimbo, pw, ph, m, comIndice);
+            y = m;
+        }
+        tituloSecao(doc, m, y + 4, uw, 'Total de Acolhidos por Motivo');
+        doc.autoTable({
+            head: [['Motivo do Acolhimento', 'Total']],
+            body: linhasMotivo.map(it => [it.motivo, String(it.total)]),
+            foot: [['Total', { content: String(r.length), styles: { halign: 'center' } }]],
+            startY: y + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            footStyles: { fillColor: COR.cartao, textColor: COR.tinta, fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: { 0: { cellWidth: uw - 30 }, 1: { cellWidth: 30, halign: 'center' } },
+            showFoot: 'lastPage',
+            didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, carimbo, pw, ph, m, comIndice),
+        });
     }
 
     // ── PDF de Habilitações para Adoção ─────────────────────────────────────────────
@@ -16226,14 +16322,15 @@
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
-    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Infracional"
-    // (dominio: 'vji') vêm DESMARCADOS por padrão — seleção sempre manual.
+    // Exceção (pedido do usuário): os itens dos grupos "VIJ - Seção Infracional" e
+    // "VIJ - Seção Cível" (DOMINIOS_VIJ) vêm DESMARCADOS por padrão — seleção manual.
     function relatorioMarcadoPorPadrao(key) {
         migrarSelecoesVjiDesmarcadas();
+        migrarAcolhidosParaSecaoCivel();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
-        return !(rel && rel.dominio === 'vji');
+        return !(rel && DOMINIOS_VIJ.includes(rel.dominio));
     }
     // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
     // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
@@ -16243,9 +16340,23 @@
     function migrarSelecoesVjiDesmarcadas() {
         if (store.getItem(CHAVE_MIGRACAO_VJI_DESMARCADO) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
-        REPORTS_AUTOMACAO.filter(r => r.dominio === 'vji').forEach(r => { delete salvas[r.key]; });
+        REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
         store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
+        // Acolhidos mudou de seção (Infracional -> Cível) e deve reaparecer desmarcado
+        // na seção nova (pedido do usuário) — marca também a 2ª migração como feita.
+        store.setItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL, '1');
+    }
+    // 2ª migração única (v26.02): Acolhidos passou para "VIJ - Seção Cível" e deve vir
+    // desmarcado lá, mesmo que tenha sido marcado quando ainda estava no grupo
+    // Infracional. Só apaga essa chave; as demais seleções ficam como estão.
+    const CHAVE_MIGRACAO_ACOLHIDOS_CIVEL = 'projudi_pa_acolhidos_civel_migrado';
+    function migrarAcolhidosParaSecaoCivel() {
+        if (store.getItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        delete salvas.acolhidos;
+        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        store.setItem(CHAVE_MIGRACAO_ACOLHIDOS_CIVEL, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -17100,14 +17211,20 @@
         // ── Grupo "VIJ - Seção Infracional" (pedido do usuário: seção própria no painel,
         // abaixo de Gabinete — ver GRUPOS_AUTOMACAO). Sem categoriaEspecifica: aparece em
         // todas as abas; unidade sem esses menus vira "Prejudicado" após 3 tentativas.
-        { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vji', precisaPreencher: true },
         { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vji', precisaPreencher: true },
+        // ── Grupo "VIJ - Seção Cível" (pedido do usuário: Acolhidos saiu do grupo
+        // Infracional para esta seção própria, logo abaixo dele) — mesmas regras.
+        { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vijcivel', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
         { chave: 'vji', rotulo: 'VIJ - Seção Infracional' },
+        { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
     ];
+    // Grupos cujos itens vêm DESMARCADOS por padrão no painel (seleção sempre manual —
+    // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
+    const DOMINIOS_VIJ = ['vji', 'vijcivel'];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -18207,9 +18324,9 @@
             // para esta atribuição em vez de travar a fila inteira esperando o usuário
             // (ver marcarPrejudicadoEAvancar).
             const LIMITE_TENTATIVAS_CRIME = 3;
-            // Mesma regra para o grupo "VIJ - Seção Infracional" (Acolhidos/Habilitações
-            // para Adoção) — unidade sem competência de Infância não tem esses menus.
-            if ((rel.categoriaEspecifica === 'crime' || rel.dominio === 'vji') && registro.n >= LIMITE_TENTATIVAS_CRIME) {
+            // Mesma regra para os grupos "VIJ - Seção Infracional"/"VIJ - Seção Cível"
+            // (DOMINIOS_VIJ) — unidade sem competência de Infância não tem esses menus.
+            if ((rel.categoriaEspecifica === 'crime' || DOMINIOS_VIJ.includes(rel.dominio)) && registro.n >= LIMITE_TENTATIVAS_CRIME) {
                 store.removeItem(chaveFalhas);
                 marcarPrejudicadoEAvancar(rel, lerAtuacaoEmQualquerFrame());
                 return;
