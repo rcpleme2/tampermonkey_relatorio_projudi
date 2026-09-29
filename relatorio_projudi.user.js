@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.05
+// @version      26.06
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
