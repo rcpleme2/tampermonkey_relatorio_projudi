@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.04
+// @version      26.05
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -5089,6 +5089,24 @@
         return texto;
     }
 
+    // Rádio da classe na árvore: <input type="radio" name="idClasseProcessualSelecionado"
+    // value="123"> (informado pelo usuário). A árvore pode estar num iframe próprio
+    // dentro da janela (bug relatado: a busca "123" funcionava mas o rádio não era
+    // achado só no documento da janela) — procura em todos os documentos acessíveis;
+    // pelo texto do nó só como reserva.
+    function radioClasseAveriguacaoPaternidade(janela) {
+        const docs = [janela.raiz.ownerDocument, ...todosDocumentosAcessiveis()];
+        for (const d of docs) {
+            const r = d.querySelector('input[type="radio"][name="idClasseProcessualSelecionado"][value="123"]');
+            if (r) return r;
+        }
+        for (const d of docs) {
+            const r = [...d.querySelectorAll('input[type="radio"]')].find(x => RE_CLASSE_AVERIGUACAO_PATERNIDADE.test(textoDoRadio(x)));
+            if (r) return r;
+        }
+        return null;
+    }
+
     // Abre a lupa, pesquisa "123", marca o rádio "123 - Averiguação de Paternidade" e
     // clica em "Selecionar"; termina quando o campo "Classe Processual" do formulário
     // principal mostra a classe (aí chama aoSelecionar). Passo a passo com poll de 500ms
@@ -5115,8 +5133,7 @@
                 // (Re)abre a lupa no início e a cada ~10s se a janela não aparecer.
                 if (lupa && (!abriu || tick % 20 === 0)) { abriu = true; lupa.click(); }
             } else {
-                const radio = [...janela.raiz.querySelectorAll('input[type="radio"]')]
-                    .find(r => RE_CLASSE_AVERIGUACAO_PATERNIDADE.test(textoDoRadio(r)));
+                const radio = radioClasseAveriguacaoPaternidade(janela);
                 if (radio) {
                     if (!radio.checked) radio.click();
                     if (selecionouEm < 0 || tick - selecionouEm >= 6) { selecionouEm = tick; janela.selecionar.click(); }
