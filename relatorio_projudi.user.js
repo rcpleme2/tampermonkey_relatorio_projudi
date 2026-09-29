@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.05
+// @version      26.06
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10679,7 +10679,7 @@
 
         // ── VIJ - Seção Cível (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) — subgrupo à
         // parte na capa, depois de "Outros". Acolhidos: total + acolhimento mais antigo
-        // com processo; Habilitações para Adoção: total (+ nº de pretendentes).
+        // com processo; Habilitações para Adoção: total.
         const itensVijCivel = [];
         if (secaoAcolhidos) {
             const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
@@ -10694,12 +10694,11 @@
         }
         if (secaoHabilitacoesAdocao) {
             const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
-            const pessoas = secaoHabilitacoesAdocao.dados.reduce((soma, d) => soma + (d.nPretendentes || 0), 0);
-            const detalhe = pessoas ? `${pessoas} pretendente(s)` : '—';
             itensVijCivel.push({
                 nome: 'Habilitações para Adoção (Aguardando Oportuna Indicação)',
                 indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
-                detalhamento: prejudicado ? `${prejudicado} · ${detalhe}` : detalhe,
+                // Sem o nº de pretendentes (pedido do usuário) — só o total no indicador.
+                detalhamento: prejudicado || '—',
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
@@ -13083,11 +13082,9 @@
         const kH = 28;
         const kW = (uw - gap) / 2;
         // Card único centralizado na largura útil (pedido do usuário).
-        // Subtítulo com o total de PESSOAS (pretendentes — um casal conta 2), já que
-        // cada registro da tela é uma habilitação.
-        const totalPessoas = r.reduce((soma, d) => soma + (d.nPretendentes || 0), 0);
+        // Só o total de habilitações (pedido do usuário: sem o subtítulo de pretendentes).
         desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Habilitações aguardando oportuna indicação', String(r.length),
-            totalPessoas ? [`${totalPessoas} pretendente(s)`] : [], true, COR.azul, COR.azul);
+            [], true, COR.azul, COR.azul);
 
         const LIMITE_TABELA_EMBUTIDA_HABILITACOES = 15;
         if (r.length > 0) {
