@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.03
+// @version      26.05
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3178,6 +3178,102 @@
         },
     };
 
+    // ── Averiguação de Paternidade (grupo "FAMÍLIA" do painel — dominio: 'familia', ver
+    // GRUPOS_AUTOMACAO). Pedido do usuário: identificar, nas unidades com competência de
+    // Vara de Família, os processos ATIVOS da classe "123 - Averiguação de Paternidade".
+    // Tela: Processos > Busca > Avançada (processo/buscaProcesso.do). Filtros: Classe
+    // Processual escolhida pela lupa (janela "Pesquisa de Classes Processuais" — ver
+    // selecionarClasseAveriguacaoPaternidade) e Status Processual só ATIVO (pedido do
+    // usuário: ignorar os demais status). A tela de busca (form#processoBuscaForm) e a de
+    // resultado (form#buscaProcessoForm, com "BUSCA POR: ... Classe Processual: 123 -
+    // Averiguação de Paternidade") são páginas diferentes; a detecção do resultado é pelo
+    // texto do filtro, porque a mesma tela serve a qualquer busca avançada.
+    //
+    // Colunas do resultado (.mhtml enviado pelo usuário, 21 registros em 2 páginas):
+    // [0] checkbox [1] Processo (<em>) + Vara (texto após <br>) [2] Seq. [3] Partes
+    // (table.form aninhada: "Polo Ativo:"/"Interessado:"/"Terceiro:" + <li> por nome)
+    // [4] Distribuição [5] Classe Processual + "(Assunto Principal)".
+    //
+    // SEM mostrarSeVazio (pedido do usuário): resultado zero não aparece na capa/sumário
+    // nem gera seção em nenhum dos dois PDFs.
+    const TITULO_AVERIGUACAO_PATERNIDADE = 'Averiguação de Paternidade — Processos Ativos';
+    const RE_CLASSE_AVERIGUACAO_PATERNIDADE = /^\s*123\s*-\s*averigua[çc][ãa]o\s+de\s+paternidade/i;
+
+    function formularioBuscaAvancada() {
+        const form = document.getElementById('processoBuscaForm');
+        return form && /buscaProcesso\.do/i.test(form.action || '') && form.querySelector('#descricaoClasseProcessual') ? form : null;
+    }
+    function paginaResultadoAveriguacaoPaternidade() {
+        const form = document.getElementById('buscaProcessoForm');
+        if (!form || !/buscaProcesso\.do/i.test(form.action || '')) return false;
+        return /Classe\s+Processual\s*:?\s*123\s*-\s*Averigua/i.test((form.textContent || '').replace(/\s+/g, ' '));
+    }
+
+    // "Polo Ativo: A; B\nInteressado: C" a partir da table.form aninhada da coluna Partes.
+    function partesPorPolo(td) {
+        const linhas = [];
+        if (!td) return '';
+        td.querySelectorAll('table.form tr').forEach(tr => {
+            const cels = tr.querySelectorAll(':scope > td');
+            if (cels.length < 2) return;
+            const polo = textoCelula(cels[0]).replace(/\s+/g, ' ').replace(/:\s*$/, '').trim();
+            const nomes = [...cels[1].querySelectorAll('li')].map(li => textoCelula(li).replace(/\s+/g, ' ')).filter(Boolean);
+            if (polo && nomes.length) linhas.push(`${polo}: ${nomes.join('; ')}`);
+        });
+        return linhas.join('\n');
+    }
+
+    const CFG_AVERIGUACAO_PATERNIDADE = {
+        prefixo: 'projudi_averiguacaopaternidade_',
+        detecta: () => paginaResultadoAveriguacaoPaternidade(),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'averiguacao_paternidade_projudi',
+        rotulos: {
+            coletar: 'Extrair Averiguação de Paternidade',
+            coletarMais: 'Extrair mais (Averiguação de Paternidade)',
+            baixar: '⬇ Baixar Averiguação de Paternidade',
+        },
+        // Pedido do usuário: todas as colunas da tela.
+        cabecalhos: ['Processo', 'Vara', 'Seq.', 'Partes', 'Distribuição', 'Classe Processual', 'Assunto Principal'],
+        larguras: [{ wch: 26 }, { wch: 44 }, { wch: 8 }, { wch: 80 }, { wch: 12 }, { wch: 30 }, { wch: 40 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[1].querySelector('em');
+            const processo = emProc ? textoCelula(emProc).replace(/\s+/g, ' ')
+                : ((textoCelula(tds[1]).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [''])[0]);
+            if (!processo) return null;
+            const [classe, assunto] = textoComQuebras(tds[5]);
+            return {
+                processo,
+                vara: linhasTextoDiretas(tds[1]).join(' '),
+                seq: textoCelula(tds[2]).replace(/\s+/g, ' '),
+                partes: partesPorPolo(tds[3]),
+                distribuicao: ((textoCelula(tds[4]).match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0]),
+                classe: classe || '',
+                assunto: (assunto || '').replace(/^\(\s*/, '').replace(/\s*\)$/, ''),
+                // Sem atuacao/competencia, filtrarSecoesPorAtribuicoes descartaria os
+                // registros (mesmo cuidado de CFG_ACOLHIDOS).
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.vara, d.seq, d.partes, d.distribuicao, d.classe, d.assunto],
+        pdfCustom: (dados, somenteResumo) => gerarPDFAveriguacaoPaternidade(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_AVERIGUACAO_PATERNIDADE,
+            tabelaTitulo: 'Lista completa dos processos ativos de Averiguação de Paternidade',
+            dataCampo: 'distribuicao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo / Vara', width: 40, get: (d) => [d.processo, d.vara].filter(Boolean).join('\n') },
+                { header: 'Seq.', width: 11, get: (d) => d.seq },
+                { header: 'Partes', width: 78, get: (d) => d.partes },
+                { header: 'Distribuição', width: 20, get: (d) => d.distribuicao },
+                { header: 'Classe Processual (Assunto Principal)', width: 37, get: (d) => [d.classe, d.assunto ? `(${d.assunto})` : ''].filter(Boolean).join('\n') },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
     // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
     // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
@@ -4924,6 +5020,134 @@
             console.log('[Projudi Habilitações Adoção] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
+    }
+
+    // Busca Avançada (Averiguação de Paternidade): Status Processual só ATIVO (value="0"
+    // — os demais desmarcados, pedido do usuário) com clique real (ver armadilha "clique
+    // sintético" no CLAUDE.md), depois seleciona a classe pela lupa e pesquisa.
+    function preencherEPesquisarAveriguacaoPaternidade() {
+        const form = formularioBuscaAvancada();
+        if (!form) return;
+        const status = [...form.querySelectorAll('input[name="idStatusSelecionados"]')];
+        status.filter(cb => cb.value !== '0' && cb.checked).forEach(cb => cb.click());
+        const ativo = status.find(cb => cb.value === '0');
+        if (ativo && !ativo.checked) ativo.click();
+        console.log(`[Projudi Averiguação Paternidade] status marcados: ${status.filter(cb => cb.checked).map(cb => cb.value).join(',') || '(nenhum)'}`);
+        selecionarClasseAveriguacaoPaternidade(form, () => {
+            const btn = form.querySelector('#pesquisar') || form.querySelector('input[type="submit"]');
+            console.log('[Projudi Averiguação Paternidade] classe selecionada — clicando em Pesquisar em 1,5s');
+            store.setItem(AUTO_ESTADO, 'coletando_averiguacaopaternidade');
+            setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1500);
+        });
+    }
+
+    // Janela "Pesquisa de Classes Processuais" (aberta pela lupa, javascript:
+    // openDialogClasseProcessual() — print enviado pelo usuário): campo "Descrição",
+    // botão "Pesquisar", árvore de classes com um rádio por nó e botão "Selecionar". Pode
+    // estar num iframe ou no próprio documento — procura em todos os documentos
+    // acessíveis a janela que tem o botão "Selecionar" e o título da pesquisa.
+    function janelaClassesProcessuais() {
+        const rotuloBotao = (b) => (b.value || b.textContent || '').trim();
+        for (const d of todosDocumentosAcessiveis()) {
+            if (!d.body || !/pesquisa\s+de\s+classes\s+processuais/i.test(d.body.textContent || '')) continue;
+            const botoes = [...d.querySelectorAll('input[type="button"], input[type="submit"], button')];
+            const selecionar = botoes.find(b => /^selecionar$/i.test(rotuloBotao(b)));
+            if (!selecionar) continue;
+            // Sobe do botão "Selecionar" até o contêiner que também tem o campo Descrição.
+            let raiz = selecionar.parentElement;
+            while (raiz && !raiz.querySelector('input[type="text"]:not([readonly])')) raiz = raiz.parentElement;
+            if (!raiz) continue;
+            return {
+                raiz, selecionar,
+                descricao: raiz.querySelector('input[type="text"]:not([readonly])'),
+                pesquisar: [...raiz.querySelectorAll('input[type="button"], input[type="submit"], button')].find(b => /^pesquisar$/i.test(rotuloBotao(b))),
+            };
+        }
+        return null;
+    }
+
+    // Texto do nó da árvore logo depois do rádio ("123 - Averiguação de Paternidade") —
+    // só os irmãos seguintes até o próximo bloco/sub-árvore, para não pegar o texto dos
+    // nós filhos (o nó "62 - ..." contém o "123 - ..." dentro dele).
+    function textoDoRadio(radio) {
+        const d = radio.ownerDocument;
+        if (radio.id) {
+            const lbl = d.querySelector(`label[for="${radio.id}"]`);
+            if (lbl) return textoCelula(lbl);
+        }
+        let texto = '';
+        for (let n = radio.nextSibling; n; n = n.nextSibling) {
+            if (n.nodeType === 3) { texto += n.textContent; continue; }
+            if (n.nodeType !== 1) continue;
+            if (!/^(SPAN|A|LABEL|FONT|B|STRONG|EM|I)$/.test(n.tagName) || n.querySelector('input')) break;
+            texto += n.textContent;
+        }
+        texto = texto.replace(/\s+/g, ' ').trim();
+        if (!texto && radio.parentElement && radio.parentElement.tagName === 'TD' && radio.parentElement.nextElementSibling) {
+            texto = textoCelula(radio.parentElement.nextElementSibling).replace(/\s+/g, ' ');
+        }
+        return texto;
+    }
+
+    // Rádio da classe na árvore: <input type="radio" name="idClasseProcessualSelecionado"
+    // value="123"> (informado pelo usuário). A árvore pode estar num iframe próprio
+    // dentro da janela (bug relatado: a busca "123" funcionava mas o rádio não era
+    // achado só no documento da janela) — procura em todos os documentos acessíveis;
+    // pelo texto do nó só como reserva.
+    function radioClasseAveriguacaoPaternidade(janela) {
+        const docs = [janela.raiz.ownerDocument, ...todosDocumentosAcessiveis()];
+        for (const d of docs) {
+            const r = d.querySelector('input[type="radio"][name="idClasseProcessualSelecionado"][value="123"]');
+            if (r) return r;
+        }
+        for (const d of docs) {
+            const r = [...d.querySelectorAll('input[type="radio"]')].find(x => RE_CLASSE_AVERIGUACAO_PATERNIDADE.test(textoDoRadio(x)));
+            if (r) return r;
+        }
+        return null;
+    }
+
+    // Abre a lupa, pesquisa "123", marca o rádio "123 - Averiguação de Paternidade" e
+    // clica em "Selecionar"; termina quando o campo "Classe Processual" do formulário
+    // principal mostra a classe (aí chama aoSelecionar). Passo a passo com poll de 500ms
+    // porque a janela e a árvore carregam de forma assíncrona. Se em ~60s a automação da
+    // janela não conseguir, continua esperando o usuário selecionar a classe à mão.
+    function selecionarClasseAveriguacaoPaternidade(form, aoSelecionar) {
+        const campo = form.querySelector('#descricaoClasseProcessual');
+        const lupa = campo && campo.parentElement ? campo.parentElement.querySelector('a.searchButton') : null;
+        let tick = 0; let abriu = false; let pesquisouEm = -1; let selecionouEm = -1; let avisou = false;
+        const passo = () => {
+            tick++;
+            if (campo && RE_CLASSE_AVERIGUACAO_PATERNIDADE.test(campo.value || '')) { aoSelecionar(); return; }
+            if (tick > 120) {
+                if (!avisou) {
+                    avisou = true;
+                    console.warn('[Projudi Averiguação Paternidade] não consegui selecionar a classe pela lupa — selecione "123 - Averiguação de Paternidade" manualmente; a pesquisa segue sozinha depois disso.');
+                    atualizarStatus('Selecione a classe "123 - Averiguação de Paternidade" pela lupa — a pesquisa continua sozinha depois disso.');
+                }
+                setTimeout(passo, 1000);
+                return;
+            }
+            const janela = janelaClassesProcessuais();
+            if (!janela) {
+                // (Re)abre a lupa no início e a cada ~10s se a janela não aparecer.
+                if (lupa && (!abriu || tick % 20 === 0)) { abriu = true; lupa.click(); }
+            } else {
+                const radio = radioClasseAveriguacaoPaternidade(janela);
+                if (radio) {
+                    if (!radio.checked) radio.click();
+                    if (selecionouEm < 0 || tick - selecionouEm >= 6) { selecionouEm = tick; janela.selecionar.click(); }
+                } else if (janela.descricao && janela.pesquisar && (pesquisouEm < 0 || tick - pesquisouEm >= 20)) {
+                    pesquisouEm = tick;
+                    janela.descricao.value = '123';
+                    janela.descricao.dispatchEvent(new Event('input', { bubbles: true }));
+                    janela.descricao.dispatchEvent(new Event('change', { bubbles: true }));
+                    janela.pesquisar.click();
+                }
+            }
+            setTimeout(passo, 500);
+        };
+        passo();
     }
 
     // Garante "Continuam Acolhidos/Internados" = Sim (rádio name="opcao",
@@ -9104,6 +9328,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_REAVALIACAO_PRISAO_PROVISORIA, comIndice),
             };
         }
+        if (cfg === CFG_AVERIGUACAO_PATERNIDADE) {
+            return {
+                rotulo: TITULO_AVERIGUACAO_PATERNIDADE,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAveriguacaoPaternidade(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaAveriguacaoPaternidade(doc, dados, comIndice),
+            };
+        }
         if (cfg === CFG_HABILITACOES_ADOCAO) {
             return {
                 rotulo: TITULO_HABILITACOES_ADOCAO,
@@ -9867,6 +10098,7 @@
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
         const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
+        const secaoAveriguacaoPaternidade = secoes.find(s => s.cfgOriginal === CFG_AVERIGUACAO_PATERNIDADE);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -10472,6 +10704,21 @@
             });
         }
         empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
+
+        // ── Família (grupo "FAMÍLIA" do painel, ver GRUPOS_AUTOMACAO) — subgrupo depois
+        // de "VIJ - Seção Cível". Pedido do usuário: resultado zero não aparece (nem a
+        // linha, nem a faixa do subgrupo — empilharSubgrupo ignora lista vazia).
+        const itensFamilia = [];
+        if (secaoAveriguacaoPaternidade && secaoAveriguacaoPaternidade.dados.length) {
+            const prejudicado = prejudicadoInfo(CFG_AVERIGUACAO_PATERNIDADE);
+            itensFamilia.push({
+                nome: 'Averiguação de Paternidade (Processos Ativos)',
+                indicador: `${secaoAveriguacaoPaternidade.dados.length} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · Classe 123` : 'Classe 123 · Status Ativo',
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
+            });
+        }
+        empilharSubgrupo('Família', itensFamilia);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
@@ -12903,6 +13150,96 @@
         return pg;
     }
 
+    // ── PDF de Averiguação de Paternidade ───────────────────────────────────────────
+    function gerarPDFAveriguacaoPaternidade(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoAveriguacaoPaternidade(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaAveriguacaoPaternidade(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_AVERIGUACAO_PATERNIDADE.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Pedido do usuário: card com o total CENTRALIZADO + a lista COMPLETA com todas as
+    // colunas também no relatório principal (não só nas Tabelas Discriminadas) — por
+    // isso o resumo desenha a tabela inteira, sem limite de linhas.
+    function montarResumoAveriguacaoPaternidade(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text('Averiguação de Paternidade', m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Classe 123 - Averiguação de Paternidade  •  Status: Ativo  •  Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+        desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Processos ativos de Averiguação de Paternidade', String(r.length), [], true, COR.azul, COR.azul);
+
+        if (r.length > 0) {
+            const yTab = kY + kH + gap;
+            tituloSecao(doc, m, yTab + 4, uw, 'Lista completa dos processos');
+            desenharTabelaAveriguacaoPaternidade(doc, r, yTab + 8, comIndice);
+        }
+
+        desenharRodape(doc, TITULO_AVERIGUACAO_PATERNIDADE, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    function desenharTabelaAveriguacaoPaternidade(doc, registros, startY, comIndice) {
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const colunas = CFG_AVERIGUACAO_PATERNIDADE.pdf.colunas;
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: registros.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: columnStylesEscalados(colunas, uw),
+            rowPageBreak: 'avoid',
+            didDrawPage: () => desenharRodape(doc, TITULO_AVERIGUACAO_PATERNIDADE, carimbo, pw, ph, m, comIndice),
+        });
+    }
+
+    // Tabela discriminada (Tabelas Discriminadas / PDF individual) — página própria com a
+    // mesma lista completa. Devolve a página inicial (para o índice).
+    function montarTabelaAveriguacaoPaternidade(doc, dados, comIndice) {
+        doc.addPage();
+        const pg = doc.internal.getNumberOfPages();
+        const m = 12;
+        const uw = doc.internal.pageSize.getWidth() - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, CFG_AVERIGUACAO_PATERNIDADE.pdf.tabelaTitulo);
+        desenharTabelaAveriguacaoPaternidade(doc, dados || [], m + 8, comIndice);
+        return pg;
+    }
+
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
     // montarResumoGenerico/montarTabelaGenerico (dependem de p.dataCampo/p.processoCampo
@@ -14783,6 +15120,10 @@
         // (cabeçalho varia entre Seção Infracional/Proteção, ver CFG_ACOLHIDOS). Antes de
         // CFG_RETORNO: sem isto a tela caía no fallback de Retorno (visto no .mhtml).
         else if (CFG_HABILITACOES_ADOCAO.detecta(cab)) cfg = CFG_HABILITACOES_ADOCAO;
+        // Averiguação de Paternidade — resultado da Busca Avançada, reconhecido pelo
+        // filtro "Classe Processual: 123 - Averiguação..." (o cabeçalho da tabela é o
+        // genérico da busca). Antes de CFG_RETORNO: sem isto caía no fallback de Retorno.
+        else if (CFG_AVERIGUACAO_PATERNIDADE.detecta(cab)) cfg = CFG_AVERIGUACAO_PATERNIDADE;
         else if (CFG_ACOLHIDOS.detecta(cab)) cfg = CFG_ACOLHIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
@@ -15215,6 +15556,7 @@
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
         if (navAlvo === 'habilitacoesadocao') return /infanciaJuventude\/casalHabilitadoAdocao\.do/i;
         if (navAlvo === 'acolhidos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
+        if (navAlvo === 'averiguacaopaternidade') return /processo\/buscaProcesso\.do/i;
         if (navAlvo === 'monitoracaoexpiradas') return /buscaMonitoracaoEletronica\.do/i;
         // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
         // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
@@ -16084,6 +16426,26 @@
                 bMedidasAlternativasAtraso.textContent = 'Preencher e Pesquisar (Medidas Alternativas em Atraso)';
                 bMedidasAlternativasAtraso.onclick = () => preencherEPesquisarMedidasAlternativasAtraso();
                 buttonBar.appendChild(bMedidasAlternativasAtraso);
+            }
+        }
+
+        // Busca Avançada (buscaProcesso.do) no fluxo de Averiguação de Paternidade —
+        // decide pelo ESTADO da automação. Voltar a esta tela JÁ em "coletando_" (depois
+        // do Pesquisar) significa que o Projudi não trouxe a página de resultados (busca
+        // sem nenhum processo) — conta como 0 registros e avança; pedido do usuário: zero
+        // não aparece no relatório.
+        if (formularioBuscaAvancada()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (estadoAtual === 'preenchendo_averiguacaopaternidade') {
+                console.log('[Projudi Averiguação Paternidade] automação: preenchendo e pesquisando');
+                preencherEPesquisarAveriguacaoPaternidade();
+                return;
+            }
+            if (estadoAtual === 'coletando_averiguacaopaternidade') {
+                console.warn('[Projudi Averiguação Paternidade] pesquisa voltou à tela de busca (sem resultados) — 0 registros, avançando');
+                store.setItem(CFG_AVERIGUACAO_PATERNIDADE.prefixo + 'coletado', '1');
+                avancarAutomacao(CFG_AVERIGUACAO_PATERNIDADE);
+                return;
             }
         }
 
@@ -17286,15 +17648,20 @@
         // esses menus vira "Prejudicado" após 3 tentativas.
         { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vijcivel', precisaPreencher: true },
         { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vijcivel', precisaPreencher: true },
+        // ── Grupo "FAMÍLIA" (pedido do usuário: seção própria no painel, abaixo de "VIJ -
+        // Seção Cível", itens desmarcados por padrão — ver DOMINIOS_VIJ).
+        { key: 'averiguacaopaternidade', cfg: CFG_AVERIGUACAO_PATERNIDADE, navAlvo: 'averiguacaopaternidade', rotulo: 'Averiguação de Paternidade (Processos Ativos)', curto: 'Averig. Paternidade', dominio: 'familia', precisaPreencher: true },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
         { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
+        { chave: 'familia', rotulo: 'FAMÍLIA' },
     ];
     // Grupos cujos itens vêm DESMARCADOS por padrão no painel (seleção sempre manual —
     // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
-    const DOMINIOS_VIJ = ['vijcivel'];
+    // Inclui "FAMÍLIA" (pedido do usuário: tudo associado a ela vem desmarcado).
+    const DOMINIOS_VIJ = ['vijcivel', 'familia'];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -17753,6 +18120,9 @@
         // "Crianças/Adolescentes Acolhidos" (menu Infância e Juventude). Casa também pelo
         // TEXTO: "Prisões/Acolhimentos/Internações" (menu Processos) tem a MESMA URL, e
         // em unidades sem competência de Infância não deve contar como este relatório.
+        // "Processos > Busca > Avançada" — "Simples" e outras buscas usam a mesma URL
+        // base, o texto distingue.
+        else if (alvo === 'averiguacaopaternidade') link = acharLinkMenu(/processo\/buscaProcesso\.do/i, /^avan[çc]ada$/i);
         else if (alvo === 'acolhidos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
