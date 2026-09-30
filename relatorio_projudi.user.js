@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.16
+// @version      26.17
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2907,8 +2907,9 @@
 
     // Textos do relatório de Acolhidos em cada variante (mesma tela/dados, palavras
     // diferentes — pedido do usuário): Acolhidos (VIJ - Seção Cível), Internados (VIJ -
-    // Seção Infracional, ver CFG_INTERNADOS) e, rodando numa Vara de Família, Prisões -
-    // Alimentos (a mesma tela ali lista presos por dívida alimentar — ver ehVaraFamilia).
+    // Seção Infracional, ver CFG_INTERNADOS) e Prisões - Alimentos (grupo FAMÍLIA — numa
+    // Vara de Família a mesma tela lista presos por dívida alimentar, ver
+    // CFG_PRISOES_ALIMENTOS).
     const TEXTOS_ACOLHIDOS = {
         titulo: TITULO_ACOLHIDOS, nomeArquivo: 'criancas_adolescentes_acolhidos_projudi',
         cardTotal: 'Crianças/adolescentes acolhidos', cardAntigo: 'Acolhimento mais antigo',
@@ -2936,6 +2937,7 @@
 
     // Vara de Família: pela Atuação atual (ex.: "Vara de Família de Curitiba"). Unidade
     // que acumula Família com Infância e Juventude continua sendo tratada como VIJ.
+    // Usado só para tirar as seções VIJ do relatório conjunto (ver secoesColetadas).
     function ehVaraFamilia() {
         const atuacao = lerAtuacaoEmQualquerFrame() || '';
         return /fam[ií]lia/i.test(atuacao) && !/inf[âa]ncia|juventude/i.test(atuacao);
@@ -2943,7 +2945,8 @@
 
     function textosAcolhimento(cfg) {
         if (cfg === CFG_INTERNADOS) return TEXTOS_INTERNADOS;
-        return ehVaraFamilia() ? TEXTOS_PRISOES_ALIMENTOS : TEXTOS_ACOLHIDOS;
+        if (cfg === CFG_PRISOES_ALIMENTOS) return TEXTOS_PRISOES_ALIMENTOS;
+        return TEXTOS_ACOLHIDOS;
     }
 
     // Mesmas 6 colunas da tela do Projudi, cada célula com as várias linhas que a tela
@@ -2980,7 +2983,7 @@
     function telaBuscaPrisao(form) {
         const h3 = form.querySelector('h3');
         return !!h3 && /pris[ãa]o/i.test(h3.textContent || '')
-            && !['acolhidos', 'internados'].includes(keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || ''));
+            && !['acolhidos', 'internados', 'prisoesalimentos'].includes(keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || ''));
     }
 
     // Lê a table.form aninhada de uma célula ("Mãe:"/"Pai:" ou "Data:"/"Guia:"/"Motivo:"/
@@ -3100,7 +3103,6 @@
             d.periodo, d.dias == null ? '' : d.dias],
         pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo, CFG_ACOLHIDOS),
         // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoAcolhidos).
-        // Vara de Família troca títulos/cabeçalhos em tempo de PDF (ver cfgPDFAcolhimento).
         pdf: {
             titulo: TITULO_ACOLHIDOS,
             tabelaTitulo: TEXTOS_ACOLHIDOS.tabelaTitulo,
@@ -3128,7 +3130,7 @@
         if (!form) return null;
         const chave = keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || '');
         if (chave === 'internados') return form;
-        if (chave === 'acolhidos') return null;
+        if (chave === 'acolhidos' || chave === 'prisoesalimentos') return null;
         const thead = document.querySelector('table.resultTable thead');
         return thead && /internad/i.test(thead.textContent || '') ? form : null;
     }
@@ -3151,6 +3153,43 @@
             titulo: TITULO_INTERNADOS,
             tabelaTitulo: TEXTOS_INTERNADOS.tabelaTitulo,
             colunas: colunasPDFAcolhimento(TEXTOS_INTERNADOS),
+        }),
+    });
+
+    // ── Prisões - Alimentos (grupo "FAMÍLIA" do painel — dominio: 'familia'). Pedido do
+    // usuário: checkbox próprio no menu Família para a busca de presos por dívida
+    // alimentar. Mesma tela/form/extração de Acolhidos (buscaAcolhimento.do, ver
+    // CFG_ACOLHIDOS), textos de prisão/preso/soltura. Prefixo próprio; quem é quem vem
+    // do ESTADO da automação, ou — fora dela — de a unidade ser Vara de Família.
+    const TITULO_PRISOES_ALIMENTOS = TEXTOS_PRISOES_ALIMENTOS.titulo;
+
+    function formularioPrisoesAlimentos() {
+        const form = formularioAcolhidos();
+        if (!form) return null;
+        const chave = keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || '');
+        if (chave === 'prisoesalimentos') return form;
+        if (chave === 'acolhidos' || chave === 'internados' || chave === 'prisoes') return null;
+        return ehVaraFamilia() ? form : null;
+    }
+
+    const CFG_PRISOES_ALIMENTOS = Object.assign({}, CFG_ACOLHIDOS, {
+        prefixo: 'projudi_prisoesalimentos_',
+        detecta: () => !!formularioPrisoesAlimentos(),
+        nomeArquivo: TEXTOS_PRISOES_ALIMENTOS.nomeArquivo,
+        rotulos: {
+            coletar: 'Extrair Prisões - Alimentos',
+            coletarMais: 'Extrair mais (Prisões - Alimentos)',
+            baixar: '⬇ Baixar Prisões - Alimentos',
+        },
+        cabecalhos: ['Processo', 'Comarca', 'Vara', 'Preso', 'Mãe', 'Pai', 'Nascimento', 'Idade',
+            'Data da Prisão', 'Guia da Prisão', 'Motivo da Prisão', 'Local da Prisão',
+            'Data da Soltura', 'Guia da Soltura', 'Motivo da Soltura',
+            'Período de Prisão', 'Dias'],
+        pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo, CFG_PRISOES_ALIMENTOS),
+        pdf: Object.assign({}, CFG_ACOLHIDOS.pdf, {
+            titulo: TITULO_PRISOES_ALIMENTOS,
+            tabelaTitulo: TEXTOS_PRISOES_ALIMENTOS.tabelaTitulo,
+            colunas: colunasPDFAcolhimento(TEXTOS_PRISOES_ALIMENTOS),
         }),
     });
 
@@ -9739,7 +9778,7 @@
         }
         // Internados (VIJ - Seção Infracional) usa o mesmo arranjo, com os textos de
         // internação (ver textosAcolhimento).
-        if (cfg === CFG_ACOLHIDOS || cfg === CFG_INTERNADOS) {
+        if (cfg === CFG_ACOLHIDOS || cfg === CFG_INTERNADOS || cfg === CFG_PRISOES_ALIMENTOS) {
             return {
                 rotulo: textosAcolhimento(cfg).titulo,
                 // Resumo dedicado (mesmo padrão de CFG_REAVALIACAO_PRISAO_PROVISORIA); a
@@ -10509,6 +10548,7 @@
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
         const secaoInternados = secoes.find(s => s.cfgOriginal === CFG_INTERNADOS);
+        const secaoPrisoesAlimentos = secoes.find(s => s.cfgOriginal === CFG_PRISOES_ALIMENTOS);
         const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
         const secaoAveriguacaoPaternidade = secoes.find(s => s.cfgOriginal === CFG_AVERIGUACAO_PATERNIDADE);
         const secaoListasJurados = secoes.find(s => s.cfgOriginal === CFG_LISTAS_JURADOS);
@@ -11109,11 +11149,9 @@
         // ── VIJ - Seção Cível (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) — subgrupo à
         // parte na capa, depois de "Outros". Acolhidos: total + acolhimento mais antigo
         // com processo; Habilitações para Adoção: total.
-        // Vara de Família (pedido do usuário): nada de VIJ na capa — Habilitações e
-        // Internados já saem em secoesColetadas; Acolhidos vira "Prisões - Alimentos" no
-        // subgrupo Família (ver textosAcolhimento).
-        const varaFamilia = ehVaraFamilia();
-        // Acolhidos/Internados: total + acolhimento/internação mais antigo com processo.
+        // Vara de Família (pedido do usuário): nada de VIJ na capa — as seções VIJ já
+        // saem em secoesColetadas.
+        // Acolhidos/Internados/Prisões - Alimentos: total + o mais antigo com processo.
         const itemAcolhimento = (secao, cfg) => {
             const t = textosAcolhimento(cfg);
             const antigo = acharMaisAntigo(secao.dados, 'dataAcolhimento');
@@ -11127,7 +11165,7 @@
             };
         };
         const itensVijCivel = [];
-        if (secaoAcolhidos && !varaFamilia) itensVijCivel.push(itemAcolhimento(secaoAcolhidos, CFG_ACOLHIDOS));
+        if (secaoAcolhidos) itensVijCivel.push(itemAcolhimento(secaoAcolhidos, CFG_ACOLHIDOS));
         if (secaoHabilitacoesAdocao) {
             const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
             itensVijCivel.push({
@@ -11150,7 +11188,6 @@
         // de "VIJ - Seção Cível". Pedido do usuário: resultado zero não aparece (nem a
         // linha, nem a faixa do subgrupo — empilharSubgrupo ignora lista vazia).
         const itensFamilia = [];
-        if (secaoAcolhidos && varaFamilia) itensFamilia.push(itemAcolhimento(secaoAcolhidos, CFG_ACOLHIDOS));
         if (secaoAveriguacaoPaternidade && secaoAveriguacaoPaternidade.dados.length) {
             const prejudicado = prejudicadoInfo(CFG_AVERIGUACAO_PATERNIDADE);
             itensFamilia.push({
@@ -11160,6 +11197,9 @@
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
             });
         }
+        // Prisões - Alimentos (depois de Averiguação, mesma ordem do painel): zero presos
+        // também aparece, como em Acolhidos (mostrarSeVazio).
+        if (secaoPrisoesAlimentos) itensFamilia.push(itemAcolhimento(secaoPrisoesAlimentos, CFG_PRISOES_ALIMENTOS));
         empilharSubgrupo('Família', itensFamilia);
 
         // ── Tribunal do Júri (grupo "TRIBUNAL DO JÚRI" do painel, ver GRUPOS_AUTOMACAO) —
@@ -15826,7 +15866,9 @@
         // Listas de Jurados (Tribunal do Júri > Lista Anual) — antes de CFG_RETORNO: sem
         // isto a tela caía no fallback de Retorno (visto no .mhtml enviado pelo usuário).
         else if (CFG_LISTAS_JURADOS.detecta(cab)) cfg = CFG_LISTAS_JURADOS;
-        // Internados ANTES de Acolhidos: mesma tela/form — ver formularioInternados.
+        // Prisões - Alimentos e Internados ANTES de Acolhidos: mesma tela/form — ver
+        // formularioPrisoesAlimentos/formularioInternados.
+        else if (CFG_PRISOES_ALIMENTOS.detecta(cab)) cfg = CFG_PRISOES_ALIMENTOS;
         else if (CFG_INTERNADOS.detecta(cab)) cfg = CFG_INTERNADOS;
         else if (CFG_ACOLHIDOS.detecta(cab)) cfg = CFG_ACOLHIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
@@ -16259,7 +16301,7 @@
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
         if (navAlvo === 'habilitacoesadocao') return /infanciaJuventude\/casalHabilitadoAdocao\.do/i;
-        if (navAlvo === 'acolhidos' || navAlvo === 'internados') return /infanciaJuventude\/buscaAcolhimento\.do/i;
+        if (navAlvo === 'acolhidos' || navAlvo === 'internados' || navAlvo === 'prisoesalimentos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'prisoes') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'averiguacaopaternidade') return /processo\/buscaProcesso\.do/i;
         if (navAlvo === 'listasjurados') return /juri\/listaAnual\.do/i;
@@ -17215,13 +17257,20 @@
                 preencherEPesquisarAcolhidos();
                 return;
             }
+            // Prisões - Alimentos (FAMÍLIA): mesma tela e mesmo preenchimento.
+            if (estadoAtual === 'preenchendo_prisoesalimentos') {
+                console.log('[Projudi Prisões - Alimentos] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_prisoesalimentos');
+                preencherEPesquisarAcolhidos();
+                return;
+            }
             if (estadoAtual === 'preenchendo_acolhidos') {
                 console.log('[Projudi Acolhidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_acolhidos');
                 preencherEPesquisarAcolhidos();
                 return;
             }
-            if (estadoAtual !== 'coletando_acolhidos' && estadoAtual !== 'coletando_internados' && mostrarBotoesIndividuais()) {
+            if (!['coletando_acolhidos', 'coletando_internados', 'coletando_prisoesalimentos'].includes(estadoAtual) && mostrarBotoesIndividuais()) {
                 const bAcolhidos = document.createElement('button');
                 bAcolhidos.type = 'button';
                 bAcolhidos.className = 'projudi-btn';
@@ -18459,6 +18508,9 @@
         // ── Grupo "FAMÍLIA" (pedido do usuário: seção própria no painel, abaixo de "VIJ -
         // Seção Cível", itens desmarcados por padrão — ver DOMINIOS_VIJ).
         { key: 'averiguacaopaternidade', cfg: CFG_AVERIGUACAO_PATERNIDADE, navAlvo: 'averiguacaopaternidade', rotulo: 'Averiguação de Paternidade (Processos Ativos)', curto: 'Averig. Paternidade', dominio: 'familia', precisaPreencher: true },
+        // Prisões - Alimentos (pedido do usuário: checkbox próprio no menu Família) — ver
+        // CFG_PRISOES_ALIMENTOS.
+        { key: 'prisoesalimentos', cfg: CFG_PRISOES_ALIMENTOS, navAlvo: 'prisoesalimentos', rotulo: TITULO_PRISOES_ALIMENTOS, curto: 'Prisões Alimentos', dominio: 'familia', precisaPreencher: true },
         // ── Grupo "TRIBUNAL DO JÚRI" (seção própria no painel, abaixo de "FAMÍLIA", item
         // desmarcado por padrão — ver DOMINIOS_VIJ; unidade sem o menu vira "Prejudicado").
         // A Lista Anual já abre com a tabela pronta — sem filtro, precisaPreencher: false.
@@ -18944,6 +18996,10 @@
         else if (alvo === 'listasjurados') link = acharLinkMenu(/criminal\/juri\/listaAnual\.do/i, /^lista\s+anual$/i);
         // Internados: o MESMO item de menu de Acolhidos (pedido do usuário).
         else if (alvo === 'acolhidos' || alvo === 'internados') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
+        // Prisões - Alimentos: mesmo item de Acolhidos; se a Vara de Família não tiver o
+        // menu Infância e Juventude, cai no "Prisões/Acolhimentos/Internações" (mesma URL).
+        else if (alvo === 'prisoesalimentos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i)
+            || acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /^pris[õo]es\/acolhimentos\/interna[çc][õo]es$/i);
         // "Prisões/Acolhimentos/Internações" (Processos > Busca) — mesma URL de Acolhidos,
         // o texto do link distingue.
         else if (alvo === 'prisoes') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /^pris[õo]es\/acolhimentos\/interna[çc][õo]es$/i);
@@ -19729,9 +19785,9 @@
         anexarDadosAtivos(CFG_TRANSACAO_PENAL, CFG_TRANSACAO_PENAL_ATIVOS);
         anexarDadosAtivos(CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PROCESSO_ATIVOS);
         // Vara de Família (pedido do usuário): nada da VIJ - Seção Cível/Infracional no
-        // PDF/Excel/Word conjunto — só Acolhidos fica, rotulado "Prisões - Alimentos"
-        // (ver textosAcolhimento). Aqui cobre capa, sumário e páginas de uma vez.
-        const cfgsSoVij = ehVaraFamilia() ? [CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
+        // PDF/Excel/Word conjunto — a busca de lá é Prisões - Alimentos (grupo FAMÍLIA).
+        // Aqui cobre capa, sumário e páginas de uma vez.
+        const cfgsSoVij = ehVaraFamilia() ? [CFG_ACOLHIDOS, CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
             .filter(s => !cfgsSoVij.includes(s.cfg))
             .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
