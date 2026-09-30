@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.12
+// @version      26.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -17405,6 +17405,7 @@
         restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
+        desmarcarVijCivelFamiliaUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
@@ -17451,6 +17452,23 @@
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
         store.setItem(CHAVE_RESTAURACAO_PADRAO_2607, '1');
+        // Com o localStorage apagado, esta função roda de novo (flag some junto) — marca
+        // também a desmarcação abaixo como feita, senão ela desmarcaria de novo, a cada
+        // limpeza, o que o usuário marcou (recuperado da cópia do Tampermonkey).
+        store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+    }
+
+    // Desmarcação única (v26.13, pedido do usuário): VIJ - Seção Cível e FAMÍLIA devem
+    // ficar desmarcados por padrão. O padrão já era desmarcado (DOMINIOS_VIJ), mas uma
+    // marcação salva (ex.: "Marcar tudo") prevalece sobre ele — desmarca esses itens uma
+    // vez; dali em diante vale o que o usuário marcar.
+    const CHAVE_DESMARCACAO_VIJ_FAMILIA_2613 = 'projudi_pa_vij_familia_desmarcado_2613';
+    function desmarcarVijCivelFamiliaUmaVez() {
+        if (store.getItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.dominio === 'vijcivel' || r.dominio === 'familia').forEach(r => { salvas[r.key] = false; });
+        gravarSelecoesSalvasPainel(salvas);
+        store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -20151,6 +20169,7 @@
         restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
+        desmarcarVijCivelFamiliaUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         let aplicados = 0;
         Object.entries(p.relatoriosSelecionados || {}).forEach(([key, marcado]) => {
