@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.08
+// @version      26.09
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3292,6 +3292,11 @@
     const TITULO_LISTAS_JURADOS = 'Listas de Jurados — Últimos 5 Anos';
     const ANOS_LISTAS_JURADOS = 5;
     const RE_LISTA_JURADOS = /(\d{4})\s*-\s*(.+)/;
+    // Texto fixo do balão de observação abaixo da tabela (pedido do usuário) — mesmo
+    // padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES. Aparece sempre, inclusive sem listas.
+    const PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS = [
+        'O Código de Processo Penal estabelece que a lista geral provisória dos jurados seja publicada até o dia 10 de outubro e a lista definitiva até o dia 10 de novembro. A unidade deverá observar rigorosamente os prazos e procedimentos previstos no art. 426 e § 1º do CPP, promovendo a publicação das listas provisória e definitiva nas datas legalmente estabelecidas.',
+    ];
 
     const CFG_LISTAS_JURADOS = {
         prefixo: 'projudi_listasjurados_',
@@ -13383,11 +13388,22 @@
         const kW = (uw - gap) / 2;
         desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, `Listas publicadas nos últimos ${ANOS_LISTAS_JURADOS} anos`, String(r.length), [], true, COR.azul, COR.azul);
 
+        let yObs = kY + kH + gap;
         if (r.length > 0) {
-            const yTab = kY + kH + gap;
-            tituloSecao(doc, m, yTab + 4, uw, CFG_LISTAS_JURADOS.pdf.tabelaTitulo);
-            desenharTabelaListasJurados(doc, r, yTab + 8, comIndice);
+            tituloSecao(doc, m, yObs + 4, uw, CFG_LISTAS_JURADOS.pdf.tabelaTitulo);
+            desenharTabelaListasJurados(doc, r, yObs + 8, comIndice);
+            yObs = doc.lastAutoTable.finalY + gap;
         }
+
+        // Balão de observação abaixo da tabela (pedido do usuário) — ver
+        // PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS/desenharCardObservacao.
+        const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS);
+        if (yObs + alturaObs > ph - m) {
+            desenharRodape(doc, TITULO_LISTAS_JURADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            doc.addPage();
+            yObs = m + 4;
+        }
+        desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS, COR.ambar);
 
         desenharRodape(doc, TITULO_LISTAS_JURADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
