@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.18
+// @version      26.19
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2939,8 +2939,11 @@
     // que acumula Família com Infância e Juventude continua sendo tratada como VIJ.
     // Usado só para tirar as seções VIJ do relatório conjunto (ver secoesColetadas).
     function ehVaraFamilia() {
-        const atuacao = lerAtuacaoEmQualquerFrame() || '';
-        return /fam[ií]lia/i.test(atuacao) && !/inf[âa]ncia|juventude/i.test(atuacao);
+        return atuacaoEhFamilia(lerAtuacaoEmQualquerFrame());
+    }
+    function atuacaoEhFamilia(atuacao) {
+        const a = atuacao || '';
+        return /fam[ií]lia/i.test(a) && !/inf[âa]ncia|juventude/i.test(a);
     }
 
     // Pedido do usuário: rodando em várias unidades da mesma VIJ (ex.: "Vara da Infância
@@ -2950,8 +2953,11 @@
     // Seção Cível. Acolhidos/Habilitações não valem numa unidade "Seção Infracional";
     // Internados não vale numa "Seção Cível". Unidade sem "Seção ..." no nome (vara
     // cumulativa) ou atuação desconhecida: vale tudo.
-    function vijForaDaSecao(cfg, atuacao) {
+    // Averiguação de Paternidade (classe 123) — pedido do usuário: só na Vara de Família
+    // (em outras competências a busca travava a automação); atuação desconhecida: vale.
+    function foraDaAtribuicao(cfg, atuacao) {
         const a = atuacao || '';
+        if (cfg === CFG_AVERIGUACAO_PATERNIDADE) return !!a && !atuacaoEhFamilia(a);
         if (cfg === CFG_ACOLHIDOS || cfg === CFG_HABILITACOES_ADOCAO) return /se[çc][ãa]o\s+infracional/i.test(a);
         if (cfg === CFG_INTERNADOS) return /se[çc][ãa]o\s+c[íi]vel/i.test(a);
         return false;
@@ -10928,7 +10934,7 @@
                 lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
             }
             // Seção da VIJ que não é a deste item não conta como "Prejudicado" nele.
-            lista = lista.filter(nome => !vijForaDaSecao(cfg, nome));
+            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome));
             if (!lista.length) return null;
             return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
@@ -19623,9 +19629,10 @@
             const rel = relatorioPorChave(key);
             if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
-            // Item da outra seção da VIJ (ver vijForaDaSecao): não coleta nesta unidade.
+            // Item de outra seção/atribuição (ver foraDaAtribuicao — seção errada da VIJ,
+            // ou Averiguação de Paternidade fora da Vara de Família): não coleta aqui.
             const atuacaoAtual = lerAtuacaoEmQualquerFrame();
-            if (vijForaDaSecao(rel.cfg, atuacaoAtual)) {
+            if (foraDaAtribuicao(rel.cfg, atuacaoAtual)) {
                 logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" — pulando nesta unidade`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + key);
                 avancarAutomacao(rel.cfg);
@@ -19815,11 +19822,12 @@
         // PDF/Excel/Word conjunto — a busca de lá é Prisões - Alimentos (grupo FAMÍLIA).
         // Aqui cobre capa, sumário e páginas de uma vez.
         const cfgsSoVij = ehVaraFamilia() ? [CFG_ACOLHIDOS, CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
-        // Seção Cível x Infracional contadas separadamente (ver vijForaDaSecao) — também
+        // Seção Cível x Infracional contadas separadamente, e Averiguação de Paternidade só
+        // da Vara de Família (ver foraDaAtribuicao) — também
         // limpa coletas antigas, feitas antes de a automação pular a seção errada.
         secoes.forEach(s => {
-            if (!Array.isArray(s.dados) || !s.dados.some(d => d && vijForaDaSecao(s.cfg, d.atuacao || d.competencia))) return;
-            s.dados = s.dados.filter(d => !(d && vijForaDaSecao(s.cfg, d.atuacao || d.competencia)));
+            if (!Array.isArray(s.dados) || !s.dados.some(d => d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia))) return;
+            s.dados = s.dados.filter(d => !(d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia)));
         });
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
             .filter(s => !cfgsSoVij.includes(s.cfg))
