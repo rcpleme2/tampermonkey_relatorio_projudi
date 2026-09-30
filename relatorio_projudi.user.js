@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.20
+// @version      26.21
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -19836,20 +19836,26 @@
             if (!Array.isArray(s.dados) || !s.dados.some(d => d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia))) return;
             s.dados = s.dados.filter(d => !(d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia)));
         });
-        // Seções desses grupos sem nenhuma unidade da atribuição correspondente entre as
-        // rodadas não aparecem (nem com zero — pedido do usuário: no sumário da Vara de
-        // Família, nada da VIJ, e vice-versa). Só quando TODAS as unidades conhecidas são
-        // de uma dessas atribuições; com alguma outra (vara cumulativa), mostra tudo.
         const atuacoesRodadas = new Set([...lerUnidadesAutomatizadas(), lerAtuacaoEmQualquerFrame()].filter(Boolean));
         secoes.forEach(s => (s.dados || []).forEach(d => { if (d && (d.atuacao || d.competencia)) atuacoesRodadas.add(d.atuacao || d.competencia); }));
-        const tiposRodados = [...atuacoesRodadas].map(tipoAtribuicao);
-        const dominiosAusentes = tiposRodados.length && tiposRodados.every(Boolean)
-            ? DOMINIOS_POR_ATRIBUICAO.filter(d => !tiposRodados.includes(d)) : [];
-        const cfgsAusentes = REPORTS_AUTOMACAO.filter(r => dominiosAusentes.includes(r.dominio)).flatMap(r => cfgsDoRelatorio(r));
-        return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
-            .filter(s => !cfgsAusentes.includes(s.cfg))
+        return filtrarGruposPorAtuacoes(secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS), atuacoesRodadas)
             .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
+    }
+
+    // Seções dos grupos FAMÍLIA/VIJ - Seção Cível/VIJ - Seção Infracional sem nenhuma
+    // unidade da atribuição correspondente em `atuacoes` não aparecem (nem com zero —
+    // pedido do usuário: no sumário da Vara de Família, nada da VIJ, e vice-versa). Só
+    // quando TODAS as atuações são de uma dessas atribuições; com alguma outra (vara
+    // cumulativa) ou nenhuma conhecida, devolve tudo. Usado em secoesColetadas (unidades
+    // rodadas) e em baixarPDFConjunto (unidades marcadas no diálogo do PDF — relatório
+    // de 1 unidade traz só os grupos dela).
+    function filtrarGruposPorAtuacoes(secoes, atuacoes) {
+        const tipos = [...atuacoes].map(tipoAtribuicao);
+        if (!tipos.length || !tipos.every(Boolean)) return secoes;
+        const dominiosAusentes = DOMINIOS_POR_ATRIBUICAO.filter(d => !tipos.includes(d));
+        const cfgsAusentes = REPORTS_AUTOMACAO.filter(r => dominiosAusentes.includes(r.dominio)).flatMap(r => cfgsDoRelatorio(r));
+        return secoes.filter(s => !cfgsAusentes.includes(s.cfg));
     }
 
     // Restringe as seções às atribuições MARCADAS pelo usuário no diálogo do PDF
@@ -19918,7 +19924,7 @@
                 // Só filtra de verdade quando o usuário desmarcou alguma — com todas
                 // marcadas (padrão), evita reprocessar à toa.
                 if (selecionadas.size < atuacoes.length) {
-                    secoesFiltradas = filtrarSecoesPorAtribuicoes(secoes, selecionadas);
+                    secoesFiltradas = filtrarGruposPorAtuacoes(filtrarSecoesPorAtribuicoes(secoes, selecionadas), selecionadas);
                 }
             }
             gerarPDFConjunto(secoesFiltradas, modo, { atribuicoesSelecionadas });
