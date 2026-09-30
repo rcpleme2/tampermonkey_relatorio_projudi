@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.15
+// @version      26.16
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2905,6 +2905,68 @@
     // Discriminadas") reaproveita montarTabelaGenerico, ordenada pela data do acolhimento.
     const TITULO_ACOLHIDOS = 'Crianças/Adolescentes Acolhidos';
 
+    // Textos do relatório de Acolhidos em cada variante (mesma tela/dados, palavras
+    // diferentes — pedido do usuário): Acolhidos (VIJ - Seção Cível), Internados (VIJ -
+    // Seção Infracional, ver CFG_INTERNADOS) e, rodando numa Vara de Família, Prisões -
+    // Alimentos (a mesma tela ali lista presos por dívida alimentar — ver ehVaraFamilia).
+    const TEXTOS_ACOLHIDOS = {
+        titulo: TITULO_ACOLHIDOS, nomeArquivo: 'criancas_adolescentes_acolhidos_projudi',
+        cardTotal: 'Crianças/adolescentes acolhidos', cardAntigo: 'Acolhimento mais antigo',
+        lista: 'Acolhimentos (do mais antigo ao mais recente)', indicador: 'acolhido(s)',
+        porMotivo: 'Total de Acolhidos por Motivo', motivo: 'Motivo do Acolhimento',
+        tabelaTitulo: 'Tabela discriminada das crianças/adolescentes acolhidos',
+        pessoa: 'Criança Acolhida', entrada: 'Acolhimento', saida: 'Desacolhimento', periodo: 'Período de Acolhimento',
+    };
+    const TEXTOS_INTERNADOS = {
+        titulo: 'Adolescentes Internados', nomeArquivo: 'adolescentes_internados_projudi',
+        cardTotal: 'Adolescentes internados', cardAntigo: 'Internação mais antiga',
+        lista: 'Internações (da mais antiga à mais recente)', indicador: 'internado(s)',
+        porMotivo: 'Total de Internados por Motivo', motivo: 'Motivo da Internação',
+        tabelaTitulo: 'Tabela discriminada dos adolescentes internados',
+        pessoa: 'Adolescente Internado', entrada: 'Internação', saida: 'Desinternação', periodo: 'Período de Internação',
+    };
+    const TEXTOS_PRISOES_ALIMENTOS = {
+        titulo: 'Prisões - Alimentos', nomeArquivo: 'prisoes_alimentos_projudi',
+        cardTotal: 'Presos', cardAntigo: 'Prisão mais antiga',
+        lista: 'Prisões (da mais antiga à mais recente)', indicador: 'preso(s)',
+        porMotivo: 'Total de Presos por Motivo', motivo: 'Motivo da Prisão',
+        tabelaTitulo: 'Tabela discriminada dos presos',
+        pessoa: 'Preso', entrada: 'Prisão', saida: 'Soltura', periodo: 'Período de Prisão',
+    };
+
+    // Vara de Família: pela Atuação atual (ex.: "Vara de Família de Curitiba"). Unidade
+    // que acumula Família com Infância e Juventude continua sendo tratada como VIJ.
+    function ehVaraFamilia() {
+        const atuacao = lerAtuacaoEmQualquerFrame() || '';
+        return /fam[ií]lia/i.test(atuacao) && !/inf[âa]ncia|juventude/i.test(atuacao);
+    }
+
+    function textosAcolhimento(cfg) {
+        if (cfg === CFG_INTERNADOS) return TEXTOS_INTERNADOS;
+        return ehVaraFamilia() ? TEXTOS_PRISOES_ALIMENTOS : TEXTOS_ACOLHIDOS;
+    }
+
+    // Mesmas 6 colunas da tela do Projudi, cada célula com as várias linhas que a tela
+    // mostra (pedido do usuário: todas as colunas apresentadas).
+    function colunasPDFAcolhimento(t) {
+        return [
+            { header: 'Processo/Comarca', width: 38, get: (d) => [d.processo, d.comarca, d.vara].filter(Boolean).join('\n') },
+            { header: t.pessoa, width: 34, get: (d) => [d.nome, linhasRotuladas([['Mãe', d.mae], ['Pai', d.pai]])].filter(Boolean).join('\n') },
+            { header: 'Nascimento / Idade', width: 24, get: (d) => [d.nascimento, d.idade ? `(${d.idade})` : ''].filter(Boolean).join('\n') },
+            { header: t.entrada, width: 40, get: (d) => linhasRotuladas([['Data', d.dataAcolhimento], ['Guia', d.guia], ['Motivo', d.motivo], ['Local', d.local]]) },
+            { header: t.saida, width: 26, get: (d) => linhasRotuladas([['Data', d.dataDesacolhimento], ['Guia', d.guiaDesacolhimento], ['Motivo', d.motivoDesacolhimento]]) || '—' },
+            { header: t.periodo, width: 20, get: (d) => d.periodo },
+        ];
+    }
+
+    // cfg com título/cabeçalhos do PDF na variante certa — para montarTabelaGenerico.
+    function cfgPDFAcolhimento(cfg) {
+        const t = textosAcolhimento(cfg);
+        return Object.assign({}, cfg, { pdf: Object.assign({}, cfg.pdf, {
+            titulo: t.titulo, tabelaTitulo: t.tabelaTitulo, colunas: colunasPDFAcolhimento(t),
+        }) });
+    }
+
     function formularioAcolhidos() {
         const form = document.getElementById('buscaAcolhimentoForm');
         return form && /buscaAcolhimento\.do/i.test(form.action || '') ? form : null;
@@ -2918,7 +2980,7 @@
     function telaBuscaPrisao(form) {
         const h3 = form.querySelector('h3');
         return !!h3 && /pris[ãa]o/i.test(h3.textContent || '')
-            && keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || '') !== 'acolhidos';
+            && !['acolhidos', 'internados'].includes(keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || ''));
     }
 
     // Lê a table.form aninhada de uma célula ("Mãe:"/"Pai:" ou "Data:"/"Guia:"/"Motivo:"/
@@ -3036,25 +3098,61 @@
             d.dataAcolhimento, d.guia, d.motivo, d.local,
             d.dataDesacolhimento, d.guiaDesacolhimento, d.motivoDesacolhimento,
             d.periodo, d.dias == null ? '' : d.dias],
-        pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo),
+        pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo, CFG_ACOLHIDOS),
         // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoAcolhidos).
+        // Vara de Família troca títulos/cabeçalhos em tempo de PDF (ver cfgPDFAcolhimento).
         pdf: {
             titulo: TITULO_ACOLHIDOS,
-            tabelaTitulo: 'Tabela discriminada das crianças/adolescentes acolhidos',
+            tabelaTitulo: TEXTOS_ACOLHIDOS.tabelaTitulo,
             dataCampo: 'dataAcolhimento',
             processoCampo: 'processo',
-            // Mesmas 6 colunas da tela do Projudi, cada célula com as várias linhas que a
-            // tela mostra (pedido do usuário: todas as colunas apresentadas).
-            colunas: [
-                { header: 'Processo/Comarca', width: 38, get: (d) => [d.processo, d.comarca, d.vara].filter(Boolean).join('\n') },
-                { header: 'Criança Acolhida', width: 34, get: (d) => [d.nome, linhasRotuladas([['Mãe', d.mae], ['Pai', d.pai]])].filter(Boolean).join('\n') },
-                { header: 'Nascimento / Idade', width: 24, get: (d) => [d.nascimento, d.idade ? `(${d.idade})` : ''].filter(Boolean).join('\n') },
-                { header: 'Acolhimento', width: 40, get: (d) => linhasRotuladas([['Data', d.dataAcolhimento], ['Guia', d.guia], ['Motivo', d.motivo], ['Local', d.local]]) },
-                { header: 'Desacolhimento', width: 26, get: (d) => linhasRotuladas([['Data', d.dataDesacolhimento], ['Guia', d.guiaDesacolhimento], ['Motivo', d.motivoDesacolhimento]]) || '—' },
-                { header: 'Período de Acolhimento', width: 20, get: (d) => d.periodo },
-            ],
+            colunas: colunasPDFAcolhimento(TEXTOS_ACOLHIDOS),
         },
     };
+
+    // ── Adolescentes Internados (grupo "VIJ - Seção Infracional" do painel — dominio:
+    // 'vijinfracional'). Pedido do usuário: a MESMA busca de Crianças/Adolescentes
+    // Acolhidos (mesmo menu/tela/form buscaAcolhimento.do, mesmo filtro "Continuam
+    // Acolhidos/Internados" = Sim, mesma extração por posição — ver CFG_ACOLHIDOS), só
+    // que o relatório fala em internação/internado em vez de acolhimento/acolhido.
+    // Prefixo próprio: numa unidade com as duas seções, cada item guarda sua coleta.
+    // A tela é a mesma, então quem é quem vem do ESTADO da automação (ver
+    // formularioInternados).
+    const TITULO_INTERNADOS = TEXTOS_INTERNADOS.titulo;
+
+    // Tela de Acolhidos sendo usada para Internados: automação rodando 'internados', ou
+    // (fora da automação de Acolhidos) cabeçalho da tabela com "Internad" — o Projudi
+    // de uma Seção Infracional já rotula as colunas "Adolescente Internado"/"Internação".
+    function formularioInternados() {
+        const form = formularioAcolhidos();
+        if (!form) return null;
+        const chave = keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || '');
+        if (chave === 'internados') return form;
+        if (chave === 'acolhidos') return null;
+        const thead = document.querySelector('table.resultTable thead');
+        return thead && /internad/i.test(thead.textContent || '') ? form : null;
+    }
+
+    const CFG_INTERNADOS = Object.assign({}, CFG_ACOLHIDOS, {
+        prefixo: 'projudi_internados_',
+        detecta: () => !!formularioInternados(),
+        nomeArquivo: TEXTOS_INTERNADOS.nomeArquivo,
+        rotulos: {
+            coletar: 'Extrair Internados',
+            coletarMais: 'Extrair mais (Internados)',
+            baixar: '⬇ Baixar Internados',
+        },
+        cabecalhos: ['Processo', 'Comarca', 'Vara', 'Adolescente', 'Mãe', 'Pai', 'Nascimento', 'Idade',
+            'Data da Internação', 'Guia da Internação', 'Motivo da Internação', 'Local da Internação',
+            'Data da Desinternação', 'Guia da Desinternação', 'Motivo da Desinternação',
+            'Período de Internação', 'Dias'],
+        pdfCustom: (dados, somenteResumo) => gerarPDFAcolhidos(dados, somenteResumo, CFG_INTERNADOS),
+        pdf: Object.assign({}, CFG_ACOLHIDOS.pdf, {
+            titulo: TITULO_INTERNADOS,
+            tabelaTitulo: TEXTOS_INTERNADOS.tabelaTitulo,
+            colunas: colunasPDFAcolhimento(TEXTOS_INTERNADOS),
+        }),
+    });
 
     // ── Prisões (menu "Processos" > "Busca" > "Prisões/Acolhimentos/Internações" —
     // processo/infanciaJuventude/buscaAcolhimento.do, a MESMA URL/form de Acolhidos, ver
@@ -9639,16 +9737,18 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaHabilitacoesAdocao(doc, dados, comIndice),
             };
         }
-        if (cfg === CFG_ACOLHIDOS) {
+        // Internados (VIJ - Seção Infracional) usa o mesmo arranjo, com os textos de
+        // internação (ver textosAcolhimento).
+        if (cfg === CFG_ACOLHIDOS || cfg === CFG_INTERNADOS) {
             return {
-                rotulo: TITULO_ACOLHIDOS,
+                rotulo: textosAcolhimento(cfg).titulo,
                 // Resumo dedicado (mesmo padrão de CFG_REAVALIACAO_PRISAO_PROVISORIA); a
                 // tabela discriminada reaproveita o genérico (ver CFG_ACOLHIDOS.pdf).
-                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAcolhidos(doc, dados, primeira, comIndice, rotuloBloco),
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoAcolhidos(doc, dados, primeira, comIndice, rotuloBloco, cfg),
                 // Tabela completa + "Total de Acolhidos por Motivo" logo abaixo dela.
                 montarTabela: (doc, dados, comIndice) => {
-                    const pg = montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, comIndice);
-                    desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, comIndice);
+                    const pg = montarTabelaGenerico(doc, dados, cfgPDFAcolhimento(cfg), comIndice);
+                    desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, comIndice, cfg);
                     return pg;
                 },
             };
@@ -10408,6 +10508,7 @@
         const secaoPrisoes = secoes.find(s => s.cfgOriginal === CFG_PRISOES);
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
+        const secaoInternados = secoes.find(s => s.cfgOriginal === CFG_INTERNADOS);
         const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
         const secaoAveriguacaoPaternidade = secoes.find(s => s.cfgOriginal === CFG_AVERIGUACAO_PATERNIDADE);
         const secaoListasJurados = secoes.find(s => s.cfgOriginal === CFG_LISTAS_JURADOS);
@@ -11008,18 +11109,25 @@
         // ── VIJ - Seção Cível (mesmo grupo do painel, ver GRUPOS_AUTOMACAO) — subgrupo à
         // parte na capa, depois de "Outros". Acolhidos: total + acolhimento mais antigo
         // com processo; Habilitações para Adoção: total.
-        const itensVijCivel = [];
-        if (secaoAcolhidos) {
-            const antigo = acharMaisAntigo(secaoAcolhidos.dados, 'dataAcolhimento');
-            const prejudicado = prejudicadoInfo(CFG_ACOLHIDOS);
+        // Vara de Família (pedido do usuário): nada de VIJ na capa — Habilitações e
+        // Internados já saem em secoesColetadas; Acolhidos vira "Prisões - Alimentos" no
+        // subgrupo Família (ver textosAcolhimento).
+        const varaFamilia = ehVaraFamilia();
+        // Acolhidos/Internados: total + acolhimento/internação mais antigo com processo.
+        const itemAcolhimento = (secao, cfg) => {
+            const t = textosAcolhimento(cfg);
+            const antigo = acharMaisAntigo(secao.dados, 'dataAcolhimento');
+            const prejudicado = prejudicadoInfo(cfg);
             const detalheAntigo = antigo ? `Mais antigo: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
-            itensVijCivel.push({
-                nome: TITULO_ACOLHIDOS,
-                indicador: `${secaoAcolhidos.dados.length} acolhido(s)`,
+            return {
+                nome: t.titulo,
+                indicador: `${secao.dados.length} ${t.indicador}`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_ACOLHIDOS,
-            });
-        }
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
+            };
+        };
+        const itensVijCivel = [];
+        if (secaoAcolhidos && !varaFamilia) itensVijCivel.push(itemAcolhimento(secaoAcolhidos, CFG_ACOLHIDOS));
         if (secaoHabilitacoesAdocao) {
             const prejudicado = prejudicadoInfo(CFG_HABILITACOES_ADOCAO);
             itensVijCivel.push({
@@ -11032,10 +11140,17 @@
         }
         empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
 
+        // ── VIJ - Seção Infracional (grupo do painel logo abaixo de "VIJ - Seção
+        // Cível") — Adolescentes Internados: total + internação mais antiga.
+        const itensVijInfracional = [];
+        if (secaoInternados) itensVijInfracional.push(itemAcolhimento(secaoInternados, CFG_INTERNADOS));
+        empilharSubgrupo('VIJ - Seção Infracional', itensVijInfracional);
+
         // ── Família (grupo "FAMÍLIA" do painel, ver GRUPOS_AUTOMACAO) — subgrupo depois
         // de "VIJ - Seção Cível". Pedido do usuário: resultado zero não aparece (nem a
         // linha, nem a faixa do subgrupo — empilharSubgrupo ignora lista vazia).
         const itensFamilia = [];
+        if (secaoAcolhidos && varaFamilia) itensFamilia.push(itemAcolhimento(secaoAcolhidos, CFG_ACOLHIDOS));
         if (secaoAveriguacaoPaternidade && secaoAveriguacaoPaternidade.dados.length) {
             const prejudicado = prejudicadoInfo(CFG_AVERIGUACAO_PATERNIDADE);
             itensFamilia.push({
@@ -13252,17 +13367,18 @@
 
 
     // ── PDF de Crianças/Adolescentes Acolhidos ──────────────────────────────────────
-    function gerarPDFAcolhidos(dados, somenteResumo) {
+    // cfg: CFG_ACOLHIDOS ou CFG_INTERNADOS (mesmo PDF, textos de textosAcolhimento).
+    function gerarPDFAcolhidos(dados, somenteResumo, cfg) {
         const doc = novoDocPDF();
-        montarResumoAcolhidos(doc, dados, true, false);
+        montarResumoAcolhidos(doc, dados, true, false, null, cfg);
         doc.outline.add(null, 'Resumo', { pageNumber: 1 });
         if (!somenteResumo) {
-            const pgTabela = montarTabelaGenerico(doc, dados, CFG_ACOLHIDOS, false);
-            desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, false);
+            const pgTabela = montarTabelaGenerico(doc, dados, cfgPDFAcolhimento(cfg), false);
+            desenharTabelaAcolhidosPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, false, cfg);
             doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
         }
         const sufixo = somenteResumo ? '_resumo' : '';
-        baixarBlob(doc.output('blob'), `${CFG_ACOLHIDOS.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+        baixarBlob(doc.output('blob'), `${textosAcolhimento(cfg).nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
     }
 
     // Mesmo padrão de montarResumoReavaliacaoPrisaoProvisoria: 2 cards (total de
@@ -13270,8 +13386,9 @@
     // TODOS os acolhidos (pedido do usuário — antes eram só os 5 mais antigos), do
     // acolhimento mais antigo ao mais recente. Sem balão de observação (nenhuma regra
     // legal foi pedida para esta seção).
-    function montarResumoAcolhidos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+    function montarResumoAcolhidos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco, cfg) {
         if (!ehPrimeiraSecao) doc.addPage();
+        const t = textosAcolhimento(cfg);
         const r = dados || [];
         const agora = new Date();
         const pw = doc.internal.pageSize.getWidth();
@@ -13282,7 +13399,7 @@
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
         doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
-        doc.text(TITULO_ACOLHIDOS, m, m + 2);
+        doc.text(t.titulo, m, m + 2);
         const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
         doc.text(`Extraído em ${hoje} às ${hora}  •  ${r.length} registro(s)`, m, rotuloInfo.y);
@@ -13296,19 +13413,19 @@
 
         // Total de REGISTROS (uma linha por criança/adolescente, não por processo
         // distinto), igual ao "N registro(s) encontrado(s)" da tela do Projudi.
-        desenharCard(doc, m, kY, kW, kH, 'Crianças/adolescentes acolhidos', String(r.length), [], true, COR.azul, COR.azul);
+        desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(r.length), [], true, COR.azul, COR.azul);
 
         const antigo = acharMaisAntigo(r, 'dataAcolhimento');
         const valAntigo = antigo ? antigo.dataStr : '—';
         const subsAntigo = antigo
             ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
             : ['Data não disponível'];
-        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Acolhimento mais antigo', valAntigo, subsAntigo, true, COR.ambar);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, t.cardAntigo, valAntigo, subsAntigo, true, COR.ambar);
 
         if (r.length > 0) {
             const yTab = kY + kH + gap;
-            tituloSecao(doc, m, yTab + 4, uw, 'Acolhimentos (do mais antigo ao mais recente)');
-            const colunas = CFG_ACOLHIDOS.pdf.colunas;
+            tituloSecao(doc, m, yTab + 4, uw, t.lista);
+            const colunas = colunasPDFAcolhimento(t);
             doc.autoTable({
                 columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
                 body: ordenarAcolhidosMaisAntigos(r).map(d => {
@@ -13325,12 +13442,12 @@
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: columnStylesEscalados(colunas, uw),
                 rowPageBreak: 'avoid',
-                didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
+                didDrawPage: () => desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
-            desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice);
+            desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice, cfg);
         }
 
-        desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // Pedido do usuário: total de crianças/adolescentes acolhidos por Motivo do
@@ -13347,7 +13464,8 @@
         return [...mapa.entries()].map(([motivo, total]) => ({ motivo, total }))
             .sort((a, b) => b.total - a.total || a.motivo.localeCompare(b.motivo, 'pt-BR'));
     }
-    function desenharTabelaAcolhidosPorMotivo(doc, dados, y, comIndice) {
+    function desenharTabelaAcolhidosPorMotivo(doc, dados, y, comIndice, cfg) {
+        const t = textosAcolhimento(cfg);
         const r = dados || [];
         if (!r.length) return;
         const pw = doc.internal.pageSize.getWidth();
@@ -13363,12 +13481,12 @@
         const alturaEstimada = 10 + (linhasMotivo.length + 2) * 7.5;
         if (y + alturaEstimada > ph - 14) {
             doc.addPage();
-            desenharRodape(doc, TITULO_ACOLHIDOS, carimbo, pw, ph, m, comIndice);
+            desenharRodape(doc, t.titulo, carimbo, pw, ph, m, comIndice);
             y = m;
         }
-        tituloSecao(doc, m, y + 4, uw, 'Total de Acolhidos por Motivo');
+        tituloSecao(doc, m, y + 4, uw, t.porMotivo);
         doc.autoTable({
-            head: [['Motivo do Acolhimento', 'Total']],
+            head: [[t.motivo, 'Total']],
             body: linhasMotivo.map(it => [it.motivo, String(it.total)]),
             foot: [['Total', { content: String(r.length), styles: { halign: 'center' } }]],
             startY: y + 8,
@@ -13381,7 +13499,7 @@
             alternateRowStyles: { fillColor: COR.cartao },
             columnStyles: { 0: { cellWidth: uw - 30 }, 1: { cellWidth: 30, halign: 'center' } },
             showFoot: 'lastPage',
-            didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, carimbo, pw, ph, m, comIndice),
+            didDrawPage: () => desenharRodape(doc, t.titulo, carimbo, pw, ph, m, comIndice),
         });
     }
 
@@ -15708,6 +15826,8 @@
         // Listas de Jurados (Tribunal do Júri > Lista Anual) — antes de CFG_RETORNO: sem
         // isto a tela caía no fallback de Retorno (visto no .mhtml enviado pelo usuário).
         else if (CFG_LISTAS_JURADOS.detecta(cab)) cfg = CFG_LISTAS_JURADOS;
+        // Internados ANTES de Acolhidos: mesma tela/form — ver formularioInternados.
+        else if (CFG_INTERNADOS.detecta(cab)) cfg = CFG_INTERNADOS;
         else if (CFG_ACOLHIDOS.detecta(cab)) cfg = CFG_ACOLHIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
@@ -16139,7 +16259,7 @@
         if (navAlvo === 'audienciasrealizadas') return /audiencia\/estatistica\.do/i;
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
         if (navAlvo === 'habilitacoesadocao') return /infanciaJuventude\/casalHabilitadoAdocao\.do/i;
-        if (navAlvo === 'acolhidos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
+        if (navAlvo === 'acolhidos' || navAlvo === 'internados') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'prisoes') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'averiguacaopaternidade') return /processo\/buscaProcesso\.do/i;
         if (navAlvo === 'listasjurados') return /juri\/listaAnual\.do/i;
@@ -17088,13 +17208,20 @@
         // presença de resultados (form e resultados convivem na mesma página).
         if (formularioAcolhidos()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
+            // Internados (VIJ - Seção Infracional): mesma tela e mesmo preenchimento.
+            if (estadoAtual === 'preenchendo_internados') {
+                console.log('[Projudi Internados] automação: preenchendo e pesquisando');
+                store.setItem(AUTO_ESTADO, 'coletando_internados');
+                preencherEPesquisarAcolhidos();
+                return;
+            }
             if (estadoAtual === 'preenchendo_acolhidos') {
                 console.log('[Projudi Acolhidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_acolhidos');
                 preencherEPesquisarAcolhidos();
                 return;
             }
-            if (estadoAtual !== 'coletando_acolhidos' && mostrarBotoesIndividuais()) {
+            if (estadoAtual !== 'coletando_acolhidos' && estadoAtual !== 'coletando_internados' && mostrarBotoesIndividuais()) {
                 const bAcolhidos = document.createElement('button');
                 bAcolhidos.type = 'button';
                 bAcolhidos.className = 'projudi-btn';
@@ -18325,6 +18452,10 @@
         // esses menus vira "Prejudicado" após 3 tentativas.
         { key: 'acolhidos', cfg: CFG_ACOLHIDOS, navAlvo: 'acolhidos', rotulo: 'Crianças/Adolescentes Acolhidos', curto: 'Acolhidos', dominio: 'vijcivel', precisaPreencher: true },
         { key: 'habilitacoesadocao', cfg: CFG_HABILITACOES_ADOCAO, navAlvo: 'habilitacoesadocao', rotulo: 'Habilitações para Adoção (Aguardando Oportuna Indicação)', curto: 'Habilitações Adoção', dominio: 'vijcivel', precisaPreencher: true },
+        // ── Grupo "VIJ - Seção Infracional" (pedido do usuário: seção própria na aba
+        // Cível-Geral, abaixo de "VIJ - Seção Cível"; desmarcado por padrão — ver
+        // DOMINIOS_VIJ). Mesma tela/menu de Acolhidos — ver CFG_INTERNADOS.
+        { key: 'internados', cfg: CFG_INTERNADOS, navAlvo: 'internados', rotulo: TITULO_INTERNADOS, curto: 'Internados', dominio: 'vijinfracional', precisaPreencher: true },
         // ── Grupo "FAMÍLIA" (pedido do usuário: seção própria no painel, abaixo de "VIJ -
         // Seção Cível", itens desmarcados por padrão — ver DOMINIOS_VIJ).
         { key: 'averiguacaopaternidade', cfg: CFG_AVERIGUACAO_PATERNIDADE, navAlvo: 'averiguacaopaternidade', rotulo: 'Averiguação de Paternidade (Processos Ativos)', curto: 'Averig. Paternidade', dominio: 'familia', precisaPreencher: true },
@@ -18337,6 +18468,7 @@
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
         { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
+        { chave: 'vijinfracional', rotulo: 'VIJ - Seção Infracional' },
         { chave: 'familia', rotulo: 'FAMÍLIA' },
         // aba: 'crime' — pedido do usuário: o menu Tribunal do Júri fica na aba Crime do
         // painel (sem `aba`, o grupo fica na aba Cível-Geral — ver injetarPainel).
@@ -18346,7 +18478,7 @@
     // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
     // Inclui "FAMÍLIA" (pedido do usuário: tudo associado a ela vem desmarcado).
     // Inclui "TRIBUNAL DO JÚRI" (só existe em unidades com competência de Júri).
-    const DOMINIOS_VIJ = ['vijcivel', 'familia', 'juri'];
+    const DOMINIOS_VIJ = ['vijcivel', 'vijinfracional', 'familia', 'juri'];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -18810,7 +18942,8 @@
         else if (alvo === 'averiguacaopaternidade') link = acharLinkMenu(/processo\/buscaProcesso\.do/i, /^avan[çc]ada$/i);
         // "Tribunal do Júri" > "Lista Anual" — link com href real (target userMainFrame).
         else if (alvo === 'listasjurados') link = acharLinkMenu(/criminal\/juri\/listaAnual\.do/i, /^lista\s+anual$/i);
-        else if (alvo === 'acolhidos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
+        // Internados: o MESMO item de menu de Acolhidos (pedido do usuário).
+        else if (alvo === 'acolhidos' || alvo === 'internados') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
         // "Prisões/Acolhimentos/Internações" (Processos > Busca) — mesma URL de Acolhidos,
         // o texto do link distingue.
         else if (alvo === 'prisoes') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /^pris[õo]es\/acolhimentos\/interna[çc][õo]es$/i);
@@ -19595,7 +19728,12 @@
         };
         anexarDadosAtivos(CFG_TRANSACAO_PENAL, CFG_TRANSACAO_PENAL_ATIVOS);
         anexarDadosAtivos(CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PROCESSO_ATIVOS);
+        // Vara de Família (pedido do usuário): nada da VIJ - Seção Cível/Infracional no
+        // PDF/Excel/Word conjunto — só Acolhidos fica, rotulado "Prisões - Alimentos"
+        // (ver textosAcolhimento). Aqui cobre capa, sumário e páginas de uma vez.
+        const cfgsSoVij = ehVaraFamilia() ? [CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
+            .filter(s => !cfgsSoVij.includes(s.cfg))
             .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
@@ -20113,7 +20251,7 @@
     }
 
     // Abas do painel (pedido do usuário): cada aba mostra SÓ os seus grupos —
-    // Cível-Geral = Cartório, Gabinete, VIJ - Seção Cível e FAMÍLIA; Crime = a seção
+    // Cível-Geral = Cartório, Gabinete, VIJ - Seção Cível/Infracional e FAMÍLIA; Crime = a seção
     // Crime (itens com categoriaEspecifica: 'crime') + TRIBUNAL DO JÚRI (grupo com
     // aba: 'crime' em GRUPOS_AUTOMACAO). A aba só decide o que aparece na tela: o
     // Automatizar busca tudo o que estiver marcado, nas duas abas.
