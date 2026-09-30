@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.19
+// @version      26.20
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2937,7 +2937,7 @@
 
     // Vara de Família: pela Atuação atual (ex.: "Vara de Família de Curitiba"). Unidade
     // que acumula Família com Infância e Juventude continua sendo tratada como VIJ.
-    // Usado só para tirar as seções VIJ do relatório conjunto (ver secoesColetadas).
+    // Ver também tipoAtribuicao/foraDaAtribuicao (quais grupos rodam em cada atribuição).
     function ehVaraFamilia() {
         return atuacaoEhFamilia(lerAtuacaoEmQualquerFrame());
     }
@@ -2946,21 +2946,32 @@
         return /fam[ií]lia/i.test(a) && !/inf[âa]ncia|juventude/i.test(a);
     }
 
-    // Pedido do usuário: rodando em várias unidades da mesma VIJ (ex.: "Vara da Infância
-    // e da Juventude - Seção Cível" + "... - Seção Infracional"), cada seção conta só o
-    // que é seu — a tela de Acolhidos da Seção Infracional devolve os internados, e a de
-    // Habilitações devolve as mesmas habilitações da comarca, o que somava tudo na
-    // Seção Cível. Acolhidos/Habilitações não valem numa unidade "Seção Infracional";
-    // Internados não vale numa "Seção Cível". Unidade sem "Seção ..." no nome (vara
-    // cumulativa) ou atuação desconhecida: vale tudo.
-    // Averiguação de Paternidade (classe 123) — pedido do usuário: só na Vara de Família
-    // (em outras competências a busca travava a automação); atuação desconhecida: vale.
-    function foraDaAtribuicao(cfg, atuacao) {
+    // Grupos do painel que só valem em certas atribuições (pedido do usuário):
+    //   Vara de Família              -> não roda VIJ - Seção Cível nem VIJ - Seção Infracional;
+    //   VIJ - Seção Cível            -> não roda FAMÍLIA nem VIJ - Seção Infracional;
+    //   VIJ - Seção Infracional      -> não roda FAMÍLIA nem VIJ - Seção Cível.
+    // Os demais itens marcados rodam normalmente. Motivo: a automação roda a mesma fila
+    // em cada unidade, e a tela de Acolhidos/Habilitações de uma seção devolvia os dados
+    // da outra (internados somados aos acolhidos, habilitações da comarca em dobro), e a
+    // Averiguação de Paternidade travava fora da Vara de Família.
+    const DOMINIOS_POR_ATRIBUICAO = ['familia', 'vijcivel', 'vijinfracional'];
+    function tipoAtribuicao(atuacao) {
         const a = atuacao || '';
-        if (cfg === CFG_AVERIGUACAO_PATERNIDADE) return !!a && !atuacaoEhFamilia(a);
-        if (cfg === CFG_ACOLHIDOS || cfg === CFG_HABILITACOES_ADOCAO) return /se[çc][ãa]o\s+infracional/i.test(a);
-        if (cfg === CFG_INTERNADOS) return /se[çc][ãa]o\s+c[íi]vel/i.test(a);
-        return false;
+        if (/se[çc][ãa]o\s+infracional/i.test(a)) return 'vijinfracional';
+        if (/se[çc][ãa]o\s+c[íi]vel/i.test(a)) return 'vijcivel';
+        if (atuacaoEhFamilia(a)) return 'familia';
+        return null;
+    }
+    // Atuação desconhecida: vale tudo. Outras atribuições (ex. Vara Cível, vara
+    // cumulativa): só a Averiguação de Paternidade fica de fora (pedido anterior do
+    // usuário: classe 123 apenas na Vara de Família).
+    function foraDaAtribuicao(cfg, atuacao) {
+        if (!atuacao) return false;
+        const rel = relatorioPorCfg(cfg);
+        const dominio = rel && rel.dominio;
+        const tipo = tipoAtribuicao(atuacao);
+        if (tipo) return DOMINIOS_POR_ATRIBUICAO.includes(dominio) && dominio !== tipo;
+        return cfg === CFG_AVERIGUACAO_PATERNIDADE;
     }
 
     function textosAcolhimento(cfg) {
@@ -19818,19 +19829,25 @@
         };
         anexarDadosAtivos(CFG_TRANSACAO_PENAL, CFG_TRANSACAO_PENAL_ATIVOS);
         anexarDadosAtivos(CFG_SUSPENSAO_COND_PROCESSO, CFG_SUSPENSAO_COND_PROCESSO_ATIVOS);
-        // Vara de Família (pedido do usuário): nada da VIJ - Seção Cível/Infracional no
-        // PDF/Excel/Word conjunto — a busca de lá é Prisões - Alimentos (grupo FAMÍLIA).
-        // Aqui cobre capa, sumário e páginas de uma vez.
-        const cfgsSoVij = ehVaraFamilia() ? [CFG_ACOLHIDOS, CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
-        // Seção Cível x Infracional contadas separadamente, e Averiguação de Paternidade só
-        // da Vara de Família (ver foraDaAtribuicao) — também
-        // limpa coletas antigas, feitas antes de a automação pular a seção errada.
+        // Cada grupo (FAMÍLIA / VIJ - Seção Cível / VIJ - Seção Infracional) conta só os
+        // registros das unidades da sua atribuição (ver foraDaAtribuicao) — também limpa
+        // coletas antigas, feitas antes de a automação pular os itens da outra seção.
         secoes.forEach(s => {
             if (!Array.isArray(s.dados) || !s.dados.some(d => d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia))) return;
             s.dados = s.dados.filter(d => !(d && foraDaAtribuicao(s.cfg, d.atuacao || d.competencia)));
         });
+        // Seções desses grupos sem nenhuma unidade da atribuição correspondente entre as
+        // rodadas não aparecem (nem com zero — pedido do usuário: no sumário da Vara de
+        // Família, nada da VIJ, e vice-versa). Só quando TODAS as unidades conhecidas são
+        // de uma dessas atribuições; com alguma outra (vara cumulativa), mostra tudo.
+        const atuacoesRodadas = new Set([...lerUnidadesAutomatizadas(), lerAtuacaoEmQualquerFrame()].filter(Boolean));
+        secoes.forEach(s => (s.dados || []).forEach(d => { if (d && (d.atuacao || d.competencia)) atuacoesRodadas.add(d.atuacao || d.competencia); }));
+        const tiposRodados = [...atuacoesRodadas].map(tipoAtribuicao);
+        const dominiosAusentes = tiposRodados.length && tiposRodados.every(Boolean)
+            ? DOMINIOS_POR_ATRIBUICAO.filter(d => !tiposRodados.includes(d)) : [];
+        const cfgsAusentes = REPORTS_AUTOMACAO.filter(r => dominiosAusentes.includes(r.dominio)).flatMap(r => cfgsDoRelatorio(r));
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
-            .filter(s => !cfgsSoVij.includes(s.cfg))
+            .filter(s => !cfgsAusentes.includes(s.cfg))
             .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
             .filter(s => s.dados.length || (s.cfg.mostrarSeVazio && foiColetado(s.cfg)));
     }
