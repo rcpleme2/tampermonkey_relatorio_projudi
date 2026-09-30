@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.14
+// @version      26.15
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13266,10 +13266,10 @@
     }
 
     // Mesmo padrão de montarResumoReavaliacaoPrisaoProvisoria: 2 cards (total de
-    // acolhidos + acolhimento mais antigo, com o nº do processo) + tabela embutida com os
-    // 5 acolhidos HÁ MAIS TEMPO (ordenados pela data do acolhimento — pedido do usuário,
-    // não a ordem de chegada da tela). Sem balão de observação (nenhuma regra legal foi
-    // pedida para esta seção).
+    // acolhidos + acolhimento mais antigo, com o nº do processo) + tabela embutida com
+    // TODOS os acolhidos (pedido do usuário — antes eram só os 5 mais antigos), do
+    // acolhimento mais antigo ao mais recente. Sem balão de observação (nenhuma regra
+    // legal foi pedida para esta seção).
     function montarResumoAcolhidos(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
         if (!ehPrimeiraSecao) doc.addPage();
         const r = dados || [];
@@ -13305,17 +13305,13 @@
             : ['Data não disponível'];
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Acolhimento mais antigo', valAntigo, subsAntigo, true, COR.ambar);
 
-        const LIMITE_TABELA_EMBUTIDA_ACOLHIDOS = 5;
         if (r.length > 0) {
             const yTab = kY + kH + gap;
-            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_ACOLHIDOS
-                ? `Os ${LIMITE_TABELA_EMBUTIDA_ACOLHIDOS} Acolhimentos Mais Antigos`
-                : 'Acolhimentos (do mais antigo ao mais recente)';
-            tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
+            tituloSecao(doc, m, yTab + 4, uw, 'Acolhimentos (do mais antigo ao mais recente)');
             const colunas = CFG_ACOLHIDOS.pdf.colunas;
             doc.autoTable({
                 columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-                body: ordenarAcolhidosMaisAntigos(r).slice(0, LIMITE_TABELA_EMBUTIDA_ACOLHIDOS).map(d => {
+                body: ordenarAcolhidosMaisAntigos(r).map(d => {
                     const o = {};
                     colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
                     return o;
@@ -13328,6 +13324,7 @@
                 headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
                 alternateRowStyles: { fillColor: COR.cartao },
                 columnStyles: columnStylesEscalados(colunas, uw),
+                rowPageBreak: 'avoid',
                 didDrawPage: () => desenharRodape(doc, TITULO_ACOLHIDOS, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
             desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice);
@@ -13573,22 +13570,15 @@
         desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, 'Habilitações aguardando oportuna indicação', String(r.length),
             [], true, COR.azul, COR.azul);
 
-        const LIMITE_TABELA_EMBUTIDA_HABILITACOES = 15;
-        if (r.length > 0) {
-            const yTab = kY + kH + gap;
-            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_HABILITACOES
-                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_HABILITACOES} Habilitados`
-                : 'Lista dos Habilitados';
-            tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
-            desenharTabelaHabilitacoes(doc, r.slice(0, LIMITE_TABELA_EMBUTIDA_HABILITACOES), yTab + 8, comIndice);
-        }
+        // Sem lista no resumo (pedido do usuário) — só o card. A lista completa fica nas
+        // Tabelas Discriminadas (montarTabelaHabilitacoesAdocao).
 
         desenharRodape(doc, TITULO_HABILITACOES_ADOCAO, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
-    // Tabela compacta (fonte 6, 16 colunas em retrato) + legenda das siglas — usada pelo
-    // resumo (15 primeiros) e pela tabela discriminada completa (montarTabelaHabilitacoes
-    // Adocao). A tabela genérica (fonte 7,5) ficava apertada demais para 16 colunas.
+    // Tabela compacta (fonte 6, 16 colunas em retrato) + legenda das siglas — usada pela
+    // tabela discriminada completa (montarTabelaHabilitacoesAdocao; o resumo não tem mais
+    // lista, só o card). A tabela genérica (fonte 7,5) ficava apertada demais para 16 colunas.
     function desenharTabelaHabilitacoes(doc, registros, startY, comIndice) {
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
