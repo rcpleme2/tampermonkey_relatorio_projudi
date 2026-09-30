@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.11
+// @version      26.12
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -12,6 +12,8 @@
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
 // @grant        GM_addStyle
 // @grant        GM_download
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
@@ -17371,7 +17373,29 @@
         // esta chave também é lida com muito mais frequência/concorrência entre frames,
         // expondo o mesmo bug de "JSON em camadas" — sem isso, relatorioMarcadoPorPadrao
         // podia devolver sempre o padrão (ou quebrar) mesmo com marcações salvas.
-        return desembrulharObjeto(store.getItem(CHAVE_RELATORIOS_SELECIONADOS)) || {};
+        const local = store.getItem(CHAVE_RELATORIOS_SELECIONADOS);
+        if (local === null) {
+            // localStorage sem as marcações (navegador que limpa os dados do site, logout
+            // do Projudi, etc.) — recupera a cópia do armazenamento do Tampermonkey (ver
+            // gravarSelecoesSalvasPainel) e devolve ao localStorage.
+            const copia = lerCopiaTampermonkey(CHAVE_RELATORIOS_SELECIONADOS);
+            if (copia && typeof copia === 'object') {
+                store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(copia));
+                return copia;
+            }
+        }
+        return desembrulharObjeto(local) || {};
+    }
+    // Pedido do usuário: o que ele desmarca tem que continuar desmarcado nos dias
+    // seguintes, mesmo depois de relogar ou trocar de competência. O localStorage do
+    // site pode ser apagado fora do controle do script, então as marcações também vão
+    // para o armazenamento do próprio Tampermonkey (GM_setValue), que sobrevive a isso.
+    function gravarSelecoesSalvasPainel(obj) {
+        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        try { if (typeof GM_setValue === 'function') GM_setValue(CHAVE_RELATORIOS_SELECIONADOS, obj); } catch (e) { /* sem a cópia, vale só o localStorage */ }
+    }
+    function lerCopiaTampermonkey(chave) {
+        try { return typeof GM_getValue === 'function' ? GM_getValue(chave, null) : null; } catch (e) { return null; }
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
@@ -17395,7 +17419,7 @@
         if (store.getItem(CHAVE_MIGRACAO_VJI_DESMARCADO) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
-        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
         // Já apagou as chaves VIJ — a 2ª migração (abaixo) não tem o que fazer.
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
@@ -17409,7 +17433,7 @@
         if (store.getItem(CHAVE_MIGRACAO_VIJ_CIVEL) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
-        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
     }
 
@@ -17810,7 +17834,7 @@
         // filhos reais junto.
         function linhaGrupoChecklist(chave, filhosKeys) {
             return `<label class="pa-item pa-item-pai-sintetico">
-                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
+                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}" ${filhosKeys.every(relatorioMarcadoPorPadrao) ? 'checked' : ''}> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                 </label>`;
         }
         // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
@@ -17938,7 +17962,7 @@
             // if (c.dataset.key) — o checkbox "pai" sintético (ver linhaGrupoChecklist/
             // ROTULOS_GRUPO_CHECKLIST) não tem data-key de propósito, fica de fora daqui.
             painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
-            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+            gravarSelecoesSalvasPainel(obj);
         }
         painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
             c.addEventListener('change', salvarSelecoesRelatorios);
@@ -20134,7 +20158,7 @@
             salvas[key] = marcado;
             aplicados++;
         });
-        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        gravarSelecoesSalvasPainel(salvas);
         if (CATEGORIAS_PAINEL.some(c => c.id === p.abaPainel)) store.setItem(CHAVE_CATEGORIA_PAINEL, p.abaPainel);
         return aplicados;
     }
@@ -20182,7 +20206,7 @@
         function linhaGrupoChecklist(chave, filhosKeys) {
             return `
                     <label class="pa-item pa-item-pai-sintetico">
-                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
+                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}" ${filhosKeys.every(relatorioMarcadoPorPadrao) ? 'checked' : ''}> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -20373,10 +20397,12 @@
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
         // (pedido do usuário: antes tinha que remarcar tudo do zero a cada troca de
         // atuação, já que o painel é recriado a cada carregamento — ver injetarPainel).
+        // Mescla no snapshot já salvo (em vez de recomeçar de {}) — um item que não
+        // esteja no painel desta tela não perde a marcação que o usuário escolheu.
         function salvarSelecoesPainel() {
-            const obj = {};
+            const obj = lerSelecoesSalvasPainel();
             painel.querySelectorAll('.pa-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
-            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+            gravarSelecoesSalvasPainel(obj);
         }
         painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
 
