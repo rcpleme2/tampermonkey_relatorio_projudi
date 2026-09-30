@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.08
+// @version      26.10
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3418,6 +3418,86 @@
         },
     };
 
+    // ── Listas de Jurados (grupo "TRIBUNAL DO JÚRI" do painel — dominio: 'juri', ver
+    // GRUPOS_AUTOMACAO). Pedido do usuário: conferir a publicação das listas de jurados
+    // pela secretaria — tabela com as listas existentes dos 5 últimos anos. Tela: menu
+    // "Tribunal do Júri" > "Lista Anual" (processo/criminal/juri/listaAnual.do), que já
+    // chega com a table.resultTable pronta (sem filtro/pesquisa — precisaPreencher: false).
+    //
+    // Colunas (.mhtml enviado pelo usuário, 26 registros em 2 páginas, ano decrescente):
+    // [0] "Ano da lista - Tipo da lista" (<a> "2026 - Definitiva") [1] Número de jurados
+    // ativos na lista [2] Edital (pode vir vazio) [3] Data de geração [4] Usuário.
+    //
+    // Os 5 anos mais recentes ficam na 1ª página (2 listas por ano, 20 por página), por
+    // isso a coleta para na 1ª página (somentePrimeiraPagina) e descarta as linhas de
+    // anos mais antigos (contextoExtra calcula os 5 anos mais recentes da tela). Não é
+    // uma lista de processos: sem campo "processo" (fica fora do cruzamento de
+    // Múltiplas Pendências sozinho) e dedupe por ano+tipo.
+    const TITULO_LISTAS_JURADOS = 'Listas de Jurados — Últimos 5 Anos';
+    const ANOS_LISTAS_JURADOS = 5;
+    const RE_LISTA_JURADOS = /(\d{4})\s*-\s*(.+)/;
+    // Texto fixo do balão de observação abaixo da tabela (pedido do usuário) — mesmo
+    // padrão de PARAGRAFOS_OBSERVACAO_PRESCRICOES. Aparece sempre, inclusive sem listas.
+    const PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS = [
+        'O Código de Processo Penal estabelece que a lista geral provisória dos jurados seja publicada até o dia 10 de outubro e a lista definitiva até o dia 10 de novembro. A unidade deverá observar rigorosamente os prazos e procedimentos previstos no art. 426 e § 1º do CPP, promovendo a publicação das listas provisória e definitiva nas datas legalmente estabelecidas.',
+    ];
+
+    const CFG_LISTAS_JURADOS = {
+        prefixo: 'projudi_listasjurados_',
+        mostrarSeVazio: true,
+        chaveDuplicata: ['ano', 'tipo'],
+        somentePrimeiraPagina: true,
+        detecta: (cab) => /ano\s+da\s+lista/i.test(cab) && /jurados/i.test(cab),
+        minTds: 5,
+        usaAtuacao: false,
+        nomeArquivo: 'listas_jurados_projudi',
+        rotulos: {
+            coletar: 'Extrair Listas de Jurados',
+            coletarMais: 'Extrair mais (Listas de Jurados)',
+            baixar: '⬇ Baixar Listas de Jurados',
+        },
+        contextoExtra: () => {
+            const anos = [...document.querySelectorAll('table.resultTable tbody tr')]
+                .map(tr => { const td = tr.querySelector(':scope > td'); const mt = td && textoCelula(td).match(RE_LISTA_JURADOS); return mt ? parseInt(mt[1], 10) : null; })
+                .filter(a => a != null);
+            return { anos: new Set([...new Set(anos)].sort((a, b) => b - a).slice(0, ANOS_LISTAS_JURADOS)) };
+        },
+        cabecalhos: ['Ano da Lista', 'Tipo da Lista', 'Nº de Jurados Ativos', 'Edital', 'Data de Geração', 'Usuário'],
+        larguras: [{ wch: 12 }, { wch: 14 }, { wch: 20 }, { wch: 24 }, { wch: 18 }, { wch: 36 }],
+        extrai: (tds, atuacao, ctx) => {
+            const mt = textoCelulaNormalizado(tds[0]).match(RE_LISTA_JURADOS);
+            if (!mt) return null;
+            const ano = parseInt(mt[1], 10);
+            if (ctx && !ctx.anos.has(ano)) return null;
+            return {
+                ano: String(ano),
+                tipo: mt[2].trim(),
+                jurados: textoCelulaNormalizado(tds[1]),
+                edital: textoCelulaNormalizado(tds[2]),
+                dataGeracao: textoCelulaNormalizado(tds[3]),
+                usuario: textoCelulaNormalizado(tds[4]),
+                // Sem atuacao/competencia, filtrarSecoesPorAtribuicoes descartaria os
+                // registros (mesmo cuidado de CFG_ACOLHIDOS).
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.ano, d.tipo, d.jurados, d.edital, d.dataGeracao, d.usuario],
+        pdfCustom: (dados, somenteResumo) => gerarPDFListasJurados(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_LISTAS_JURADOS,
+            tabelaTitulo: 'Listas de jurados dos últimos 5 anos',
+            colunas: [
+                { header: 'Ano', width: 12, get: (d) => d.ano },
+                { header: 'Tipo da Lista', width: 22, get: (d) => d.tipo },
+                { header: 'Nº de Jurados Ativos', width: 22, get: (d) => d.jurados },
+                { header: 'Edital', width: 34, get: (d) => d.edital || '—' },
+                { header: 'Data de Geração', width: 28, get: (d) => d.dataGeracao },
+                { header: 'Usuário', width: 68, get: (d) => d.usuario },
+            ],
+        },
+    };
+
     // ── Mandados (processo/cumprimentoCartorioMandado.do) — QUATRO relatórios
     // independentes derivados da MESMA tela de busca, distinguidos só pelo valor
     // selecionado no <select id="codStatusCumprimentoCartorio"> (13=retorno,
@@ -6772,7 +6852,9 @@
 
             atualizarStatus(`Coletando ${ctx}página ${pagina} de ${totPag} — ${total} no total acumulado...`);
 
-            if (temProximaPagina()) {
+            // cfg.somentePrimeiraPagina (opcional): relatórios que só precisam da 1ª página
+            // (ex.: Listas de Jurados — os 5 anos mais recentes cabem nela).
+            if (!cfg.somentePrimeiraPagina && temProximaPagina()) {
                 document.querySelector('a.arrowNextOn').click();
             } else {
                 store.removeItem(KEY_RODANDO);
@@ -9539,6 +9621,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaAveriguacaoPaternidade(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_LISTAS_JURADOS) {
+            return {
+                rotulo: TITULO_LISTAS_JURADOS,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoListasJurados(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaListasJurados(doc, dados, comIndice),
+            };
+        }
         if (cfg === CFG_HABILITACOES_ADOCAO) {
             return {
                 rotulo: TITULO_HABILITACOES_ADOCAO,
@@ -10317,6 +10406,7 @@
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
         const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
         const secaoAveriguacaoPaternidade = secoes.find(s => s.cfgOriginal === CFG_AVERIGUACAO_PATERNIDADE);
+        const secaoListasJurados = secoes.find(s => s.cfgOriginal === CFG_LISTAS_JURADOS);
         const secaoOutrosCumprimentos = secoes.find(s => s.cfgOriginal === CFG_OUTROS_CUMPRIMENTOS);
         const secaoArquivadosSaldo = secoes.find(s => s.cfgOriginal === CFG_ARQUIVADOS_SALDO);
         const secaoSuspensosPrazo = secoes.find(s => s.cfgOriginal === CFG_SUSPENSOS_PRAZO);
@@ -10952,6 +11042,23 @@
             });
         }
         empilharSubgrupo('Família', itensFamilia);
+
+        // ── Tribunal do Júri (grupo "TRIBUNAL DO JÚRI" do painel, ver GRUPOS_AUTOMACAO) —
+        // subgrupo depois de "Família". Mostra também zero listas (mostrarSeVazio): numa
+        // unidade de Júri, nenhuma lista publicada é justamente o achado.
+        const itensJuri = [];
+        if (secaoListasJurados) {
+            const prejudicado = prejudicadoInfo(CFG_LISTAS_JURADOS);
+            const anos = [...new Set(secaoListasJurados.dados.map(d => d.ano))].sort();
+            const detalheAnos = anos.length ? `Anos ${anos[0]} a ${anos[anos.length - 1]}` : 'Nenhuma lista localizada';
+            itensJuri.push({
+                nome: 'Listas de Jurados (últimos 5 anos)',
+                indicador: `${secaoListasJurados.dados.length} lista(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAnos}` : detalheAnos,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_LISTAS_JURADOS,
+            });
+        }
+        empilharSubgrupo('Tribunal do Júri', itensJuri);
 
         // Extração pulada pelo usuário (ver pularRelatorioAtual): sobrepõe o que quer que
         // tenha sido calculado acima — o dado pode estar incompleto, então avisa em vez de
@@ -13613,6 +13720,110 @@
         return pg;
     }
 
+    // ── PDF de Listas de Jurados ────────────────────────────────────────────────────
+    // Não é lista de processos (sem processo/data de pendência) — resumo dedicado: card
+    // com o total + a tabela das listas (pedido do usuário), ano mais recente primeiro.
+    function gerarPDFListasJurados(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoListasJurados(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaListasJurados(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_LISTAS_JURADOS.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    const ordenarListasJurados = (dados) => [...(dados || [])].sort((a, b) => (parseInt(b.ano, 10) || 0) - (parseInt(a.ano, 10) || 0));
+
+    function montarResumoListasJurados(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = ordenarListasJurados(dados);
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const anos = [...new Set(r.map(d => d.ano))];
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text('Listas de Jurados', m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        const faixa = anos.length ? `Anos ${anos[anos.length - 1]} a ${anos[0]}` : 'Nenhuma lista localizada';
+        doc.text(`Tribunal do Júri > Lista Anual  •  ${faixa}  •  Extraído em ${hoje} às ${hora}  •  ${r.length} lista(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+        desenharCard(doc, m + (uw - kW) / 2, kY, kW, kH, `Listas publicadas nos últimos ${ANOS_LISTAS_JURADOS} anos`, String(r.length), [], true, COR.azul, COR.azul);
+
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            tituloSecao(doc, m, yObs + 4, uw, CFG_LISTAS_JURADOS.pdf.tabelaTitulo);
+            desenharTabelaListasJurados(doc, r, yObs + 8, comIndice);
+            yObs = doc.lastAutoTable.finalY + gap;
+        }
+
+        // Balão de observação abaixo da tabela (pedido do usuário) — ver
+        // PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS/desenharCardObservacao.
+        const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS);
+        if (yObs + alturaObs > ph - m) {
+            desenharRodape(doc, TITULO_LISTAS_JURADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+            doc.addPage();
+            yObs = m + 4;
+        }
+        desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_LISTAS_JURADOS, COR.ambar);
+
+        desenharRodape(doc, TITULO_LISTAS_JURADOS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    function desenharTabelaListasJurados(doc, registros, startY, comIndice) {
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const colunas = CFG_LISTAS_JURADOS.pdf.colunas;
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: registros.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: columnStylesEscalados(colunas, uw),
+            rowPageBreak: 'avoid',
+            didDrawPage: () => desenharRodape(doc, TITULO_LISTAS_JURADOS, carimbo, pw, ph, m, comIndice),
+        });
+    }
+
+    // Tabela discriminada (Tabelas Discriminadas / PDF individual) — página própria com a
+    // mesma tabela. Devolve a página inicial (para o índice).
+    function montarTabelaListasJurados(doc, dados, comIndice) {
+        doc.addPage();
+        const pg = doc.internal.getNumberOfPages();
+        const m = 12;
+        const uw = doc.internal.pageSize.getWidth() - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, CFG_LISTAS_JURADOS.pdf.tabelaTitulo);
+        desenharTabelaListasJurados(doc, ordenarListasJurados(dados), m + 8, comIndice);
+        return pg;
+    }
+
     // ── PDF do relatório de Outros Cumprimentos (Mesa do Magistrado) ────────────
     // Painel de contadores por tipo — sem processo/data individual, então NÃO reaproveita
     // montarResumoGenerico/montarTabelaGenerico (dependem de p.dataCampo/p.processoCampo
@@ -15500,6 +15711,9 @@
         // Prisões ANTES de Acolhidos: mesma tela/form (buscaAcolhimento.do) — ver
         // telaBuscaPrisao; CFG_ACOLHIDOS.detecta casaria com a Busca por Prisão também.
         else if (CFG_PRISOES.detecta(cab)) cfg = CFG_PRISOES;
+        // Listas de Jurados (Tribunal do Júri > Lista Anual) — antes de CFG_RETORNO: sem
+        // isto a tela caía no fallback de Retorno (visto no .mhtml enviado pelo usuário).
+        else if (CFG_LISTAS_JURADOS.detecta(cab)) cfg = CFG_LISTAS_JURADOS;
         else if (CFG_ACOLHIDOS.detecta(cab)) cfg = CFG_ACOLHIDOS;
         else if (CFG_RETORNO.detecta(cab)) cfg = CFG_RETORNO;
         else if (CFG_CONCLUSOES.detecta(cab)) cfg = CFG_CONCLUSOES;
@@ -15934,6 +16148,7 @@
         if (navAlvo === 'acolhidos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'prisoes') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'averiguacaopaternidade') return /processo\/buscaProcesso\.do/i;
+        if (navAlvo === 'listasjurados') return /juri\/listaAnual\.do/i;
         if (navAlvo === 'monitoracaoexpiradas') return /buscaMonitoracaoEletronica\.do/i;
         // outroscumprimentos NÃO entra aqui (retorna null de propósito) — devolver /.*/
         // fazia o fallback "sem buttonBar = 0 registros" logo abaixo (pensado pra telas
@@ -18076,17 +18291,23 @@
         // ── Grupo "FAMÍLIA" (pedido do usuário: seção própria no painel, abaixo de "VIJ -
         // Seção Cível", itens desmarcados por padrão — ver DOMINIOS_VIJ).
         { key: 'averiguacaopaternidade', cfg: CFG_AVERIGUACAO_PATERNIDADE, navAlvo: 'averiguacaopaternidade', rotulo: 'Averiguação de Paternidade (Processos Ativos)', curto: 'Averig. Paternidade', dominio: 'familia', precisaPreencher: true },
+        // ── Grupo "TRIBUNAL DO JÚRI" (seção própria no painel, abaixo de "FAMÍLIA", item
+        // desmarcado por padrão — ver DOMINIOS_VIJ; unidade sem o menu vira "Prejudicado").
+        // A Lista Anual já abre com a tabela pronta — sem filtro, precisaPreencher: false.
+        { key: 'listasjurados', cfg: CFG_LISTAS_JURADOS, navAlvo: 'listasjurados', rotulo: 'Listas de Jurados (últimos 5 anos)', curto: 'Listas Jurados', dominio: 'juri', precisaPreencher: false },
     ];
     const GRUPOS_AUTOMACAO = [
         { chave: 'cartorio', rotulo: 'Cartório' },
         { chave: 'gabinete', rotulo: 'Gabinete' },
         { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
         { chave: 'familia', rotulo: 'FAMÍLIA' },
+        { chave: 'juri', rotulo: 'TRIBUNAL DO JÚRI' },
     ];
     // Grupos cujos itens vêm DESMARCADOS por padrão no painel (seleção sempre manual —
     // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
     // Inclui "FAMÍLIA" (pedido do usuário: tudo associado a ela vem desmarcado).
-    const DOMINIOS_VIJ = ['vijcivel', 'familia'];
+    // Inclui "TRIBUNAL DO JÚRI" (só existe em unidades com competência de Júri).
+    const DOMINIOS_VIJ = ['vijcivel', 'familia', 'juri'];
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -18548,6 +18769,8 @@
         // "Processos > Busca > Avançada" — "Simples" e outras buscas usam a mesma URL
         // base, o texto distingue.
         else if (alvo === 'averiguacaopaternidade') link = acharLinkMenu(/processo\/buscaProcesso\.do/i, /^avan[çc]ada$/i);
+        // "Tribunal do Júri" > "Lista Anual" — link com href real (target userMainFrame).
+        else if (alvo === 'listasjurados') link = acharLinkMenu(/criminal\/juri\/listaAnual\.do/i, /^lista\s+anual$/i);
         else if (alvo === 'acolhidos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
         // "Prisões/Acolhimentos/Internações" (Processos > Busca) — mesma URL de Acolhidos,
         // o texto do link distingue.
