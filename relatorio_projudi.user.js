@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.09
+// @version      26.10
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2906,6 +2906,17 @@
         return form && /buscaAcolhimento\.do/i.test(form.action || '') ? form : null;
     }
 
+    // "Busca por Prisão" (menu Processos > Busca > Prisões/Acolhimentos/Internações, ver
+    // CFG_PRISOES) usa o MESMO form#buscaAcolhimentoForm/URL desta tela. Distingue pelo
+    // <h3> do form ("Busca por Prisão"); se a automação estiver rodando Acolhidos,
+    // respeita isso. Usado só por formularioPrisoes — o código de Acolhidos não foi
+    // alterado (pedido do usuário); CFG_PRISOES vem antes em detectarConfig/injetarBotoes.
+    function telaBuscaPrisao(form) {
+        const h3 = form.querySelector('h3');
+        return !!h3 && /pris[ãa]o/i.test(h3.textContent || '')
+            && keyDoEstadoAtual(store.getItem(AUTO_ESTADO) || '') !== 'acolhidos';
+    }
+
     // Lê a table.form aninhada de uma célula ("Mãe:"/"Pai:" ou "Data:"/"Guia:"/"Motivo:"/
     // "Local:") como { rótulo em minúsculas, sem ":" -> valor }.
     function camposTabelaAninhada(td) {
@@ -3037,6 +3048,139 @@
                 { header: 'Acolhimento', width: 40, get: (d) => linhasRotuladas([['Data', d.dataAcolhimento], ['Guia', d.guia], ['Motivo', d.motivo], ['Local', d.local]]) },
                 { header: 'Desacolhimento', width: 26, get: (d) => linhasRotuladas([['Data', d.dataDesacolhimento], ['Guia', d.guiaDesacolhimento], ['Motivo', d.motivoDesacolhimento]]) || '—' },
                 { header: 'Período de Acolhimento', width: 20, get: (d) => d.periodo },
+            ],
+        },
+    };
+
+    // ── Prisões (menu "Processos" > "Busca" > "Prisões/Acolhimentos/Internações" —
+    // processo/infanciaJuventude/buscaAcolhimento.do, a MESMA URL/form de Acolhidos, ver
+    // telaBuscaPrisao). Categoria Crime. Duas buscas na mesma tela (pedido do usuário):
+    //   1) "Agrupar por" = Por processo (padrão da tela; demais filtros intocados —
+    //      "Continuam Presos" = Sim já vem marcado): coleta paginada genérica de todas as
+    //      linhas. O "N registro(s) encontrado(s)" vira o card "Total de processos"
+    //      (total_identificado, ver adicionarPagina); processos distintos são contados
+    //      dos registros coletados.
+    //   2) Ao terminar (aoTerminarColetaPrisoes), marca "Por réu" com clique real e
+    //      pesquisa de novo — dessa busca só interessa o total de registros, gravado em
+    //      prefixo+'total_reus' (card "Total de pessoas presas"; difere do nº de
+    //      processos porque a mesma pessoa pode estar presa em mais de um processo).
+    // Colunas da tabela (amostra .mhtml do usuário, 23 registros em 2 páginas), por
+    // POSIÇÃO — mesmo layout de Acolhidos: [0] Processo/Comarca [1] Réu Preso (+ Mãe/Pai)
+    // [2] Nascimento/Idade [3] Prisão (Data/Guia/Motivo/Local/Tipo/Fiança) [4] Soltura
+    // (Data/Guia/Motivo) [5] Período de Prisão ("1 ano, 7 meses e 25 dias (602 dias)").
+    const TITULO_PRISOES = 'Prisões (Réus Presos)';
+
+    function formularioPrisoes() {
+        const form = document.getElementById('buscaAcolhimentoForm');
+        return form && /buscaAcolhimento\.do/i.test(form.action || '') && telaBuscaPrisao(form) ? form : null;
+    }
+
+    // Presas há mais tempo primeiro (data da prisão mais antiga; sem data, no fim).
+    function ordenarPrisoesMaisAntigas(dados) {
+        return (dados || []).slice().sort((a, b) => {
+            const ta = parseDataBR(a.dataPrisao); const tb = parseDataBR(b.dataPrisao);
+            return (ta == null ? Infinity : ta) - (tb == null ? Infinity : tb);
+        });
+    }
+
+    // Pedido do usuário: prisões com motivo "Em Flagrante" há mais de 5 dias disparam o
+    // balão de OBSERVAÇÃO no fim do resumo (provável conversão em preventiva não
+    // registrada no sistema).
+    function prisoesEmFlagranteMaisDe5Dias(dados) {
+        return (dados || []).filter(d => /flagrante/i.test(d.motivo || '') && d.dias != null && d.dias > 5);
+    }
+
+    // Total da 2ª busca ("Por réu") — null se ainda não foi feita/não pôde ser lida.
+    function totalPessoasPresas() {
+        const v = parseInt(store.getItem(CFG_PRISOES.prefixo + 'total_reus') || '', 10);
+        return Number.isFinite(v) ? v : null;
+    }
+
+    const CFG_PRISOES = {
+        prefixo: 'projudi_prisoes_',
+        // Zero presos é informação válida (mesmo padrão de CFG_ACOLHIDOS).
+        mostrarSeVazio: true,
+        // Uma linha por prisão (o mesmo processo pode ter mais de um réu preso) — dedupe
+        // pelo registro inteiro, mesmo caso de CFG_ACOLHIDOS.
+        chaveDuplicata: '*',
+        totalIdentificadoNoResumo: true,
+        detecta: () => !!formularioPrisoes(),
+        minTds: 6,
+        usaAtuacao: false,
+        nomeArquivo: 'prisoes_projudi',
+        rotulos: {
+            coletar: 'Extrair Prisões',
+            coletarMais: 'Extrair mais (Prisões)',
+            baixar: '⬇ Baixar Prisões',
+        },
+        cabecalhos: ['Processo', 'Comarca', 'Vara', 'Réu Preso', 'Mãe', 'Pai', 'Nascimento', 'Idade',
+            'Data da Prisão', 'Guia da Prisão', 'Motivo da Prisão', 'Local da Prisão', 'Tipo', 'Fiança',
+            'Data da Soltura', 'Guia da Soltura', 'Motivo da Soltura',
+            'Período de Prisão', 'Dias'],
+        larguras: [{ wch: 26 }, { wch: 20 }, { wch: 44 }, { wch: 34 }, { wch: 30 }, { wch: 30 }, { wch: 12 }, { wch: 28 },
+            { wch: 14 }, { wch: 38 }, { wch: 34 }, { wch: 40 }, { wch: 16 }, { wch: 10 },
+            { wch: 14 }, { wch: 38 }, { wch: 30 },
+            { wch: 30 }, { wch: 8 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[0].querySelector('em');
+            const processo = emProc ? textoCelula(emProc)
+                : ((textoCelula(tds[0]).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [''])[0]);
+            const linkNome = tds[1].querySelector('a');
+            const pais = camposTabelaAninhada(tds[1]);
+            const nascTexto = textoCelula(tds[2]).replace(/\s+/g, ' ');
+            const mNasc = nascTexto.match(/\d{2}\/\d{2}\/\d{4}/);
+            const mIdade = nascTexto.match(/\(([^)]*)\)/);
+            const pr = camposTabelaAninhada(tds[3]);
+            const dataPrisao = ((pr.data || '').match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0];
+            const sol = camposTabelaAninhada(tds[4]);
+            const periodo = textoCelula(tds[5]).replace(/\s+/g, ' ');
+            const [comarca, vara] = linhasTextoDiretas(tds[0]);
+            return {
+                dataPrisao,
+                processo,
+                comarca: comarca || '',
+                vara: vara || '',
+                nome: (linkNome ? textoCelula(linkNome) : '').replace(/\s+/g, ' '),
+                nascimento: mNasc ? mNasc[0] : '',
+                idade: mIdade ? mIdade[1].trim() : '',
+                mae: pais['mãe'] || pais.mae || '',
+                pai: pais.pai || '',
+                guia: pr.guia || '',
+                motivo: pr.motivo || '',
+                local: pr.local || '',
+                tipo: pr.tipo || '',
+                fianca: pr['fiança'] || pr.fianca || '',
+                dataSoltura: sol.data || '',
+                guiaSoltura: sol.guia || '',
+                motivoSoltura: sol.motivo || '',
+                periodo,
+                // Mesmo formato de período de Acolhidos ("... (602 dias)" ou "23 dias").
+                dias: diasAcolhimento(periodo, dataPrisao),
+                // Mesmo cuidado de CFG_ACOLHIDOS: sem atuacao/competencia,
+                // filtrarSecoesPorAtribuicoes descartaria os registros.
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.comarca, d.vara, d.nome, d.mae, d.pai, d.nascimento, d.idade,
+            d.dataPrisao, d.guia, d.motivo, d.local, d.tipo, d.fianca,
+            d.dataSoltura, d.guiaSoltura, d.motivoSoltura,
+            d.periodo, d.dias == null ? '' : d.dias],
+        aoTerminarColeta: aoTerminarColetaPrisoes,
+        pdfCustom: (dados, somenteResumo) => gerarPDFPrisoes(dados, somenteResumo),
+        // Usado só por montarTabelaGenerico (o resumo é dedicado — montarResumoPrisoes).
+        pdf: {
+            titulo: TITULO_PRISOES,
+            tabelaTitulo: 'Tabela discriminada das prisões',
+            dataCampo: 'dataPrisao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo/Comarca', width: 38, get: (d) => [d.processo, d.comarca, d.vara].filter(Boolean).join('\n') },
+                { header: 'Réu Preso', width: 34, get: (d) => [d.nome, linhasRotuladas([['Mãe', d.mae], ['Pai', d.pai]])].filter(Boolean).join('\n') },
+                { header: 'Nascimento / Idade', width: 24, get: (d) => [d.nascimento, d.idade ? `(${d.idade})` : ''].filter(Boolean).join('\n') },
+                { header: 'Prisão', width: 40, get: (d) => linhasRotuladas([['Data', d.dataPrisao], ['Guia', d.guia], ['Motivo', d.motivo], ['Local', d.local], ['Tipo', d.tipo], ['Fiança', d.fianca]]) },
+                { header: 'Soltura', width: 26, get: (d) => linhasRotuladas([['Data', d.dataSoltura], ['Guia', d.guiaSoltura], ['Motivo', d.motivoSoltura]]) || '—' },
+                { header: 'Período de Prisão', width: 20, get: (d) => d.periodo },
             ],
         },
     };
@@ -5247,6 +5391,62 @@
         }, 1500);
     }
 
+    // Prisões — marca o rádio "Agrupar por" pedido (clique real, ver armadilha "clique
+    // sintético" no CLAUDE.md) e clica em Pesquisar. Não mexe em nenhum outro filtro
+    // (pedido do usuário: "Continuam Presos" = Sim e o resto ficam no padrão da tela).
+    function pesquisarPrisoesAgrupadoPor(valor) {
+        const form = formularioPrisoes();
+        if (!form) return;
+        const radio = form.querySelector(`input[name="flagAgruparPorReu"][value="${valor}"]`);
+        if (radio && !radio.checked) radio.click();
+        const btn = document.getElementById('pesquisar') || form.querySelector('input[name="btPesquisar"]');
+        console.log(`[Projudi Prisões] agrupar por=${valor} marcado=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        setTimeout(() => {
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+        }, 1500);
+    }
+
+    function preencherEPesquisarPrisoes() { pesquisarPrisoesAgrupadoPor('porProcesso'); }
+
+    // cfg.aoTerminarColeta de CFG_PRISOES: terminada a coleta "Por processo", dispara a
+    // 2ª busca ("Por réu") — o resultado é lido por tratarBuscaPorReuPrisoes no próximo
+    // carregamento da página (flag prefixo+'fase_reu').
+    function aoTerminarColetaPrisoes() {
+        store.setItem(CFG_PRISOES.prefixo + 'fase_reu', '1');
+        store.removeItem(CFG_PRISOES.prefixo + 'tentativas_reu');
+        store.removeItem(CFG_PRISOES.prefixo + 'total_reus');
+        pesquisarPrisoesAgrupadoPor('porReu');
+    }
+
+    // Chamado por injetarBotoes enquanto a flag 'fase_reu' estiver ativa. Com "Por réu"
+    // já marcado (resultado da 2ª busca), grava o total e avança a automação; devolve
+    // true se ainda precisou pesquisar de novo (página vai recarregar).
+    function tratarBuscaPorReuPrisoes() {
+        const p = CFG_PRISOES.prefixo;
+        const radio = document.getElementById('flagAgruparPorReu');
+        const tentativas = parseInt(store.getItem(p + 'tentativas_reu') || '0', 10);
+        if (!(radio && radio.checked) && tentativas < 3) {
+            store.setItem(p + 'tentativas_reu', String(tentativas + 1));
+            console.log(`[Projudi Prisões] "Por réu" ainda não está marcado — pesquisando de novo (tentativa ${tentativas + 1})`);
+            pesquisarPrisoesAgrupadoPor('porReu');
+            return true;
+        }
+        store.removeItem(p + 'fase_reu');
+        store.removeItem(p + 'tentativas_reu');
+        if (radio && radio.checked) {
+            // Sem "N registro(s) encontrado(s)": só é zero de fato se a tela disser
+            // "Nenhum registro"; senão fica sem total (card mostra "—").
+            let total = totalRegistrosPagina();
+            if (total == null && /nenhum\s+registro/i.test(document.body ? document.body.textContent : '')) total = 0;
+            if (total != null) store.setItem(p + 'total_reus', String(total));
+            logPainel(`[Projudi Prisões] busca "Por réu" concluída — total de pessoas presas: ${total == null ? '(não identificado)' : total}`);
+        } else {
+            console.warn('[Projudi Prisões] não foi possível pesquisar "Por réu" após 3 tentativas — seguindo sem o total de pessoas presas');
+        }
+        avancarAutomacao(CFG_PRISOES);
+        return false;
+    }
+
     // Tela de filtros de "Em Instância Recursal" (processoBuscaInstanciaSuperior.do) —
     // form + table.resultTable juntos desde o primeiro carregamento, mesmo padrão de
     // Suspensos com Prazo acima. O rádio "Em Instância Superior" (value="P") já vem
@@ -6375,6 +6575,10 @@
             // uma coleta nova (de uma área sem Motivo) herdar a flag de uma coleta antiga
             // (da área Crime) que não foi limpa antes de recomeçar.
             store.removeItem(cfg.prefixo + 'tem_motivo');
+            // Prisões: total da busca "Por réu" e flags da 2ª fase (ver aoTerminarColetaPrisoes).
+            store.removeItem(cfg.prefixo + 'total_reus');
+            store.removeItem(cfg.prefixo + 'fase_reu');
+            store.removeItem(cfg.prefixo + 'tentativas_reu');
             // Fila de Motivos da Suspensão em andamento (ver avancarMotivoOuTerminar/
             // gateTransacaoPenal) — sem limpar aqui, um "Limpar" no meio da iteração
             // deixaria a próxima coleta retomar de um Motivo no meio da lista, em vez de
@@ -9445,6 +9649,19 @@
                 },
             };
         }
+        if (cfg === CFG_PRISOES) {
+            return {
+                rotulo: TITULO_PRISOES,
+                // Mesmo arranjo de CFG_ACOLHIDOS: resumo dedicado, tabela genérica +
+                // "Total de Prisões por Motivo" logo abaixo dela.
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoPrisoes(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => {
+                    const pg = montarTabelaGenerico(doc, dados, CFG_PRISOES, comIndice);
+                    desenharTabelaPrisoesPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, comIndice);
+                    return pg;
+                },
+            };
+        }
         return {
             rotulo: cfg.pdf.titulo,
             montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoGenerico(doc, dados, cfg, primeira, comIndice, rotuloBloco),
@@ -10184,6 +10401,7 @@
         const secaoSemRg = secoes.find(s => s.cfgOriginal === CFG_SEM_RG);
         const secaoSemCpf = secoes.find(s => s.cfgOriginal === CFG_SEM_CPF);
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
+        const secaoPrisoes = secoes.find(s => s.cfgOriginal === CFG_PRISOES);
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
         const secaoHabilitacoesAdocao = secoes.find(s => s.cfgOriginal === CFG_HABILITACOES_ADOCAO);
@@ -10747,6 +10965,22 @@
                 indicador: `${secaoReavaliacaoPrisaoProvisoria.dados.length} preso(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
+            });
+        }
+        // Prisões — logo após Reavaliação de Prisão Provisória (mesma ordem de
+        // REPORTS_AUTOMACAO). Indicador: total de processos (busca Por processo) + total
+        // de pessoas presas (busca Por réu); detalhamento: prisão mais antiga.
+        if (secaoPrisoes) {
+            const antigo = acharMaisAntigo(secaoPrisoes.dados, 'dataPrisao');
+            const prejudicado = prejudicadoInfo(CFG_PRISOES);
+            const pessoas = totalPessoasPresas();
+            const detalheAntigo = antigo ? `Mais antiga: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
+            itensOutros.push({
+                nome: TITULO_PRISOES,
+                indicador: `${totalIdentificadoOuColetado(CFG_PRISOES, secaoPrisoes.dados)} processo(s)`
+                    + (pessoas == null ? '' : ` · ${pessoas} pessoa(s) presa(s)`),
+                detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
+                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRISOES,
             });
         }
         // "Campos Obrigatórios Pendentes da Parte (VD)" — ÚLTIMO da categoria Crime
@@ -13150,6 +13384,148 @@
         });
     }
 
+    // ── PDF de Prisões (Crime) ──────────────────────────────────────────────────────
+    function gerarPDFPrisoes(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoPrisoes(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_PRISOES, false);
+            desenharTabelaPrisoesPorMotivo(doc, dados, (doc.lastAutoTable ? doc.lastAutoTable.finalY : 12) + 6, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_PRISOES.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Texto fixo do balão de OBSERVAÇÃO (pedido do usuário) — só aparece quando há
+    // prisão "Em Flagrante" há mais de 5 dias (ver prisoesEmFlagranteMaisDe5Dias).
+    const OBSERVACAO_PRISOES_FLAGRANTE = [
+        'A secretaria deverá revisar os cadastros das prisões, com especial atenção às prisões em flagrante, '
+            + 'promovendo as correções necessárias sempre que identificadas inconsistências. Em particular, deverá '
+            + 'verificar os casos em que já tenha sido decretada a prisão preventiva, assegurando que a situação '
+            + 'processual registrada no sistema corresponda à realidade dos autos.',
+        'A conversão do motivo da prisão deverá ser devidamente registrada pela secretaria, de modo que o sistema '
+            + 'reflita com exatidão a situação jurídica da parte e o efetivo andamento processual.',
+    ];
+
+    // Pedido do usuário: 2 cards (total de processos = "N registro(s) encontrado(s)" da
+    // busca Por processo, com o nº de processos distintos; total de pessoas presas =
+    // total da busca Por réu), tabela das 5 prisões mais antigas (de N), tabela do total
+    // de prisões por Motivo e, se houver flagrante há mais de 5 dias, balão de
+    // OBSERVAÇÃO ao final.
+    function montarResumoPrisoes(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const totalProcessos = totalIdentificadoOuColetado(CFG_PRISOES, r);
+        const distintos = new Set(r.map(d => d.processo).filter(Boolean)).size;
+        const pessoas = totalPessoasPresas();
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_PRISOES, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  ${totalProcessos} registro(s)`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - gap) / 2;
+        desenharCard(doc, m, kY, kW, kH, 'Total de processos', String(totalProcessos),
+            [`${distintos} processo(s) distinto(s)`], true, COR.azul, COR.azul);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Total de pessoas presas', pessoas == null ? '—' : String(pessoas),
+            [pessoas == null ? 'Busca "Por réu" não disponível' : 'Busca agrupada por réu'], true, COR.vermelho, COR.vermelho);
+
+        let yFim = kY + kH;
+        const LIMITE_TABELA_EMBUTIDA_PRISOES = 5;
+        if (r.length > 0) {
+            const yTab = kY + kH + gap;
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_PRISOES
+                ? `As ${LIMITE_TABELA_EMBUTIDA_PRISOES} Prisões Mais Antigas (de ${totalProcessos})`
+                : 'Prisões (da mais antiga à mais recente)';
+            tituloSecao(doc, m, yTab + 4, uw, tituloTabela);
+            const colunas = CFG_PRISOES.pdf.colunas;
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: ordenarPrisoesMaisAntigas(r).slice(0, LIMITE_TABELA_EMBUTIDA_PRISOES).map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                    return o;
+                }),
+                startY: yTab + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_PRISOES, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            desenharTabelaPrisoesPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice);
+            yFim = doc.lastAutoTable.finalY;
+        }
+
+        if (prisoesEmFlagranteMaisDe5Dias(r).length > 0) {
+            let yObs = yFim + gap;
+            const hObs = medirAlturaCardObservacao(doc, uw, OBSERVACAO_PRISOES_FLAGRANTE);
+            if (yObs + hObs > ph - 14) {
+                doc.addPage();
+                desenharRodape(doc, TITULO_PRISOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                yObs = m;
+            }
+            desenharCardObservacao(doc, m, yObs, uw, hObs, 'Observação', OBSERVACAO_PRISOES_FLAGRANTE, COR.ambar);
+        }
+
+        desenharRodape(doc, TITULO_PRISOES, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // Total de prisões por Motivo (campo "Motivo" da coluna Prisão), contado dos próprios
+    // registros — reaproveita a contagem de Acolhidos (mesmo campo d.motivo), sem alterá-la.
+    function desenharTabelaPrisoesPorMotivo(doc, dados, y, comIndice) {
+        const r = dados || [];
+        if (!r.length) return;
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const agora = new Date();
+        const carimbo = `${agora.toLocaleDateString('pt-BR')} ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+        const linhasMotivo = contarAcolhidosPorMotivo(r);
+        const alturaEstimada = 10 + (linhasMotivo.length + 2) * 7.5;
+        if (y + alturaEstimada > ph - 14) {
+            doc.addPage();
+            desenharRodape(doc, TITULO_PRISOES, carimbo, pw, ph, m, comIndice);
+            y = m;
+        }
+        tituloSecao(doc, m, y + 4, uw, 'Total de Prisões por Motivo');
+        doc.autoTable({
+            head: [['Motivo da Prisão', 'Total']],
+            body: linhasMotivo.map(it => [it.motivo, String(it.total)]),
+            foot: [['Total', { content: String(r.length), styles: { halign: 'center' } }]],
+            startY: y + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 8, cellPadding: 1.8, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            footStyles: { fillColor: COR.cartao, textColor: COR.tinta, fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles: { 0: { cellWidth: uw - 30 }, 1: { cellWidth: 30, halign: 'center' } },
+            showFoot: 'lastPage',
+            didDrawPage: () => desenharRodape(doc, TITULO_PRISOES, carimbo, pw, ph, m, comIndice),
+        });
+    }
+
     // ── PDF de Habilitações para Adoção ─────────────────────────────────────────────
     function gerarPDFHabilitacoesAdocao(dados, somenteResumo) {
         const doc = novoDocPDF();
@@ -15332,6 +15708,9 @@
         // filtro "Classe Processual: 123 - Averiguação..." (o cabeçalho da tabela é o
         // genérico da busca). Antes de CFG_RETORNO: sem isto caía no fallback de Retorno.
         else if (CFG_AVERIGUACAO_PATERNIDADE.detecta(cab)) cfg = CFG_AVERIGUACAO_PATERNIDADE;
+        // Prisões ANTES de Acolhidos: mesma tela/form (buscaAcolhimento.do) — ver
+        // telaBuscaPrisao; CFG_ACOLHIDOS.detecta casaria com a Busca por Prisão também.
+        else if (CFG_PRISOES.detecta(cab)) cfg = CFG_PRISOES;
         // Listas de Jurados (Tribunal do Júri > Lista Anual) — antes de CFG_RETORNO: sem
         // isto a tela caía no fallback de Retorno (visto no .mhtml enviado pelo usuário).
         else if (CFG_LISTAS_JURADOS.detecta(cab)) cfg = CFG_LISTAS_JURADOS;
@@ -15767,6 +16146,7 @@
         if (navAlvo === 'apreensoes') return /processo\/criminal\/apreensao\.do/i;
         if (navAlvo === 'habilitacoesadocao') return /infanciaJuventude\/casalHabilitadoAdocao\.do/i;
         if (navAlvo === 'acolhidos') return /infanciaJuventude\/buscaAcolhimento\.do/i;
+        if (navAlvo === 'prisoes') return /infanciaJuventude\/buscaAcolhimento\.do/i;
         if (navAlvo === 'averiguacaopaternidade') return /processo\/buscaProcesso\.do/i;
         if (navAlvo === 'listasjurados') return /juri\/listaAnual\.do/i;
         if (navAlvo === 'monitoracaoexpiradas') return /buscaMonitoracaoEletronica\.do/i;
@@ -16679,6 +17059,33 @@
                 bHabilitacoes.textContent = 'Preencher e Pesquisar (Habilitações para Adoção)';
                 bHabilitacoes.onclick = () => preencherEPesquisarHabilitacoesAdocao();
                 buttonBar.appendChild(bHabilitacoes);
+            }
+        }
+
+        // Tela "Busca por Prisão" (buscaAcolhimento.do, mesma URL/form de Acolhidos — ver
+        // telaBuscaPrisao). ANTES do bloco de Acolhidos: aqui os returns cortam o resto.
+        // Fase 2 (flag 'fase_reu', ver aoTerminarColetaPrisoes): só lê o total da busca
+        // "Por réu" — não pode cair no coletor genérico, que recoletaria as linhas.
+        if (formularioPrisoes()) {
+            const estadoAtual = store.getItem(AUTO_ESTADO);
+            if (store.getItem(CFG_PRISOES.prefixo + 'fase_reu') === '1') {
+                if (tratarBuscaPorReuPrisoes()) return;
+                // Total gravado: segue o fluxo normal só para renderizar os botões (a
+                // coleta já terminou — 'rodando' foi limpo e a automação já avançou).
+            } else if (estadoAtual === 'preenchendo_prisoes') {
+                console.log('[Projudi Prisões] automação: pesquisando "Por processo"');
+                store.setItem(AUTO_ESTADO, 'coletando_prisoes');
+                preencherEPesquisarPrisoes();
+                return;
+            }
+            if (estadoAtual !== 'coletando_prisoes' && mostrarBotoesIndividuais()) {
+                const bPrisoes = document.createElement('button');
+                bPrisoes.type = 'button';
+                bPrisoes.className = 'projudi-btn';
+                bPrisoes.title = 'Marca "Agrupar por" = Por processo e pesquisa (demais filtros no padrão da tela)';
+                bPrisoes.textContent = 'Preencher e Pesquisar (Prisões)';
+                bPrisoes.onclick = () => preencherEPesquisarPrisoes();
+                buttonBar.appendChild(bPrisoes);
             }
         }
 
@@ -17867,6 +18274,10 @@
         // "Mesa do Escrivão Criminal" de Prescrições/Sem Infração Penal (card sem link,
         // ver acharCardReavaliacaoPrisaoProvisoria); logo após Sem Infração Penal.
         { key: 'reavaliacaoprisao', cfg: CFG_REAVALIACAO_PRISAO_PROVISORIA, navAlvo: 'reavaliacaoprisao', rotulo: 'Reavaliação de Prisão Provisória (Art 316, CPP)', curto: 'Reavaliação Prisão Prov.', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // "Prisões" — menu "Processos > Busca > Prisões/Acolhimentos/Internações"; duas
+        // buscas na mesma tela (Por processo, depois Por réu — ver CFG_PRISOES). Logo após
+        // Reavaliação de Prisão Provisória, categoria Crime (pedido do usuário).
+        { key: 'prisoes', cfg: CFG_PRISOES, navAlvo: 'prisoes', rotulo: 'Prisões (Réus Presos)', curto: 'Prisões', categoriaEspecifica: 'crime', precisaPreencher: true },
         // "Campos Obrigatórios Pendentes da Parte em Proc. VD" — mesma aba "Mesa do
         // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
         // da categoria Crime.
@@ -18361,6 +18772,9 @@
         // "Tribunal do Júri" > "Lista Anual" — link com href real (target userMainFrame).
         else if (alvo === 'listasjurados') link = acharLinkMenu(/criminal\/juri\/listaAnual\.do/i, /^lista\s+anual$/i);
         else if (alvo === 'acolhidos') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /adolescentes\s+acolhid/i);
+        // "Prisões/Acolhimentos/Internações" (Processos > Busca) — mesma URL de Acolhidos,
+        // o texto do link distingue.
+        else if (alvo === 'prisoes') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /^pris[õo]es\/acolhimentos\/interna[çc][õo]es$/i);
         if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
         console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
