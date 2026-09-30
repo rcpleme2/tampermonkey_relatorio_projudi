@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.10
+// @version      26.13
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -12,6 +12,8 @@
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js
 // @grant        GM_addStyle
 // @grant        GM_download
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
@@ -17371,7 +17373,29 @@
         // esta chave também é lida com muito mais frequência/concorrência entre frames,
         // expondo o mesmo bug de "JSON em camadas" — sem isso, relatorioMarcadoPorPadrao
         // podia devolver sempre o padrão (ou quebrar) mesmo com marcações salvas.
-        return desembrulharObjeto(store.getItem(CHAVE_RELATORIOS_SELECIONADOS)) || {};
+        const local = store.getItem(CHAVE_RELATORIOS_SELECIONADOS);
+        if (local === null) {
+            // localStorage sem as marcações (navegador que limpa os dados do site, logout
+            // do Projudi, etc.) — recupera a cópia do armazenamento do Tampermonkey (ver
+            // gravarSelecoesSalvasPainel) e devolve ao localStorage.
+            const copia = lerCopiaTampermonkey(CHAVE_RELATORIOS_SELECIONADOS);
+            if (copia && typeof copia === 'object') {
+                store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(copia));
+                return copia;
+            }
+        }
+        return desembrulharObjeto(local) || {};
+    }
+    // Pedido do usuário: o que ele desmarca tem que continuar desmarcado nos dias
+    // seguintes, mesmo depois de relogar ou trocar de competência. O localStorage do
+    // site pode ser apagado fora do controle do script, então as marcações também vão
+    // para o armazenamento do próprio Tampermonkey (GM_setValue), que sobrevive a isso.
+    function gravarSelecoesSalvasPainel(obj) {
+        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+        try { if (typeof GM_setValue === 'function') GM_setValue(CHAVE_RELATORIOS_SELECIONADOS, obj); } catch (e) { /* sem a cópia, vale só o localStorage */ }
+    }
+    function lerCopiaTampermonkey(chave) {
+        try { return typeof GM_getValue === 'function' ? GM_getValue(chave, null) : null; } catch (e) { return null; }
     }
     // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
     // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
@@ -17381,6 +17405,7 @@
         restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
+        desmarcarVijCivelFamiliaUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
@@ -17395,7 +17420,7 @@
         if (store.getItem(CHAVE_MIGRACAO_VJI_DESMARCADO) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
-        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
         // Já apagou as chaves VIJ — a 2ª migração (abaixo) não tem o que fazer.
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
@@ -17409,7 +17434,7 @@
         if (store.getItem(CHAVE_MIGRACAO_VIJ_CIVEL) === '1') return;
         const salvas = lerSelecoesSalvasPainel();
         REPORTS_AUTOMACAO.filter(r => DOMINIOS_VIJ.includes(r.dominio)).forEach(r => { delete salvas[r.key]; });
-        store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(salvas));
+        gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
     }
 
@@ -17427,6 +17452,23 @@
         store.setItem(CHAVE_MIGRACAO_VJI_DESMARCADO, '1');
         store.setItem(CHAVE_MIGRACAO_VIJ_CIVEL, '1');
         store.setItem(CHAVE_RESTAURACAO_PADRAO_2607, '1');
+        // Com o localStorage apagado, esta função roda de novo (flag some junto) — marca
+        // também a desmarcação abaixo como feita, senão ela desmarcaria de novo, a cada
+        // limpeza, o que o usuário marcou (recuperado da cópia do Tampermonkey).
+        store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+    }
+
+    // Desmarcação única (v26.13, pedido do usuário): VIJ - Seção Cível e FAMÍLIA devem
+    // ficar desmarcados por padrão. O padrão já era desmarcado (DOMINIOS_VIJ), mas uma
+    // marcação salva (ex.: "Marcar tudo") prevalece sobre ele — desmarca esses itens uma
+    // vez; dali em diante vale o que o usuário marcar.
+    const CHAVE_DESMARCACAO_VIJ_FAMILIA_2613 = 'projudi_pa_vij_familia_desmarcado_2613';
+    function desmarcarVijCivelFamiliaUmaVez() {
+        if (store.getItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.dominio === 'vijcivel' || r.dominio === 'familia').forEach(r => { salvas[r.key] = false; });
+        gravarSelecoesSalvasPainel(salvas);
+        store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -17810,7 +17852,7 @@
         // filhos reais junto.
         function linhaGrupoChecklist(chave, filhosKeys) {
             return `<label class="pa-item pa-item-pai-sintetico">
-                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
+                    <input type="checkbox" class="projudi-mu-rel-check" data-filhos="${filhosKeys.join(',')}" ${filhosKeys.every(relatorioMarcadoPorPadrao) ? 'checked' : ''}> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                 </label>`;
         }
         // Mesmo agrupamento visual por "subgrupo" do painel da página inicial (ver
@@ -17858,7 +17900,9 @@
         // Aqui as duas ficam empilhadas e sempre visíveis (sem abas — contexto mais
         // enxuto que o painel da página inicial), então nada fica escondido.
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
-        const linhasCivel = GRUPOS_AUTOMACAO.map(g => {
+        // Grupos com aba: 'crime' (Tribunal do Júri) vão pra logo depois do bloco Crime,
+        // mesma ordem da aba Crime do painel da página inicial.
+        const linhasDeGrupos = (grupos) => grupos.map(g => {
             const itens = itensCivel.filter(r => r.dominio === g.chave);
             // "Processos Ativos" agora é um item comum de REPORTS_AUTOMACAO
             // (CFG_ATIVOS_CLASSE/key 'ativosclasse') — entra em `itens` como qualquer
@@ -17866,10 +17910,11 @@
             if (!itens.length) return '';
             return `<div class="pa-group"><p class="pa-group-lbl">${g.rotulo}</p>${linhasComSubgruposMU(itens)}</div>`;
         }).join('');
+        const linhasCivel = linhasDeGrupos(GRUPOS_AUTOMACAO.filter(g => (g.aba || 'civel') === 'civel'));
         const itensCrime = REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime');
-        const linhasCrime = itensCrime.length
+        const linhasCrime = (itensCrime.length
             ? `<div class="pa-group"><p class="pa-group-lbl especifico">Crime</p>${linhasComSubgruposMU(itensCrime)}</div>`
-            : '';
+            : '') + linhasDeGrupos(GRUPOS_AUTOMACAO.filter(g => g.aba === 'crime'));
 
         // Mesma estrutura/classes .pa-* do painel da página inicial (injetarPainel) —
         // pedido do usuário: o visual deve corresponder ao popup já existente. A folha
@@ -17935,7 +17980,7 @@
             // if (c.dataset.key) — o checkbox "pai" sintético (ver linhaGrupoChecklist/
             // ROTULOS_GRUPO_CHECKLIST) não tem data-key de propósito, fica de fora daqui.
             painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
-            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+            gravarSelecoesSalvasPainel(obj);
         }
         painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => {
             c.addEventListener('change', salvarSelecoesRelatorios);
@@ -18301,7 +18346,9 @@
         { chave: 'gabinete', rotulo: 'Gabinete' },
         { chave: 'vijcivel', rotulo: 'VIJ - Seção Cível' },
         { chave: 'familia', rotulo: 'FAMÍLIA' },
-        { chave: 'juri', rotulo: 'TRIBUNAL DO JÚRI' },
+        // aba: 'crime' — pedido do usuário: o menu Tribunal do Júri fica na aba Crime do
+        // painel (sem `aba`, o grupo fica na aba Cível-Geral — ver injetarPainel).
+        { chave: 'juri', rotulo: 'TRIBUNAL DO JÚRI', aba: 'crime' },
     ];
     // Grupos cujos itens vêm DESMARCADOS por padrão no painel (seleção sempre manual —
     // ver relatorioMarcadoPorPadrao) e viram "Prejudicado" após 3 tentativas sem o menu.
@@ -19961,14 +20008,12 @@
         // (state-row/unidades/tempo/progresso/ações) — evita a lista comprida
         // distraindo de "o que está acontecendo agora". Volta a aparecer assim que a
         // automação para (concluído, travado ou nunca iniciada).
+        const categoriaAtual = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
         painel.querySelectorAll('.pa-tabs, .pa-group, .pa-links, .pa-dica').forEach(el => {
-            // .pa-group-especifico tem uma 2ª regra própria de visibilidade além da
-            // automação (aplicarCategoria só a mostra fora da aba Cível-Geral) — combina
-            // as duas aqui em vez de deixar aplicarCategoria brigar com esta função pra
-            // decidir o display por último.
-            if (el.classList.contains('pa-group-especifico')) {
-                const categoriaAtual = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
-                el.style.display = (emCurso || categoriaAtual === 'civel') ? 'none' : '';
+            // Cada .pa-group pertence a uma aba (data-aba, ver injetarPainel) — combina
+            // as duas regras aqui: some durante a automação E fora da sua aba.
+            if (el.dataset.aba) {
+                el.style.display = (emCurso || el.dataset.aba !== categoriaAtual) ? 'none' : '';
                 return;
             }
             el.style.display = emCurso ? 'none' : '';
@@ -20075,15 +20120,67 @@
         }
     }
 
-    // Categorias do painel: Cível-Geral é a base (todos os relatórios já existentes);
-    // as demais herdam os mesmos itens e ganham uma seção própria para relatórios
-    // específicos — ainda vazia (placeholder) até serem definidos. Só Cível-Geral e
-    // Crime por enquanto; Família/Infância entra depois, no mesmo padrão.
+    // Abas do painel (pedido do usuário): cada aba mostra SÓ os seus grupos —
+    // Cível-Geral = Cartório, Gabinete, VIJ - Seção Cível e FAMÍLIA; Crime = a seção
+    // Crime (itens com categoriaEspecifica: 'crime') + TRIBUNAL DO JÚRI (grupo com
+    // aba: 'crime' em GRUPOS_AUTOMACAO). A aba só decide o que aparece na tela: o
+    // Automatizar busca tudo o que estiver marcado, nas duas abas.
     const CATEGORIAS_PAINEL = [
         { id: 'civel', rotulo: 'Cível-Geral' },
         { id: 'crime', rotulo: 'Crime' },
     ];
     const CHAVE_CATEGORIA_PAINEL = 'projudi_painel_categoria';
+
+    // ── Preferências do usuário: exportar/importar ───────────────────────────────────
+    // Pedido do usuário: levar as preferências do painel (relatórios marcados e aba
+    // aberta) para outro computador, ou recuperá-las depois de uma versão nova — elas
+    // moram só no localStorage deste navegador, e as migrações únicas de versões novas
+    // (ex.: restaurarSelecoesPadraoUmaVez) já chegaram a apagá-las. O arquivo .json
+    // exportado é a cópia portátil.
+    const TIPO_ARQUIVO_PREFERENCIAS = 'projudi_preferencias';
+    function exportarPreferencias() {
+        // Estado EFETIVO de cada relatório (marcação salva ou o padrão), não só o que
+        // está no snapshot — assim o arquivo reproduz exatamente o painel de agora.
+        const relatoriosSelecionados = {};
+        REPORTS_AUTOMACAO.forEach(r => { relatoriosSelecionados[r.key] = relatorioMarcadoPorPadrao(r.key); });
+        const dados = {
+            tipo: TIPO_ARQUIVO_PREFERENCIAS,
+            versaoScript: (typeof GM_info !== 'undefined' && GM_info.script) ? GM_info.script.version : '',
+            exportadoEm: new Date().toISOString(),
+            preferencias: {
+                relatoriosSelecionados,
+                abaPainel: store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel',
+            },
+        };
+        baixarBlob(new Blob([JSON.stringify(dados, null, 2)], { type: 'application/json' }), `projudi_preferencias_${dataArquivo()}.json`);
+    }
+    // Grava no localStorage as preferências lidas de um arquivo exportado; devolve
+    // quantos relatórios foram aplicados. Chaves de relatórios que não existem nesta
+    // versão são ignoradas; relatórios novos, ausentes do arquivo, ficam no padrão.
+    function importarPreferencias(texto) {
+        let dados;
+        try { dados = JSON.parse(texto); } catch (e) { throw new Error('o arquivo não é um JSON válido.'); }
+        if (!dados || dados.tipo !== TIPO_ARQUIVO_PREFERENCIAS || !dados.preferencias) {
+            throw new Error('o arquivo não é um arquivo de preferências deste script.');
+        }
+        const p = dados.preferencias;
+        // Roda as migrações únicas ANTES de gravar — se alguma ainda estiver pendente
+        // nesta instalação, apagaria as marcações recém-importadas na 1ª leitura.
+        restaurarSelecoesPadraoUmaVez();
+        migrarSelecoesVjiDesmarcadas();
+        migrarItensParaSecaoCivel();
+        desmarcarVijCivelFamiliaUmaVez();
+        const salvas = lerSelecoesSalvasPainel();
+        let aplicados = 0;
+        Object.entries(p.relatoriosSelecionados || {}).forEach(([key, marcado]) => {
+            if (typeof marcado !== 'boolean' || !relatorioPorChave(key)) return;
+            salvas[key] = marcado;
+            aplicados++;
+        });
+        gravarSelecoesSalvasPainel(salvas);
+        if (CATEGORIAS_PAINEL.some(c => c.id === p.abaPainel)) store.setItem(CHAVE_CATEGORIA_PAINEL, p.abaPainel);
+        return aplicados;
+    }
 
     function injetarPainel() {
         if (document.getElementById('painel-automacao')) return;
@@ -20097,10 +20194,9 @@
 
         const painel = document.createElement('div');
         painel.id = 'painel-automacao';
-        // Itens do Cível-Geral (sem categoriaEspecifica) valem para qualquer categoria —
-        // ficam sempre visíveis nos grupos Cartório/Gabinete, independente da aba. Itens
-        // com categoriaEspecifica só aparecem na seção própria da categoria correspondente
-        // (ver aplicarCategoria) — hoje só "Audiências Pendentes" em Crime.
+        // Itens sem categoriaEspecifica ficam no grupo do seu `dominio` (GRUPOS_AUTOMACAO),
+        // na aba do grupo; itens com categoriaEspecifica formam a seção própria da aba
+        // correspondente (ver CATEGORIAS_PAINEL/aplicarCategoria).
         const itensCivel = REPORTS_AUTOMACAO.filter(r => !r.categoriaEspecifica);
         const itensEspecificos = (catId) => REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === catId);
 
@@ -20129,7 +20225,7 @@
         function linhaGrupoChecklist(chave, filhosKeys) {
             return `
                     <label class="pa-item pa-item-pai-sintetico">
-                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}"> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
+                        <input type="checkbox" class="pa-check" data-filhos="${filhosKeys.join(',')}" ${filhosKeys.every(relatorioMarcadoPorPadrao) ? 'checked' : ''}> ${ROTULOS_GRUPO_CHECKLIST[chave] || chave}
                     </label>`;
         }
         // Agrupa uma lista de itens (de um mesmo domínio/categoria) em blocos por
@@ -20169,22 +20265,23 @@
             });
             return html;
         }
-        const linhasGrupos = GRUPOS_AUTOMACAO.map(g => {
-            const itensGrupo = itensCivel.filter(r => r.dominio === g.chave);
-            const itens = linhasComSubgrupos(itensGrupo);
-            return `
-                <div class="pa-group">
+        // Todos os grupos de todas as abas ficam no DOM desde o início (data-aba diz a
+        // qual aba cada um pertence; atualizarPainel mostra só os da aba atual) — assim
+        // os itens marcados numa aba continuam existindo, e entram na fila, quando o
+        // usuário troca para a outra.
+        const linhasGrupos = CATEGORIAS_PAINEL.map(cat => {
+            const especificos = itensEspecificos(cat.id);
+            const blocoEspecifico = especificos.length ? `
+                <div class="pa-group" data-aba="${cat.id}">
+                    <p class="pa-group-lbl especifico">${cat.rotulo}</p>
+                    ${linhasComSubgrupos(especificos)}
+                </div>` : '';
+            return blocoEspecifico + GRUPOS_AUTOMACAO.filter(g => (g.aba || 'civel') === cat.id).map(g => `
+                <div class="pa-group" data-aba="${cat.id}">
                     <p class="pa-group-lbl">${g.rotulo}</p>
-                    ${itens}
-                </div>`;
+                    ${linhasComSubgrupos(itensCivel.filter(r => r.dominio === g.chave))}
+                </div>`).join('');
         }).join('');
-        // Enquanto a categoria não tiver nenhum item próprio ainda definido, mostra um
-        // espaço reservado em vez de uma seção vazia.
-        const montarGrupoEspecifico = (cat) => {
-            const itens = itensEspecificos(cat.id);
-            return itens.length ? linhasComSubgrupos(itens)
-                : `<div class="pa-placeholder">Itens específicos desta categoria — a definir</div>`;
-        };
         const categoriaSalva = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
         const categoriaInicial = CATEGORIAS_PAINEL.some(c => c.id === categoriaSalva) ? categoriaSalva : 'civel';
         const linhasAbas = CATEGORIAS_PAINEL.map(c => `
@@ -20217,14 +20314,15 @@
                 </div>
                 <div class="pa-checklist">
                     ${linhasGrupos}
-                    <div class="pa-group pa-group-especifico" style="display:none;">
-                        <p class="pa-group-lbl especifico"></p>
-                        <div class="pa-group-conteudo"></div>
-                    </div>
                 </div>
                 <div class="pa-links">
                     <button id="pa-marcar-tudo" class="pa-link" type="button">Marcar tudo</button>
                     <button id="pa-desmarcar-tudo" class="pa-link" type="button">Desmarcar tudo</button>
+                </div>
+                <div class="pa-links">
+                    <button id="pa-pref-exportar" class="pa-link" type="button" title="Salva num arquivo .json os relatórios marcados (nas duas abas) e a aba aberta — para levar a outro computador ou guardar antes de atualizar o script">⬇ Exportar preferências</button>
+                    <button id="pa-pref-importar" class="pa-link" type="button" title="Carrega um arquivo .json de preferências exportado antes">⬆ Importar preferências</button>
+                    <input id="pa-pref-arquivo" type="file" accept=".json,application/json" style="display:none;">
                 </div>
                 <div class="pa-actions">
                     <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
@@ -20247,11 +20345,9 @@
             </div>`;
         document.body.appendChild(painel);
         painel.querySelector('#pa-iniciar').onclick = async () => {
-            // Itens de outra categoria ficam com o checkbox oculto (display:none no
-            // .pa-group), não desmarcado — sem esse filtro, marcar um item específico,
-            // trocar de aba e clicar Automatizar rodaria um relatório invisível na tela.
+            // Pedido do usuário: tudo o que estiver marcado é buscado, nas duas abas
+            // (Cível-Geral e Crime) — a aba ativa só decide o que aparece na tela.
             const fila = [...painel.querySelectorAll('.pa-check:checked')]
-                .filter(c => { const grupo = c.closest('.pa-group'); return !grupo || grupo.style.display !== 'none'; })
                 .map(c => c.dataset.key).filter(Boolean);
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
@@ -20320,15 +20416,19 @@
         // mudança de checkbox, pra marcação persistir entre atuações/recargas de página
         // (pedido do usuário: antes tinha que remarcar tudo do zero a cada troca de
         // atuação, já que o painel é recriado a cada carregamento — ver injetarPainel).
+        // Mescla no snapshot já salvo (em vez de recomeçar de {}) — um item que não
+        // esteja no painel desta tela não perde a marcação que o usuário escolheu.
         function salvarSelecoesPainel() {
-            const obj = {};
+            const obj = lerSelecoesSalvasPainel();
             painel.querySelectorAll('.pa-check').forEach(c => { if (c.dataset.key) obj[c.dataset.key] = c.checked; });
-            store.setItem(CHAVE_RELATORIOS_SELECIONADOS, JSON.stringify(obj));
+            gravarSelecoesSalvasPainel(obj);
         }
         painel.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
 
+        // Só a aba visível — não mexe nas marcações da outra aba, que não estão na tela.
         function marcarDesmarcarTudo(valor) {
-            painel.querySelectorAll('.pa-check').forEach(c => { c.checked = valor; });
+            const aba = store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel';
+            painel.querySelectorAll(`.pa-group[data-aba="${aba}"] .pa-check`).forEach(c => { c.checked = valor; });
             salvarSelecoesPainel();
         }
         painel.querySelector('#pa-marcar-tudo').onclick = () => marcarDesmarcarTudo(true);
@@ -20343,28 +20443,17 @@
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
 
-        // Troca de categoria: mostra a seção de itens específicos (checkboxes de verdade
-        // quando já existem, senão o espaço reservado) e refaz a grade de contagens para
-        // incluir só os itens visíveis na aba atual (Cível-Geral + os específicos dela).
+        // Marcar o checkbox "pai" sintético (ex.: Suspensões por Tipo) já marca os
+        // filhos junto.
+        ligarCheckboxesPaiFilho(painel, '.pa-check', salvarSelecoesPainel);
+
+        // Troca de aba: grava a aba escolhida; atualizarPainel mostra só os .pa-group
+        // dela (data-aba).
         function aplicarCategoria(id) {
             const cat = CATEGORIAS_PAINEL.find(c => c.id === id) || CATEGORIAS_PAINEL[0];
             painel.querySelectorAll('.pa-tab').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.categoria === cat.id);
             });
-            const grupoEspecifico = painel.querySelector('.pa-group-especifico');
-            const ehCivel = cat.id === 'civel';
-            grupoEspecifico.style.display = ehCivel ? 'none' : '';
-            grupoEspecifico.querySelector('.pa-group-lbl').textContent = cat.rotulo;
-            grupoEspecifico.querySelector('.pa-group-conteudo').innerHTML = montarGrupoEspecifico(cat);
-            // innerHTML acima recria os .pa-check daquela categoria do zero — o listener
-            // de persistência (salvarSelecoesPainel, ver mais abaixo) precisa ser
-            // reanexado a esses elementos NOVOS a cada troca de aba, senão marcar/
-            // desmarcar um item específico de uma categoria não-Cível não persistia.
-            grupoEspecifico.querySelectorAll('.pa-check').forEach(c => { c.addEventListener('change', salvarSelecoesPainel); });
-            // Marcar o checkbox "pai" sintético (ex.: Suspensões por Tipo) já marca os
-            // filhos junto — precisa reanexar aqui pelo mesmo motivo do listener acima
-            // (innerHTML recria os elementos do zero a cada troca de categoria).
-            ligarCheckboxesPaiFilho(grupoEspecifico, '.pa-check', salvarSelecoesPainel);
             store.setItem(CHAVE_CATEGORIA_PAINEL, cat.id);
             atualizarPainel();
         }
@@ -20372,6 +20461,27 @@
             btn.onclick = () => aplicarCategoria(btn.dataset.categoria);
         });
         aplicarCategoria(categoriaInicial);
+
+        painel.querySelector('#pa-pref-exportar').onclick = exportarPreferencias;
+        const inputPreferencias = painel.querySelector('#pa-pref-arquivo');
+        painel.querySelector('#pa-pref-importar').onclick = () => {
+            inputPreferencias.value = ''; // permite reimportar o mesmo arquivo
+            inputPreferencias.click();
+        };
+        inputPreferencias.onchange = async () => {
+            const arquivo = inputPreferencias.files && inputPreferencias.files[0];
+            if (!arquivo) return;
+            try {
+                const aplicados = importarPreferencias(await arquivo.text());
+                painel.querySelectorAll('.pa-check').forEach(c => {
+                    if (c.dataset.key) c.checked = relatorioMarcadoPorPadrao(c.dataset.key);
+                });
+                aplicarCategoria(store.getItem(CHAVE_CATEGORIA_PAINEL) || 'civel');
+                alert(`Preferências importadas: ${aplicados} relatório(s) atualizado(s).`);
+            } catch (e) {
+                alert('Não foi possível importar as preferências: ' + e.message);
+            }
+        };
 
         habilitarArrastePainel(painel);
         atualizarPainel();
