@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.17
+// @version      26.18
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -2941,6 +2941,20 @@
     function ehVaraFamilia() {
         const atuacao = lerAtuacaoEmQualquerFrame() || '';
         return /fam[ií]lia/i.test(atuacao) && !/inf[âa]ncia|juventude/i.test(atuacao);
+    }
+
+    // Pedido do usuário: rodando em várias unidades da mesma VIJ (ex.: "Vara da Infância
+    // e da Juventude - Seção Cível" + "... - Seção Infracional"), cada seção conta só o
+    // que é seu — a tela de Acolhidos da Seção Infracional devolve os internados, e a de
+    // Habilitações devolve as mesmas habilitações da comarca, o que somava tudo na
+    // Seção Cível. Acolhidos/Habilitações não valem numa unidade "Seção Infracional";
+    // Internados não vale numa "Seção Cível". Unidade sem "Seção ..." no nome (vara
+    // cumulativa) ou atuação desconhecida: vale tudo.
+    function vijForaDaSecao(cfg, atuacao) {
+        const a = atuacao || '';
+        if (cfg === CFG_ACOLHIDOS || cfg === CFG_HABILITACOES_ADOCAO) return /se[çc][ãa]o\s+infracional/i.test(a);
+        if (cfg === CFG_INTERNADOS) return /se[çc][ãa]o\s+c[íi]vel/i.test(a);
+        return false;
     }
 
     function textosAcolhimento(cfg) {
@@ -10287,6 +10301,9 @@
         // Cumprimento de Medidas é só os 3 contadores agregados — nunca tem tabela
         // discriminada de processos (ver montarTabela: null em descreverSecaoPDF).
         if (s.cfgOriginal === CFG_CUMPRIMENTO_MEDIDAS) return false;
+        // Prisões - Alimentos com zero presos (pedido do usuário): não gera página — fica
+        // só a linha da capa (o modo 'resumo' já pula seção vazia, ver secaoVazia).
+        if (s.cfgOriginal === CFG_PRISOES_ALIMENTOS && !(s.dados && s.dados.length)) return false;
         // Processos Arquivados com Saldo desenha a tabela dentro do próprio resumo
         // (pedido do usuário: sem página de tabela separada ao final) — nunca entra no
         // passo de tabela separado.
@@ -10910,6 +10927,8 @@
             if (opcoes.atribuicoesSelecionadas) {
                 lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
             }
+            // Seção da VIJ que não é a deste item não conta como "Prejudicado" nele.
+            lista = lista.filter(nome => !vijForaDaSecao(cfg, nome));
             if (!lista.length) return null;
             return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
@@ -19604,6 +19623,14 @@
             const rel = relatorioPorChave(key);
             if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
+            // Item da outra seção da VIJ (ver vijForaDaSecao): não coleta nesta unidade.
+            const atuacaoAtual = lerAtuacaoEmQualquerFrame();
+            if (vijForaDaSecao(rel.cfg, atuacaoAtual)) {
+                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" — pulando nesta unidade`);
+                store.setItem(AUTO_ESTADO, 'coletando_' + key);
+                avancarAutomacao(rel.cfg);
+                return;
+            }
             if (navegarMenu(rel.navAlvo)) {
                 store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
@@ -19788,6 +19815,12 @@
         // PDF/Excel/Word conjunto — a busca de lá é Prisões - Alimentos (grupo FAMÍLIA).
         // Aqui cobre capa, sumário e páginas de uma vez.
         const cfgsSoVij = ehVaraFamilia() ? [CFG_ACOLHIDOS, CFG_HABILITACOES_ADOCAO, CFG_INTERNADOS] : [];
+        // Seção Cível x Infracional contadas separadamente (ver vijForaDaSecao) — também
+        // limpa coletas antigas, feitas antes de a automação pular a seção errada.
+        secoes.forEach(s => {
+            if (!Array.isArray(s.dados) || !s.dados.some(d => d && vijForaDaSecao(s.cfg, d.atuacao || d.competencia))) return;
+            s.dados = s.dados.filter(d => !(d && vijForaDaSecao(s.cfg, d.atuacao || d.competencia)));
+        });
         return secoes.filter(s => s.cfg !== CFG_PROCESSOS_REMETIDOS)
             .filter(s => !cfgsSoVij.includes(s.cfg))
             .filter(s => s.cfg !== CFG_TRANSACAO_PENAL_ATIVOS && s.cfg !== CFG_SUSPENSAO_COND_PROCESSO_ATIVOS)
