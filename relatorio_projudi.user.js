@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.23
+// @version      26.24
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -575,6 +575,8 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
+            // Card "Prioritários pendentes" removido (pedido do usuário).
+            semKpiPrioridade: true,
             // Pedido do usuário: cards espelhando o painel "Análise de Juntadas" da tela
             // (Com Urgência / Para Realizar), gravados por capturarContadoresPainelJuntadas.
             // Sem visita ao painel (coleta manual direto na tela de resultados), os cards
@@ -8591,7 +8593,9 @@
             // idêntico a antes desta mudança pra todo relatório que não define o campo).
             { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR[p.atosAcento] || COR.azul },
         ];
-        if (!p.semPrioridade) {
+        // p.semKpiPrioridade: tira só o card (pedido do usuário em Juntadas), mantendo
+        // as colunas de prioritários das tabelas — p.semPrioridade tiraria tudo.
+        if (!p.semPrioridade && !p.semKpiPrioridade) {
             kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`], acento: COR.vermelho });
         }
         if (p.mediaLabel) {
