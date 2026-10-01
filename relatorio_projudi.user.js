@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.27
+// @version      26.28
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -154,6 +154,54 @@
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error || new Error('Falha ao apagar do IndexedDB'));
         });
+    }
+    // Apaga do IndexedDB toda página cuja chave passe em `filtro` (não só as de 0 a
+    // num_paginas-1 — páginas órfãs de uma coleta interrompida também saem).
+    async function idbApagarChaves(filtro) {
+        const db = await abrirIDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_OBJSTORE, 'readwrite');
+            const os = tx.objectStore(IDB_OBJSTORE);
+            const req = os.getAllKeys();
+            req.onsuccess = () => (req.result || []).filter(k => filtro(String(k))).forEach(k => os.delete(k));
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Falha ao apagar do IndexedDB'));
+        });
+    }
+
+    // ── "Limpar" apaga TUDO o que foi coletado (pedido do usuário) ────────────────────
+    // Antes, cada "Limpar" removia uma lista de chaves escrita à mão, e chaves novas
+    // ficavam para trás. Exemplo: o "Limpar" do painel não apagava os contadores do
+    // painel de Juntadas/Retorno/Suspensos (total_identificado, urgencia, *_por_unidade),
+    // que voltavam a somar no PDF seguinte. Agora apaga por PREFIXO: toda chave de
+    // qualquer relatório (cfg.prefixo) e as chaves globais da automação. Preferências
+    // (projudi_pa_*, projudi_painel_*, seleção de várias unidades projudi_mu_*, log,
+    // papéis dos usuários, aviso de atualização) não começam com nenhum destes
+    // prefixos e são preservadas.
+    const PREFIXOS_GLOBAIS_DE_DADOS = ['projudi_auto_', 'projudi_estatisticas_ativos', 'projudi_unidades_automatizadas', 'projudi_paralisado_auto_iniciar'];
+    function prefixosDeRelatorios() {
+        return [...new Set([...REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio), CFG_PROCESSOS_REMETIDOS, CFG_BENS_PENDENTES_SNGB].map(c => c.prefixo))];
+    }
+    function chavesDoStore() {
+        const chaves = [];
+        for (let i = 0; i < store.length; i++) chaves.push(store.key(i));
+        return chaves.filter(Boolean);
+    }
+    async function apagarChavesDeDados(filtro) {
+        chavesDoStore().filter(filtro).forEach(k => store.removeItem(k));
+        try { await idbApagarChaves(filtro); } catch (e) { console.error('[Projudi] falha ao apagar páginas do IndexedDB', e); }
+    }
+    // Todos os relatórios + estado da automação (botão "Limpar" do painel).
+    function apagarTodosOsDadosColetados() {
+        const prefixos = [...prefixosDeRelatorios(), ...PREFIXOS_GLOBAIS_DE_DADOS];
+        return apagarChavesDeDados(k => prefixos.some(p => k.startsWith(p)));
+    }
+    // Um relatório só (botão "Limpar" da tela do relatório). Exclui as chaves de outro
+    // relatório cujo prefixo começa com este (ex.: projudi_transacaopenal_t_ e
+    // projudi_transacaopenal_t_ativos_).
+    function apagarDadosDoRelatorio(prefixo) {
+        const outros = prefixosDeRelatorios().filter(p => p !== prefixo && p.startsWith(prefixo));
+        return apagarChavesDeDados(k => k.startsWith(prefixo) && !outros.some(p => k.startsWith(p)));
     }
     // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
     // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
@@ -5278,11 +5326,7 @@
             bLimpar.className = 'projudi-btn';
             bLimpar.title = 'Apaga os dados coletados deste relatório';
             bLimpar.textContent = 'Limpar';
-            bLimpar.onclick = () => {
-                store.removeItem(prefixo + 'pagina_0');
-                store.removeItem(prefixo + 'num_paginas');
-                store.removeItem(prefixo + 'coletado');
-            };
+            bLimpar.onclick = () => apagarDadosDoRelatorio(prefixo);
             ancora.appendChild(bLimpar);
         }
         return true;
@@ -6800,6 +6844,8 @@
             // recomeçar do primeiro. Sem efeito para cfgs que não usam esse recurso.
             store.removeItem(cfg.prefixo + 'fila_motivos');
             store.removeItem(cfg.prefixo + 'motivo_atual');
+            // Garantia final: qualquer outra chave deste relatório (ver apagarDadosDoRelatorio).
+            await apagarDadosDoRelatorio(cfg.prefixo);
         }
 
         async function adicionarPagina(dadosPagina) {
@@ -19910,7 +19956,7 @@
         setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
     }
 
-    function limparTudoAutomacao() {
+    async function limparTudoAutomacao() {
         REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
@@ -19942,6 +19988,9 @@
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
         store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
+        // Garantia final: o que a lista acima não cobre (contadores do painel, total da
+        // busca, mapas por unidade, páginas no IndexedDB...) — ver apagarTodosOsDadosColetados.
+        await apagarTodosOsDadosColetados();
         atualizarPainel();
     }
 
@@ -20809,7 +20858,7 @@
                     `Já existem dados coletados para um ou mais relatórios marcados.${listaUnidades}`,
                     'Começar relatório do zero', 'Continuar extração',
                 );
-                if (apagar) limparTudoAutomacao();
+                if (apagar) await limparTudoAutomacao();
             }
             iniciarAutomacao(fila, periodoTM);
         };
