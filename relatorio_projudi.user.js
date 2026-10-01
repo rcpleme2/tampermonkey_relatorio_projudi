@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.26
+// @version      26.27
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -588,12 +588,12 @@
             // de uma unidade só, só ela. "Para realizar" sem contador numa unidade cai na
             // contagem dos registros dela (a lista coletada é a fila "Para Realizar").
             kpisExtras: (dados) => {
-                const somaOuValor = (chave, base) => {
-                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, base);
+                const somaOuValor = (chave, contarRegistros) => {
+                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, dados, contarRegistros);
                     return soma != null ? soma : parseInt(store.getItem(CFG_JUNTADAS.prefixo + chave) || '', 10);
                 };
-                const urg = somaOuValor('urgencia', []);
-                const real = somaOuValor('para_realizar', dados);
+                const urg = somaOuValor('urgencia', false);
+                const real = somaOuValor('para_realizar', true);
                 if (!Number.isFinite(urg) || !Number.isFinite(real)) return [];
                 return [
                     { titulo: 'Com urgência', valor: urg, acento: 'vermelhoVivo' },
@@ -7282,26 +7282,31 @@
 
     function unidadeDoRegistro(d) { return ((d && (d.competencia || d.atuacao)) || '').trim(); }
 
-    // Unidades consideradas: as marcadas no diálogo do PDF conjunto (overrideUnidadesPDF)
-    // ou, sem filtro, todas as que têm contador gravado ou registro coletado. null quando
-    // nada foi gravado por unidade (coleta anterior a esta mudança — o chamador cai no
-    // valor único de sempre).
+    // Unidades consideradas: as do PDF conjunto (overrideUnidadesPDF) ou, sem filtro
+    // (PDF individual), as que têm registro coletado em `dados`. Nunca todas as chaves do
+    // mapa: ele recebe toda unidade em que o usuário abriu a página inicial, mesmo sem
+    // coletar nada nela, e somá-las misturava competências. null quando nada foi gravado
+    // por unidade ou não há unidade a considerar — o chamador cai no valor único.
     function unidadesComContador(mapa, dados) {
         if (!Object.keys(mapa).length) return null;
         if (overrideUnidadesPDF) return [...overrideUnidadesPDF];
-        return [...new Set([...Object.keys(mapa), ...(dados || []).map(unidadeDoRegistro).filter(Boolean)])];
+        const unidades = [...new Set((dados || []).map(unidadeDoRegistro).filter(Boolean))];
+        return unidades.length ? unidades : null;
     }
 
     // Soma o contador das unidades consideradas. Unidade sem contador gravado (ex.:
     // coleta manual sem passar pelo painel) entra com a contagem dos seus registros em
     // `dados` — passe [] quando os registros não representam esse contador.
-    function somaPorUnidade(chave, dados) {
+    // contarRegistros=false: `dados` só indica as unidades (ex.: "Com urgência", que não
+    // é a fila coletada) — unidade sem contador entra com 0.
+    function somaPorUnidade(chave, dados, contarRegistros = true) {
         const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
         const unidades = unidadesComContador(mapa, dados);
         if (!unidades) return null;
         return unidades.reduce((s, u) => {
             const v = parseInt(mapa[u], 10);
-            return s + (Number.isFinite(v) ? v : (dados || []).filter(d => unidadeDoRegistro(d) === u).length);
+            if (Number.isFinite(v)) return s + v;
+            return s + (contarRegistros ? (dados || []).filter(d => unidadeDoRegistro(d) === u).length : 0);
         }, 0);
     }
 
@@ -10555,7 +10560,14 @@
         overrideMapaAtivos = opcoes.atribuicoesSelecionadas
             ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
             : null;
-        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || null;
+        // Sem diálogo (dados de uma unidade só), as unidades do PDF são as presentes nos
+        // dados coletados — NUNCA todas as do mapa por unidade: os contadores do painel
+        // são gravados a cada página visitada, em qualquer unidade (bootstrap/setInterval),
+        // e o mapa acumulava competências por onde o usuário só passou. Bug relatado pelo
+        // usuário: PDF gerado de dentro de uma unidade somava Juntadas/Retorno de outras.
+        const unidadesNosDados = new Set(secoesEntrada.flatMap(s =>
+            (Array.isArray(s.dados) ? s.dados : []).map(unidadeDoRegistro)).filter(Boolean));
+        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || (unidadesNosDados.size ? unidadesNosDados : null);
         // Alguns itens (Suspensos, Suspensos com Prazo, Instância Recursal, Arquivados
         // com Saldo, Audiências Pendentes) não têm montarTabela próprio — a tabela
         // discriminada deles é desenhada DENTRO do próprio resumo (ver
