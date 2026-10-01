@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.21
+// @version      26.22
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10666,7 +10666,40 @@
         // menos um item (subgrupo vazio não aparece). A contagem exibida na faixa conta
         // só itens de PRIMEIRO nível (sem grupoPai) — um grupo como "Mandados" (pai + 3
         // filhas indentadas) conta como 1 item, não 4, mesmo padrão do popup do painel.
+        // Sumário (pedido do usuário): Cartório e Gabinete sempre; os demais grupos
+        // (VIJ - Seção Cível/Infracional, Família, Crime, Tribunal do Júri) só com as
+        // consultas que foram selecionadas e rodaram em alguma unidade deste PDF — as
+        // marcadas no diálogo de atribuições ou, sem diálogo, as presentes nos dados.
+        // Sem isso, dados acumulados de outra rodada (ex.: VIJ/Família de outra comarca,
+        // coletados com zero) apareciam no sumário de uma Vara Criminal. Coleta anterior
+        // ao registro de unidades (lerUnidadesRodadas null): vale a marcação do painel.
+        const unidadesDoPDF = opcoes.atribuicoesSelecionadas || new Set(secoesEntrada.flatMap(s =>
+            (Array.isArray(s.dados) ? s.dados : []).map(d => ((d && (d.competencia || d.atuacao)) || '').trim())).filter(Boolean));
+        function entraNoSumarioPDF(cfg) {
+            const rel = relatorioPorCfg(cfg);
+            if (!rel || !(rel.categoriaEspecifica === 'crime' || DOMINIOS_VIJ.includes(rel.dominio))) return true;
+            const secao = secoes.find(s => s.cfgOriginal === cfg);
+            if (secao && Array.isArray(secao.dados) && secao.dados.length) return true;
+            const rodadas = lerUnidadesRodadas(cfg);
+            const prejudicadas = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            if (rodadas === null && !prejudicadas.length) return relatorioMarcadoPorPadrao(rel.key);
+            return [...(rodadas || []), ...prejudicadas].some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
+        }
+        // Tira do subgrupo os itens fora do sumário, junto com as sub-linhas por
+        // atribuição deles e os cabeçalhos de grupo (ex. Benefícios/Medidas/Suspensões)
+        // que ficarem sem nenhum filho.
+        function filtrarItensSumario(itens) {
+            const restantes = [];
+            let paiOmitido = false;
+            itens.forEach(l => {
+                if (l.subAtribuicao) { if (!paiOmitido) restantes.push(l); return; }
+                paiOmitido = !!l.cfgOriginal && !entraNoSumarioPDF(l.cfgOriginal);
+                if (!paiOmitido) restantes.push(l);
+            });
+            return restantes.filter(l => !l.grupoCabecalho || restantes.some(f => f.grupoPai === l.nome));
+        }
         function empilharSubgrupo(nome, itens, unidade) {
+            itens = filtrarItensSumario(itens);
             if (!itens.length) return;
             const contagem = itens.filter(l => !l.grupoPai && !l.subAtribuicao).length;
             linhasCartorio.push(linhaSubgrupo(nome, `${contagem} ${unidade || 'item(ns)'}`));
@@ -19397,6 +19430,9 @@
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
+        // Item pulado por ser de outra atribuição (ver passoAutomacao) não conta como rodado.
+        const atuacaoRodada = lerAtuacaoEmQualquerFrame();
+        if (!foraDaAtribuicao(rel.cfg, atuacaoRodada)) registrarUnidadeRodada(rel, atuacaoRodada);
         logPainel(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
         if (!prox && multiUnidadeEmCurso()) {
             console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
@@ -19760,6 +19796,7 @@
             store.removeItem(c.prefixo + 'coletado');
             store.removeItem(c.prefixo + 'erro');
             store.removeItem(c.prefixo + 'prejudicado');
+            store.removeItem(c.prefixo + 'unidades');
         });
         store.removeItem(AUTO_ESTADO);
         store.removeItem(CHAVE_AUTO_INICIO);
@@ -19788,6 +19825,24 @@
     // zero registros, desde que a coleta tenha rodado até o fim — "zero pendências" é uma
     // informação relevante para o card, diferente de "nunca foi coletado".
     function foiColetado(cfg) { return store.getItem(cfg.prefixo + 'coletado') === '1'; }
+    // Unidades (atuações) em que cada consulta de fato rodou até o fim na automação —
+    // pedido do usuário: no sumário do PDF conjunto, os grupos além de Cartório/Gabinete
+    // (VIJ - Seção Cível/Infracional, Família, Crime, Tribunal do Júri) só aparecem se
+    // a consulta foi selecionada e rodou numa das unidades do PDF (ver
+    // entraNoSumarioPDF em gerarPDFConjunto). `null` = coleta anterior a este registro.
+    function lerUnidadesRodadas(cfg) {
+        const v = store.getItem(cfg.prefixo + 'unidades');
+        return v === null ? null : (desembrulharArray(v) || []);
+    }
+    function registrarUnidadeRodada(rel, atuacao) {
+        const nome = (atuacao || '').trim();
+        if (!nome) return;
+        cfgsDoRelatorio(rel).forEach(cfg => {
+            const lista = lerUnidadesRodadas(cfg) || [];
+            if (!lista.includes(nome)) lista.push(nome);
+            store.setItem(cfg.prefixo + 'unidades', JSON.stringify(lista));
+        });
+    }
     // Marcado por "Pular a extração atual" no painel (ver pularRelatorioAtual) — o
     // relatório foi interrompido antes de terminar; os dados que existem são parciais.
     function foiInterrompidoPorErro(cfg) { return store.getItem(cfg.prefixo + 'erro') === '1'; }
