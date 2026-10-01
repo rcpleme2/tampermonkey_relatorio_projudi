@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.26
+// @version      26.28
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -154,6 +154,54 @@
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error || new Error('Falha ao apagar do IndexedDB'));
         });
+    }
+    // Apaga do IndexedDB toda página cuja chave passe em `filtro` (não só as de 0 a
+    // num_paginas-1 — páginas órfãs de uma coleta interrompida também saem).
+    async function idbApagarChaves(filtro) {
+        const db = await abrirIDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_OBJSTORE, 'readwrite');
+            const os = tx.objectStore(IDB_OBJSTORE);
+            const req = os.getAllKeys();
+            req.onsuccess = () => (req.result || []).filter(k => filtro(String(k))).forEach(k => os.delete(k));
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Falha ao apagar do IndexedDB'));
+        });
+    }
+
+    // ── "Limpar" apaga TUDO o que foi coletado (pedido do usuário) ────────────────────
+    // Antes, cada "Limpar" removia uma lista de chaves escrita à mão, e chaves novas
+    // ficavam para trás. Exemplo: o "Limpar" do painel não apagava os contadores do
+    // painel de Juntadas/Retorno/Suspensos (total_identificado, urgencia, *_por_unidade),
+    // que voltavam a somar no PDF seguinte. Agora apaga por PREFIXO: toda chave de
+    // qualquer relatório (cfg.prefixo) e as chaves globais da automação. Preferências
+    // (projudi_pa_*, projudi_painel_*, seleção de várias unidades projudi_mu_*, log,
+    // papéis dos usuários, aviso de atualização) não começam com nenhum destes
+    // prefixos e são preservadas.
+    const PREFIXOS_GLOBAIS_DE_DADOS = ['projudi_auto_', 'projudi_estatisticas_ativos', 'projudi_unidades_automatizadas', 'projudi_paralisado_auto_iniciar'];
+    function prefixosDeRelatorios() {
+        return [...new Set([...REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio), CFG_PROCESSOS_REMETIDOS, CFG_BENS_PENDENTES_SNGB].map(c => c.prefixo))];
+    }
+    function chavesDoStore() {
+        const chaves = [];
+        for (let i = 0; i < store.length; i++) chaves.push(store.key(i));
+        return chaves.filter(Boolean);
+    }
+    async function apagarChavesDeDados(filtro) {
+        chavesDoStore().filter(filtro).forEach(k => store.removeItem(k));
+        try { await idbApagarChaves(filtro); } catch (e) { console.error('[Projudi] falha ao apagar páginas do IndexedDB', e); }
+    }
+    // Todos os relatórios + estado da automação (botão "Limpar" do painel).
+    function apagarTodosOsDadosColetados() {
+        const prefixos = [...prefixosDeRelatorios(), ...PREFIXOS_GLOBAIS_DE_DADOS];
+        return apagarChavesDeDados(k => prefixos.some(p => k.startsWith(p)));
+    }
+    // Um relatório só (botão "Limpar" da tela do relatório). Exclui as chaves de outro
+    // relatório cujo prefixo começa com este (ex.: projudi_transacaopenal_t_ e
+    // projudi_transacaopenal_t_ativos_).
+    function apagarDadosDoRelatorio(prefixo) {
+        const outros = prefixosDeRelatorios().filter(p => p !== prefixo && p.startsWith(prefixo));
+        return apagarChavesDeDados(k => k.startsWith(prefixo) && !outros.some(p => k.startsWith(p)));
     }
     // Era 2 minutos; aumentado para 6 depois de um travamento real do Tempo Médio (24
     // meses): a troca de pageSize (ver criarColetor.iniciar/pageSizeSelect) dispara um
@@ -588,12 +636,12 @@
             // de uma unidade só, só ela. "Para realizar" sem contador numa unidade cai na
             // contagem dos registros dela (a lista coletada é a fila "Para Realizar").
             kpisExtras: (dados) => {
-                const somaOuValor = (chave, base) => {
-                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, base);
+                const somaOuValor = (chave, contarRegistros) => {
+                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, dados, contarRegistros);
                     return soma != null ? soma : parseInt(store.getItem(CFG_JUNTADAS.prefixo + chave) || '', 10);
                 };
-                const urg = somaOuValor('urgencia', []);
-                const real = somaOuValor('para_realizar', dados);
+                const urg = somaOuValor('urgencia', false);
+                const real = somaOuValor('para_realizar', true);
                 if (!Number.isFinite(urg) || !Number.isFinite(real)) return [];
                 return [
                     { titulo: 'Com urgência', valor: urg, acento: 'vermelhoVivo' },
@@ -5278,11 +5326,7 @@
             bLimpar.className = 'projudi-btn';
             bLimpar.title = 'Apaga os dados coletados deste relatório';
             bLimpar.textContent = 'Limpar';
-            bLimpar.onclick = () => {
-                store.removeItem(prefixo + 'pagina_0');
-                store.removeItem(prefixo + 'num_paginas');
-                store.removeItem(prefixo + 'coletado');
-            };
+            bLimpar.onclick = () => apagarDadosDoRelatorio(prefixo);
             ancora.appendChild(bLimpar);
         }
         return true;
@@ -6800,6 +6844,8 @@
             // recomeçar do primeiro. Sem efeito para cfgs que não usam esse recurso.
             store.removeItem(cfg.prefixo + 'fila_motivos');
             store.removeItem(cfg.prefixo + 'motivo_atual');
+            // Garantia final: qualquer outra chave deste relatório (ver apagarDadosDoRelatorio).
+            await apagarDadosDoRelatorio(cfg.prefixo);
         }
 
         async function adicionarPagina(dadosPagina) {
@@ -7282,26 +7328,31 @@
 
     function unidadeDoRegistro(d) { return ((d && (d.competencia || d.atuacao)) || '').trim(); }
 
-    // Unidades consideradas: as marcadas no diálogo do PDF conjunto (overrideUnidadesPDF)
-    // ou, sem filtro, todas as que têm contador gravado ou registro coletado. null quando
-    // nada foi gravado por unidade (coleta anterior a esta mudança — o chamador cai no
-    // valor único de sempre).
+    // Unidades consideradas: as do PDF conjunto (overrideUnidadesPDF) ou, sem filtro
+    // (PDF individual), as que têm registro coletado em `dados`. Nunca todas as chaves do
+    // mapa: ele recebe toda unidade em que o usuário abriu a página inicial, mesmo sem
+    // coletar nada nela, e somá-las misturava competências. null quando nada foi gravado
+    // por unidade ou não há unidade a considerar — o chamador cai no valor único.
     function unidadesComContador(mapa, dados) {
         if (!Object.keys(mapa).length) return null;
         if (overrideUnidadesPDF) return [...overrideUnidadesPDF];
-        return [...new Set([...Object.keys(mapa), ...(dados || []).map(unidadeDoRegistro).filter(Boolean)])];
+        const unidades = [...new Set((dados || []).map(unidadeDoRegistro).filter(Boolean))];
+        return unidades.length ? unidades : null;
     }
 
     // Soma o contador das unidades consideradas. Unidade sem contador gravado (ex.:
     // coleta manual sem passar pelo painel) entra com a contagem dos seus registros em
     // `dados` — passe [] quando os registros não representam esse contador.
-    function somaPorUnidade(chave, dados) {
+    // contarRegistros=false: `dados` só indica as unidades (ex.: "Com urgência", que não
+    // é a fila coletada) — unidade sem contador entra com 0.
+    function somaPorUnidade(chave, dados, contarRegistros = true) {
         const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
         const unidades = unidadesComContador(mapa, dados);
         if (!unidades) return null;
         return unidades.reduce((s, u) => {
             const v = parseInt(mapa[u], 10);
-            return s + (Number.isFinite(v) ? v : (dados || []).filter(d => unidadeDoRegistro(d) === u).length);
+            if (Number.isFinite(v)) return s + v;
+            return s + (contarRegistros ? (dados || []).filter(d => unidadeDoRegistro(d) === u).length : 0);
         }, 0);
     }
 
@@ -10555,7 +10606,14 @@
         overrideMapaAtivos = opcoes.atribuicoesSelecionadas
             ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
             : null;
-        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || null;
+        // Sem diálogo (dados de uma unidade só), as unidades do PDF são as presentes nos
+        // dados coletados — NUNCA todas as do mapa por unidade: os contadores do painel
+        // são gravados a cada página visitada, em qualquer unidade (bootstrap/setInterval),
+        // e o mapa acumulava competências por onde o usuário só passou. Bug relatado pelo
+        // usuário: PDF gerado de dentro de uma unidade somava Juntadas/Retorno de outras.
+        const unidadesNosDados = new Set(secoesEntrada.flatMap(s =>
+            (Array.isArray(s.dados) ? s.dados : []).map(unidadeDoRegistro)).filter(Boolean));
+        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || (unidadesNosDados.size ? unidadesNosDados : null);
         // Alguns itens (Suspensos, Suspensos com Prazo, Instância Recursal, Arquivados
         // com Saldo, Audiências Pendentes) não têm montarTabela próprio — a tabela
         // discriminada deles é desenhada DENTRO do próprio resumo (ver
@@ -19898,7 +19956,7 @@
         setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
     }
 
-    function limparTudoAutomacao() {
+    async function limparTudoAutomacao() {
         REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
@@ -19930,6 +19988,9 @@
         store.removeItem(CHAVE_UNIDADES_AUTOMATIZADAS);
         store.removeItem(CHAVE_WATCHDOG);
         limparEstadoTransitorioAR();
+        // Garantia final: o que a lista acima não cobre (contadores do painel, total da
+        // busca, mapas por unidade, páginas no IndexedDB...) — ver apagarTodosOsDadosColetados.
+        await apagarTodosOsDadosColetados();
         atualizarPainel();
     }
 
@@ -20797,7 +20858,7 @@
                     `Já existem dados coletados para um ou mais relatórios marcados.${listaUnidades}`,
                     'Começar relatório do zero', 'Continuar extração',
                 );
-                if (apagar) limparTudoAutomacao();
+                if (apagar) await limparTudoAutomacao();
             }
             iniciarAutomacao(fila, periodoTM);
         };
