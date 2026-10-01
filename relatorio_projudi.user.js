@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.24
+// @version      26.25
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -204,6 +204,9 @@
     // filtra todos eles de uma vez sem precisar passar um parâmetro extra por ~10 pontos
     // de chamada diferentes.
     let overrideMapaAtivos = null;
+    // Mesma ideia, para os contadores gravados POR UNIDADE (ver gravarPorUnidade): as
+    // unidades marcadas no diálogo do PDF conjunto. null = todas as unidades.
+    let overrideUnidadesPDF = null;
     function lerMapaAtivosBruto() {
         try { return JSON.parse(store.getItem('projudi_estatisticas_ativos') || '{}'); } catch (e) { return {}; }
     }
@@ -581,9 +584,16 @@
             // (Com Urgência / Para Realizar), gravados por capturarContadoresPainelJuntadas.
             // Sem visita ao painel (coleta manual direto na tela de resultados), os cards
             // não aparecem.
-            kpisExtras: () => {
-                const urg = parseInt(store.getItem(CFG_JUNTADAS.prefixo + 'urgencia') || '', 10);
-                const real = parseInt(store.getItem(CFG_JUNTADAS.prefixo + 'para_realizar') || '', 10);
+            // Somados por unidade (ver somaPorUnidade) — PDF de várias unidades soma todas;
+            // de uma unidade só, só ela. "Para realizar" sem contador numa unidade cai na
+            // contagem dos registros dela (a lista coletada é a fila "Para Realizar").
+            kpisExtras: (dados) => {
+                const somaOuValor = (chave, base) => {
+                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, base);
+                    return soma != null ? soma : parseInt(store.getItem(CFG_JUNTADAS.prefixo + chave) || '', 10);
+                };
+                const urg = somaOuValor('urgencia', []);
+                const real = somaOuValor('para_realizar', dados);
                 if (!Number.isFinite(urg) || !Number.isFinite(real)) return [];
                 return [
                     { titulo: 'Com urgência', valor: urg, acento: 'vermelhoVivo' },
@@ -6762,9 +6772,12 @@
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
             store.removeItem(cfg.prefixo + 'total_identificado');
+            store.removeItem(cfg.prefixo + 'total_identificado_por_unidade');
             if (cfg === CFG_JUNTADAS) {
-                store.removeItem(cfg.prefixo + 'urgencia');
-                store.removeItem(cfg.prefixo + 'para_realizar');
+                ['urgencia', 'para_realizar', 'outros_indicadores'].forEach(c => {
+                    store.removeItem(cfg.prefixo + c);
+                    store.removeItem(cfg.prefixo + c + '_por_unidade');
+                });
             }
             if (cfg === CFG_PROCESSOS_REMETIDOS) {
                 store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
@@ -6826,7 +6839,7 @@
                 // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
                 // o comportamento de sempre (1º div#navigator do documento).
                 const totalInicial = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
-                if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
+                if (totalInicial != null) gravarPorUnidade(cfg.prefixo + 'total_identificado', String(totalInicial));
             }
             // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
             // preencherEPesquisarProcessosRemetidos) — o mecanismo acima (idx===0) só
@@ -7226,10 +7239,70 @@
     // enquanto a seção detalhada do MESMO PDF já mostrava corretamente 44 — a capa
     // calculava "pendentes" direto como dados.length, sem passar por essa mesma lógica.
     function totalIdentificadoOuColetado(cfg, dados) {
+        if (cfg.totalIdentificadoNoResumo) {
+            const porUnidade = somaPorUnidade(cfg.prefixo + 'total_identificado', dados);
+            if (porUnidade != null) return porUnidade > 0 ? porUnidade : dados.length;
+        }
         const totalIdentificado = cfg.totalIdentificadoNoResumo
             ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
             : NaN;
         return Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
+    }
+
+    // Contadores capturados da tela (total da busca, painéis da página inicial) valem
+    // para a unidade em que foram lidos. Antes ficava só um valor por relatório e cada
+    // unidade sobrescrevia a anterior — bug relatado pelo usuário: PDF de 2 unidades
+    // com o card de Juntadas mostrando só a última unidade (10) enquanto a tabela por
+    // competência somava 396. Agora, além da chave de sempre (ainda usada pela barra
+    // "Nesta etapa" do painel), grava um mapa {unidade: valor} em chave+'_por_unidade'.
+    function gravarPorUnidade(chave, valor) {
+        store.setItem(chave, typeof valor === 'string' ? valor : JSON.stringify(valor));
+        const unidade = competenciaDe(lerAtuacaoEmQualquerFrame());
+        if (!unidade) return;
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        mapa[unidade] = valor;
+        store.setItem(chave + '_por_unidade', JSON.stringify(mapa));
+    }
+
+    // Listas de indicadores [{label, valor, critico}] gravadas por unidade (ver
+    // capturarOutrosIndicadoresPainelJuntadas): soma os valores de mesmo rótulo nas
+    // unidades consideradas. Sem mapa por unidade, usa a lista única de sempre.
+    function indicadoresPainelSomados(chave) {
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        const unidades = unidadesComContador(mapa, []);
+        if (!unidades) return desembrulharArray(store.getItem(chave)) || [];
+        const porLabel = new Map();
+        unidades.forEach(u => (desembrulharArray(mapa[u]) || []).forEach(it => {
+            const atual = porLabel.get(it.label);
+            if (atual) atual.valor += it.valor || 0;
+            else porLabel.set(it.label, { label: it.label, valor: it.valor || 0, critico: !!it.critico });
+        }));
+        return [...porLabel.values()];
+    }
+
+    function unidadeDoRegistro(d) { return ((d && (d.competencia || d.atuacao)) || '').trim(); }
+
+    // Unidades consideradas: as marcadas no diálogo do PDF conjunto (overrideUnidadesPDF)
+    // ou, sem filtro, todas as que têm contador gravado ou registro coletado. null quando
+    // nada foi gravado por unidade (coleta anterior a esta mudança — o chamador cai no
+    // valor único de sempre).
+    function unidadesComContador(mapa, dados) {
+        if (!Object.keys(mapa).length) return null;
+        if (overrideUnidadesPDF) return [...overrideUnidadesPDF];
+        return [...new Set([...Object.keys(mapa), ...(dados || []).map(unidadeDoRegistro).filter(Boolean)])];
+    }
+
+    // Soma o contador das unidades consideradas. Unidade sem contador gravado (ex.:
+    // coleta manual sem passar pelo painel) entra com a contagem dos seus registros em
+    // `dados` — passe [] quando os registros não representam esse contador.
+    function somaPorUnidade(chave, dados) {
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        const unidades = unidadesComContador(mapa, dados);
+        if (!unidades) return null;
+        return unidades.reduce((s, u) => {
+            const v = parseInt(mapa[u], 10);
+            return s + (Number.isFinite(v) ? v : (dados || []).filter(d => unidadeDoRegistro(d) === u).length);
+        }, 0);
     }
 
     // ── Download genérico (dispara a partir de um clique do usuário) ─────────────
@@ -8719,7 +8792,7 @@
             // JSON (JSON.parse de uma vez só devolvia uma STRING, não o array, e
             // ".filter" quebrava com "is not a function"). Mesma proteção já usada em
             // Audiências Realizadas (ver CHAVE_ACUMULADO_AR) para o mesmo tipo de valor.
-            const lista = desembrulharArray(store.getItem(chavePainelExtra)) || [];
+            const lista = indicadoresPainelSomados(chavePainelExtra);
             const extras = lista
                 .filter(it => (it.valor || 0) > 0)
                 .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
@@ -10482,6 +10555,7 @@
         overrideMapaAtivos = opcoes.atribuicoesSelecionadas
             ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
             : null;
+        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || null;
         // Alguns itens (Suspensos, Suspensos com Prazo, Instância Recursal, Arquivados
         // com Saldo, Audiências Pendentes) não têm montarTabela próprio — a tabela
         // discriminada deles é desenhada DENTRO do próprio resumo (ver
@@ -11596,6 +11670,7 @@
         const nomeArquivoFinal = modo === 'tabelas' ? `${nomeArquivoConjunto}_${dataArquivo()}` : nomeArquivoConjunto;
         baixarBlob(doc.output('blob'), `${nomeArquivoFinal}.pdf`);
         overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
+        overrideUnidadesPDF = null;
         return doc;
     }
 
@@ -14909,7 +14984,8 @@
         // linhas só quando esse número não foi capturado (coleta antiga, ou avulsa fora
         // do fluxo de automação).
         const totaisPorDestinoRemetidos = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
-        const totalIdentificadoRemessas = parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
+        const somaRemessas = somaPorUnidade(CFG_REMESSAS.prefixo + 'total_identificado', validos.filter(d => !d.destino));
+        const totalIdentificadoRemessas = somaRemessas != null ? somaRemessas : parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
         const porDestino = new Map();
         const semDestino = [];
         validos.forEach(d => {
@@ -18736,9 +18812,9 @@
             if (urgencia !== null && realizar !== null) break;
         }
         if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
-        store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
-        store.setItem(CFG_JUNTADAS.prefixo + 'urgencia', String(urgencia));
-        store.setItem(CFG_JUNTADAS.prefixo + 'para_realizar', String(realizar));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'urgencia', String(urgencia));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'para_realizar', String(realizar));
     }
 
     // Demais indicadores (spans #id + rótulo) do mesmo painel "Mesa do Analista
@@ -18802,7 +18878,7 @@
                 .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
                 .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
             console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
-            store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
+            gravarPorUnidade(CFG_JUNTADAS.prefixo + 'outros_indicadores', encontrados);
             return;
         }
         console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
@@ -18830,7 +18906,7 @@
             if (urgencia !== null && realizar !== null) break;
         }
         if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
-        store.setItem(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
+        gravarPorUnidade(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
     // Captura o número do card "Processos Suspensos por Tempo Indeterminado" da página
@@ -18846,10 +18922,10 @@
         const link = acharLinkAoLadoDoLabel(labelRe);
         if (link) {
             const n = parseInt((link.textContent || '').trim(), 10);
-            if (Number.isFinite(n)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', String(n));
+            if (Number.isFinite(n)) gravarPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', String(n));
             return;
         }
-        if (labelSemLinkEncontrado(labelRe)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', '0');
+        if (labelSemLinkEncontrado(labelRe)) gravarPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', '0');
     }
 
     // Lê o total capturado por capturarContadorHomeSuspensos (card da home), com
@@ -18859,6 +18935,8 @@
     // Indeterminado" na capa unificada do Cartório (ver itensCartorio em
     // gerarPDFConjunto).
     function totalHomeOuColetadoSuspensos(dados) {
+        const porUnidade = somaPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', dados);
+        if (porUnidade != null) return porUnidade;
         const n = parseInt(store.getItem(CFG_SUSPENSOS.prefixo + 'total_identificado') || '', 10);
         return Number.isFinite(n) ? n : (dados || []).length;
     }
@@ -20022,7 +20100,11 @@
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
             // dados existentes — ver onclick de #pa-iniciar em injetarPainel).
         }
-        catch (err) { alert('Erro ao gerar PDF: ' + err.message); console.error(err); }
+        catch (err) {
+            overrideMapaAtivos = null;
+            overrideUnidadesPDF = null;
+            alert('Erro ao gerar PDF: ' + err.message); console.error(err);
+        }
     }
 
     // ── Relatório conjunto em Word (editável) — pedido do usuário ───────────────────
