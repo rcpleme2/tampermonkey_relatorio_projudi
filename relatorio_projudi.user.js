@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.22
+// @version      26.26
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -204,6 +204,9 @@
     // filtra todos eles de uma vez sem precisar passar um parâmetro extra por ~10 pontos
     // de chamada diferentes.
     let overrideMapaAtivos = null;
+    // Mesma ideia, para os contadores gravados POR UNIDADE (ver gravarPorUnidade): as
+    // unidades marcadas no diálogo do PDF conjunto. null = todas as unidades.
+    let overrideUnidadesPDF = null;
     function lerMapaAtivosBruto() {
         try { return JSON.parse(store.getItem('projudi_estatisticas_ativos') || '{}'); } catch (e) { return {}; }
     }
@@ -520,6 +523,17 @@
         // cada carregamento de página, via bootstrap) em vez de adicionarPagina — os dois
         // contadores só existem no painel da página inicial, não na tela de resultados.
         totalIdentificadoNoResumo: true,
+        // A tela de resultados de Juntadas só mostra "Total de registros nesta página: 20"
+        // (tamanho da PÁGINA, não da busca) — o adicionarPagina genérico sobrescrevia com
+        // esse 20 a soma Com Urgência + Para Realizar já capturada do painel, e o KPI
+        // ficava preso em 20 (bug relatado pelo usuário: painel 0 + 26, PDF com 20). Com
+        // esta flag, o total vem só do painel (ou cai em dados.length, se não houver).
+        totalIdentificadoSoDoPainel: true,
+        // Dedupe pelo registro INTEIRO, não por 'processo' (padrão): um mesmo processo
+        // pode ter várias juntadas pendentes, cada uma é uma pendência própria — com o
+        // dedupe por processo, 26 juntadas em 20 processos viravam 20 no PDF (mesmo bug
+        // acima, relatado pelo usuário). '*' só descarta a mesma linha repetida por reload.
+        chaveDuplicata: '*',
         detecta: (cab) => /juntado\s+por/i.test(cab),
         minTds: 9,                              // linhas têm 10 tds (0=checkbox, 1=expandir, 2=semáforo)
         usaAtuacao: false,
@@ -564,6 +578,28 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
+            // Card "Prioritários pendentes" removido (pedido do usuário).
+            semKpiPrioridade: true,
+            // Pedido do usuário: cards espelhando o painel "Análise de Juntadas" da tela
+            // (Com Urgência / Para Realizar), gravados por capturarContadoresPainelJuntadas.
+            // Sem visita ao painel (coleta manual direto na tela de resultados), os cards
+            // não aparecem.
+            // Somados por unidade (ver somaPorUnidade) — PDF de várias unidades soma todas;
+            // de uma unidade só, só ela. "Para realizar" sem contador numa unidade cai na
+            // contagem dos registros dela (a lista coletada é a fila "Para Realizar").
+            kpisExtras: (dados) => {
+                const somaOuValor = (chave, base) => {
+                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, base);
+                    return soma != null ? soma : parseInt(store.getItem(CFG_JUNTADAS.prefixo + chave) || '', 10);
+                };
+                const urg = somaOuValor('urgencia', []);
+                const real = somaOuValor('para_realizar', dados);
+                if (!Number.isFinite(urg) || !Number.isFinite(real)) return [];
+                return [
+                    { titulo: 'Com urgência', valor: urg, acento: 'vermelhoVivo' },
+                    { titulo: 'Para realizar', valor: real, acento: 'azul' },
+                ];
+            },
             // "Pendências por Função" e "Juntadas pendentes por pessoa" removidos (pedido
             // do usuário).
             distribuicoes: [
@@ -6736,6 +6772,13 @@
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
             store.removeItem(cfg.prefixo + 'total_identificado');
+            store.removeItem(cfg.prefixo + 'total_identificado_por_unidade');
+            if (cfg === CFG_JUNTADAS) {
+                ['urgencia', 'para_realizar', 'outros_indicadores'].forEach(c => {
+                    store.removeItem(cfg.prefixo + c);
+                    store.removeItem(cfg.prefixo + c + '_por_unidade');
+                });
+            }
             if (cfg === CFG_PROCESSOS_REMETIDOS) {
                 store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
                 store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
@@ -6791,12 +6834,12 @@
             // usar este valor (totalIdentificadoOuColetado), então isso não muda o
             // comportamento de nenhum relatório já em produção, só passa a alimentar a
             // barra de progresso da etapa também para relatórios que não usam esse KPI.
-            if (idx === 0 || numeroPaginaAtual() === 1) {
+            if (!cfg.totalIdentificadoSoDoPainel && (idx === 0 || numeroPaginaAtual() === 1)) {
                 // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
                 // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
                 // o comportamento de sempre (1º div#navigator do documento).
                 const totalInicial = totalRegistrosPagina(cfg.navigatorRaiz ? cfg.navigatorRaiz() : undefined);
-                if (totalInicial != null) store.setItem(cfg.prefixo + 'total_identificado', String(totalInicial));
+                if (totalInicial != null) gravarPorUnidade(cfg.prefixo + 'total_identificado', String(totalInicial));
             }
             // Processos Remetidos busca destino a destino no MESMO relatório/prefixo (ver
             // preencherEPesquisarProcessosRemetidos) — o mecanismo acima (idx===0) só
@@ -7196,10 +7239,70 @@
     // enquanto a seção detalhada do MESMO PDF já mostrava corretamente 44 — a capa
     // calculava "pendentes" direto como dados.length, sem passar por essa mesma lógica.
     function totalIdentificadoOuColetado(cfg, dados) {
+        if (cfg.totalIdentificadoNoResumo) {
+            const porUnidade = somaPorUnidade(cfg.prefixo + 'total_identificado', dados);
+            if (porUnidade != null) return porUnidade > 0 ? porUnidade : dados.length;
+        }
         const totalIdentificado = cfg.totalIdentificadoNoResumo
             ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
             : NaN;
         return Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
+    }
+
+    // Contadores capturados da tela (total da busca, painéis da página inicial) valem
+    // para a unidade em que foram lidos. Antes ficava só um valor por relatório e cada
+    // unidade sobrescrevia a anterior — bug relatado pelo usuário: PDF de 2 unidades
+    // com o card de Juntadas mostrando só a última unidade (10) enquanto a tabela por
+    // competência somava 396. Agora, além da chave de sempre (ainda usada pela barra
+    // "Nesta etapa" do painel), grava um mapa {unidade: valor} em chave+'_por_unidade'.
+    function gravarPorUnidade(chave, valor) {
+        store.setItem(chave, typeof valor === 'string' ? valor : JSON.stringify(valor));
+        const unidade = competenciaDe(lerAtuacaoEmQualquerFrame());
+        if (!unidade) return;
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        mapa[unidade] = valor;
+        store.setItem(chave + '_por_unidade', JSON.stringify(mapa));
+    }
+
+    // Listas de indicadores [{label, valor, critico}] gravadas por unidade (ver
+    // capturarOutrosIndicadoresPainelJuntadas): soma os valores de mesmo rótulo nas
+    // unidades consideradas. Sem mapa por unidade, usa a lista única de sempre.
+    function indicadoresPainelSomados(chave) {
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        const unidades = unidadesComContador(mapa, []);
+        if (!unidades) return desembrulharArray(store.getItem(chave)) || [];
+        const porLabel = new Map();
+        unidades.forEach(u => (desembrulharArray(mapa[u]) || []).forEach(it => {
+            const atual = porLabel.get(it.label);
+            if (atual) atual.valor += it.valor || 0;
+            else porLabel.set(it.label, { label: it.label, valor: it.valor || 0, critico: !!it.critico });
+        }));
+        return [...porLabel.values()];
+    }
+
+    function unidadeDoRegistro(d) { return ((d && (d.competencia || d.atuacao)) || '').trim(); }
+
+    // Unidades consideradas: as marcadas no diálogo do PDF conjunto (overrideUnidadesPDF)
+    // ou, sem filtro, todas as que têm contador gravado ou registro coletado. null quando
+    // nada foi gravado por unidade (coleta anterior a esta mudança — o chamador cai no
+    // valor único de sempre).
+    function unidadesComContador(mapa, dados) {
+        if (!Object.keys(mapa).length) return null;
+        if (overrideUnidadesPDF) return [...overrideUnidadesPDF];
+        return [...new Set([...Object.keys(mapa), ...(dados || []).map(unidadeDoRegistro).filter(Boolean)])];
+    }
+
+    // Soma o contador das unidades consideradas. Unidade sem contador gravado (ex.:
+    // coleta manual sem passar pelo painel) entra com a contagem dos seus registros em
+    // `dados` — passe [] quando os registros não representam esse contador.
+    function somaPorUnidade(chave, dados) {
+        const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
+        const unidades = unidadesComContador(mapa, dados);
+        if (!unidades) return null;
+        return unidades.reduce((s, u) => {
+            const v = parseInt(mapa[u], 10);
+            return s + (Number.isFinite(v) ? v : (dados || []).filter(d => unidadeDoRegistro(d) === u).length);
+        }, 0);
     }
 
     // ── Download genérico (dispara a partir de um clique do usuário) ─────────────
@@ -8563,7 +8666,9 @@
             // idêntico a antes desta mudança pra todo relatório que não define o campo).
             { titulo: p.atosTitulo, valor: String(valorAtos), subs: [], acento: COR[p.atosAcento] || COR.azul },
         ];
-        if (!p.semPrioridade) {
+        // p.semKpiPrioridade: tira só o card (pedido do usuário em Juntadas), mantendo
+        // as colunas de prioritários das tabelas — p.semPrioridade tiraria tudo.
+        if (!p.semPrioridade && !p.semKpiPrioridade) {
             kpis.push({ titulo: p.rotuloPrioridadeKpi || 'Prioritários pendentes', valor: String(prio), subs: [`${dados.length ? Math.round(prio / dados.length * 100) : 0}% do total`], acento: COR.vermelho });
         }
         if (p.mediaLabel) {
@@ -8687,7 +8792,7 @@
             // JSON (JSON.parse de uma vez só devolvia uma STRING, não o array, e
             // ".filter" quebrava com "is not a function"). Mesma proteção já usada em
             // Audiências Realizadas (ver CHAVE_ACUMULADO_AR) para o mesmo tipo de valor.
-            const lista = desembrulharArray(store.getItem(chavePainelExtra)) || [];
+            const lista = indicadoresPainelSomados(chavePainelExtra);
             const extras = lista
                 .filter(it => (it.valor || 0) > 0)
                 .map(it => ({ titulo: it.label, valor: it.valor, critico: it.critico }));
@@ -10450,6 +10555,7 @@
         overrideMapaAtivos = opcoes.atribuicoesSelecionadas
             ? Object.fromEntries(Object.entries(lerMapaAtivosBruto()).filter(([k]) => opcoes.atribuicoesSelecionadas.has(k)))
             : null;
+        overrideUnidadesPDF = opcoes.atribuicoesSelecionadas || null;
         // Alguns itens (Suspensos, Suspensos com Prazo, Instância Recursal, Arquivados
         // com Saldo, Audiências Pendentes) não têm montarTabela próprio — a tabela
         // discriminada deles é desenhada DENTRO do próprio resumo (ver
@@ -11564,6 +11670,7 @@
         const nomeArquivoFinal = modo === 'tabelas' ? `${nomeArquivoConjunto}_${dataArquivo()}` : nomeArquivoConjunto;
         baixarBlob(doc.output('blob'), `${nomeArquivoFinal}.pdf`);
         overrideMapaAtivos = null; // não deixa vazar pra alguma outra leitura fora desta chamada
+        overrideUnidadesPDF = null;
         return doc;
     }
 
@@ -14877,7 +14984,8 @@
         // linhas só quando esse número não foi capturado (coleta antiga, ou avulsa fora
         // do fluxo de automação).
         const totaisPorDestinoRemetidos = desembrulharObjeto(store.getItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS)) || {};
-        const totalIdentificadoRemessas = parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
+        const somaRemessas = somaPorUnidade(CFG_REMESSAS.prefixo + 'total_identificado', validos.filter(d => !d.destino));
+        const totalIdentificadoRemessas = somaRemessas != null ? somaRemessas : parseInt(store.getItem(CFG_REMESSAS.prefixo + 'total_identificado') || '', 10);
         const porDestino = new Map();
         const semDestino = [];
         validos.forEach(d => {
@@ -18704,7 +18812,9 @@
             if (urgencia !== null && realizar !== null) break;
         }
         if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
-        store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'urgencia', String(urgencia));
+        gravarPorUnidade(CFG_JUNTADAS.prefixo + 'para_realizar', String(realizar));
     }
 
     // Demais indicadores (spans #id + rótulo) do mesmo painel "Mesa do Analista
@@ -18768,7 +18878,7 @@
                 .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
                 .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
             console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
-            store.setItem(CFG_JUNTADAS.prefixo + 'outros_indicadores', JSON.stringify(encontrados));
+            gravarPorUnidade(CFG_JUNTADAS.prefixo + 'outros_indicadores', encontrados);
             return;
         }
         console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
@@ -18796,7 +18906,7 @@
             if (urgencia !== null && realizar !== null) break;
         }
         if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
-        store.setItem(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
+        gravarPorUnidade(CFG_RETORNO.prefixo + 'total_identificado', String(urgencia + realizar));
     }
 
     // Captura o número do card "Processos Suspensos por Tempo Indeterminado" da página
@@ -18812,10 +18922,10 @@
         const link = acharLinkAoLadoDoLabel(labelRe);
         if (link) {
             const n = parseInt((link.textContent || '').trim(), 10);
-            if (Number.isFinite(n)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', String(n));
+            if (Number.isFinite(n)) gravarPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', String(n));
             return;
         }
-        if (labelSemLinkEncontrado(labelRe)) store.setItem(CFG_SUSPENSOS.prefixo + 'total_identificado', '0');
+        if (labelSemLinkEncontrado(labelRe)) gravarPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', '0');
     }
 
     // Lê o total capturado por capturarContadorHomeSuspensos (card da home), com
@@ -18825,6 +18935,8 @@
     // Indeterminado" na capa unificada do Cartório (ver itensCartorio em
     // gerarPDFConjunto).
     function totalHomeOuColetadoSuspensos(dados) {
+        const porUnidade = somaPorUnidade(CFG_SUSPENSOS.prefixo + 'total_identificado', dados);
+        if (porUnidade != null) return porUnidade;
         const n = parseInt(store.getItem(CFG_SUSPENSOS.prefixo + 'total_identificado') || '', 10);
         return Number.isFinite(n) ? n : (dados || []).length;
     }
@@ -19988,7 +20100,11 @@
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
             // dados existentes — ver onclick de #pa-iniciar em injetarPainel).
         }
-        catch (err) { alert('Erro ao gerar PDF: ' + err.message); console.error(err); }
+        catch (err) {
+            overrideMapaAtivos = null;
+            overrideUnidadesPDF = null;
+            alert('Erro ao gerar PDF: ' + err.message); console.error(err);
+        }
     }
 
     // ── Relatório conjunto em Word (editável) — pedido do usuário ───────────────────
@@ -21145,13 +21261,18 @@
     // ── Verificação diária de atualização (pedido do usuário) ──────────────────────────
     // O Tampermonkey já procura versões novas sozinho (@updateURL), mas no intervalo das
     // configurações de cada navegador (que pode estar em "Nunca"), e um userscript não
-    // consegue se reinstalar nem mudar esse intervalo. Então, uma vez por dia, o script
+    // consegue se reinstalar nem mudar esse intervalo. Então, a cada 30 min, o script
     // lê o @version da main e, se for mais novo que o instalado, mostra um aviso com o
     // botão "Atualizar agora" — ele abre o @downloadURL, que o Tampermonkey intercepta
     // e abre na tela de atualização. Lembrete: o Tampermonkey só reconhece atualização
     // quando o @version sobe — sempre suba a versão a cada mudança na main.
     const URL_SCRIPT_MAIN = 'https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js';
     const CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO = 'projudi_ultima_verificacao_atualizacao';
+    // Versão mais nova já vista na main — o aviso reaparece a cada carregamento da
+    // página inicial enquanto a instalada for mais antiga (pedido do usuário: o aviso só
+    // some quando o usuário clica em "Atualizar agora", e volta se ele não instalar).
+    const CHAVE_VERSAO_DISPONIVEL = 'projudi_versao_disponivel';
+    const INTERVALO_VERIFICACAO_ATUALIZACAO_MS = 30 * 60 * 1000;
     function versaoMaisNova(a, b) { // true se a > b ("26.14" > "26.13")
         const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
         const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
@@ -21167,10 +21288,14 @@
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
         if (estado !== 'inativo' && estado !== 'concluido') return;
         if (typeof GM_xmlhttpRequest !== 'function' || typeof GM_info === 'undefined') return;
-        const hoje = dataArquivo();
-        if (lerCopiaTampermonkey(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO) === hoje) return;
-        GM_setValue(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO, hoje);
         const instalada = GM_info.script.version;
+        const conhecida = lerCopiaTampermonkey(CHAVE_VERSAO_DISPONIVEL);
+        if (conhecida && versaoMaisNova(conhecida, instalada)) mostrarAvisoAtualizacao(conhecida, instalada);
+        // Antes era 1x por dia; agora a cada 30 min, para o aviso chegar logo depois de
+        // um merge na main (a requisição lê só 2 KB do cabeçalho).
+        const ultima = parseInt(lerCopiaTampermonkey(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO) || '0', 10) || 0;
+        if (Date.now() - ultima < INTERVALO_VERIFICACAO_ATUALIZACAO_MS) return;
+        GM_setValue(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO, String(Date.now()));
         GM_xmlhttpRequest({
             method: 'GET',
             // Só o começo do arquivo (o cabeçalho) — o script inteiro tem vários MB.
@@ -21178,28 +21303,31 @@
             headers: { Range: 'bytes=0-2047', 'Cache-Control': 'no-cache' },
             onload: (resp) => {
                 const m = /@version\s+([\d.]+)/.exec(resp.responseText || '');
-                if (!m || !versaoMaisNova(m[1], instalada)) return;
+                if (!m) return;
+                GM_setValue(CHAVE_VERSAO_DISPONIVEL, m[1]);
+                if (!versaoMaisNova(m[1], instalada)) return;
                 console.log(`[Projudi] versão nova na main: ${m[1]} (instalada: ${instalada})`);
                 mostrarAvisoAtualizacao(m[1], instalada);
             },
-            onerror: () => console.log('[Projudi] não foi possível verificar atualização hoje'),
+            onerror: () => console.log('[Projudi] não foi possível verificar atualização agora'),
         });
     }
+    // Sem botão "Depois" (pedido do usuário): o aviso fica na tela até o clique em
+    // "Atualizar agora".
     function mostrarAvisoAtualizacao(nova, instalada) {
-        if (document.getElementById('projudi-aviso-atualizacao')) return;
+        const existente = document.getElementById('projudi-aviso-atualizacao');
+        if (existente) existente.remove();
         const aviso = document.createElement('div');
         aviso.id = 'projudi-aviso-atualizacao';
         aviso.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;'
-            + 'background:#FFFFFF;border:1px solid #3A5A7D;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);'
-            + 'padding:10px 14px;font:13px/1.4 sans-serif;color:#2B2A27;display:flex;gap:10px;align-items:center;';
-        aviso.innerHTML = `<span>Nova versão do <strong>Relatório Projudi</strong>: ${nova} (instalada: ${instalada}).</span>
-            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-weight:600;">Atualizar agora</button>
-            <button type="button" data-acao="depois" style="background:none;border:none;color:#3A5A7D;cursor:pointer;font-weight:600;">Depois</button>`;
+            + 'background:#FFFFFF;border:2px solid #C42E2E;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);'
+            + 'padding:12px 16px;font:13px/1.4 sans-serif;color:#2B2A27;display:flex;gap:12px;align-items:center;';
+        aviso.innerHTML = `<span><strong>Atualização obrigatória do Relatório Projudi:</strong> versão ${nova} disponível (instalada: ${instalada}).<br>Clique em "Atualizar agora" e confirme a instalação na tela do Tampermonkey.</span>
+            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:600;white-space:nowrap;">Atualizar agora</button>`;
         aviso.querySelector('[data-acao="atualizar"]').onclick = () => {
             window.open(URL_SCRIPT_MAIN, '_blank');
             aviso.remove();
         };
-        aviso.querySelector('[data-acao="depois"]').onclick = () => aviso.remove();
         document.body.appendChild(aviso);
     }
 
@@ -21225,7 +21353,7 @@
         // comentário grande acima de CHAVE_MU_ATIVO).
         chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
         chamarSeguro(passoAutomacao, 'passoAutomacao'); // avança a automação se estiver em estado de navegação
-        chamarSeguro(verificarAtualizacaoDiaria, 'verificarAtualizacaoDiaria'); // 1x por dia, só na página inicial
+        chamarSeguro(verificarAtualizacaoDiaria, 'verificarAtualizacaoDiaria'); // a cada 30 min, só na página inicial
         // Conduz a navegação da automação em QUALQUER página (não só na página inicial,
         // onde fica o painel) — a coleta ocorre no frame de conteúdo, que pode não ser o
         // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
