@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.25
+// @version      26.26
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -21261,13 +21261,18 @@
     // ── Verificação diária de atualização (pedido do usuário) ──────────────────────────
     // O Tampermonkey já procura versões novas sozinho (@updateURL), mas no intervalo das
     // configurações de cada navegador (que pode estar em "Nunca"), e um userscript não
-    // consegue se reinstalar nem mudar esse intervalo. Então, uma vez por dia, o script
+    // consegue se reinstalar nem mudar esse intervalo. Então, a cada 30 min, o script
     // lê o @version da main e, se for mais novo que o instalado, mostra um aviso com o
     // botão "Atualizar agora" — ele abre o @downloadURL, que o Tampermonkey intercepta
     // e abre na tela de atualização. Lembrete: o Tampermonkey só reconhece atualização
     // quando o @version sobe — sempre suba a versão a cada mudança na main.
     const URL_SCRIPT_MAIN = 'https://raw.githubusercontent.com/rcpleme2/tampermonkey_relatorio_projudi/main/relatorio_projudi.user.js';
     const CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO = 'projudi_ultima_verificacao_atualizacao';
+    // Versão mais nova já vista na main — o aviso reaparece a cada carregamento da
+    // página inicial enquanto a instalada for mais antiga (pedido do usuário: o aviso só
+    // some quando o usuário clica em "Atualizar agora", e volta se ele não instalar).
+    const CHAVE_VERSAO_DISPONIVEL = 'projudi_versao_disponivel';
+    const INTERVALO_VERIFICACAO_ATUALIZACAO_MS = 30 * 60 * 1000;
     function versaoMaisNova(a, b) { // true se a > b ("26.14" > "26.13")
         const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
         const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
@@ -21283,10 +21288,14 @@
         const estado = store.getItem(AUTO_ESTADO) || 'inativo';
         if (estado !== 'inativo' && estado !== 'concluido') return;
         if (typeof GM_xmlhttpRequest !== 'function' || typeof GM_info === 'undefined') return;
-        const hoje = dataArquivo();
-        if (lerCopiaTampermonkey(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO) === hoje) return;
-        GM_setValue(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO, hoje);
         const instalada = GM_info.script.version;
+        const conhecida = lerCopiaTampermonkey(CHAVE_VERSAO_DISPONIVEL);
+        if (conhecida && versaoMaisNova(conhecida, instalada)) mostrarAvisoAtualizacao(conhecida, instalada);
+        // Antes era 1x por dia; agora a cada 30 min, para o aviso chegar logo depois de
+        // um merge na main (a requisição lê só 2 KB do cabeçalho).
+        const ultima = parseInt(lerCopiaTampermonkey(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO) || '0', 10) || 0;
+        if (Date.now() - ultima < INTERVALO_VERIFICACAO_ATUALIZACAO_MS) return;
+        GM_setValue(CHAVE_ULTIMA_VERIFICACAO_ATUALIZACAO, String(Date.now()));
         GM_xmlhttpRequest({
             method: 'GET',
             // Só o começo do arquivo (o cabeçalho) — o script inteiro tem vários MB.
@@ -21294,28 +21303,31 @@
             headers: { Range: 'bytes=0-2047', 'Cache-Control': 'no-cache' },
             onload: (resp) => {
                 const m = /@version\s+([\d.]+)/.exec(resp.responseText || '');
-                if (!m || !versaoMaisNova(m[1], instalada)) return;
+                if (!m) return;
+                GM_setValue(CHAVE_VERSAO_DISPONIVEL, m[1]);
+                if (!versaoMaisNova(m[1], instalada)) return;
                 console.log(`[Projudi] versão nova na main: ${m[1]} (instalada: ${instalada})`);
                 mostrarAvisoAtualizacao(m[1], instalada);
             },
-            onerror: () => console.log('[Projudi] não foi possível verificar atualização hoje'),
+            onerror: () => console.log('[Projudi] não foi possível verificar atualização agora'),
         });
     }
+    // Sem botão "Depois" (pedido do usuário): o aviso fica na tela até o clique em
+    // "Atualizar agora".
     function mostrarAvisoAtualizacao(nova, instalada) {
-        if (document.getElementById('projudi-aviso-atualizacao')) return;
+        const existente = document.getElementById('projudi-aviso-atualizacao');
+        if (existente) existente.remove();
         const aviso = document.createElement('div');
         aviso.id = 'projudi-aviso-atualizacao';
         aviso.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;'
-            + 'background:#FFFFFF;border:1px solid #3A5A7D;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);'
-            + 'padding:10px 14px;font:13px/1.4 sans-serif;color:#2B2A27;display:flex;gap:10px;align-items:center;';
-        aviso.innerHTML = `<span>Nova versão do <strong>Relatório Projudi</strong>: ${nova} (instalada: ${instalada}).</span>
-            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-weight:600;">Atualizar agora</button>
-            <button type="button" data-acao="depois" style="background:none;border:none;color:#3A5A7D;cursor:pointer;font-weight:600;">Depois</button>`;
+            + 'background:#FFFFFF;border:2px solid #C42E2E;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);'
+            + 'padding:12px 16px;font:13px/1.4 sans-serif;color:#2B2A27;display:flex;gap:12px;align-items:center;';
+        aviso.innerHTML = `<span><strong>Atualização obrigatória do Relatório Projudi:</strong> versão ${nova} disponível (instalada: ${instalada}).<br>Clique em "Atualizar agora" e confirme a instalação na tela do Tampermonkey.</span>
+            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:600;white-space:nowrap;">Atualizar agora</button>`;
         aviso.querySelector('[data-acao="atualizar"]').onclick = () => {
             window.open(URL_SCRIPT_MAIN, '_blank');
             aviso.remove();
         };
-        aviso.querySelector('[data-acao="depois"]').onclick = () => aviso.remove();
         document.body.appendChild(aviso);
     }
 
@@ -21341,7 +21353,7 @@
         // comentário grande acima de CHAVE_MU_ATIVO).
         chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
         chamarSeguro(passoAutomacao, 'passoAutomacao'); // avança a automação se estiver em estado de navegação
-        chamarSeguro(verificarAtualizacaoDiaria, 'verificarAtualizacaoDiaria'); // 1x por dia, só na página inicial
+        chamarSeguro(verificarAtualizacaoDiaria, 'verificarAtualizacaoDiaria'); // a cada 30 min, só na página inicial
         // Conduz a navegação da automação em QUALQUER página (não só na página inicial,
         // onde fica o painel) — a coleta ocorre no frame de conteúdo, que pode não ser o
         // mesmo frame com o link do próximo relatório; sem esse poll rodando em toda
