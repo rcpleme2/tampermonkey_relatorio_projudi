@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.22
+// @version      26.23
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -520,6 +520,17 @@
         // cada carregamento de página, via bootstrap) em vez de adicionarPagina — os dois
         // contadores só existem no painel da página inicial, não na tela de resultados.
         totalIdentificadoNoResumo: true,
+        // A tela de resultados de Juntadas só mostra "Total de registros nesta página: 20"
+        // (tamanho da PÁGINA, não da busca) — o adicionarPagina genérico sobrescrevia com
+        // esse 20 a soma Com Urgência + Para Realizar já capturada do painel, e o KPI
+        // ficava preso em 20 (bug relatado pelo usuário: painel 0 + 26, PDF com 20). Com
+        // esta flag, o total vem só do painel (ou cai em dados.length, se não houver).
+        totalIdentificadoSoDoPainel: true,
+        // Dedupe pelo registro INTEIRO, não por 'processo' (padrão): um mesmo processo
+        // pode ter várias juntadas pendentes, cada uma é uma pendência própria — com o
+        // dedupe por processo, 26 juntadas em 20 processos viravam 20 no PDF (mesmo bug
+        // acima, relatado pelo usuário). '*' só descarta a mesma linha repetida por reload.
+        chaveDuplicata: '*',
         detecta: (cab) => /juntado\s+por/i.test(cab),
         minTds: 9,                              // linhas têm 10 tds (0=checkbox, 1=expandir, 2=semáforo)
         usaAtuacao: false,
@@ -564,6 +575,19 @@
             dataTitulo: 'Juntada pendente mais antiga',
             processoCampo: 'processo',
             tipoCampo: 'tipoDocumento',
+            // Pedido do usuário: cards espelhando o painel "Análise de Juntadas" da tela
+            // (Com Urgência / Para Realizar), gravados por capturarContadoresPainelJuntadas.
+            // Sem visita ao painel (coleta manual direto na tela de resultados), os cards
+            // não aparecem.
+            kpisExtras: () => {
+                const urg = parseInt(store.getItem(CFG_JUNTADAS.prefixo + 'urgencia') || '', 10);
+                const real = parseInt(store.getItem(CFG_JUNTADAS.prefixo + 'para_realizar') || '', 10);
+                if (!Number.isFinite(urg) || !Number.isFinite(real)) return [];
+                return [
+                    { titulo: 'Com urgência', valor: urg, acento: 'vermelhoVivo' },
+                    { titulo: 'Para realizar', valor: real, acento: 'azul' },
+                ];
+            },
             // "Pendências por Função" e "Juntadas pendentes por pessoa" removidos (pedido
             // do usuário).
             distribuicoes: [
@@ -6736,6 +6760,10 @@
             store.removeItem(KEY_TOTAL_REGISTROS);
             store.removeItem(KEY_ATUACOES);
             store.removeItem(cfg.prefixo + 'total_identificado');
+            if (cfg === CFG_JUNTADAS) {
+                store.removeItem(cfg.prefixo + 'urgencia');
+                store.removeItem(cfg.prefixo + 'para_realizar');
+            }
             if (cfg === CFG_PROCESSOS_REMETIDOS) {
                 store.removeItem(CHAVE_TOTAIS_POR_DESTINO_REMETIDOS);
                 store.removeItem(CHAVE_PRECISA_CAPTURAR_TOTAL_DESTINO_REMETIDOS);
@@ -6791,7 +6819,7 @@
             // usar este valor (totalIdentificadoOuColetado), então isso não muda o
             // comportamento de nenhum relatório já em produção, só passa a alimentar a
             // barra de progresso da etapa também para relatórios que não usam esse KPI.
-            if (idx === 0 || numeroPaginaAtual() === 1) {
+            if (!cfg.totalIdentificadoSoDoPainel && (idx === 0 || numeroPaginaAtual() === 1)) {
                 // cfg.navigatorRaiz (opcional): resolve o div#navigator certo quando a
                 // tela pode ter mais de um (ver navigatorDeMandados()) — sem ele, mantém
                 // o comportamento de sempre (1º div#navigator do documento).
@@ -18705,6 +18733,8 @@
         }
         if (urgencia === null || realizar === null) return; // painel não está nesta página — não mexe no valor já gravado
         store.setItem(CFG_JUNTADAS.prefixo + 'total_identificado', String(urgencia + realizar));
+        store.setItem(CFG_JUNTADAS.prefixo + 'urgencia', String(urgencia));
+        store.setItem(CFG_JUNTADAS.prefixo + 'para_realizar', String(realizar));
     }
 
     // Demais indicadores (spans #id + rótulo) do mesmo painel "Mesa do Analista
