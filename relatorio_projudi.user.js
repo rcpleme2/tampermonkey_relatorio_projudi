@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.28
+// @version      26.29
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -6803,6 +6803,19 @@
         }
         function rodando() { return store.getItem(KEY_RODANDO) === '1'; }
 
+        // "Parar" com a coleta no meio: segura antes de ler a página atual (nada lido
+        // fica pela metade). KEY_RODANDO marcado para que, se a página recarregar durante
+        // a pausa, injetarBotoes a retome; e se "Limpar" (ou o refazer de
+        // continuarAutomacao) apagar KEY_RODANDO enquanto isso, não há o que retomar.
+        function aguardarFimDaPausaNoColetor(retomar) {
+            store.setItem(KEY_RODANDO, '1');
+            marcarAtividade();
+            atualizarStatus('Automação pausada — os dados já coletados estão gravados. Clique em "Continuar" no painel para retomar.');
+            aguardarFimDaPausa(() => {
+                if (rodando()) retomar(); else render();
+            }, `coleta de "${cfg.prefixo}"`);
+        }
+
         async function limparTudo() {
             const n = parseInt(store.getItem(KEY_NUM_PAGINAS) || '0', 10);
             for (let i = 0; i < n; i++) {
@@ -7019,6 +7032,7 @@
         // iniciar() e precisa saber quando a coleta de fato terminou (ex.: testes) pode
         // dar await nela; produção continua chamando sem await, igual antes.
         async function iniciar() {
+            if (automacaoPausada()) { aguardarFimDaPausaNoColetor(iniciar); return; }
             // Antes de iniciar, ajusta a página para exibir o tamanho configurado em
             // cfg.pageSizeSelect (se houver e a opção existir no seletor). Quando o valor
             // do select muda, o Projudi recarrega a página; o estado KEY_RODANDO já estará
@@ -7050,6 +7064,7 @@
         // abaixo, senão o reload do Projudi mataria a escrita no meio do caminho e a
         // página coletada se perderia silenciosamente.
         async function continuar() {
+            if (automacaoPausada()) { aguardarFimDaPausaNoColetor(continuar); return; }
             desabilitarBotoes(true);
             marcarAtividade();
             console.log('[Projudi] continuar() — coletando página atual');
@@ -16765,6 +16780,9 @@
     }
 
     function injetarBotoes() {
+        // "Parar": nada que esta página dispararia ao carregar (preencher filtros,
+        // pesquisar, retomar a coleta paginada...) roda até "Continuar".
+        if (automacaoPausada()) { aguardarFimDaPausa(injetarBotoes, 'carregamento da página', true); return; }
         const estadoAutoNoInicio = store.getItem(AUTO_ESTADO);
         logPainel(`[Projudi] injetarBotoes — url=${location.pathname} estadoAuto=${estadoAutoNoInicio}`);
 
@@ -17723,6 +17741,120 @@
     // — usados só para mostrar o tempo decorrido no painel (ver atualizarPainel).
     const CHAVE_AUTO_INICIO = 'projudi_auto_inicio';
     const CHAVE_AUTO_FIM = 'projudi_auto_fim';
+
+    // ── Parar / Continuar (pedido do usuário) ────────────────────────────────────────
+    // "Parar" NÃO mexe em AUTO_ESTADO: só grava esta flag (com o instante da pausa). As
+    // transições já em voo (uma pesquisa que acabou de ser clicada, uma página sendo
+    // gravada) continuam atualizando AUTO_ESTADO normalmente, então ele sempre diz onde
+    // a automação estava — é dali que "Continuar" retoma. O que para de avançar:
+    // passoAutomacao (navegação entre relatórios/unidades), o watchdog, o coletor
+    // paginado (antes de ler a próxima página) e injetarBotoes (todo fluxo disparado no
+    // carregamento de uma página fica esperando). Os dados já coletados ficam onde
+    // sempre ficaram (cada página é gravada assim que lida). Começa com "projudi_auto_",
+    // então "Limpar" apaga junto (ver PREFIXOS_GLOBAIS_DE_DADOS).
+    const CHAVE_AUTO_PAUSADO = 'projudi_auto_pausado';
+    // Marcada quando uma página carrega bem depois da pausa — sinal de que o usuário
+    // navegou e a página em que a coleta estava esperando não existe mais (ver
+    // aguardarFimDaPausa/continuarAutomacao).
+    const CHAVE_AUTO_PAUSA_PAGINA_TROCADA = 'projudi_auto_pausa_pagina_trocada';
+    // Foto do estado de controle de todos os relatórios no início da etapa atual (ver
+    // gravarMarcoDaEtapa) — usada para refazer a etapa do zero quando a página da coleta
+    // se perdeu durante a pausa, sem duplicar páginas nem pular meses/destinos.
+    const CHAVE_AUTO_MARCO = 'projudi_auto_marco';
+    function automacaoPausada() { return !!store.getItem(CHAVE_AUTO_PAUSADO); }
+
+    // Segura `retomar` até "Continuar" (ou "Limpar"), mantendo vivas as coletas paradas
+    // (ts das cfgs com "rodando" — senão obsoleta() as descartaria depois de STALE_MS).
+    // noCarregamento: chamado ao carregar uma página (injetarBotoes) — se ela carregou
+    // mais de 15s depois da pausa, não veio de uma transição em voo da automação: foi o
+    // usuário navegando, e a página em que a coleta esperava não existe mais.
+    function aguardarFimDaPausa(retomar, rotulo, noCarregamento) {
+        const pausaDesde = parseInt(store.getItem(CHAVE_AUTO_PAUSADO) || '0', 10);
+        if (noCarregamento && pausaDesde && Date.now() - pausaDesde > 15000) store.setItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA, '1');
+        logPainel(`[Auto Projudi] automação pausada — ${rotulo} aguardando "Continuar" (url=${location.pathname})`);
+        const manterVivas = () => prefixosDeRelatorios().forEach(p => {
+            if (store.getItem(p + 'rodando') === '1') store.setItem(p + 'ts', String(Date.now()));
+        });
+        manterVivas();
+        const timer = setInterval(() => {
+            if (automacaoPausada()) { manterVivas(); return; }
+            clearInterval(timer);
+            retomar();
+        }, 1000);
+    }
+
+    // Chaves que entram na foto da etapa: todas as de controle de cada relatório (prefixo)
+    // — inclusive filas internas como meses do Tempo Médio, destinos de Remetidos e
+    // usuários de Audiências Realizadas, que usam o mesmo prefixo — menos as páginas de
+    // dados (tratadas à parte pelo num_paginas da foto).
+    const CHAVES_EXTRAS_MARCO = ['projudi_paralisado_auto_iniciar', 'projudi_estatisticas_ativos'];
+    function chaveEntraNoMarco(k) {
+        if (/pagina_\d+$/.test(k)) return false;
+        return CHAVES_EXTRAS_MARCO.includes(k) || prefixosDeRelatorios().some(p => k.startsWith(p));
+    }
+    // Chamado sempre que um relatório (ou uma etapa dele, ex.: um mês do Tempo Médio)
+    // começa — ver iniciarAutomacao e o ramo "ir_" de passoAutomacao.
+    function gravarMarcoDaEtapa(key) {
+        const chaves = {};
+        chavesDoStore().filter(chaveEntraNoMarco).forEach(k => { chaves[k] = store.getItem(k); });
+        try { store.setItem(CHAVE_AUTO_MARCO, JSON.stringify({ key, chaves })); }
+        catch (e) { store.removeItem(CHAVE_AUTO_MARCO); console.warn('[Auto Projudi] não foi possível gravar o marco da etapa', e); }
+    }
+    // Volta tudo ao instante em que a etapa começou (apaga as páginas gravadas depois
+    // dele) e manda a automação refazê-la a partir da navegação ("ir_").
+    async function refazerEtapaDoMarco(estado) {
+        let marco = null;
+        try { marco = JSON.parse(store.getItem(CHAVE_AUTO_MARCO) || 'null'); } catch (e) { marco = null; }
+        const key = (marco && relatorioPorChave(marco.key)) ? marco.key : keyDoEstadoAtual(estado);
+        if (!relatorioPorChave(key)) return false;
+        store.setItem(AUTO_ESTADO, 'ir_' + key);
+        const prefixos = prefixosDeRelatorios();
+        if (marco && marco.key === key && marco.chaves) {
+            for (const p of prefixos) {
+                const n0 = parseInt(marco.chaves[p + 'num_paginas'] || '0', 10);
+                const n = parseInt(store.getItem(p + 'num_paginas') || '0', 10);
+                for (let i = n0; i < n; i++) {
+                    store.removeItem(p + 'pagina_' + i);
+                    try { await idbDelete(p + 'pagina_' + i); } catch (e) { /* página nunca foi pro IndexedDB */ }
+                }
+            }
+            chavesDoStore().filter(chaveEntraNoMarco).forEach(k => { if (!(k in marco.chaves)) store.removeItem(k); });
+            Object.entries(marco.chaves).forEach(([k, v]) => store.setItem(k, v));
+        }
+        prefixos.forEach(p => { store.removeItem(p + 'rodando'); store.removeItem(p + 'ts'); });
+        logPainel(`[Auto Projudi] página da coleta perdida durante a pausa — refazendo "${key}" desde o início da etapa`);
+        return true;
+    }
+
+    function pararAutomacao() {
+        if (automacaoPausada()) return;
+        store.setItem(CHAVE_AUTO_PAUSADO, String(Date.now()));
+        store.removeItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA);
+        store.removeItem(CHAVE_WATCHDOG);
+        logPainel(`[Auto Projudi] automação pausada pelo usuário — estado="${store.getItem(AUTO_ESTADO)}"`);
+        atualizarPainel();
+    }
+
+    async function continuarAutomacao() {
+        const pausaDesde = parseInt(store.getItem(CHAVE_AUTO_PAUSADO) || '0', 10);
+        if (!pausaDesde) return;
+        const estado = store.getItem(AUTO_ESTADO) || '';
+        // Ainda pausado enquanto refaz o marco — nenhuma página parada retoma no meio.
+        if (store.getItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA) === '1'
+            && (estado.startsWith('coletando_') || estado.startsWith('preenchendo_'))) {
+            await refazerEtapaDoMarco(estado);
+        }
+        // O tempo parado não conta no "Tempo decorrido" do painel.
+        const inicio = parseInt(store.getItem(CHAVE_AUTO_INICIO) || '0', 10);
+        if (inicio) store.setItem(CHAVE_AUTO_INICIO, String(inicio + (Date.now() - pausaDesde)));
+        store.removeItem(CHAVE_AUTO_PAUSADO);
+        store.removeItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA);
+        store.removeItem(CHAVE_WATCHDOG);
+        store.removeItem('projudi_auto_lock');
+        logPainel(`[Auto Projudi] automação retomada pelo usuário — estado="${store.getItem(AUTO_ESTADO)}"`);
+        atualizarPainel();
+        setTimeout(passoAutomacao, 300);
+    }
 
     // "Xh Ym Zs" / "Ym Zs" / "Zs", sempre com o menor número de unidades necessário.
     function formatarDuracao(ms) {
@@ -19727,6 +19859,8 @@
     // página) e reiniciado sempre que o item da fila muda.
     const CHAVE_WATCHDOG = 'projudi_auto_watchdog';
     function verificarTravamentoAutomacao() {
+        // Pausado não é travado — e ao continuar o watchdog recomeça a contar do zero.
+        if (automacaoPausada()) { store.removeItem(CHAVE_WATCHDOG); return; }
         const estado = store.getItem(AUTO_ESTADO);
         // "travado_X" (passoAutomacao desistiu de navegar depois de LIMITE_TENTATIVAS,
         // ver mais abaixo) também entra aqui agora — antes só coletando_/preenchendo_
@@ -19774,6 +19908,7 @@
     function passoAutomacao() {
         const estado = store.getItem(AUTO_ESTADO);
         if (!estado || estado === 'concluido') return;
+        if (automacaoPausada()) return; // "Parar" — ver CHAVE_AUTO_PAUSADO
         // Durante a coleta ou o preenchimento do formulário, quem conduz é a própria
         // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
         // preencherEPesquisarParalisado). "travado_X" = desistiu de navegar depois de
@@ -19846,6 +19981,7 @@
             const rel = relatorioPorChave(key);
             if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
+            gravarMarcoDaEtapa(key);
             // Item de outra seção/atribuição (ver foraDaAtribuicao — seção errada da VIJ,
             // ou Averiguação de Paternidade fora da Vara de Família): não coleta aqui.
             const atuacaoAtual = lerAtuacaoEmQualquerFrame();
@@ -19948,6 +20084,9 @@
         // tamanho cheio a cada mês coletado.
         if (fila.includes('tempomedio')) prepararFilaMesesTempoMedio(periodoTM || '1m');
         const primeiro = relatorioPorChave(fila[0]);
+        store.removeItem(CHAVE_AUTO_PAUSADO);
+        store.removeItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA);
+        gravarMarcoDaEtapa(primeiro.key);
         store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
         store.setItem('projudi_auto_lock', String(Date.now()));
         store.setItem(CHAVE_AUTO_INICIO, String(Date.now()));
@@ -20415,7 +20554,13 @@
         const total = contagens.reduce((s, c) => s + c.n, 0);
         const emCurso = estado !== 'inativo' && estado !== 'concluido' && estado !== 'armazenamento_cheio';
         const travado = estado.startsWith('travado_') || estado === 'armazenamento_cheio';
+        const pausada = emCurso && automacaoPausada();
         const estadoTexto = (() => {
+            if (pausada) {
+                const relPausa = relatorioPorChave(keyDoEstadoAtual(estado) || (estado.startsWith('ir_') ? estado.slice(3) : ''));
+                return `Pausado${relPausa ? ` em <strong>${relPausa.rotulo}</strong>` : ''} — os dados já coletados estão gravados. `
+                    + 'Clique em <strong>Continuar</strong> para retomar ou em <strong>Limpar</strong> para recomeçar do zero.';
+            }
             if (estado === 'inativo') return 'Pronto para iniciar';
             if (estado === 'concluido') return 'Coleta concluída';
             if (estado === 'armazenamento_cheio') {
@@ -20481,7 +20626,7 @@
 
         const dot = painel.querySelector('.pa-dot');
         painel.querySelector('.pa-state-txt').innerHTML = estadoTexto;
-        if (dot) dot.classList.toggle('on', emCurso);
+        if (dot) dot.classList.toggle('on', emCurso && !pausada);
         if (dot) dot.classList.toggle('alerta', travado);
 
         // Pedido do usuário: com a automação rodando NESTA unidade, esconder a
@@ -20529,7 +20674,10 @@
         // "Pular extração atual" só aparece com a automação em curso — é a válvula de
         // escape para quando a coleta trava (ver pularRelatorioAtual).
         const btnPular = painel.querySelector('#pa-pular');
-        if (btnPular) btnPular.style.display = emCurso ? '' : 'none';
+        if (btnPular) btnPular.style.display = (emCurso && !pausada) ? '' : 'none';
+        // Parar só com a automação andando (travado já está parado); Continuar só pausado.
+        painel.querySelector('#pa-parar').style.display = (emCurso && !travado && !pausada) ? '' : 'none';
+        painel.querySelector('#pa-continuar').style.display = pausada ? '' : 'none';
 
         // Tempo decorrido: enquanto em curso, atualiza a cada 2s (mesmo intervalo que
         // chama atualizarPainel); depois de concluído, mostra o tempo total fixo da
@@ -20538,7 +20686,11 @@
         if (elTempo) {
             const inicio = parseInt(store.getItem(CHAVE_AUTO_INICIO) || '0', 10);
             const fim = parseInt(store.getItem(CHAVE_AUTO_FIM) || '0', 10);
-            if (inicio && emCurso) {
+            if (inicio && pausada) {
+                elTempo.style.display = '';
+                const pausaDesde = parseInt(store.getItem(CHAVE_AUTO_PAUSADO) || '0', 10);
+                elTempo.textContent = `Tempo decorrido até a pausa: ${formatarDuracao(pausaDesde - inicio)}`;
+            } else if (inicio && emCurso) {
                 elTempo.style.display = '';
                 elTempo.textContent = `Tempo decorrido: ${formatarDuracao(Date.now() - inicio)}`;
             } else if (inicio && fim && estado === 'concluido') {
@@ -20782,7 +20934,7 @@
                     <span class="pa-dot"></span>
                     <span class="pa-state-txt">—</span>
                 </div>
-                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações onde o botão Automatizar já foi clicado — persistem até 'Limpar'"></div>
+                <div class="pa-unidades" style="display:none;" title="Atribuições/atuações onde o botão Iniciar já foi clicado — persistem até 'Limpar'"></div>
                 <div class="pa-tempo" style="display:none;"></div>
                 <div class="pa-progress" style="display:none;">
                     <div class="pa-progress-title">Progresso geral</div>
@@ -20807,7 +20959,11 @@
                     <input id="pa-pref-arquivo" type="file" accept=".json,application/json" style="display:none;">
                 </div>
                 <div class="pa-actions">
-                    <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Automatizar</button>
+                    <div class="pa-btn-row">
+                        <button id="pa-iniciar" class="pa-btn pa-btn-primary" type="button" title="Extrai os relatórios marcados automaticamente">▶ Iniciar</button>
+                        <button id="pa-parar" class="pa-btn pa-btn-secondary" type="button" style="display:none;" title="Pausa a extração — os dados já coletados ficam gravados">⏸ Parar</button>
+                        <button id="pa-continuar" class="pa-btn pa-btn-primary" type="button" style="display:none;" title="Retoma a extração de onde parou, mantendo os dados já coletados">▶ Continuar</button>
+                    </div>
                     <div class="pa-btn-row">
                         <button id="pa-pdf" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com o resumo (cartões de KPI e tabela comparativa por competência) de cada relatório já coletado, sem tabelas discriminadas">⬇ Relatório PDF</button>
                         <button id="pa-tabelas" class="pa-btn pa-btn-secondary" type="button" title="Gera um PDF único com as tabelas discriminadas de cada relatório já coletado">⬇ Tabelas Discriminadas</button>
@@ -20869,6 +21025,8 @@
         // o resto da implementação continuam no código, só sem botão pra chamá-la.
         painel.querySelector('#pa-limpar').onclick = limparTudoAutomacao;
         painel.querySelector('#pa-pular').onclick = pularRelatorioAtual;
+        painel.querySelector('#pa-parar').onclick = pararAutomacao;
+        painel.querySelector('#pa-continuar').onclick = continuarAutomacao;
         // "▼ Ver log detalhado" — colapsado por padrão; ao abrir, preenche com o que já
         // foi registrado por logPainel (persiste entre reloads, ver CHAVE_LOG_DETALHADO).
         painel.querySelector('#pa-log-toggle').onclick = () => {

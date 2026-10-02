@@ -49,8 +49,11 @@ Ao publicar uma nova versão, repita os passos acima (ou reabra a URL Raw) — o
 ### Automação (relatório conjunto entre vários relatórios/competências)
 
 1. Abra a página inicial do Projudi — o painel **"Automação de relatórios"** aparece nas páginas com o menu principal
-2. Marque os relatórios desejados e clique em **▶ Automatizar**
+2. Marque os relatórios desejados e clique em **▶ Iniciar**
 3. O script navega, preenche filtros, pesquisa e coleta cada relatório marcado, na sequência
+   - **⏸ Parar** pausa a extração; tudo o que já foi coletado fica gravado
+   - **▶ Continuar** retoma de onde parou, mantendo os dados já coletados (se, durante a pausa, você sair da página que estava sendo coletada, a etapa em andamento é refeita do início, sem duplicar dados)
+   - Para recomeçar do zero, use **Limpar**
 4. Para reunir mais de uma competência: troque de atuação no Projudi e rode a automação de novo — os dados de cada rodada são **acumulados**, não substituídos
 5. Ao concluir, clique em **⬇ PDF conjunto** (ou baixe o Excel de cada relatório individualmente)
 6. Use **Limpar** no painel para apagar tudo o que foi acumulado
