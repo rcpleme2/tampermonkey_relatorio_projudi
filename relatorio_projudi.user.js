@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.34
+// @version      26.35
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -79,11 +79,19 @@
             return Array.isArray(v) ? v : [];
         } catch (e) { return []; }
     }
+    // Linhas "principais" (resumo legível): começam, depois da hora, com um marcador —
+    // ▶ início de etapa, ✔ concluído, ⏭ pulado, ═ cabeçalho de unidade, ⚠ aviso, ✖ erro.
+    // Todo o resto é detalhe técnico (diagnóstico), visível ao marcar "Mostrar detalhes".
+    const RE_LINHA_PRINCIPAL = /^\[[^\]]*\] [▶✔⏭═⚠✖]/;
+    function logMostraDetalhes() {
+        try { return store.getItem('projudi_log_mostrar_detalhes') === '1'; } catch (e) { return false; }
+    }
     function atualizarLogDetalhadoUI() {
         try {
             const caixa = document.getElementById('pa-log-detalhado');
             if (!caixa) return;
-            const linhas = lerLogDetalhado();
+            const todas = lerLogDetalhado();
+            const linhas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
             caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
             caixa.scrollTop = caixa.scrollHeight;
         } catch (e) { /* nunca deixa o log detalhado quebrar quem chamou */ }
@@ -3125,21 +3133,32 @@
     // Atuação desconhecida: vale tudo. Além da regra acima, mantém as regras antigas: as
     // seções da VIJ (Cível/Infracional) só rodam na seção correspondente e não rodam em
     // Vara de Família; Averiguação de Paternidade (classe 123) só na Vara de Família.
-    function foraDaAtribuicao(cfg, atuacao) {
-        if (!atuacao) return false;
+    // Devolve o MOTIVO (texto legível, usado no log) de o item não se aplicar a esta
+    // atribuição, ou '' quando ele se aplica.
+    function motivoForaDaAtribuicao(cfg, atuacao) {
+        if (!atuacao) return '';
         const rel = relatorioPorCfg(cfg);
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
-        if (rel && rel.categoriaEspecifica === 'crime') return !/crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais/.test(nome);
-        if (dominio === 'juri') return !/tribunal\s+do\s+juri/.test(nome);
+        if (rel && rel.categoriaEspecifica === 'crime') {
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais/.test(nome) ? ''
+                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri" nem "execução penal"';
+        }
+        if (dominio === 'juri') {
+            return /tribunal\s+do\s+juri/.test(nome) ? '' : 'item do Tribunal do Júri — o nome da unidade não tem "tribunal do júri"';
+        }
         if (dominio === 'familia') {
-            if (cfg === CFG_AVERIGUACAO_PATERNIDADE && !atuacaoEhFamilia(atuacao)) return true;
-            return !/familia|infancia/.test(nome);
+            if (cfg === CFG_AVERIGUACAO_PATERNIDADE && !atuacaoEhFamilia(atuacao)) return 'Averiguação de Paternidade — só na Vara de Família';
+            return /familia|infancia/.test(nome) ? '' : 'item de Família — o nome da unidade não tem "família" nem "infância"';
         }
         const tipo = tipoAtribuicao(atuacao);
-        if (tipo) return ['vijcivel', 'vijinfracional'].includes(dominio) && dominio !== tipo;
-        return cfg === CFG_AVERIGUACAO_PATERNIDADE;
+        if (tipo) {
+            return (['vijcivel', 'vijinfracional'].includes(dominio) && dominio !== tipo)
+                ? 'item de outra seção da VIJ / não se aplica a esta atribuição' : '';
+        }
+        return cfg === CFG_AVERIGUACAO_PATERNIDADE ? 'Averiguação de Paternidade — só na Vara de Família' : '';
     }
+    function foraDaAtribuicao(cfg, atuacao) { return !!motivoForaDaAtribuicao(cfg, atuacao); }
 
     function textosAcolhimento(cfg) {
         if (cfg === CFG_INTERNADOS) return TEXTOS_INTERNADOS;
@@ -5919,7 +5938,7 @@
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
         logPainel(`[Projudi Processos Remetidos] destino="${destino ? destino.rotulo : '(nenhum)'}" (${fila.length - (destino ? 1 : 0)} restante(s) na fila) — botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            logPainel('[Projudi Processos Remetidos] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            logPainel(`▶ Remessas — pesquisando destino "${destino ? destino.rotulo : '(todos)'}"`);
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
@@ -5929,7 +5948,7 @@
                     logPainelAviso('[Projudi Processos Remetidos] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
                 }
             }, 15000);
-        }, 1500);
+        }, 500);
     }
 
     // Chamado via CFG_PROCESSOS_REMETIDOS.aoTerminarColeta ao final da coleta de UM
@@ -5939,6 +5958,13 @@
     function avancarOuProximoDestinoRemetidos() {
         if (lerFilaDestinosRemetidos().length > 0) {
             logPainel('[Projudi Processos Remetidos] destino concluído — ainda restam destinos na fila, buscando o próximo');
+            // Atalho: a tela de resultados já traz o formulário — pesquisa o próximo
+            // destino direto daqui, sem voltar pelo menu (um reload a menos por destino).
+            if (!automacaoPausada() && formularioProcessosRemetidos()) {
+                store.setItem(AUTO_ESTADO, 'coletando_remetidos');
+                preencherEPesquisarProcessosRemetidos();
+                return;
+            }
             store.setItem(AUTO_ESTADO, 'ir_remetidos');
             setTimeout(passoAutomacao, 900);
         } else {
@@ -16370,9 +16396,23 @@
     // de chamar `iniciarCallback` (normalmente coletor.iniciar()). Teto de ~15s, depois
     // do qual segue mesmo assim (com aviso), para não travar a automação pra sempre numa
     // tela que por algum motivo nunca estabiliza.
+    // Tela de resultado vazia: uma única linha "Nenhum registro encontrado" (td com
+    // colspan) em table.resultTable — sinal de que a busca não trouxe nada.
+    function resultadoSemRegistros() {
+        const linhas = [...document.querySelectorAll('table.resultTable tbody tr')];
+        return linhas.length >= 1 && linhas.every(tr => /nenhum\s+registro/i.test(tr.textContent || ''));
+    }
     function aguardarResultadoTMEstabilizarEIniciar(iniciarCallback, tentativa) {
         tentativa = tentativa || 0;
         const assinaturaAtual = assinaturaResultadoTM();
+        // Pedido do usuário: "Nenhum registro encontrado" após filtrar = nada a coletar,
+        // segue já. Antes, dois resultados vazios seguidos (assinatura idêntica) nunca
+        // "mudavam" e a espera ia até o teto de ~15s por destino/mês.
+        if (tentativa > 0 && resultadoSemRegistros() && assinaturaAtual === ultimaAssinaturaVistaTM) {
+            logPainel('[Projudi] "Nenhum registro encontrado" após filtrar — nada a coletar, passando ao próximo');
+            iniciarCallback();
+            return;
+        }
         const assinaturaAnterior = store.getItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         const jaMudou = assinaturaAnterior == null || assinaturaAtual !== assinaturaAnterior;
         if (tentativa > 0 && jaMudou && assinaturaAtual === ultimaAssinaturaVistaTM) {
@@ -18244,11 +18284,20 @@
                 const label = grupo.querySelector('span.userinfo_label');
                 if (label && /atua[çc][ãa]o/i.test(label.textContent)) {
                     const span = grupo.querySelector('span[title]');
-                    if (span && span.textContent.trim()) return span.textContent.trim();
+                    if (span && span.textContent.trim()) {
+                        try { store.setItem('projudi_ultima_atuacao_conhecida', span.textContent.trim()); } catch (e) { /* ignora */ }
+                        return span.textContent.trim();
+                    }
                 }
             }
         }
         return '';
+    }
+    // Atuação para DECIDIR o que rodar: a lida agora ou, se nenhuma frame a mostra neste
+    // instante (página recém-carregada), a última conhecida. Sem isso, atuação vazia
+    // fazia foraDaAtribuicao() liberar TODOS os itens (ex.: Prisões numa Vara da Fazenda).
+    function atuacaoParaDecisao() {
+        return lerAtuacaoEmQualquerFrame() || store.getItem('projudi_ultima_atuacao_conhecida') || '';
     }
 
     // #alterarAreaAtuacao (dentro de table#userinfo) existe em toda página autenticada —
@@ -19822,7 +19871,11 @@
         const prox = idx >= 0 ? fila[idx + 1] : undefined;
         // Item pulado por ser de outra atribuição (ver passoAutomacao) não conta como rodado.
         const atuacaoRodada = lerAtuacaoEmQualquerFrame();
-        if (!foraDaAtribuicao(rel.cfg, atuacaoRodada)) registrarUnidadeRodada(rel, atuacaoRodada);
+        if (!foraDaAtribuicao(rel.cfg, atuacaoRodada)) {
+            registrarUnidadeRodada(rel, atuacaoRodada);
+            const nRegistros = cfgsDoRelatorio(rel).reduce((t, c) => t + contarRegistrosSync(c.prefixo), 0);
+            logPainel(`✔ ${rel.rotulo} — concluído (${nRegistros} registro(s) acumulado(s))`);
+        }
         logPainel(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
         if (!prox && multiUnidadeEmCurso()) {
             logPainel(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
@@ -20038,6 +20091,7 @@
             store.setItem(CHAVE_AUTO_FIM, String(agora)); // marca o fim desta unidade (mostrador do painel)
             const idxAtual = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
             const totalUnidades = lerTitulosMultiUnidade().length;
+            logPainel(`✔ Unidade ${idxAtual}/${totalUnidades} concluída — trocando para a próxima`);
             logPainel(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacaoEmQualquerFrame() || ''}") — abrindo popup pra trocar de atuação`);
             if (!tentarAbrirPopupTrocaAtuacao()) navegarMenu('inicio');
             return;
@@ -20068,6 +20122,7 @@
             store.setItem('projudi_auto_lock', String(agora));
             store.setItem(AUTO_ESTADO, 'concluido');
             store.setItem(CHAVE_AUTO_FIM, String(agora));
+            logPainel('✔ AUTOMAÇÃO CONCLUÍDA — todas as etapas da fila terminaram');
             if (multiUnidadeEmCurso()) finalizarMultiUnidade(); // rodada de várias unidades chegou ao fim de verdade
             navegarMenu('inicio');
             return;
@@ -20078,17 +20133,36 @@
             if (!rel) { logPainelAviso('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
             gravarMarcoDaEtapa(key);
-            // Item de outra seção/atribuição (ver foraDaAtribuicao — seção errada da VIJ,
-            // ou Averiguação de Paternidade fora da Vara de Família): não coleta aqui.
-            const atuacaoAtual = lerAtuacaoEmQualquerFrame();
-            if (foraDaAtribuicao(rel.cfg, atuacaoAtual)) {
-                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" (fora da atribuição pelo nome da unidade) — pulando nesta unidade`);
+            // Item de outra seção/atribuição (ver foraDaAtribuicao — Crime, Família, Júri,
+            // seção errada da VIJ, Averiguação de Paternidade): não coleta aqui.
+            // Usa a atuação conhecida mesmo se nenhuma frame a mostra neste instante; se
+            // nunca foi vista, espera alguns ticks antes de liberar tudo (sem atuação, a
+            // regra de atribuição não tem como decidir).
+            const atuacaoAtual = atuacaoParaDecisao();
+            if (!atuacaoAtual) {
+                const esperas = parseInt(store.getItem('projudi_auto_espera_atuacao') || '0', 10) + 1;
+                if (esperas <= 4) {
+                    store.setItem('projudi_auto_espera_atuacao', String(esperas));
+                    logPainel(`[Auto Projudi] atuação ainda não identificada (tentativa ${esperas}/4) — aguardando antes de decidir o que rodar`);
+                    store.setItem('projudi_auto_lock', '0');
+                    return;
+                }
+                logPainelAviso('[Auto Projudi] atuação não identificada após 4 tentativas — rodando o item sem filtro de atribuição');
+            }
+            store.removeItem('projudi_auto_espera_atuacao');
+            if (atuacaoAtual && store.getItem('projudi_log_ultima_unidade') !== atuacaoAtual) {
+                store.setItem('projudi_log_ultima_unidade', atuacaoAtual);
+                logPainel(`═══ UNIDADE: ${atuacaoAtual} ═══`);
+            }
+            const motivoPulo = motivoForaDaAtribuicao(rel.cfg, atuacaoAtual);
+            if (motivoPulo) {
+                logPainel(`⏭ PULADO: ${rel.rotulo} — ${motivoPulo} (unidade: "${atuacaoAtual}")`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + key);
                 avancarAutomacao(rel.cfg);
                 return;
             }
             if (navegarMenu(rel.navAlvo)) {
-                logPainel(`[Auto Projudi] navegou para "${rel.navAlvo}" (${rel.rotulo})`);
+                logPainel(`▶ ${rel.rotulo} — iniciando (menu "${rel.navAlvo}")`);
                 store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
                 return;
@@ -20174,7 +20248,15 @@
             const rel = relatorioPorChave(key);
             cfgsDoRelatorio(rel).forEach(cfg => store.removeItem(cfg.prefixo + 'erro'));
         });
-        logPainel(`[Auto Projudi] automação iniciada — fila: ${fila.join(', ')} (atuação: "${lerAtuacao() || ''}")`);
+        {
+            const atuacaoPlano = atuacaoParaDecisao();
+            const rodam = [], pulam = [];
+            fila.forEach(k => { const r = relatorioPorChave(k); (foraDaAtribuicao(r.cfg, atuacaoPlano) ? pulam : rodam).push(r.curto || r.rotulo); });
+            logPainel(`═══ AUTOMAÇÃO INICIADA — unidade: "${atuacaoPlano || '(não identificada)'}" ═══`);
+            logPainel(`▶ Vão rodar (${rodam.length}): ${rodam.join(', ') || '(nenhum)'}`);
+            if (pulam.length) logPainel(`⏭ Serão pulados por não corresponderem à atribuição (${pulam.length}): ${pulam.join(', ')}`);
+            store.setItem('projudi_log_ultima_unidade', atuacaoPlano);
+        }
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
         // Monta a fila de meses do Tempo Médio uma única vez aqui, no início — nunca dentro
@@ -20185,12 +20267,16 @@
         store.removeItem(CHAVE_AUTO_PAUSADO);
         store.removeItem(CHAVE_AUTO_PAUSA_PAGINA_TROCADA);
         gravarMarcoDaEtapa(primeiro.key);
-        store.setItem(AUTO_ESTADO, primeiro.precisaPreencher ? ('preenchendo_' + primeiro.key) : ('coletando_' + primeiro.key));
+        // Entra pelo estado "ir_" (e não direto em coletando_/preenchendo_ + navegarMenu)
+        // para o PRIMEIRO item da fila passar pela mesma checagem de atribuição que os
+        // demais em passoAutomacao — antes ele ia direto e rodava mesmo numa unidade a que
+        // não se aplicava (ex.: item de Crime numa Vara da Fazenda Pública).
+        store.setItem(AUTO_ESTADO, 'ir_' + primeiro.key);
         store.setItem('projudi_auto_lock', String(Date.now()));
         store.setItem(CHAVE_AUTO_INICIO, String(Date.now()));
         store.removeItem(CHAVE_AUTO_FIM);
         atualizarPainel();
-        setTimeout(() => navegarMenu(primeiro.navAlvo), 300);
+        setTimeout(passoAutomacao, 1300); // acima do lock de 1200ms de passoAutomacao
     }
 
     async function limparTudoAutomacao() {
@@ -20363,7 +20449,7 @@
     // Processos Ativos (lerMapaAtivos): aquele mapa só é gravado quando a opção "Ativos"
     // está marcada e pode não refletir todas as atribuições realmente coletadas.
     async function baixarPDFConjunto(modo) {
-        logPainel(`[Projudi] gerando PDF conjunto (modo="${modo}")`);
+        logPainel(`▶ Gerando PDF conjunto (modo="${modo}")`);
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
@@ -20395,7 +20481,7 @@
                 }
             }
             gerarPDFConjunto(secoesFiltradas, modo, { atribuicoesSelecionadas });
-            logPainel(`[Projudi] PDF conjunto gerado (modo="${modo}", ${secoesFiltradas.length} seção(ões))`);
+            logPainel(`✔ PDF conjunto gerado (modo="${modo}", ${secoesFiltradas.length} seção(ões))`);
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
@@ -21076,6 +21162,7 @@
                 <div class="pa-log">
                     <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
                     <div id="pa-log-wrap" style="display:none;">
+                        <label class="pa-log-detalhes"><input type="checkbox" id="pa-log-detalhes"> Mostrar detalhes técnicos (o resumo mostra só etapas, itens pulados, avisos e erros)</label>
                         <pre id="pa-log-detalhado" class="pa-log-box"></pre>
                         <button id="pa-log-baixar" class="pa-link" type="button" title="Salva o log completo (todas as linhas guardadas, não só o que cabe na caixa) num .txt para enviar/investigar">⬇ Baixar log completo</button>
                         <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
@@ -21137,6 +21224,12 @@
             wrap.style.display = abrindo ? '' : 'none';
             btn.textContent = abrindo ? '▲ Ocultar log detalhado' : '▼ Ver log detalhado';
             if (abrindo) atualizarLogDetalhadoUI();
+        };
+        const chkDetalhes = painel.querySelector('#pa-log-detalhes');
+        chkDetalhes.checked = logMostraDetalhes();
+        chkDetalhes.onchange = () => {
+            try { store.setItem('projudi_log_mostrar_detalhes', chkDetalhes.checked ? '1' : '0'); } catch (e) { /* ignora */ }
+            atualizarLogDetalhadoUI();
         };
         painel.querySelector('#pa-log-limpar').onclick = () => {
             apagarLogBruto();
@@ -21440,8 +21533,9 @@
         #painel-automacao .pa-dica , #projudi-mu-painel .pa-dica { font-size: .64em; color: #82807A; line-height: 1.4; border-top: 1px solid #DEDDD6; padding-top: 8px; }
         #painel-automacao .pa-log , #projudi-mu-painel .pa-log { margin-top: 8px; border-top: 1px solid #DEDDD6; padding-top: 8px; }
         #painel-automacao .pa-log-toggle-btn , #projudi-mu-painel .pa-log-toggle-btn { font-size: .68em; }
+        #painel-automacao .pa-log-detalhes , #projudi-mu-painel .pa-log-detalhes { display: block; font-size: .62em; color: #82807A; margin-top: 4px; }
         #painel-automacao .pa-log-box , #projudi-mu-painel .pa-log-box {
-            max-height: 180px; overflow-y: auto; margin: 6px 0; padding: 6px;
+            max-height: 260px; overflow-y: auto; margin: 6px 0; padding: 6px;
             background: #FAFAF7; border: 1px solid #DEDDD6; border-radius: 3px;
             font-family: monospace; font-size: .62em; white-space: pre-wrap; word-break: break-word;
         }
@@ -21653,6 +21747,7 @@
 
     function bootstrap() {
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
+        try { logPainelSeMudou('versao', `═══ Relatório Projudi versão ${(typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?'} ═══`); } catch (e) { /* GM_info indisponível */ }
         // Erros não tratados também vão para o log persistente (só os do próprio script:
         // a página do Projudi gera ruído próprio que não interessa aqui).
         const ehDoScript = (e) => /userscript|tampermonkey|relat[oó]rio[_ ]projudi/i.test(String((e && (e.filename || (e.error && e.error.stack) || (e.reason && e.reason.stack))) || ''));
