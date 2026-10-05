@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.46
+// @version      26.47
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13892,12 +13892,15 @@
         // VIJ - Seção Cível/Infracional (pedido do usuário): pessoas sem Data de
         // Nascimento ganham um 3º card de ALERTA + observação no fim do resumo.
         // Prisões - Alimentos fica de fora (não foi pedido).
-        const semNascimento = cfg === CFG_PRISOES_ALIMENTOS ? 0
-            : contarPessoasDistintas(r.filter(d => !d.nascimento));
+        const regsSemNascimento = cfg === CFG_PRISOES_ALIMENTOS ? [] : r.filter(d => !d.nascimento);
+        const semNascimento = contarPessoasDistintas(regsSemNascimento);
+        // Nº único dos processos no próprio card (pedido do usuário — facilita achar o
+        // cadastro a regularizar), um por linha; a linha de cards cresce para caber todos.
+        const processosSemNascimento = [...new Set(regsSemNascimento.map(d => d.processo).filter(Boolean))];
 
         const gap = 6;
         const kY = yLinha + 7;
-        const kH = 28;
+        const kH = semNascimento > 0 ? Math.max(28, 24 + processosSemNascimento.length * 4.2) : 28;
         const nCards = semNascimento > 0 ? 3 : 2;
         const kW = (uw - gap * (nCards - 1)) / nCards;
 
@@ -13910,7 +13913,7 @@
         if (semNascimento > 0) {
             const xA = m + 2 * (kW + gap);
             desenharCard(doc, xA, kY, kW, kH, 'Pessoas sem data de nascimento informada', String(semNascimento),
-                ['Alerta: regularizar cadastro'], true, COR.vermelho, COR.vermelhoVivo);
+                processosSemNascimento, true, COR.vermelho, COR.vermelhoVivo);
             desenharIconeAlerta(doc, xA + kW - 7, kY + 3.5);
         }
         let yFim = kY + kH;
