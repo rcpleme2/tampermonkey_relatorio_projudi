@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.31
+// @version      26.32
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3099,7 +3099,8 @@
     // Regra por NOME da atribuição (pedido do usuário, sem distinguir maiúsculas/minúsculas
     // nem acentos):
     //   itens de Cartório (e Gabinete) -> rodam em qualquer unidade;
-    //   itens de Crime (categoriaEspecifica: 'crime') -> só se o nome tiver "crim*";
+    //   itens de Crime (categoriaEspecifica: 'crime') -> só se o nome tiver "crim*",
+    //                                 "tribunal do júri" ou "execução penal";
     //   itens do grupo FAMÍLIA        -> só se o nome tiver "família" ou "infância";
     //   itens do TRIBUNAL DO JÚRI     -> só se o nome tiver "tribunal do júri".
     // Itens de Crime/FAMÍLIA/JÚRI de unidade que não casa com a regra são pulados mesmo
@@ -3115,7 +3116,7 @@
         const rel = relatorioPorCfg(cfg);
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
-        if (rel && rel.categoriaEspecifica === 'crime') return !/crim/.test(nome);
+        if (rel && rel.categoriaEspecifica === 'crime') return !/crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais/.test(nome);
         if (dominio === 'juri') return !/tribunal\s+do\s+juri/.test(nome);
         if (dominio === 'familia') {
             if (cfg === CFG_AVERIGUACAO_PATERNIDADE && !atuacaoEhFamilia(atuacao)) return true;
