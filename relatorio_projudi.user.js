@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.35
+// @version      26.36
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -33,82 +33,123 @@
     // sem @noframes (ver comentário grande de IDB_NOME logo abaixo), duas frames podem
     // gravar quase ao mesmo tempo e uma sobrescrever a linha da outra (leitura-e-escrita
     // não é atômica entre frames) — aceitável para um log de diagnóstico, não crítico.
-    const CHAVE_LOG_DETALHADO = 'projudi_log_detalhado';
-    // Pedido do usuário: uma automação com vários relatórios (cada um com dezenas de
-    // chamadas de gate/página) facilmente passava de 400 linhas antes do usuário chegar a
-    // abrir o log — as entradas de um relatório problemático (ex.: Transação Penal, bem no
-    // início da fila) já tinham rotacionado pra fora quando ele foi investigar. 2000 dá
-    // bem mais margem sem aproximar a cota do localStorage (cada linha tem ~100-300
-    // bytes — 2000 linhas ainda fica na casa de poucos centenas de KB).
+    // O log fica num IndexedDB PRÓPRIO (projudi_log_db), uma linha por registro, e NÃO no
+    // localStorage nem num único array regravado a cada linha. Motivos (bugs relatados:
+    // "o log reseta toda vez que muda de página" e linhas faltando):
+    //   - o localStorage da página enche com os dados coletados; com ele cheio, setItem
+    //     falha e o log (e qualquer controle gravado nele) para de funcionar em silêncio;
+    //   - regravar o array inteiro a cada linha é leitura-e-escrita: as várias frames do
+    //     Projudi (sem @noframes) se atropelavam e uma sobrescrevia o log da outra;
+    //   - IndexedDB tem cota muito maior, é compartilhado entre frames/páginas da origem e
+    //     o "add" de um registro é atômico — nenhuma frame apaga a linha de outra.
+    const LOG_DB_NOME = 'projudi_log_db';
+    const LOG_DB_STORE = 'linhas';
     const LOG_DETALHADO_MAX = 5000;
-    // Bug relatado pelo usuário ("linhas.push is not a function", centenas de vezes no
-    // console): JSON.parse pode ter sucesso mas devolver algo que não é array (ex.: a
-    // chave já continha outro valor por algum motivo) — sem o Array.isArray abaixo, o
-    // valor não-array passava direto pra quem chama, que quebrava ao tentar .push nele.
-    // Também nunca deixa lerLogDetalhado() propagar exceção — quem chama sempre recebe um
-    // array de verdade, mesmo vazio.
-    // Persistência (pedido do usuário: o log deve ser mantido): o armazenamento principal é
-    // o GM_setValue/GM_getValue do Tampermonkey — compartilhado por todas as frames, fora
-    // da cota pequena do localStorage da página (que já estourou com dados grandes e
-    // deixava o log parar de gravar) e sobrevive a "limpar dados do site". localStorage fica
-    // como reserva (e para migrar o log que já existia nele).
-    function lerLogBruto() {
-        try {
-            if (typeof GM_getValue === 'function') {
-                const v = GM_getValue(CHAVE_LOG_DETALHADO, null);
-                if (v) return v;
-            }
-        } catch (e) { /* cai para o localStorage */ }
-        try { return store.getItem(CHAVE_LOG_DETALHADO); } catch (e) { return null; }
+    let logDbPromise = null;
+    let logEscritasDesdePoda = 0;
+    // Cópia em memória das últimas linhas desta frame: se o IndexedDB não abrir (modo
+    // privativo etc.), a caixa do painel ainda mostra o que esta frame registrou.
+    const logMemoria = [];
+    function abrirLogDb() {
+        if (logDbPromise) return logDbPromise;
+        logDbPromise = new Promise(resolve => {
+            try {
+                const req = indexedDB.open(LOG_DB_NOME, 1);
+                req.onupgradeneeded = () => { req.result.createObjectStore(LOG_DB_STORE, { autoIncrement: true }); };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => resolve(null);
+                req.onblocked = () => resolve(null);
+            } catch (e) { resolve(null); }
+        });
+        return logDbPromise;
     }
-    function gravarLogBruto(json) {
-        let gravou = false;
+    async function lerLogDetalhado() {
         try {
-            if (typeof GM_setValue === 'function') { GM_setValue(CHAVE_LOG_DETALHADO, json); gravou = true; }
-        } catch (e) { /* tenta o localStorage */ }
-        try { store.setItem(CHAVE_LOG_DETALHADO, json); gravou = true; } catch (e) { /* cota cheia: o GM já guardou */ }
-        return gravou;
+            const db = await abrirLogDb();
+            if (!db) return logMemoria.slice();
+            const regs = await new Promise(resolve => {
+                try {
+                    const req = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE).getAll();
+                    req.onsuccess = () => resolve(req.result || []);
+                    req.onerror = () => resolve([]);
+                } catch (e) { resolve([]); }
+            });
+            return regs.map(r => r && r.linha).filter(Boolean);
+        } catch (e) { return logMemoria.slice(); }
     }
-    function apagarLogBruto() {
-        try { if (typeof GM_setValue === 'function') GM_setValue(CHAVE_LOG_DETALHADO, ''); } catch (e) { /* ignora */ }
-        try { store.removeItem(CHAVE_LOG_DETALHADO); } catch (e) { /* ignora */ }
-    }
-    function lerLogDetalhado() {
+    async function apagarLogDetalhado() {
+        logMemoria.length = 0;
         try {
-            const v = JSON.parse(lerLogBruto() || '[]');
-            return Array.isArray(v) ? v : [];
-        } catch (e) { return []; }
+            const db = await abrirLogDb();
+            if (!db) return;
+            await new Promise(resolve => {
+                try {
+                    const tx = db.transaction(LOG_DB_STORE, 'readwrite');
+                    tx.objectStore(LOG_DB_STORE).clear();
+                    tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+                } catch (e) { resolve(); }
+            });
+        } catch (e) { /* ignora */ }
+    }
+    // Mantém no máximo LOG_DETALHADO_MAX linhas, apagando as mais antigas.
+    function podarLogDb(db) {
+        try {
+            const tx = db.transaction(LOG_DB_STORE, 'readwrite');
+            const os = tx.objectStore(LOG_DB_STORE);
+            const cont = os.count();
+            cont.onsuccess = () => {
+                let excesso = cont.result - LOG_DETALHADO_MAX;
+                if (excesso <= 0) return;
+                const cur = os.openCursor();
+                cur.onsuccess = () => {
+                    const c = cur.result;
+                    if (c && excesso-- > 0) { c.delete(); c.continue(); }
+                };
+            };
+        } catch (e) { /* poda é só manutenção */ }
+    }
+    async function gravarLinhaNoDb(linha) {
+        try {
+            const db = await abrirLogDb();
+            if (!db) return;
+            await new Promise(resolve => {
+                try {
+                    const tx = db.transaction(LOG_DB_STORE, 'readwrite');
+                    tx.objectStore(LOG_DB_STORE).add({ ts: Date.now(), linha });
+                    tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+                } catch (e) { resolve(); }
+            });
+            if (++logEscritasDesdePoda >= 200) { logEscritasDesdePoda = 0; podarLogDb(db); }
+        } catch (e) { /* nunca deixa o log quebrar quem chamou */ }
     }
     // Linhas "principais" (resumo legível): começam, depois da hora, com um marcador —
-    // ▶ início de etapa, ✔ concluído, ⏭ pulado, ═ cabeçalho de unidade, ⚠ aviso, ✖ erro.
-    // Todo o resto é detalhe técnico (diagnóstico), visível ao marcar "Mostrar detalhes".
-    const RE_LINHA_PRINCIPAL = /^\[[^\]]*\] [▶✔⏭═⚠✖]/;
+    // ▶ início de etapa, ✔ concluído, • passo realizado, ⏭ pulado, ═ cabeçalho de unidade,
+    // ⚠ aviso, ✖ erro. Todo o resto é detalhe técnico (diagnóstico), visível ao marcar
+    // "Mostrar detalhes".
+    const RE_LINHA_PRINCIPAL = /^\[[^\]]*\] [▶✔•⏭═⚠✖]/;
     function logMostraDetalhes() {
         try { return store.getItem('projudi_log_mostrar_detalhes') === '1'; } catch (e) { return false; }
     }
-    function atualizarLogDetalhadoUI() {
+    let atualizandoLogUI = false;
+    async function atualizarLogDetalhadoUI() {
+        if (atualizandoLogUI) return;
         try {
             const caixa = document.getElementById('pa-log-detalhado');
-            if (!caixa) return;
-            const todas = lerLogDetalhado();
+            const wrap = document.getElementById('pa-log-wrap');
+            if (!caixa || (wrap && wrap.style.display === 'none')) return; // log fechado: não gasta leitura
+            atualizandoLogUI = true;
+            const todas = await lerLogDetalhado();
             const linhas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
-            caixa.textContent = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
-            caixa.scrollTop = caixa.scrollHeight;
+            const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
+            if (caixa.textContent !== texto) {
+                // Só rola para o fim se o usuário já estava no fim — senão não dá pra subir e ler.
+                const noFim = caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight < 30;
+                caixa.textContent = texto;
+                if (noFim) caixa.scrollTop = caixa.scrollHeight;
+            }
         } catch (e) { /* nunca deixa o log detalhado quebrar quem chamou */ }
+        finally { atualizandoLogUI = false; }
     }
-    // Registra uma linha no log detalhado do painel E no console (console.log continua
-    // funcionando exatamente como antes — isto é um ACRÉSCIMO, não substitui o console
-    // pra quem prefere DevTools). Use nos pontos que já eram logados via console.log e
-    // que ajudam a diagnosticar decisões da automação (gates, "zero resultados", linhas
-    // rejeitadas na coleta, avanço de fila) — não é pra logar TUDO, só o que interessa
-    // pra depuração.
-    //
-    // TUDO abaixo do console.log fica dentro de um try/catch — bug relatado pelo usuário
-    // ("a extensão sequer aparece" depois deste recurso entrar): localStorage tem cota
-    // pequena (~5-10MB, ver comentário grande de IDB_NOME) e já estourou antes com dados
-    // grandes; logPainel ficou bem mais chamado que os console.log originais (toda
-    // página, toda linha coletada), então setItem pode lançar QuotaExceededError — sem
-    // proteção, isso quebrava a automação inteira só por causa do log de diagnóstico.
     // Serializa o "extra" de uma linha de log: Error vira "nome: mensagem" (JSON.stringify
     // de um Error dá "{}", escondendo a causa) e qualquer valor é truncado, pra uma linha
     // com um array enorme (ex.: tentativas de decodificação) não estourar a cota.
@@ -121,25 +162,23 @@
     }
     function gravarLinhaLog(prefixo, msg, extra) {
         try {
-            const linhas = lerLogDetalhado();
             let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${prefixo}${msg}`;
             if (extra !== undefined) linha += ' ' + extraParaLog(extra);
-            linhas.push(linha);
-            if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
-            gravarLogBruto(JSON.stringify(linhas));
-            atualizarLogDetalhadoUI();
+            logMemoria.push(linha);
+            if (logMemoria.length > 500) logMemoria.splice(0, logMemoria.length - 500);
+            gravarLinhaNoDb(linha).then(atualizarLogDetalhadoUI);
         } catch (e) {
-            console.warn('[Projudi] logPainel falhou (provável localStorage cheio) — log do painel pode ficar incompleto, mas a automação continua normalmente:', e);
+            console.warn('[Projudi] falha ao registrar no log do painel — a automação continua normalmente:', e);
         }
     }
+    // Registra uma linha no log do painel E no console (o console.log continua funcionando
+    // como antes). Mensagens que começam com um marcador (▶ ✔ • ⏭ ═) aparecem no resumo;
+    // as demais são detalhe técnico. Nunca lança exceção.
     function logPainel(msg, extra) {
         if (extra !== undefined) console.log(msg, extra); else console.log(msg);
         gravarLinhaLog('', msg, extra);
     }
-    // Variantes com nível: mesmas saídas do console.warn/console.error de antes, mas
-    // também registradas no log do painel (pedido do usuário: o log deve mostrar TODOS os
-    // passos — antes só os console.log escolhidos a dedo apareciam, o resto da automação
-    // ficava só no console do navegador).
+    // Variantes com nível (console.warn/console.error + linha com ⚠/✖ no log).
     function logPainelAviso(msg, extra) {
         if (extra !== undefined) console.warn(msg, extra); else console.warn(msg);
         gravarLinhaLog('⚠ ', msg, extra);
@@ -148,18 +187,15 @@
         if (extra !== undefined) console.error(msg, extra); else console.error(msg);
         gravarLinhaLog('✖ ', msg, extra);
     }
-    // Para funções chamadas em polling (setInterval de 2s em TODAS as frames, ex.
-    // capturarOutrosIndicadoresPainelJuntadas): só registra quando a mensagem MUDA em
-    // relação à última registrada com a mesma chave — sem isso, o mesmo "painel ainda não
-    // carregou" se repetia dezenas de vezes (uma por tick por frame), enterrando o resto
-    // do log. A última mensagem fica no localStorage (compartilhada entre frames).
+    // Para funções chamadas em polling (setInterval de 2s em TODAS as frames): só registra
+    // quando a mensagem MUDA em relação à última com a mesma chave NESTA frame. A
+    // comparação é em memória de propósito — a versão que guardava a última mensagem no
+    // localStorage deixava de funcionar quando ele enchia, e o aviso voltava a se repetir.
+    const ultimaMensagemPorChave = {};
     function logPainelSeMudou(chave, msg, extra) {
-        const k = 'projudi_log_dedupe_' + chave;
         const atual = extra === undefined ? msg : msg + ' ' + extraParaLog(extra);
-        try {
-            if (store.getItem(k) === atual) return;
-            store.setItem(k, atual);
-        } catch (e) { /* sem dedupe se o storage falhar: melhor repetir que perder */ }
+        if (ultimaMensagemPorChave[chave] === atual) return;
+        ultimaMensagemPorChave[chave] = atual;
         logPainel(msg, extra);
     }
 
@@ -4499,7 +4535,7 @@
         // aguardando retorno já é "coletado, zero registros", sem precisar visitar a tela.
         const n = parseInt((span.textContent || '0').trim(), 10) || 0;
         if (chave === 'mandadosretorno' && n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
-        logPainel(`[Auto Projudi Mandados] indo para a tela de resultados (alvo="${chave}", contador de aguardando retorno=${n})`);
+        logPainel(`▶ Mandados — indo para a tela de resultados (alvo="${chave}", contador de aguardando retorno=${n})`);
         link.click();
     }
 
@@ -16116,7 +16152,7 @@
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
-        logPainel(`[Projudi] status: ${msg}`);
+        logPainel(`• ${msg}`);
         const el = document.getElementById('exportar-status');
         if (el) el.textContent = msg;
     }
@@ -17193,7 +17229,7 @@
             // sozinho (sem esperar clique manual) — a fila de meses já foi preparada em
             // iniciarAutomacao() (ou por uma rodada anterior, ver criarColetor/continuar).
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
-                logPainel('[Projudi TM] automação: preenchendo e pesquisando o próximo mês da fila');
+                logPainel('▶ [Projudi TM] automação: preenchendo e pesquisando o próximo mês da fila');
                 store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
                 preencherEPesquisarTempoMedio();
                 return;
@@ -17204,7 +17240,7 @@
             // então "Pendentes" sempre traz TODAS as conclusões pendentes, sem filtro de
             // data; ver preencherEPesquisarConclusoes).
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_conclusoes') {
-                logPainel('[Projudi Conclusões] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Conclusões] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_conclusoes');
                 preencherEPesquisarConclusoes();
                 return;
@@ -17265,7 +17301,7 @@
             if (estadoAtual === 'preenchendo_paralisados' || estadoAtual === 'preenchendo_remessas') {
                 const chave = estadoAtual.slice('preenchendo_'.length);
                 const opcaoBuscaValor = chave === 'remessas' ? '3' : '1';
-                logPainel(`[Projudi Paralisado] automação: preenchendo e pesquisando (${chave})`);
+                logPainel(`▶ [Projudi Paralisado] automação: preenchendo e pesquisando (${chave})`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + chave);
                 preencherEPesquisarParalisado(opcaoBuscaValor, 30, chave);
                 return;
@@ -17305,7 +17341,7 @@
         if (formularioAudiencias()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_audiencias') {
-                logPainel('[Projudi Audiências] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Audiências] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_audiencias');
                 preencherEPesquisarAudiencias();
                 return;
@@ -17330,7 +17366,7 @@
         if (formularioPautaAudiencias()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_audienciasdesignadas') {
-                logPainel('[Projudi Audiências Designadas] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Audiências Designadas] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_audienciasdesignadas');
                 preencherEPesquisarPautaAudiencias();
                 return;
@@ -17441,7 +17477,7 @@
         if (formularioApreensoes()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_apreensoes') {
-                logPainel('[Projudi Apreensões] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Apreensões] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_apreensoes');
                 preencherEPesquisarApreensoes();
                 return;
@@ -17484,7 +17520,7 @@
         if (formularioPrescricoes()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_prescricoes') {
-                logPainel('[Projudi Prescrições] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Prescrições] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_prescricoes');
                 preencherEPesquisarPrescricoes();
                 return;
@@ -17509,7 +17545,7 @@
         if (formularioMonitoracaoExpiradas()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_monitoracaoexpiradas') {
-                logPainel('[Projudi Monitoração Expirada] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Monitoração Expirada] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_monitoracaoexpiradas');
                 preencherEPesquisarMonitoracaoExpiradas();
                 return;
@@ -17535,7 +17571,7 @@
         if (formularioMedidasAlternativasAtraso()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_medidasalternativasatraso') {
-                logPainel('[Projudi Medidas Alternativas em Atraso] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Medidas Alternativas em Atraso] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_medidasalternativasatraso');
                 preencherEPesquisarMedidasAlternativasAtraso();
                 return;
@@ -17562,7 +17598,7 @@
         if (formularioBuscaAvancada()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_averiguacaopaternidade') {
-                logPainel('[Projudi Averiguação Paternidade] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Averiguação Paternidade] automação: preenchendo e pesquisando');
                 preencherEPesquisarAveriguacaoPaternidade();
                 return;
             }
@@ -17579,7 +17615,7 @@
         if (formularioHabilitacoesAdocao()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_habilitacoesadocao') {
-                logPainel('[Projudi Habilitações Adoção] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Habilitações Adoção] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_habilitacoesadocao');
                 preencherEPesquisarHabilitacoesAdocao();
                 return;
@@ -17629,20 +17665,20 @@
             const estadoAtual = store.getItem(AUTO_ESTADO);
             // Internados (VIJ - Seção Infracional): mesma tela e mesmo preenchimento.
             if (estadoAtual === 'preenchendo_internados') {
-                logPainel('[Projudi Internados] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Internados] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_internados');
                 preencherEPesquisarAcolhidos();
                 return;
             }
             // Prisões - Alimentos (FAMÍLIA): mesma tela e mesmo preenchimento.
             if (estadoAtual === 'preenchendo_prisoesalimentos') {
-                logPainel('[Projudi Prisões - Alimentos] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Prisões - Alimentos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_prisoesalimentos');
                 preencherEPesquisarAcolhidos();
                 return;
             }
             if (estadoAtual === 'preenchendo_acolhidos') {
-                logPainel('[Projudi Acolhidos] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Acolhidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_acolhidos');
                 preencherEPesquisarAcolhidos();
                 return;
@@ -17664,7 +17700,7 @@
         if (formularioSuspensoPrazo()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_suspensosprazo') {
-                logPainel('[Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_suspensosprazo');
                 preencherEPesquisarSuspensoPrazo();
                 return;
@@ -17689,7 +17725,7 @@
         if (formularioInstanciaRecursal()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_instanciarecursal') {
-                logPainel('[Projudi Instância Recursal] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Instância Recursal] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_instanciarecursal');
                 preencherEPesquisarInstanciaRecursal();
                 return;
@@ -17714,7 +17750,7 @@
         if (formularioProcessosRemetidos()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_remetidos') {
-                logPainel('[Projudi Processos Remetidos] automação: preenchendo e pesquisando');
+                logPainel('▶ [Projudi Processos Remetidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_remetidos');
                 preencherEPesquisarProcessosRemetidos();
                 return;
@@ -17739,7 +17775,7 @@
         if (formularioAtivosClasse()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_ativosclasse') {
-                logPainel('[Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
+                logPainel('▶ [Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_ativosclasse');
                 preencherEPesquisarAtivosClasse();
                 return;
@@ -17771,6 +17807,10 @@
             cfg = emAndamento || CFG_RETORNO;
         }
         const coletor = criarColetor(cfg);
+        {
+            const relPagina = relatorioPorCfg(cfg);
+            logPainelSeMudou('pagina_aberta', `• Página aberta: ${relPagina ? relPagina.rotulo : cfg.prefixo} (${location.pathname})`);
+        }
 
         const mk = (id, title, onclick, texto) => {
             const b = document.createElement('button');
@@ -19817,7 +19857,7 @@
             // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
             // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
             store.setItem(AUTO_ESTADO, 'coletando_juntadas');
-            logPainel('[Auto Projudi Juntadas] indo para a tela de resultados de Juntadas');
+            logPainel('▶ Juntadas — indo para a tela de resultados');
             link.click();
             return;
         }
@@ -20802,7 +20842,12 @@
                 }
                 return txt;
             }
-            if (estado.startsWith('ir_')) { const rel = relatorioPorChave(estado.slice(3)); return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`; }
+            if (estado.startsWith('ir_')) {
+                const rel = relatorioPorChave(estado.slice(3));
+                // Item que não se aplica à atribuição: não vai a lugar nenhum, é pulado.
+                if (rel && foraDaAtribuicao(rel.cfg, atuacaoParaDecisao())) return `Pulando <strong>${rel.rotulo}</strong> (não se aplica a esta atribuição)…`;
+                return `Indo para <strong>${rel ? rel.rotulo : estado}</strong>…`;
+            }
             if (travado) {
                 const rel = relatorioPorChave(estado.slice(8));
                 const nome = rel ? rel.rotulo : estado.slice(8);
@@ -21163,7 +21208,7 @@
                     <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
                     <div id="pa-log-wrap" style="display:none;">
                         <label class="pa-log-detalhes"><input type="checkbox" id="pa-log-detalhes"> Mostrar detalhes técnicos (o resumo mostra só etapas, itens pulados, avisos e erros)</label>
-                        <pre id="pa-log-detalhado" class="pa-log-box"></pre>
+                        <pre id="pa-log-detalhado" class="pa-log-box" style="max-height:260px;overflow-y:scroll;"></pre>
                         <button id="pa-log-baixar" class="pa-link" type="button" title="Salva o log completo (todas as linhas guardadas, não só o que cabe na caixa) num .txt para enviar/investigar">⬇ Baixar log completo</button>
                         <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
                     </div>
@@ -21232,16 +21277,15 @@
             atualizarLogDetalhadoUI();
         };
         painel.querySelector('#pa-log-limpar').onclick = () => {
-            apagarLogBruto();
-            atualizarLogDetalhadoUI();
+            apagarLogDetalhado().then(atualizarLogDetalhadoUI);
         };
         // Pedido do usuário: "implementar algo no log pra encontrar o problema de vez,
         // em vez de ficar adivinhando" — baixa TODAS as linhas guardadas (até
         // LOG_DETALHADO_MAX) como .txt, pra anexar/colar ao relatar um bug. A caixa na
         // tela já mostra tudo (não trunca à parte), mas um arquivo é mais fácil de
         // copiar/colar inteiro do que selecionar texto dentro do painel.
-        painel.querySelector('#pa-log-baixar').onclick = () => {
-            const linhas = lerLogDetalhado();
+        painel.querySelector('#pa-log-baixar').onclick = async () => {
+            const linhas = await lerLogDetalhado();
             const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
             baixarBlob(new Blob([texto], { type: 'text/plain;charset=utf-8' }), `projudi_log_${dataArquivo()}.txt`);
         };
