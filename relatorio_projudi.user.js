@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.39
+// @version      26.40
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13880,8 +13880,7 @@
             // distintos, no lugar do total de registros + internação mais antiga (a lista
             // abaixo já vem da internação mais antiga à mais recente).
             const pessoas = contarPessoasDistintas(r);
-            const subsPessoas = pessoas !== r.length ? [`${r.length} registro(s) no Projudi`] : [];
-            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(pessoas), subsPessoas, true, COR.azul, COR.azul);
+            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(pessoas), [], true, COR.azul, COR.azul);
             desenharCard(doc, m + kW + gap, kY, kW, kH, 'Processos', String(contarProcessosDistintos(r)), [], true, COR.ambar);
         } else {
             // Total de REGISTROS (uma linha por criança/adolescente, não por processo
@@ -13929,13 +13928,16 @@
     // registros coletados (sem pesquisa extra por motivo no Projudi), do maior para o
     // menor, com linha de total. Usado no resumo (Relatório PDF) e nas Tabelas
     // Discriminadas (ver descreverSecaoPDF). Quebra de página fica a cargo do autoTable.
-    function contarAcolhidosPorMotivo(dados) {
+    // porPessoa (Internados, pedido do usuário): conta adolescentes distintos por motivo
+    // (Nome + Nascimento, ver contarPessoasDistintas), não linhas/internações.
+    function contarAcolhidosPorMotivo(dados, porPessoa) {
         const mapa = new Map();
         (dados || []).forEach(d => {
             const motivo = (d.motivo || '').trim() || 'Não informado';
-            mapa.set(motivo, (mapa.get(motivo) || 0) + 1);
+            if (!mapa.has(motivo)) mapa.set(motivo, []);
+            mapa.get(motivo).push(d);
         });
-        return [...mapa.entries()].map(([motivo, total]) => ({ motivo, total }))
+        return [...mapa.entries()].map(([motivo, regs]) => ({ motivo, total: porPessoa ? contarPessoasDistintas(regs) : regs.length }))
             .sort((a, b) => b.total - a.total || a.motivo.localeCompare(b.motivo, 'pt-BR'));
     }
     function desenharTabelaAcolhidosPorMotivo(doc, dados, y, comIndice, cfg) {
@@ -13951,7 +13953,8 @@
         // A tabela é curta (uma linha por motivo) — não deixa partir entre páginas: se o
         // título + cabeçalho + linhas + total (~7,5 mm cada) não couberem, vai inteira
         // para a próxima página.
-        const linhasMotivo = contarAcolhidosPorMotivo(r);
+        const porPessoa = cfg === CFG_INTERNADOS;
+        const linhasMotivo = contarAcolhidosPorMotivo(r, porPessoa);
         const alturaEstimada = 10 + (linhasMotivo.length + 2) * 7.5;
         if (y + alturaEstimada > ph - 14) {
             doc.addPage();
@@ -13962,7 +13965,9 @@
         doc.autoTable({
             head: [[t.motivo, 'Total']],
             body: linhasMotivo.map(it => [it.motivo, String(it.total)]),
-            foot: [['Total', { content: String(r.length), styles: { halign: 'center' } }]],
+            // Internados: total de adolescentes distintos (mesmo número do card) — um
+            // adolescente com internações por motivos diferentes conta uma vez só aqui.
+            foot: [['Total', { content: String(porPessoa ? contarPessoasDistintas(r) : r.length), styles: { halign: 'center' } }]],
             startY: y + 8,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
