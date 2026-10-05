@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.39
+// @version      26.40
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18652,10 +18652,10 @@
             <div class="pa-body">
                 <div id="projudi-mu-contador" class="pa-unidades">0 unidade(s) marcada(s) na árvore ao lado</div>
                 <div class="pa-group">
-                    <p class="pa-group-lbl">Predefinições (pode ligar várias)</p>
+                    <p class="pa-group-lbl">Predefinições (pode selecionar mais de um)
+                        <span id="projudi-mu-perfil-manual" class="pa-chip-manual" style="display:none;" title="A marcação foi alterada à mão e já não corresponde às predefinições selecionadas">● manual</span></p>
                     <div class="pa-chips">
                         ${PERFIS_MU.map(pf => `<button class="pa-chip" type="button" data-perfil="${pf.id}">${pf.rotulo}</button>`).join('')}
-                        <span id="projudi-mu-perfil-manual" class="pa-chip-manual" style="display:none;" title="A marcação foi alterada à mão e já não corresponde às predefinições ligadas">● manual</span>
                     </div>
                 </div>
                 <div class="pa-group">
@@ -18691,7 +18691,15 @@
 
         const contador = painel.querySelector('#projudi-mu-contador');
         function atualizarContador() {
-            contador.textContent = `${contarSelecionadas()} unidade(s) marcada(s) na árvore ao lado`;
+            const marcadas = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
+            contador.textContent = `${marcadas.length} unidade(s) marcada(s) na árvore ao lado`;
+            // Lista as unidades marcadas (pedido do usuário) — textContent, sem innerHTML.
+            marcadas.forEach(t => {
+                const li = document.createElement('div');
+                li.className = 'pa-unidade-item';
+                li.textContent = '• ' + t;
+                contador.appendChild(li);
+            });
         }
         document.querySelectorAll('.projudi-mu-chk').forEach(chk => {
             chk.addEventListener('change', atualizarContador);
@@ -21580,11 +21588,12 @@
             color: #82807A; cursor: pointer; border-bottom: 2px solid transparent; text-align: center;
             font-family: inherit;
         }
-        #projudi-mu-painel .pa-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
-        #projudi-mu-painel .pa-chip { border: 1px solid #D0CEC8; background: #fff; color: #52514E; border-radius: 12px; padding: 3px 10px; font-size: .72em; font-weight: 600; cursor: pointer; font-family: inherit; }
+        #projudi-mu-painel .pa-chips { display: flex; flex-wrap: nowrap; gap: 3px; }
+        #projudi-mu-painel .pa-chip { flex: 1 1 0; min-width: 0; border: 1px solid #D0CEC8; background: #fff; color: #52514E; border-radius: 10px; padding: 2px 0; font-size: .68em; font-weight: 600; cursor: pointer; font-family: inherit; white-space: nowrap; text-align: center; }
         #projudi-mu-painel .pa-chip:hover { border-color: #3A5A7D; }
         #projudi-mu-painel .pa-chip.ativo { background: #3A5A7D; border-color: #3A5A7D; color: #fff; }
-        #projudi-mu-painel .pa-chip-manual { font-size: .68em; color: #B5651D; font-weight: 600; }
+        #projudi-mu-painel .pa-chip-manual { margin-left: 6px; font-size: .95em; color: #B5651D; text-transform: none; letter-spacing: 0; }
+        #projudi-mu-painel .pa-unidade-item { margin-top: 2px; word-break: break-word; }
         #painel-automacao .pa-tab:hover , #projudi-mu-painel .pa-tab:hover { color: #52514E; }
         #painel-automacao .pa-tab.active , #projudi-mu-painel .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
 
