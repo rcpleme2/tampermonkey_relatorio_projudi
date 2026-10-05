@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.44
+// @version      26.45
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3293,13 +3293,32 @@
     // Acolhidos, Internados e Prisões - Alimentos (pedido do usuário): o Projudi lista
     // uma linha por acolhimento/internação/prisão, então a mesma pessoa aparece mais de
     // uma vez (vários acolhimentos/internações/prisões/processos) e o total de linhas
-    // conta em duplicidade. Pessoa = Nome + Data de Nascimento (nome sem acentos/
+    // conta em duplicidade. Pessoa = Nome + Data de Nascimento (nomes sem acentos/
     // maiúsculas/espaços extras); registro sem nome não é fundido com nenhum outro.
+    // Data de Nascimento em branco (pedido do usuário): só é a mesma pessoa se houver
+    // registro com o mesmo Nome E o mesmo nome da Mãe (com ou sem nascimento); sem Mãe
+    // ou sem quem bata, conta como pessoa diferente.
     function contarPessoasDistintas(dados) {
+        const norm = (texto) => normalizarAtuacao(texto).replace(/\s+/g, ' ').trim();
+        const regs = dados || [];
         const chaves = new Set();
-        (dados || []).forEach((d, i) => {
-            const nome = normalizarAtuacao(d.nome).replace(/\s+/g, ' ').trim();
-            chaves.add(nome ? `${nome}|${d.nascimento || ''}` : `#${i}`);
+        const pessoaPorNomeMae = new Map();
+        regs.forEach(d => {
+            const nome = norm(d.nome);
+            if (!nome || !d.nascimento) return;
+            const chave = `${nome}|${d.nascimento}`;
+            chaves.add(chave);
+            const nomeMae = `${nome}|${norm(d.mae)}`;
+            if (norm(d.mae) && !pessoaPorNomeMae.has(nomeMae)) pessoaPorNomeMae.set(nomeMae, chave);
+        });
+        regs.forEach((d, i) => {
+            const nome = norm(d.nome);
+            if (nome && d.nascimento) return;
+            const mae = norm(d.mae);
+            if (!nome || !mae) { chaves.add(`#${i}`); return; }
+            const nomeMae = `${nome}|${mae}`;
+            if (!pessoaPorNomeMae.has(nomeMae)) pessoaPorNomeMae.set(nomeMae, `sem-nascimento|${nomeMae}`);
+            chaves.add(pessoaPorNomeMae.get(nomeMae));
         });
         return chaves.size;
     }
