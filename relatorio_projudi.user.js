@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.38
+// @version      26.39
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3288,6 +3288,22 @@
         if (mSo) return parseInt(mSo[1], 10);
         const ts = parseDataBR(dataAcolhimento);
         return ts == null ? null : Math.floor((Date.now() - ts) / 86400000);
+    }
+
+    // Internados (pedido do usuário): o Projudi lista uma linha por internação, então o
+    // mesmo adolescente aparece mais de uma vez (várias internações/processos) e o total
+    // de linhas conta em duplicidade. Pessoa = Nome + Data de Nascimento (nome sem
+    // acentos/maiúsculas/espaços extras); registro sem nome não é fundido com nenhum outro.
+    function contarPessoasDistintas(dados) {
+        const chaves = new Set();
+        (dados || []).forEach((d, i) => {
+            const nome = normalizarAtuacao(d.nome).replace(/\s+/g, ' ').trim();
+            chaves.add(nome ? `${nome}|${d.nascimento || ''}` : `#${i}`);
+        });
+        return chaves.size;
+    }
+    function contarProcessosDistintos(dados) {
+        return new Set((dados || []).map((d, i) => d.processo || `#${i}`)).size;
     }
 
     // Acolhidos há mais tempo primeiro (data do acolhimento mais antiga; sem data, no fim).
@@ -11563,7 +11579,9 @@
             const detalheAntigo = antigo ? `Mais antigo: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
             return {
                 nome: t.titulo,
-                indicador: `${secao.dados.length} ${t.indicador}`,
+                // Internados: adolescentes distintos (Nome + Nascimento), não linhas do
+                // Projudi — ver contarPessoasDistintas.
+                indicador: `${cfg === CFG_INTERNADOS ? contarPessoasDistintas(secao.dados) : secao.dados.length} ${t.indicador}`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
             };
@@ -13856,16 +13874,27 @@
         const kH = 28;
         const kW = (uw - gap) / 2;
 
-        // Total de REGISTROS (uma linha por criança/adolescente, não por processo
-        // distinto), igual ao "N registro(s) encontrado(s)" da tela do Projudi.
-        desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(r.length), [], true, COR.azul, COR.azul);
+        if (cfg === CFG_INTERNADOS) {
+            // Internados (pedido do usuário): adolescentes DISTINTOS (Nome + Data de
+            // Nascimento — o Projudi repete o adolescente a cada internação) + processos
+            // distintos, no lugar do total de registros + internação mais antiga (a lista
+            // abaixo já vem da internação mais antiga à mais recente).
+            const pessoas = contarPessoasDistintas(r);
+            const subsPessoas = pessoas !== r.length ? [`${r.length} registro(s) no Projudi`] : [];
+            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(pessoas), subsPessoas, true, COR.azul, COR.azul);
+            desenharCard(doc, m + kW + gap, kY, kW, kH, 'Processos', String(contarProcessosDistintos(r)), [], true, COR.ambar);
+        } else {
+            // Total de REGISTROS (uma linha por criança/adolescente, não por processo
+            // distinto), igual ao "N registro(s) encontrado(s)" da tela do Projudi.
+            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(r.length), [], true, COR.azul, COR.azul);
 
-        const antigo = acharMaisAntigo(r, 'dataAcolhimento');
-        const valAntigo = antigo ? antigo.dataStr : '—';
-        const subsAntigo = antigo
-            ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
-            : ['Data não disponível'];
-        desenharCard(doc, m + kW + gap, kY, kW, kH, t.cardAntigo, valAntigo, subsAntigo, true, COR.ambar);
+            const antigo = acharMaisAntigo(r, 'dataAcolhimento');
+            const valAntigo = antigo ? antigo.dataStr : '—';
+            const subsAntigo = antigo
+                ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
+                : ['Data não disponível'];
+            desenharCard(doc, m + kW + gap, kY, kW, kH, t.cardAntigo, valAntigo, subsAntigo, true, COR.ambar);
+        }
 
         if (r.length > 0) {
             const yTab = kY + kH + gap;
