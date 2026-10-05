@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.38
+// @version      26.39
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18652,6 +18652,13 @@
             <div class="pa-body">
                 <div id="projudi-mu-contador" class="pa-unidades">0 unidade(s) marcada(s) na árvore ao lado</div>
                 <div class="pa-group">
+                    <p class="pa-group-lbl">Predefinições (pode ligar várias)</p>
+                    <div class="pa-chips">
+                        ${PERFIS_MU.map(pf => `<button class="pa-chip" type="button" data-perfil="${pf.id}">${pf.rotulo}</button>`).join('')}
+                        <span id="projudi-mu-perfil-manual" class="pa-chip-manual" style="display:none;" title="A marcação foi alterada à mão e já não corresponde às predefinições ligadas">● manual</span>
+                    </div>
+                </div>
+                <div class="pa-group">
                     <p class="pa-group-lbl">Relatórios a extrair</p>
                 </div>
                 <div class="pa-links">
@@ -18715,6 +18722,62 @@
             painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => { c.checked = false; });
             salvarSelecoesRelatorios();
         };
+        // Predefinições: chips-toggle; o conjunto marcado é a UNIÃO dos perfis ligados.
+        // Desligar um chip só desmarca o que nenhum outro chip ligado exige (a união é
+        // recalculada). "Todos" liga/desliga todos os chips. Marcar um checkbox à mão não
+        // mexe nos chips — só acende o aviso "● manual".
+        const chipsPerfil = [...painel.querySelectorAll('.pa-chip')];
+        const avisoManual = painel.querySelector('#projudi-mu-perfil-manual');
+        const checksRel = () => [...painel.querySelectorAll('.projudi-mu-rel-check[data-key]')];
+        function perfisLigados() { return chipsPerfil.filter(c => c.classList.contains('ativo')).map(c => c.dataset.perfil); }
+        function chavesDaUniao() {
+            const ligados = PERFIS_MU.filter(pf => perfisLigados().includes(pf.id));
+            return new Set(REPORTS_AUTOMACAO.filter(r => ligados.some(pf => relatorioNoPerfilMU(r, pf))).map(r => r.key));
+        }
+        function atualizarAvisoManual() {
+            if (!avisoManual) return;
+            const ligados = perfisLigados();
+            if (!ligados.length) { avisoManual.style.display = 'none'; return; }
+            const uniao = chavesDaUniao();
+            const diverge = checksRel().some(c => c.checked !== uniao.has(c.dataset.key));
+            avisoManual.style.display = diverge ? '' : 'none';
+        }
+        function reaplicarPerfis() {
+            const uniao = chavesDaUniao();
+            checksRel().forEach(c => { c.checked = uniao.has(c.dataset.key); });
+            // checkboxes "pai" sintéticos (sem data-key) refletem o estado dos filhos
+            painel.querySelectorAll('.projudi-mu-rel-check[data-filhos]').forEach(pai => {
+                pai.checked = pai.dataset.filhos.split(',').every(k => uniao.has(k));
+            });
+            salvarSelecoesRelatorios();
+            atualizarAvisoManual();
+        }
+        function salvarPerfisLigados() { try { store.setItem(CHAVE_PERFIS_MU, JSON.stringify(perfisLigados())); } catch (e) {} }
+        chipsPerfil.forEach(chip => {
+            chip.onclick = () => {
+                const id = chip.dataset.perfil;
+                const ligar = !chip.classList.contains('ativo');
+                if (id === 'todos') {
+                    chipsPerfil.forEach(c => c.classList.toggle('ativo', ligar));
+                } else {
+                    chip.classList.toggle('ativo', ligar);
+                    const todosChip = chipsPerfil.find(c => c.dataset.perfil === 'todos');
+                    if (todosChip) {
+                        todosChip.classList.toggle('ativo', chipsPerfil.filter(c => c.dataset.perfil !== 'todos').every(c => c.classList.contains('ativo')));
+                    }
+                }
+                salvarPerfisLigados();
+                reaplicarPerfis();
+            };
+        });
+        try {
+            const salvos = desembrulharArray(store.getItem(CHAVE_PERFIS_MU)) || [];
+            chipsPerfil.forEach(c => c.classList.toggle('ativo', salvos.includes(c.dataset.perfil)));
+        } catch (e) {}
+        painel.querySelectorAll('.projudi-mu-rel-check').forEach(c => c.addEventListener('change', atualizarAvisoManual));
+        painel.querySelector('#projudi-mu-rel-marcar').addEventListener('click', atualizarAvisoManual);
+        painel.querySelector('#projudi-mu-rel-desmarcar').addEventListener('click', atualizarAvisoManual);
+        atualizarAvisoManual();
         const periodoTmSel = painel.querySelector('#projudi-mu-periodo-tm');
         if (periodoTmSel) periodoTmSel.addEventListener('change', () => {
             store.setItem('projudi_auto_periodo_tm', periodoTmSel.value);
@@ -19082,6 +19145,24 @@
     // Inclui "FAMÍLIA" (pedido do usuário: tudo associado a ela vem desmarcado).
     // Inclui "TRIBUNAL DO JÚRI" (só existe em unidades com competência de Júri).
     const DOMINIOS_VIJ = ['vijcivel', 'vijinfracional', 'familia', 'juri'];
+    // Predefinições do painel multiunidades (pedido do usuário): cada chip liga um conjunto
+    // de relatórios e vários chips podem ficar ligados ao mesmo tempo (vale a UNIÃO).
+    // "Gerais" = grupos cartorio+gabinete, presentes em todos os perfis. Crime inclui a
+    // categoria Crime (categoriaEspecifica) e TRIBUNAL DO JÚRI. "Todos" = tudo.
+    const PERFIS_MU = [
+        { id: 'civel',    rotulo: 'Cível',    grupos: [] },
+        { id: 'familia',  rotulo: 'Família',  grupos: ['familia'] },
+        { id: 'infancia', rotulo: 'Infância', grupos: ['vijcivel', 'vijinfracional'] },
+        { id: 'crime',    rotulo: 'Crime',    grupos: ['juri'], crime: true },
+        { id: 'todos',    rotulo: 'Todos',    todos: true },
+    ];
+    const GRUPOS_GERAIS_MU = ['cartorio', 'gabinete'];
+    const CHAVE_PERFIS_MU = 'projudi_mu_perfis';
+    function relatorioNoPerfilMU(r, perfil) {
+        if (perfil.todos) return true;
+        if (r.categoriaEspecifica === 'crime') return !!perfil.crime;
+        return GRUPOS_GERAIS_MU.includes(r.dominio) || perfil.grupos.includes(r.dominio);
+    }
     // Rótulos dos checkboxes "pai" SINTÉTICOS do checklist do painel — não são chaves de
     // REPORTS_AUTOMACAO (não têm cfg/navAlvo próprios, não entram na fila de automação),
     // só agrupam visualmente um conjunto de itens reais que apontam pra eles via
@@ -21499,6 +21580,11 @@
             color: #82807A; cursor: pointer; border-bottom: 2px solid transparent; text-align: center;
             font-family: inherit;
         }
+        #projudi-mu-painel .pa-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+        #projudi-mu-painel .pa-chip { border: 1px solid #D0CEC8; background: #fff; color: #52514E; border-radius: 12px; padding: 3px 10px; font-size: .72em; font-weight: 600; cursor: pointer; font-family: inherit; }
+        #projudi-mu-painel .pa-chip:hover { border-color: #3A5A7D; }
+        #projudi-mu-painel .pa-chip.ativo { background: #3A5A7D; border-color: #3A5A7D; color: #fff; }
+        #projudi-mu-painel .pa-chip-manual { font-size: .68em; color: #B5651D; font-weight: 600; }
         #painel-automacao .pa-tab:hover , #projudi-mu-painel .pa-tab:hover { color: #52514E; }
         #painel-automacao .pa-tab.active , #projudi-mu-painel .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
 
