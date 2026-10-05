@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.40
+// @version      26.41
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -18652,7 +18652,7 @@
             <div class="pa-body">
                 <div id="projudi-mu-contador" class="pa-unidades">0 unidade(s) marcada(s) na árvore ao lado</div>
                 <div class="pa-group">
-                    <p class="pa-group-lbl">Predefinições (pode selecionar mais de um)
+                    <p class="pa-group-lbl">Predefinições (1 ou +)
                         <span id="projudi-mu-perfil-manual" class="pa-chip-manual" style="display:none;" title="A marcação foi alterada à mão e já não corresponde às predefinições selecionadas">● manual</span></p>
                     <div class="pa-chips">
                         ${PERFIS_MU.map(pf => `<button class="pa-chip" type="button" data-perfil="${pf.id}">${pf.rotulo}</button>`).join('')}
@@ -21589,7 +21589,8 @@
             font-family: inherit;
         }
         #projudi-mu-painel .pa-chips { display: flex; flex-wrap: nowrap; gap: 3px; }
-        #projudi-mu-painel .pa-chip { flex: 1 1 0; min-width: 0; border: 1px solid #D0CEC8; background: #fff; color: #52514E; border-radius: 10px; padding: 2px 0; font-size: .68em; font-weight: 600; cursor: pointer; font-family: inherit; white-space: nowrap; text-align: center; }
+        /* !important + px: o CSS da página do Projudi sobrescrevia o tamanho do <button> e o texto estourava o chip */
+        #projudi-mu-painel .pa-chip { flex: 1 1 0 !important; min-width: 0 !important; width: auto !important; box-sizing: border-box !important; overflow: hidden; text-overflow: clip; border: 1px solid #D0CEC8; background: #fff; color: #52514E; border-radius: 10px; padding: 2px 1px !important; margin: 0 !important; font-size: 10px !important; line-height: 14px !important; font-weight: 600; letter-spacing: 0 !important; text-transform: none !important; cursor: pointer; font-family: inherit; white-space: nowrap; text-align: center; height: auto !important; }
         #projudi-mu-painel .pa-chip:hover { border-color: #3A5A7D; }
         #projudi-mu-painel .pa-chip.ativo { background: #3A5A7D; border-color: #3A5A7D; color: #fff; }
         #projudi-mu-painel .pa-chip-manual { margin-left: 6px; font-size: .95em; color: #B5651D; text-transform: none; letter-spacing: 0; }
