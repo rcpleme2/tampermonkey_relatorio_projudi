@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.36
+// @version      26.37
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -121,6 +121,17 @@
             });
             if (++logEscritasDesdePoda >= 200) { logEscritasDesdePoda = 0; podarLogDb(db); }
         } catch (e) { /* nunca deixa o log quebrar quem chamou */ }
+    }
+    // Preferências de aparência do painel (aberto/recolhido, log aberto). Guardadas no
+    // GM_setValue do Tampermonkey (sobrevive à troca de atribuição/página e não depende da
+    // cota do localStorage, que enche) e, de reserva, no localStorage.
+    function lerPrefPainel(chave) {
+        try { if (typeof GM_getValue === 'function') { const v = GM_getValue(chave, null); if (v !== null && v !== undefined) return String(v); } } catch (e) { /* cai para o localStorage */ }
+        try { return store.getItem(chave); } catch (e) { return null; }
+    }
+    function gravarPrefPainel(chave, valor) {
+        try { if (typeof GM_setValue === 'function') GM_setValue(chave, valor); } catch (e) { /* tenta o localStorage */ }
+        try { store.setItem(chave, valor); } catch (e) { /* cota cheia: o GM já guardou */ }
     }
     // Linhas "principais" (resumo legível): começam, depois da hora, com um marcador —
     // ▶ início de etapa, ✔ concluído, • passo realizado, ⏭ pulado, ═ cabeçalho de unidade,
@@ -21156,11 +21167,11 @@
             <div class="pa-head">
                 <span class="pa-titulo">Automação de relatórios</span>
                 <div class="pa-icons">
-                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="Expandir">▼</button>
+                    <button class="pa-icon-btn pa-btn-colapsar" type="button" title="${lerPrefPainel('projudi_pa_recolhido') === '0' ? 'Recolher' : 'Expandir'}">${lerPrefPainel('projudi_pa_recolhido') === '0' ? '▲' : '▼'}</button>
                     <button class="pa-icon-btn pa-btn-fechar" type="button" title="Fechar">✕</button>
                 </div>
             </div>
-            <div class="pa-body" style="display:none;">
+            <div class="pa-body" style="display:${lerPrefPainel('projudi_pa_recolhido') === '0' ? '' : 'none'};">
                 <div class="pa-tabs">${linhasAbas}</div>
                 <div class="pa-state-row">
                     <span class="pa-dot"></span>
@@ -21205,10 +21216,10 @@
                 </div>
                 <div class="pa-dica">Rode em cada Atuação para acumular várias competências antes de gerar o Relatório PDF, ou marque as unidades desejadas na tela "Alterar Atuação"/login para automatizar todas de uma vez.</div>
                 <div class="pa-log">
-                    <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">▼ Ver log detalhado</button>
-                    <div id="pa-log-wrap" style="display:none;">
+                    <button id="pa-log-toggle" class="pa-link pa-log-toggle-btn" type="button">${lerPrefPainel('projudi_pa_log_aberto') === '1' ? '▲ Ocultar log detalhado' : '▼ Ver log detalhado'}</button>
+                    <div id="pa-log-wrap" style="display:${lerPrefPainel('projudi_pa_log_aberto') === '1' ? '' : 'none'};">
                         <label class="pa-log-detalhes"><input type="checkbox" id="pa-log-detalhes"> Mostrar detalhes técnicos (o resumo mostra só etapas, itens pulados, avisos e erros)</label>
-                        <pre id="pa-log-detalhado" class="pa-log-box" style="max-height:260px;overflow-y:scroll;"></pre>
+                        <pre id="pa-log-detalhado" class="pa-log-box" style="max-height:260px;overflow-y:scroll;text-align:justify;"></pre>
                         <button id="pa-log-baixar" class="pa-link" type="button" title="Salva o log completo (todas as linhas guardadas, não só o que cabe na caixa) num .txt para enviar/investigar">⬇ Baixar log completo</button>
                         <button id="pa-log-limpar" class="pa-link" type="button">Limpar log</button>
                     </div>
@@ -21268,6 +21279,7 @@
             const abrindo = wrap.style.display === 'none';
             wrap.style.display = abrindo ? '' : 'none';
             btn.textContent = abrindo ? '▲ Ocultar log detalhado' : '▼ Ver log detalhado';
+            gravarPrefPainel('projudi_pa_log_aberto', abrindo ? '1' : '0');
             if (abrindo) atualizarLogDetalhadoUI();
         };
         const chkDetalhes = painel.querySelector('#pa-log-detalhes');
@@ -21318,6 +21330,7 @@
             body.style.display = recolhido ? '' : 'none';
             btn.textContent = recolhido ? '▲' : '▼';
             btn.title = recolhido ? 'Recolher' : 'Expandir';
+            gravarPrefPainel('projudi_pa_recolhido', recolhido ? '0' : '1'); // lembra entre atribuições/páginas
         };
         painel.querySelector('.pa-btn-fechar').onclick = () => painel.remove();
 
@@ -21581,7 +21594,7 @@
         #painel-automacao .pa-log-box , #projudi-mu-painel .pa-log-box {
             max-height: 260px; overflow-y: auto; margin: 6px 0; padding: 6px;
             background: #FAFAF7; border: 1px solid #DEDDD6; border-radius: 3px;
-            font-family: monospace; font-size: .62em; white-space: pre-wrap; word-break: break-word;
+            font-family: monospace; font-size: .62em; white-space: pre-wrap; word-break: break-word; text-align: justify;
         }
 
         /* Diálogo de confirmação com botões personalizados (ver confirmarComBotoes) —
