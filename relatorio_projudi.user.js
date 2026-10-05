@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.42
+// @version      26.47
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3116,7 +3116,7 @@
     // CFG_PRISOES_ALIMENTOS).
     const TEXTOS_ACOLHIDOS = {
         titulo: TITULO_ACOLHIDOS, nomeArquivo: 'criancas_adolescentes_acolhidos_projudi',
-        cardTotal: 'Crianças/adolescentes acolhidos', cardAntigo: 'Acolhimento mais antigo',
+        cardTotal: 'Crianças/adolescentes acolhidos',
         lista: 'Acolhimentos (do mais antigo ao mais recente)', indicador: 'acolhido(s)',
         porMotivo: 'Total de Acolhidos por Motivo', motivo: 'Motivo do Acolhimento',
         tabelaTitulo: 'Tabela discriminada das crianças/adolescentes acolhidos',
@@ -3124,7 +3124,7 @@
     };
     const TEXTOS_INTERNADOS = {
         titulo: 'Adolescentes Internados', nomeArquivo: 'adolescentes_internados_projudi',
-        cardTotal: 'Adolescentes internados', cardAntigo: 'Internação mais antiga',
+        cardTotal: 'Adolescentes internados',
         lista: 'Internações (da mais antiga à mais recente)', indicador: 'internado(s)',
         porMotivo: 'Total de Internados por Motivo', motivo: 'Motivo da Internação',
         tabelaTitulo: 'Tabela discriminada dos adolescentes internados',
@@ -3132,7 +3132,7 @@
     };
     const TEXTOS_PRISOES_ALIMENTOS = {
         titulo: 'Prisões - Alimentos', nomeArquivo: 'prisoes_alimentos_projudi',
-        cardTotal: 'Presos', cardAntigo: 'Prisão mais antiga',
+        cardTotal: 'Presos',
         lista: 'Prisões (da mais antiga à mais recente)', indicador: 'preso(s)',
         porMotivo: 'Total de Presos por Motivo', motivo: 'Motivo da Prisão',
         tabelaTitulo: 'Tabela discriminada dos presos',
@@ -3290,15 +3290,35 @@
         return ts == null ? null : Math.floor((Date.now() - ts) / 86400000);
     }
 
-    // Internados (pedido do usuário): o Projudi lista uma linha por internação, então o
-    // mesmo adolescente aparece mais de uma vez (várias internações/processos) e o total
-    // de linhas conta em duplicidade. Pessoa = Nome + Data de Nascimento (nome sem
-    // acentos/maiúsculas/espaços extras); registro sem nome não é fundido com nenhum outro.
+    // Acolhidos, Internados e Prisões - Alimentos (pedido do usuário): o Projudi lista
+    // uma linha por acolhimento/internação/prisão, então a mesma pessoa aparece mais de
+    // uma vez (vários acolhimentos/internações/prisões/processos) e o total de linhas
+    // conta em duplicidade. Pessoa = Nome + Data de Nascimento (nomes sem acentos/
+    // maiúsculas/espaços extras); registro sem nome não é fundido com nenhum outro.
+    // Data de Nascimento em branco (pedido do usuário): só é a mesma pessoa se houver
+    // registro com o mesmo Nome E o mesmo nome da Mãe (com ou sem nascimento); sem Mãe
+    // ou sem quem bata, conta como pessoa diferente.
     function contarPessoasDistintas(dados) {
+        const norm = (texto) => normalizarAtuacao(texto).replace(/\s+/g, ' ').trim();
+        const regs = dados || [];
         const chaves = new Set();
-        (dados || []).forEach((d, i) => {
-            const nome = normalizarAtuacao(d.nome).replace(/\s+/g, ' ').trim();
-            chaves.add(nome ? `${nome}|${d.nascimento || ''}` : `#${i}`);
+        const pessoaPorNomeMae = new Map();
+        regs.forEach(d => {
+            const nome = norm(d.nome);
+            if (!nome || !d.nascimento) return;
+            const chave = `${nome}|${d.nascimento}`;
+            chaves.add(chave);
+            const nomeMae = `${nome}|${norm(d.mae)}`;
+            if (norm(d.mae) && !pessoaPorNomeMae.has(nomeMae)) pessoaPorNomeMae.set(nomeMae, chave);
+        });
+        regs.forEach((d, i) => {
+            const nome = norm(d.nome);
+            if (nome && d.nascimento) return;
+            const mae = norm(d.mae);
+            if (!nome || !mae) { chaves.add(`#${i}`); return; }
+            const nomeMae = `${nome}|${mae}`;
+            if (!pessoaPorNomeMae.has(nomeMae)) pessoaPorNomeMae.set(nomeMae, `sem-nascimento|${nomeMae}`);
+            chaves.add(pessoaPorNomeMae.get(nomeMae));
         });
         return chaves.size;
     }
@@ -11579,9 +11599,9 @@
             const detalheAntigo = antigo ? `Mais antigo: ${antigo.dataStr} (proc. ${antigo.registro.processo || ''})` : 'Sem data disponível';
             return {
                 nome: t.titulo,
-                // Internados: adolescentes distintos (Nome + Nascimento), não linhas do
-                // Projudi — ver contarPessoasDistintas.
-                indicador: `${cfg === CFG_INTERNADOS ? contarPessoasDistintas(secao.dados) : secao.dados.length} ${t.indicador}`,
+                // Pessoas distintas (Nome + Nascimento), não linhas do Projudi — ver
+                // contarPessoasDistintas.
+                indicador: `${contarPessoasDistintas(secao.dados)} ${t.indicador}`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
             };
@@ -13869,31 +13889,34 @@
         const yLinha = rotuloInfo.y + 3.5;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
+        // VIJ - Seção Cível/Infracional (pedido do usuário): pessoas sem Data de
+        // Nascimento ganham um 3º card de ALERTA + observação no fim do resumo.
+        // Prisões - Alimentos fica de fora (não foi pedido).
+        const regsSemNascimento = cfg === CFG_PRISOES_ALIMENTOS ? [] : r.filter(d => !d.nascimento);
+        const semNascimento = contarPessoasDistintas(regsSemNascimento);
+        // Nº único dos processos no próprio card (pedido do usuário — facilita achar o
+        // cadastro a regularizar), um por linha; a linha de cards cresce para caber todos.
+        const processosSemNascimento = [...new Set(regsSemNascimento.map(d => d.processo).filter(Boolean))];
+
         const gap = 6;
         const kY = yLinha + 7;
-        const kH = 28;
-        const kW = (uw - gap) / 2;
+        const kH = semNascimento > 0 ? Math.max(28, 24 + processosSemNascimento.length * 4.2) : 28;
+        const nCards = semNascimento > 0 ? 3 : 2;
+        const kW = (uw - gap * (nCards - 1)) / nCards;
 
-        if (cfg === CFG_INTERNADOS) {
-            // Internados (pedido do usuário): adolescentes DISTINTOS (Nome + Data de
-            // Nascimento — o Projudi repete o adolescente a cada internação) + processos
-            // distintos, no lugar do total de registros + internação mais antiga (a lista
-            // abaixo já vem da internação mais antiga à mais recente).
-            const pessoas = contarPessoasDistintas(r);
-            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(pessoas), [], true, COR.azul, COR.azul);
-            desenharCard(doc, m + kW + gap, kY, kW, kH, 'Processos', String(contarProcessosDistintos(r)), [], true, COR.ambar);
-        } else {
-            // Total de REGISTROS (uma linha por criança/adolescente, não por processo
-            // distinto), igual ao "N registro(s) encontrado(s)" da tela do Projudi.
-            desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(r.length), [], true, COR.azul, COR.azul);
-
-            const antigo = acharMaisAntigo(r, 'dataAcolhimento');
-            const valAntigo = antigo ? antigo.dataStr : '—';
-            const subsAntigo = antigo
-                ? [`Processo ${antigo.registro.processo || ''}`, `Período: ${antigo.registro.periodo || ''}`]
-                : ['Data não disponível'];
-            desenharCard(doc, m + kW + gap, kY, kW, kH, t.cardAntigo, valAntigo, subsAntigo, true, COR.ambar);
+        // Pedido do usuário: pessoas DISTINTAS (Nome + Data de Nascimento — o Projudi
+        // repete a pessoa a cada acolhimento/internação/prisão) + processos distintos, no
+        // lugar do total de registros + mais antigo (a lista abaixo já vem do mais antigo
+        // ao mais recente).
+        desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(contarPessoasDistintas(r)), [], true, COR.azul, COR.azul);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Processos', String(contarProcessosDistintos(r)), [], true, COR.ambar);
+        if (semNascimento > 0) {
+            const xA = m + 2 * (kW + gap);
+            desenharCard(doc, xA, kY, kW, kH, 'Pessoas sem data de nascimento informada', String(semNascimento),
+                processosSemNascimento, true, COR.vermelho, COR.vermelhoVivo);
+            desenharIconeAlerta(doc, xA + kW - 7, kY + 3.5);
         }
+        let yFim = kY + kH;
 
         if (r.length > 0) {
             const yTab = kY + kH + gap;
@@ -13918,9 +13941,37 @@
                 didDrawPage: () => desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
             desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice, cfg);
+            yFim = doc.lastAutoTable.finalY;
+        }
+
+        // Mesmo padrão do balão de flagrante de montarResumoPrisoes: no fim, e na página
+        // seguinte se não couber.
+        if (semNascimento > 0) {
+            let yObs = yFim + gap;
+            const hObs = medirAlturaCardObservacao(doc, uw, OBSERVACAO_SEM_NASCIMENTO);
+            if (yObs + hObs > ph - 14) {
+                doc.addPage();
+                desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                yObs = m;
+            }
+            desenharCardObservacao(doc, m, yObs, uw, hObs, 'Observação', OBSERVACAO_SEM_NASCIMENTO, COR.ambar);
         }
 
         desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    const OBSERVACAO_SEM_NASCIMENTO = [
+        'A secretaria deverá regularizar o cadastro das crianças e/ou adolescentes cuja data de nascimento não está informada.',
+    ];
+
+    // Triângulo de alerta (vermelho, "!" branco) desenhado com primitivas do jsPDF — a
+    // fonte PublicSans embutida não tem o glifo ⚠. (x, y) = canto superior esquerdo; 4,5 mm.
+    function desenharIconeAlerta(doc, x, y) {
+        const l = 4.5;
+        doc.setFillColor(...COR.vermelhoVivo);
+        doc.triangle(x + l / 2, y, x, y + l * 0.88, x + l, y + l * 0.88, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7); doc.setTextColor(255, 255, 255);
+        doc.text('!', x + l / 2, y + l * 0.8, { align: 'center' });
     }
 
     // Pedido do usuário: total de crianças/adolescentes acolhidos por Motivo do
@@ -13928,8 +13979,9 @@
     // registros coletados (sem pesquisa extra por motivo no Projudi), do maior para o
     // menor, com linha de total. Usado no resumo (Relatório PDF) e nas Tabelas
     // Discriminadas (ver descreverSecaoPDF). Quebra de página fica a cargo do autoTable.
-    // porPessoa (Internados, pedido do usuário): conta adolescentes distintos por motivo
-    // (Nome + Nascimento, ver contarPessoasDistintas), não linhas/internações.
+    // porPessoa (Acolhidos/Internados/Prisões - Alimentos, pedido do usuário): conta
+    // pessoas distintas por motivo (Nome + Nascimento, ver contarPessoasDistintas), não
+    // linhas. Sem ele (Prisões - Crime) conta registros.
     function contarAcolhidosPorMotivo(dados, porPessoa) {
         const mapa = new Map();
         (dados || []).forEach(d => {
@@ -13953,8 +14005,7 @@
         // A tabela é curta (uma linha por motivo) — não deixa partir entre páginas: se o
         // título + cabeçalho + linhas + total (~7,5 mm cada) não couberem, vai inteira
         // para a próxima página.
-        const porPessoa = cfg === CFG_INTERNADOS;
-        const linhasMotivo = contarAcolhidosPorMotivo(r, porPessoa);
+        const linhasMotivo = contarAcolhidosPorMotivo(r, true);
         const alturaEstimada = 10 + (linhasMotivo.length + 2) * 7.5;
         if (y + alturaEstimada > ph - 14) {
             doc.addPage();
@@ -13965,9 +14016,9 @@
         doc.autoTable({
             head: [[t.motivo, 'Total']],
             body: linhasMotivo.map(it => [it.motivo, String(it.total)]),
-            // Internados: total de adolescentes distintos (mesmo número do card) — um
-            // adolescente com internações por motivos diferentes conta uma vez só aqui.
-            foot: [['Total', { content: String(porPessoa ? contarPessoasDistintas(r) : r.length), styles: { halign: 'center' } }]],
+            // Total de pessoas distintas (mesmo número do card) — quem tem registros por
+            // motivos diferentes conta uma vez só aqui.
+            foot: [['Total', { content: String(contarPessoasDistintas(r)), styles: { halign: 'center' } }]],
             startY: y + 8,
             margin: { left: m, right: m, top: m, bottom: 14 },
             theme: 'grid',
