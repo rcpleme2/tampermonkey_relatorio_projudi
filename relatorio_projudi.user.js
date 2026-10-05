@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.30
+// @version      26.31
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -40,16 +40,42 @@
     // início da fila) já tinham rotacionado pra fora quando ele foi investigar. 2000 dá
     // bem mais margem sem aproximar a cota do localStorage (cada linha tem ~100-300
     // bytes — 2000 linhas ainda fica na casa de poucos centenas de KB).
-    const LOG_DETALHADO_MAX = 2000;
+    const LOG_DETALHADO_MAX = 5000;
     // Bug relatado pelo usuário ("linhas.push is not a function", centenas de vezes no
     // console): JSON.parse pode ter sucesso mas devolver algo que não é array (ex.: a
     // chave já continha outro valor por algum motivo) — sem o Array.isArray abaixo, o
     // valor não-array passava direto pra quem chama, que quebrava ao tentar .push nele.
     // Também nunca deixa lerLogDetalhado() propagar exceção — quem chama sempre recebe um
     // array de verdade, mesmo vazio.
+    // Persistência (pedido do usuário: o log deve ser mantido): o armazenamento principal é
+    // o GM_setValue/GM_getValue do Tampermonkey — compartilhado por todas as frames, fora
+    // da cota pequena do localStorage da página (que já estourou com dados grandes e
+    // deixava o log parar de gravar) e sobrevive a "limpar dados do site". localStorage fica
+    // como reserva (e para migrar o log que já existia nele).
+    function lerLogBruto() {
+        try {
+            if (typeof GM_getValue === 'function') {
+                const v = GM_getValue(CHAVE_LOG_DETALHADO, null);
+                if (v) return v;
+            }
+        } catch (e) { /* cai para o localStorage */ }
+        try { return store.getItem(CHAVE_LOG_DETALHADO); } catch (e) { return null; }
+    }
+    function gravarLogBruto(json) {
+        let gravou = false;
+        try {
+            if (typeof GM_setValue === 'function') { GM_setValue(CHAVE_LOG_DETALHADO, json); gravou = true; }
+        } catch (e) { /* tenta o localStorage */ }
+        try { store.setItem(CHAVE_LOG_DETALHADO, json); gravou = true; } catch (e) { /* cota cheia: o GM já guardou */ }
+        return gravou;
+    }
+    function apagarLogBruto() {
+        try { if (typeof GM_setValue === 'function') GM_setValue(CHAVE_LOG_DETALHADO, ''); } catch (e) { /* ignora */ }
+        try { store.removeItem(CHAVE_LOG_DETALHADO); } catch (e) { /* ignora */ }
+    }
     function lerLogDetalhado() {
         try {
-            const v = JSON.parse(store.getItem(CHAVE_LOG_DETALHADO) || '[]');
+            const v = JSON.parse(lerLogBruto() || '[]');
             return Array.isArray(v) ? v : [];
         } catch (e) { return []; }
     }
@@ -92,7 +118,7 @@
             if (extra !== undefined) linha += ' ' + extraParaLog(extra);
             linhas.push(linha);
             if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
-            store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
+            gravarLogBruto(JSON.stringify(linhas));
             atualizarLogDetalhadoUI();
         } catch (e) {
             console.warn('[Projudi] logPainel falhou (provável localStorage cheio) — log do painel pode ficar incompleto, mas a automação continua normalmente:', e);
@@ -3063,7 +3089,6 @@
     // em cada unidade, e a tela de Acolhidos/Habilitações de uma seção devolvia os dados
     // da outra (internados somados aos acolhidos, habilitações da comarca em dobro), e a
     // Averiguação de Paternidade travava fora da Vara de Família.
-    const DOMINIOS_POR_ATRIBUICAO = ['familia', 'vijcivel', 'vijinfracional'];
     function tipoAtribuicao(atuacao) {
         const a = atuacao || '';
         if (/se[çc][ãa]o\s+infracional/i.test(a)) return 'vijinfracional';
@@ -3071,26 +3096,33 @@
         if (atuacaoEhFamilia(a)) return 'familia';
         return null;
     }
-    // Atuação desconhecida: vale tudo. Outras atribuições (ex. Vara Cível, vara
-    // cumulativa): só a Averiguação de Paternidade fica de fora (pedido anterior do
-    // usuário: classe 123 apenas na Vara de Família).
-    // Pedido do usuário: unidade com "cível", "fazenda pública" ou "família" no nome (sem
-    // distinguir maiúsculas/minúsculas nem acentos) não tem competência criminal, então os
-    // itens específicos de Crime (categoriaEspecifica: 'crime') são ignorados mesmo
-    // marcados no menu de automação. Exceção (confirmada com o usuário): vara mista cujo
-    // nome também cite crime/criminal/penal/júri (ex. "Vara Cível e Criminal") continua
-    // rodando os itens de Crime.
-    function atuacaoSemCompetenciaCriminal(atuacao) {
-        const a = (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-        return /civel|fazenda\s+publica|familia/.test(a) && !/crim|penal|juri/.test(a);
+    // Regra por NOME da atribuição (pedido do usuário, sem distinguir maiúsculas/minúsculas
+    // nem acentos):
+    //   itens de Cartório (e Gabinete) -> rodam em qualquer unidade;
+    //   itens de Crime (categoriaEspecifica: 'crime') -> só se o nome tiver "crim*";
+    //   itens do grupo FAMÍLIA        -> só se o nome tiver "família" ou "infância";
+    //   itens do TRIBUNAL DO JÚRI     -> só se o nome tiver "tribunal do júri".
+    // Itens de Crime/FAMÍLIA/JÚRI de unidade que não casa com a regra são pulados mesmo
+    // marcados no menu de automação (e omitidos do PDF, como já era para VIJ).
+    function normalizarAtuacao(atuacao) {
+        return (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
+    // Atuação desconhecida: vale tudo. Além da regra acima, mantém as regras antigas: as
+    // seções da VIJ (Cível/Infracional) só rodam na seção correspondente e não rodam em
+    // Vara de Família; Averiguação de Paternidade (classe 123) só na Vara de Família.
     function foraDaAtribuicao(cfg, atuacao) {
         if (!atuacao) return false;
         const rel = relatorioPorCfg(cfg);
         const dominio = rel && rel.dominio;
-        if (rel && rel.categoriaEspecifica === 'crime' && atuacaoSemCompetenciaCriminal(atuacao)) return true;
+        const nome = normalizarAtuacao(atuacao);
+        if (rel && rel.categoriaEspecifica === 'crime') return !/crim/.test(nome);
+        if (dominio === 'juri') return !/tribunal\s+do\s+juri/.test(nome);
+        if (dominio === 'familia') {
+            if (cfg === CFG_AVERIGUACAO_PATERNIDADE && !atuacaoEhFamilia(atuacao)) return true;
+            return !/familia|infancia/.test(nome);
+        }
         const tipo = tipoAtribuicao(atuacao);
-        if (tipo) return DOMINIOS_POR_ATRIBUICAO.includes(dominio) && dominio !== tipo;
+        if (tipo) return ['vijcivel', 'vijinfracional'].includes(dominio) && dominio !== tipo;
         return cfg === CFG_AVERIGUACAO_PATERNIDADE;
     }
 
@@ -16043,6 +16075,7 @@
     // ── Interface ───────────────────────────────────────────────────────────────
 
     function atualizarStatus(msg) {
+        logPainel(`[Projudi] status: ${msg}`);
         const el = document.getElementById('exportar-status');
         if (el) el.textContent = msg;
     }
@@ -20030,7 +20063,7 @@
             // ou Averiguação de Paternidade fora da Vara de Família): não coleta aqui.
             const atuacaoAtual = lerAtuacaoEmQualquerFrame();
             if (foraDaAtribuicao(rel.cfg, atuacaoAtual)) {
-                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" (atribuição/sem competência criminal) — pulando nesta unidade`);
+                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" (fora da atribuição pelo nome da unidade) — pulando nesta unidade`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + key);
                 avancarAutomacao(rel.cfg);
                 return;
@@ -20122,6 +20155,7 @@
             const rel = relatorioPorChave(key);
             cfgsDoRelatorio(rel).forEach(cfg => store.removeItem(cfg.prefixo + 'erro'));
         });
+        logPainel(`[Auto Projudi] automação iniciada — fila: ${fila.join(', ')} (atuação: "${lerAtuacao() || ''}")`);
         store.setItem('projudi_auto_fila', JSON.stringify(fila));
         store.setItem('projudi_auto_periodo_tm', periodoTM || '1m');
         // Monta a fila de meses do Tempo Médio uma única vez aqui, no início — nunca dentro
@@ -20141,6 +20175,7 @@
     }
 
     async function limparTudoAutomacao() {
+        logPainel('[Projudi] "Limpar" — apagando dados coletados e estado da automação (o log é preservado)');
         REPORTS_AUTOMACAO.flatMap(cfgsDoRelatorio).forEach(c => {
             const n = parseInt(store.getItem(c.prefixo + 'num_paginas') || '0', 10);
             for (let i = 0; i < n; i++) store.removeItem(c.prefixo + 'pagina_' + i);
@@ -20263,11 +20298,11 @@
     // rodadas) e em baixarPDFConjunto (unidades marcadas no diálogo do PDF — relatório
     // de 1 unidade traz só os grupos dela).
     function filtrarGruposPorAtuacoes(secoes, atuacoes) {
-        const tipos = [...atuacoes].map(tipoAtribuicao);
-        if (!tipos.length || !tipos.every(Boolean)) return secoes;
-        const dominiosAusentes = DOMINIOS_POR_ATRIBUICAO.filter(d => !tipos.includes(d));
-        const cfgsAusentes = REPORTS_AUTOMACAO.filter(r => dominiosAusentes.includes(r.dominio)).flatMap(r => cfgsDoRelatorio(r));
-        return secoes.filter(s => !cfgsAusentes.includes(s.cfg));
+        const lista = [...atuacoes].filter(Boolean);
+        if (!lista.length) return secoes;
+        // Mesma regra de nome da automação (foraDaAtribuicao): a seção some se TODAS as
+        // atuações a consideram fora da atribuição.
+        return secoes.filter(s => !lista.every(a => foraDaAtribuicao(s.cfg, a)));
     }
 
     // Restringe as seções às atribuições MARCADAS pelo usuário no diálogo do PDF
@@ -20309,6 +20344,7 @@
     // Processos Ativos (lerMapaAtivos): aquele mapa só é gravado quando a opção "Ativos"
     // está marcada e pode não refletir todas as atribuições realmente coletadas.
     async function baixarPDFConjunto(modo) {
+        logPainel(`[Projudi] gerando PDF conjunto (modo="${modo}")`);
         const secoes = await secoesColetadas();
         if (!secoes.length) { alert('Nenhum dado coletado ainda.'); return; }
         try {
@@ -20340,6 +20376,7 @@
                 }
             }
             gerarPDFConjunto(secoesFiltradas, modo, { atribuicoesSelecionadas });
+            logPainel(`[Projudi] PDF conjunto gerado (modo="${modo}", ${secoesFiltradas.length} seção(ões))`);
             // Pedido do usuário: não limpar mais automaticamente depois de exportar — os
             // dados continuam acumulados (o botão "Limpar" continua disponível pra apagar
             // de propósito, e #pa-iniciar agora pergunta antes de reiniciar por cima de
@@ -21083,7 +21120,7 @@
             if (abrindo) atualizarLogDetalhadoUI();
         };
         painel.querySelector('#pa-log-limpar').onclick = () => {
-            store.removeItem(CHAVE_LOG_DETALHADO);
+            apagarLogBruto();
             atualizarLogDetalhadoUI();
         };
         // Pedido do usuário: "implementar algo no log pra encontrar o problema de vez,
@@ -21597,6 +21634,11 @@
 
     function bootstrap() {
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
+        // Erros não tratados também vão para o log persistente (só os do próprio script:
+        // a página do Projudi gera ruído próprio que não interessa aqui).
+        const ehDoScript = (e) => /userscript|tampermonkey|relat[oó]rio[_ ]projudi/i.test(String((e && (e.filename || (e.error && e.error.stack) || (e.reason && e.reason.stack))) || ''));
+        window.addEventListener('error', (e) => { if (ehDoScript(e)) logPainelErro('[Projudi] erro não tratado:', e.error || e.message); });
+        window.addEventListener('unhandledrejection', (e) => { if (ehDoScript(e)) logPainelErro('[Projudi] promessa rejeitada sem tratamento:', e.reason); });
         // Limpeza de uma versão anterior: existia um "modo de teste" disfarçado (5
         // cliques no painel) que limitava a coleta a 2 páginas por relatório — causou um
         // bug real (Tempo Médio/Conclusões parando de virar página a partir da 2ª). O
