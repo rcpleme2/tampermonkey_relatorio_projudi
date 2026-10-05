@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.45
+// @version      26.46
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -13889,10 +13889,17 @@
         const yLinha = rotuloInfo.y + 3.5;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
+        // VIJ - Seção Cível/Infracional (pedido do usuário): pessoas sem Data de
+        // Nascimento ganham um 3º card de ALERTA + observação no fim do resumo.
+        // Prisões - Alimentos fica de fora (não foi pedido).
+        const semNascimento = cfg === CFG_PRISOES_ALIMENTOS ? 0
+            : contarPessoasDistintas(r.filter(d => !d.nascimento));
+
         const gap = 6;
         const kY = yLinha + 7;
         const kH = 28;
-        const kW = (uw - gap) / 2;
+        const nCards = semNascimento > 0 ? 3 : 2;
+        const kW = (uw - gap * (nCards - 1)) / nCards;
 
         // Pedido do usuário: pessoas DISTINTAS (Nome + Data de Nascimento — o Projudi
         // repete a pessoa a cada acolhimento/internação/prisão) + processos distintos, no
@@ -13900,6 +13907,13 @@
         // ao mais recente).
         desenharCard(doc, m, kY, kW, kH, t.cardTotal, String(contarPessoasDistintas(r)), [], true, COR.azul, COR.azul);
         desenharCard(doc, m + kW + gap, kY, kW, kH, 'Processos', String(contarProcessosDistintos(r)), [], true, COR.ambar);
+        if (semNascimento > 0) {
+            const xA = m + 2 * (kW + gap);
+            desenharCard(doc, xA, kY, kW, kH, 'Pessoas sem data de nascimento informada', String(semNascimento),
+                ['Alerta: regularizar cadastro'], true, COR.vermelho, COR.vermelhoVivo);
+            desenharIconeAlerta(doc, xA + kW - 7, kY + 3.5);
+        }
+        let yFim = kY + kH;
 
         if (r.length > 0) {
             const yTab = kY + kH + gap;
@@ -13924,9 +13938,37 @@
                 didDrawPage: () => desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice),
             });
             desenharTabelaAcolhidosPorMotivo(doc, r, doc.lastAutoTable.finalY + gap, comIndice, cfg);
+            yFim = doc.lastAutoTable.finalY;
+        }
+
+        // Mesmo padrão do balão de flagrante de montarResumoPrisoes: no fim, e na página
+        // seguinte se não couber.
+        if (semNascimento > 0) {
+            let yObs = yFim + gap;
+            const hObs = medirAlturaCardObservacao(doc, uw, OBSERVACAO_SEM_NASCIMENTO);
+            if (yObs + hObs > ph - 14) {
+                doc.addPage();
+                desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+                yObs = m;
+            }
+            desenharCardObservacao(doc, m, yObs, uw, hObs, 'Observação', OBSERVACAO_SEM_NASCIMENTO, COR.ambar);
         }
 
         desenharRodape(doc, t.titulo, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    const OBSERVACAO_SEM_NASCIMENTO = [
+        'A secretaria deverá regularizar o cadastro das crianças e/ou adolescentes cuja data de nascimento não está informada.',
+    ];
+
+    // Triângulo de alerta (vermelho, "!" branco) desenhado com primitivas do jsPDF — a
+    // fonte PublicSans embutida não tem o glifo ⚠. (x, y) = canto superior esquerdo; 4,5 mm.
+    function desenharIconeAlerta(doc, x, y) {
+        const l = 4.5;
+        doc.setFillColor(...COR.vermelhoVivo);
+        doc.triangle(x + l / 2, y, x, y + l * 0.88, x + l, y + l * 0.88, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(7); doc.setTextColor(255, 255, 255);
+        doc.text('!', x + l / 2, y + l * 0.8, { align: 'center' });
     }
 
     // Pedido do usuário: total de crianças/adolescentes acolhidos por Motivo do
