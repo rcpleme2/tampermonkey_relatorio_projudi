@@ -4,8 +4,6 @@ Userscript para [Tampermonkey](https://www.tampermonkey.net/) que automatiza a c
 
 Exige login de servidor ou Corregedoria, assim como vinculação à unidade judicial cujos dados pretende se exportar.
 
-📘 Manual do usuário (instalação e uso passo a passo): [`manual_usuario.pdf`](./manual_usuario.pdf) / [`manual_usuario.docx`](./manual_usuario.docx)
-
 ## Relatórios suportados
 
 - **Conclusões** — processos aguardando conclusão
@@ -57,8 +55,6 @@ Ao publicar uma nova versão, repita os passos acima (ou reabra a URL Raw) — o
 4. Para reunir mais de uma competência: troque de atuação no Projudi e rode a automação de novo — os dados de cada rodada são **acumulados**, não substituídos
 5. Ao concluir, clique em **⬇ PDF conjunto** (ou baixe o Excel de cada relatório individualmente)
 6. Use **Limpar** no painel para apagar tudo o que foi acumulado
-
-Veja o [manual do usuário](./manual_usuario.pdf) para o passo a passo completo, opções do PDF e solução de problemas comuns.
 
 ## Requisitos
 
