@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.32
+// @version      26.33
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -139,6 +139,20 @@
     function logPainelErro(msg, extra) {
         if (extra !== undefined) console.error(msg, extra); else console.error(msg);
         gravarLinhaLog('✖ ', msg, extra);
+    }
+    // Para funções chamadas em polling (setInterval de 2s em TODAS as frames, ex.
+    // capturarOutrosIndicadoresPainelJuntadas): só registra quando a mensagem MUDA em
+    // relação à última registrada com a mesma chave — sem isso, o mesmo "painel ainda não
+    // carregou" se repetia dezenas de vezes (uma por tick por frame), enterrando o resto
+    // do log. A última mensagem fica no localStorage (compartilhada entre frames).
+    function logPainelSeMudou(chave, msg, extra) {
+        const k = 'projudi_log_dedupe_' + chave;
+        const atual = extra === undefined ? msg : msg + ' ' + extraParaLog(extra);
+        try {
+            if (store.getItem(k) === atual) return;
+            store.setItem(k, atual);
+        } catch (e) { /* sem dedupe se o storage falhar: melhor repetir que perder */ }
+        logPainel(msg, extra);
     }
 
     // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
@@ -19137,11 +19151,11 @@
             const encontrados = INDICADORES_EXTRA_JUNTADAS
                 .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
                 .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
-            logPainel(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
+            logPainelSeMudou('juntadas_indicadores_extras', `[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
             gravarPorUnidade(CFG_JUNTADAS.prefixo + 'outros_indicadores', encontrados);
             return;
         }
-        logPainel(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
+        logPainelSeMudou('juntadas_indicadores_extras', `[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
     }
 
     // Mesma ideia de capturarContadoresPainelJuntadas, para o painel "Retorno de
@@ -20035,7 +20049,7 @@
         if (estado === 'trocando_unidade') {
             store.setItem('projudi_auto_lock', String(agora));
             const naArvore = !!documentoComArvoreAreaAtuacao();
-            logPainel(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
+            logPainelSeMudou('multiunidade_poll', `[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
             if (naArvore) {
                 avancarParaProximaUnidadeSelecionada();
             } else if (lerAtuacaoEmQualquerFrame()) {
