@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.41
+// @version      26.42
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -45,6 +45,9 @@
     const LOG_DB_NOME = 'projudi_log_db';
     const LOG_DB_STORE = 'linhas';
     const LOG_DETALHADO_MAX = 5000;
+    // Versão já registrada na sessão de log atual (zerada em apagarLogDetalhado). O bootstrap
+    // roda a cada página/frame; sem isso a linha da versão se repetia a cada recarga.
+    const CHAVE_LOG_VERSAO = 'projudi_log_versao_registrada';
     let logDbPromise = null;
     let logEscritasDesdePoda = 0;
     // Cópia em memória das últimas linhas desta frame: se o IndexedDB não abrir (modo
@@ -79,6 +82,7 @@
     }
     async function apagarLogDetalhado() {
         logMemoria.length = 0;
+        try { store.removeItem(CHAVE_LOG_VERSAO); } catch (e) { /* ignora */ } // próxima página registra a versão de novo (início de sessão)
         try {
             const db = await abrirLogDb();
             if (!db) return;
@@ -21386,7 +21390,11 @@
         // tela já mostra tudo (não trunca à parte), mas um arquivo é mais fácil de
         // copiar/colar inteiro do que selecionar texto dentro do painel.
         painel.querySelector('#pa-log-baixar').onclick = async () => {
-            const linhas = await lerLogDetalhado();
+            // Mesmo conteúdo da tela (pedido do usuário: o arquivo trazia o detalhe técnico
+            // mesmo com "Mostrar detalhes" desmarcado) — marque "Mostrar detalhes" para
+            // baixar também o diagnóstico completo.
+            const todas = await lerLogDetalhado();
+            const linhas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
             const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
             baixarBlob(new Blob([texto], { type: 'text/plain;charset=utf-8' }), `projudi_log_${dataArquivo()}.txt`);
         };
@@ -21902,7 +21910,14 @@
 
     function bootstrap() {
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
-        try { logPainelSeMudou('versao', `═══ Relatório Projudi versão ${(typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?'} ═══`); } catch (e) { /* GM_info indisponível */ }
+        // Versão só no início da sessão de log (ou se a versão mudou) — pedido do usuário.
+        try {
+            const versao = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?';
+            if (store.getItem(CHAVE_LOG_VERSAO) !== versao) {
+                store.setItem(CHAVE_LOG_VERSAO, versao); // síncrono: as demais frames já veem e não repetem
+                logPainel(`═══ Relatório Projudi versão ${versao} ═══`);
+            }
+        } catch (e) { /* GM_info/localStorage indisponível */ }
         // Erros não tratados também vão para o log persistente (só os do próprio script:
         // a página do Projudi gera ruído próprio que não interessa aqui).
         const ehDoScript = (e) => /userscript|tampermonkey|relat[oó]rio[_ ]projudi/i.test(String((e && (e.filename || (e.error && e.error.stack) || (e.reason && e.reason.stack))) || ''));
