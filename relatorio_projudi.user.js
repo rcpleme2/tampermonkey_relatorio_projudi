@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.37
+// @version      26.38
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -21468,6 +21468,7 @@
             position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
             box-shadow: 0 6px 20px rgba(26,26,26,.18); overflow: hidden;
+            display: flex; flex-direction: column; max-height: calc(100vh - 16px); /* corpo rola quando passa da tela */
             font-family: "Public Sans", Verdana, Arial, sans-serif; color: #1A1A1A;
         }
         #painel-automacao .pa-head , #projudi-mu-painel .pa-head {
@@ -21501,7 +21502,8 @@
         #painel-automacao .pa-tab:hover , #projudi-mu-painel .pa-tab:hover { color: #52514E; }
         #painel-automacao .pa-tab.active , #projudi-mu-painel .pa-tab.active { color: #3A5A7D; border-bottom-color: #3A5A7D; }
 
-        #painel-automacao .pa-body , #projudi-mu-painel .pa-body { padding: 11px; }
+        #painel-automacao .pa-body , #projudi-mu-painel .pa-body { padding: 11px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        #painel-automacao .pa-head , #projudi-mu-painel .pa-head { flex: none; }
 
         #painel-automacao .pa-state-row , #projudi-mu-painel .pa-state-row { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
         #painel-automacao .pa-dot , #projudi-mu-painel .pa-dot {
