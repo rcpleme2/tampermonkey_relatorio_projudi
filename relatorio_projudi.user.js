@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.29
+// @version      26.30
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -75,12 +75,21 @@
     // grandes; logPainel ficou bem mais chamado que os console.log originais (toda
     // página, toda linha coletada), então setItem pode lançar QuotaExceededError — sem
     // proteção, isso quebrava a automação inteira só por causa do log de diagnóstico.
-    function logPainel(msg, extra) {
-        if (extra !== undefined) console.log(msg, extra); else console.log(msg);
+    // Serializa o "extra" de uma linha de log: Error vira "nome: mensagem" (JSON.stringify
+    // de um Error dá "{}", escondendo a causa) e qualquer valor é truncado, pra uma linha
+    // com um array enorme (ex.: tentativas de decodificação) não estourar a cota.
+    function extraParaLog(extra) {
+        let t;
+        if (extra instanceof Error || (extra && typeof extra.message === 'string' && extra.stack)) t = `${extra.name}: ${extra.message}`;
+        else { try { t = JSON.stringify(extra); } catch (e) { t = String(extra); } }
+        if (t === undefined) t = String(extra);
+        return t.length > 600 ? t.slice(0, 600) + '…' : t;
+    }
+    function gravarLinhaLog(prefixo, msg, extra) {
         try {
             const linhas = lerLogDetalhado();
-            let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${msg}`;
-            if (extra !== undefined) { try { linha += ' ' + JSON.stringify(extra); } catch (e) { /* não serializável, ignora */ } }
+            let linha = `[${new Date().toLocaleTimeString('pt-BR')}] ${prefixo}${msg}`;
+            if (extra !== undefined) linha += ' ' + extraParaLog(extra);
             linhas.push(linha);
             if (linhas.length > LOG_DETALHADO_MAX) linhas.splice(0, linhas.length - LOG_DETALHADO_MAX);
             store.setItem(CHAVE_LOG_DETALHADO, JSON.stringify(linhas));
@@ -88,6 +97,22 @@
         } catch (e) {
             console.warn('[Projudi] logPainel falhou (provável localStorage cheio) — log do painel pode ficar incompleto, mas a automação continua normalmente:', e);
         }
+    }
+    function logPainel(msg, extra) {
+        if (extra !== undefined) console.log(msg, extra); else console.log(msg);
+        gravarLinhaLog('', msg, extra);
+    }
+    // Variantes com nível: mesmas saídas do console.warn/console.error de antes, mas
+    // também registradas no log do painel (pedido do usuário: o log deve mostrar TODOS os
+    // passos — antes só os console.log escolhidos a dedo apareciam, o resto da automação
+    // ficava só no console do navegador).
+    function logPainelAviso(msg, extra) {
+        if (extra !== undefined) console.warn(msg, extra); else console.warn(msg);
+        gravarLinhaLog('⚠ ', msg, extra);
+    }
+    function logPainelErro(msg, extra) {
+        if (extra !== undefined) console.error(msg, extra); else console.error(msg);
+        gravarLinhaLog('✖ ', msg, extra);
     }
 
     // ── Armazenamento híbrido dos dados coletados (IndexedDB para as páginas de dados,
@@ -189,7 +214,7 @@
     }
     async function apagarChavesDeDados(filtro) {
         chavesDoStore().filter(filtro).forEach(k => store.removeItem(k));
-        try { await idbApagarChaves(filtro); } catch (e) { console.error('[Projudi] falha ao apagar páginas do IndexedDB', e); }
+        try { await idbApagarChaves(filtro); } catch (e) { logPainelErro('[Projudi] falha ao apagar páginas do IndexedDB', e); }
     }
     // Todos os relatórios + estado da automação (botão "Limpar" do painel).
     function apagarTodosOsDadosColetados() {
@@ -1388,17 +1413,17 @@
     function marcarTodosOsTiposAudiencia(form) {
         const checkTodos = form.querySelector('input[name="checkMarcaTodos"]');
         if (checkTodos && !checkTodos.checked) {
-            console.log('[Projudi Audiências Designadas] clicando no checkbox "Todas"');
+            logPainel('[Projudi Audiências Designadas] clicando no checkbox "Todas"');
             checkTodos.click();
         }
         const todos = form.querySelectorAll('input[name="idsTiposAudiencia"]');
         const semMarcar = [...todos].filter(chk => !chk.checked);
         if (semMarcar.length) {
-            console.warn(`[Projudi Audiências Designadas] "Todas" não marcou ${semMarcar.length} tipo(s) — marcando manualmente`);
+            logPainelAviso(`[Projudi Audiências Designadas] "Todas" não marcou ${semMarcar.length} tipo(s) — marcando manualmente`);
             semMarcar.forEach(chk => { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); });
         }
         const aindaFaltando = [...todos].filter(chk => !chk.checked).length;
-        console.log(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s) (Todas=${checkTodos ? checkTodos.checked : 'n/d'})`);
+        logPainel(`[Projudi Audiências Designadas] ${todos.length} tipo(s) de audiência marcado(s) (Todas=${checkTodos ? checkTodos.checked : 'n/d'})`);
         return { total: todos.length, completo: todos.length > 0 && aindaFaltando === 0 && (!checkTodos || checkTodos.checked) };
     }
 
@@ -1425,7 +1450,7 @@
             return;
         }
         if (!resultado.completo) {
-            console.warn('[Projudi Audiências Designadas] não foi possível confirmar todos os tipos marcados — pesquisando mesmo assim para não travar a automação.');
+            logPainelAviso('[Projudi Audiências Designadas] não foi possível confirmar todos os tipos marcados — pesquisando mesmo assim para não travar a automação.');
         }
 
         const campoFim = form.querySelector('#dataFinal');
@@ -1436,10 +1461,10 @@
             campoFim.dispatchEvent(new Event('input', { bubbles: true }));
             campoFim.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        console.log(`[Projudi Audiências Designadas] Data Fim="${campoFim ? campoFim.value : '?'}"`);
+        logPainel(`[Projudi Audiências Designadas] Data Fim="${campoFim ? campoFim.value : '?'}"`);
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="button"][name="button"]');
-        console.log(`[Projudi Audiências Designadas] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Audiências Designadas] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
@@ -1550,7 +1575,7 @@
             ...calcularResumoAudienciasDesignadasDeTabela(tabelaMesclada),
             competencia,
         };
-        console.log(`[Projudi Audiências Designadas] "${atuacao || '(sem atuação)'}": ${tabelaDestaAtribuicao.length} audiência(s) nesta atribuição — resumo mesclado: totalDesignadas=${resumo.totalDesignadas} ultimaData=${resumo.ultimaData} totalProcessosUltimoDia=${resumo.totalProcessosUltimoDia} tipos=${resumo.porTipo.length}`);
+        logPainel(`[Projudi Audiências Designadas] "${atuacao || '(sem atuação)'}": ${tabelaDestaAtribuicao.length} audiência(s) nesta atribuição — resumo mesclado: totalDesignadas=${resumo.totalDesignadas} ultimaData=${resumo.ultimaData} totalProcessosUltimoDia=${resumo.totalProcessosUltimoDia} tipos=${resumo.porTipo.length}`);
 
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
@@ -1566,7 +1591,7 @@
     // atribuição) — "zero nesta vara" não deve apagar as audiências já coletadas em
     // outras atribuições.
     function salvarAudienciasDesignadasVazio() {
-        console.log('[Projudi Audiências Designadas] "Nenhum registro encontrado" — 0 audiências designadas nesta atribuição');
+        logPainel('[Projudi Audiências Designadas] "Nenhum registro encontrado" — 0 audiências designadas nesta atribuição');
         salvarResumoAudienciasDesignadas([]);
     }
 
@@ -1659,9 +1684,9 @@
             const processados = Math.min(i + lote.length, total);
             const semProcesso = lote.filter(l => l.processos.length === 0).length;
             if (semProcesso) {
-                console.warn(`[Projudi Audiências Designadas] ${semProcesso} linha(s) do lote ${Math.floor(i / TAMANHO_LOTE_EXPANSAO_AD) + 1} sem processo vinculado — serão ignoradas (ver filtro de linhas sem processo).`);
+                logPainelAviso(`[Projudi Audiências Designadas] ${semProcesso} linha(s) do lote ${Math.floor(i / TAMANHO_LOTE_EXPANSAO_AD) + 1} sem processo vinculado — serão ignoradas (ver filtro de linhas sem processo).`);
             }
-            console.log(`[Projudi Audiências Designadas] expandindo processos: ${processados}/${total} linha(s)`);
+            logPainel(`[Projudi Audiências Designadas] expandindo processos: ${processados}/${total} linha(s)`);
             atualizarProgressoExpansaoAD(processados, total);
         }
     }
@@ -1695,9 +1720,9 @@
     // lerDadosDe/criarColetor (uma "página" com um array de 1 item), para participar do
     // Relatório PDF/automação como qualquer outro relatório.
     async function coletarAudienciasDesignadas() {
-        console.log('[Projudi Audiências Designadas] iniciando extração da Pauta de Horários');
+        logPainel('[Projudi Audiências Designadas] iniciando extração da Pauta de Horários');
         const todasAsLinhas = lerLinhasPautaAudiencias();
-        console.log(`[Projudi Audiências Designadas] ${todasAsLinhas.length} linha(s) lida(s) — iniciando expansão dos processos em lotes de ${TAMANHO_LOTE_EXPANSAO_AD}`);
+        logPainel(`[Projudi Audiências Designadas] ${todasAsLinhas.length} linha(s) lida(s) — iniciando expansão dos processos em lotes de ${TAMANHO_LOTE_EXPANSAO_AD}`);
 
         await expandirTodasAsLinhas(todasAsLinhas);
 
@@ -1706,7 +1731,7 @@
         // TODOS os cálculos abaixo, não só na tabela.
         const linhas = todasAsLinhas.filter(l => l.processos.length > 0);
         const ignoradas = todasAsLinhas.length - linhas.length;
-        if (ignoradas > 0) console.log(`[Projudi Audiências Designadas] ${ignoradas} linha(s) sem processo vinculado foram ignoradas`);
+        if (ignoradas > 0) logPainel(`[Projudi Audiências Designadas] ${ignoradas} linha(s) sem processo vinculado foram ignoradas`);
 
         // Tabela discriminada DESTA atribuição: data/hora/processo/tipo, uma linha por
         // processo (uma linha da pauta pode ter mais de um processo agendado no mesmo
@@ -1722,7 +1747,7 @@
             const ta = parseDataBR(a.data) || 0, tb = parseDataBR(b.data) || 0;
             return ta - tb || a.horario.localeCompare(b.horario);
         });
-        console.log(`[Projudi Audiências Designadas] ${tabela.length} audiência(s) nesta atribuição, ${ignoradas} linha(s) sem processo vinculado ignorada(s)`);
+        logPainel(`[Projudi Audiências Designadas] ${tabela.length} audiência(s) nesta atribuição, ${ignoradas} linha(s) sem processo vinculado ignorada(s)`);
 
         salvarResumoAudienciasDesignadas(tabela);
     }
@@ -1864,7 +1889,7 @@
         const form = formularioAudienciasRealizadas();
         if (!form) return;
         const periodo = periodoAudienciasRealizadas(new Date());
-        console.log(`[Projudi Audiências Realizadas] iniciando — período ${periodo.dataInicio} a ${periodo.dataFim}, pesquisa geral (todos os usuários)`);
+        logPainel(`[Projudi Audiências Realizadas] iniciando — período ${periodo.dataInicio} a ${periodo.dataFim}, pesquisa geral (todos os usuários)`);
         preencherPeriodoAR(form, periodo);
         setUsuarioAR(form, '');
         store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'geral' }));
@@ -1883,7 +1908,7 @@
         const totalUsuarios = parseInt(store.getItem(CHAVE_TOTAL_USUARIOS_AR) || '0', 10);
         const prox = fila.shift();
         store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(fila));
-        console.log(`[Projudi Audiências Realizadas] pesquisando usuário "${prox.label}" (${totalUsuarios - fila.length}/${totalUsuarios})`);
+        logPainel(`[Projudi Audiências Realizadas] pesquisando usuário "${prox.label}" (${totalUsuarios - fila.length}/${totalUsuarios})`);
         atualizarProgressoAR(totalUsuarios - fila.length - 1, totalUsuarios);
         setUsuarioAR(form, prox.value);
         store.setItem(CHAVE_AGUARDANDO_AR, JSON.stringify({ tipo: 'usuario', value: prox.value, label: prox.label }));
@@ -1925,7 +1950,7 @@
         const temTabela = !!document.querySelector('table.resultTable');
         if (!temTabela) {
             if (tentativa >= TENTATIVAS_MAX_AR) {
-                console.warn('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~5s — pesquisando de novo.');
+                logPainelAviso('[Projudi Audiências Realizadas] tabela de resultado não apareceu em ~5s — pesquisando de novo.');
                 const form = formularioAudienciasRealizadas();
                 if (form) submitAR(form);
                 return;
@@ -1941,12 +1966,12 @@
         const estabilizouRapido = jaMudou && streakEstavelAR >= LEITURAS_ESTAVEIS_RAPIDO_AR;
         const estabilizouDevagar = streakEstavelAR >= LEITURAS_ESTAVEIS_DEVAGAR_AR;
         if (tentativa > 0 && (estabilizouRapido || estabilizouDevagar)) {
-            console.log('[Projudi Audiências Realizadas] resultado estável — processando');
+            logPainel('[Projudi Audiências Realizadas] resultado estável — processando');
             processarResultadoAudienciasRealizadas();
             return;
         }
         if (tentativa >= TENTATIVAS_MAX_AR) {
-            console.warn('[Projudi Audiências Realizadas] resultado não estabilizou em ~5s — processando mesmo assim (valores podem estar desatualizados)');
+            logPainelAviso('[Projudi Audiências Realizadas] resultado não estabilizou em ~5s — processando mesmo assim (valores podem estar desatualizados)');
             processarResultadoAudienciasRealizadas();
             return;
         }
@@ -1978,7 +2003,7 @@
             // Finaliza direto, sem popular a fila (mesmo caminho de "fila vazia" que
             // avancarUsuarioAR já usa quando termina de percorrer os usuários de verdade).
             if (total === 0) {
-                console.log('[Projudi Audiências Realizadas] total geral do período = 0 — pulando a pesquisa individual por magistrado');
+                logPainel('[Projudi Audiências Realizadas] total geral do período = 0 — pulando a pesquisa individual por magistrado');
                 store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify([]));
                 store.setItem(CHAVE_TOTAL_USUARIOS_AR, '0');
                 atualizarProgressoAR(0, 0);
@@ -1986,7 +2011,7 @@
                 return;
             }
             const usuarios = lerOpcoesUsuarioAR(form);
-            console.log(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} negativas=${extras.negativas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas} pessoasOuvidas=${extras.pessoasOuvidas}) — ${usuarios.length} usuário(s) a percorrer`);
+            logPainel(`[Projudi Audiências Realizadas] total geral do período: ${total} (canceladas=${extras.canceladas} negativas=${extras.negativas} não realizadas=${extras.naoRealizadas} redesignadas=${extras.redesignadas} pessoasOuvidas=${extras.pessoasOuvidas}) — ${usuarios.length} usuário(s) a percorrer`);
             store.setItem(CHAVE_FILA_USUARIOS_AR, JSON.stringify(usuarios));
             store.setItem(CHAVE_TOTAL_USUARIOS_AR, String(usuarios.length));
             atualizarProgressoAR(0, usuarios.length);
@@ -1995,7 +2020,7 @@
         }
 
         const extrasUsuario = lerExtrasAR();
-        console.log(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.negativas} negativa(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s), ${extrasUsuario.pessoasOuvidas} pessoa(s) ouvida(s)`);
+        logPainel(`[Projudi Audiências Realizadas] "${aguardando.label}": ${total} realizada(s), ${extrasUsuario.canceladas} cancelada(s), ${extrasUsuario.negativas} negativa(s), ${extrasUsuario.naoRealizadas} não realizada(s), ${extrasUsuario.redesignadas} redesignada(s), ${extrasUsuario.pessoasOuvidas} pessoa(s) ouvida(s)`);
         const acumulado = desembrulharArray(store.getItem(CHAVE_ACUMULADO_AR)) || [];
         acumulado.push({
             usuario: aguardando.value, nome: aguardando.label, quantidade: total,
@@ -2050,7 +2075,7 @@
         const porAtribuicaoMesclado = [...porAtribuicaoAnterior.filter(a => (a.atuacao || '') !== (atuacao || '')), totaisDestaAtribuicao];
 
         const resumo = calcularResumoAudienciasRealizadasDeListas(porAtribuicaoMesclado, porUsuarioMesclado, periodo);
-        console.log(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length}`);
+        logPainel(`[Projudi Audiências Realizadas] "${atuacao || '(sem atuação)'}": ${totalGeral} audiência(s) nesta atribuição — resumo mesclado (${porAtribuicaoMesclado.length} atribuição(ões)): totalGeral=${resumo.totalGeral} usuarios=${resumo.porUsuario.length}`);
 
         store.setItem(prefixo + 'pagina_0', JSON.stringify([resumo]));
         store.setItem(prefixo + 'num_paginas', '1');
@@ -3049,10 +3074,21 @@
     // Atuação desconhecida: vale tudo. Outras atribuições (ex. Vara Cível, vara
     // cumulativa): só a Averiguação de Paternidade fica de fora (pedido anterior do
     // usuário: classe 123 apenas na Vara de Família).
+    // Pedido do usuário: unidade com "cível", "fazenda pública" ou "família" no nome (sem
+    // distinguir maiúsculas/minúsculas nem acentos) não tem competência criminal, então os
+    // itens específicos de Crime (categoriaEspecifica: 'crime') são ignorados mesmo
+    // marcados no menu de automação. Exceção (confirmada com o usuário): vara mista cujo
+    // nome também cite crime/criminal/penal/júri (ex. "Vara Cível e Criminal") continua
+    // rodando os itens de Crime.
+    function atuacaoSemCompetenciaCriminal(atuacao) {
+        const a = (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        return /civel|fazenda\s+publica|familia/.test(a) && !/crim|penal|juri/.test(a);
+    }
     function foraDaAtribuicao(cfg, atuacao) {
         if (!atuacao) return false;
         const rel = relatorioPorCfg(cfg);
         const dominio = rel && rel.dominio;
+        if (rel && rel.categoriaEspecifica === 'crime' && atuacaoSemCompetenciaCriminal(atuacao)) return true;
         const tipo = tipoAtribuicao(atuacao);
         if (tipo) return DOMINIOS_POR_ATRIBUICAO.includes(dominio) && dominio !== tipo;
         return cfg === CFG_AVERIGUACAO_PATERNIDADE;
@@ -4372,7 +4408,7 @@
                 setTimeout(() => tratarPainelMandados(tentativa + 1), 500);
                 return;
             }
-            console.warn(`[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando "${chave}"`);
+            logPainelAviso(`[Auto Projudi Mandados] contador/link de mandados aguardando retorno não apareceu em ~15s — pulando "${chave}"`);
             // Bug relatado pelo usuário: sem isso, avancarAutomacao(cfg) era chamado com
             // AUTO_ESTADO ainda em "preenchendo_<chave>" — avancarAutomacao() exige
             // "coletando_<chave>" (ver checagem `estado !== 'coletando_' + rel.key`) e
@@ -4397,7 +4433,7 @@
         // aguardando retorno já é "coletado, zero registros", sem precisar visitar a tela.
         const n = parseInt((span.textContent || '0').trim(), 10) || 0;
         if (chave === 'mandadosretorno' && n === 0) marcarColetaMandadosVazia(CFG_MANDADOS_RETORNO);
-        console.log(`[Auto Projudi Mandados] indo para a tela de resultados (alvo="${chave}", contador de aguardando retorno=${n})`);
+        logPainel(`[Auto Projudi Mandados] indo para a tela de resultados (alvo="${chave}", contador de aguardando retorno=${n})`);
         link.click();
     }
 
@@ -4422,7 +4458,7 @@
         if (selStatus6 && selStatus6.value === '6' && tabelaMandados()) {
             selStatus6.value = '4';
             const btnStatus6 = document.getElementById('searchButton');
-            console.log('[Auto Projudi Mandados] status=6 (Lido e Sem Cumprimento) não é mais coletado — filtrando para status=4 (Cumprimento) e clicando Filtrar');
+            logPainel('[Auto Projudi Mandados] status=6 (Lido e Sem Cumprimento) não é mais coletado — filtrando para status=4 (Cumprimento) e clicando Filtrar');
             setTimeout(() => { if (btnStatus6) btnStatus6.click(); }, 400);
             return true;
         }
@@ -4441,7 +4477,7 @@
         if (sel && sel.value !== statusEsperado) {
             sel.value = statusEsperado;
             const btn = document.getElementById('searchButton');
-            console.log(`[Auto Projudi Mandados] filtrando para status=${statusEsperado} (${chave}) e clicando Filtrar`);
+            logPainel(`[Auto Projudi Mandados] filtrando para status=${statusEsperado} (${chave}) e clicando Filtrar`);
             setTimeout(() => { if (btn) btn.click(); }, 400);
             return true;
         }
@@ -4455,7 +4491,7 @@
         const tabela = tabelaMandados();
         if (!document.querySelector('table.buttonBar td.buttons') && !(tabela && tabela.querySelector('tbody tr'))) {
             if (store.getItem(cfg.prefixo + 'coletado') !== '1') marcarColetaMandadosVazia(cfg);
-            console.log(`[Auto Projudi Mandados] "${chave}" sem resultados — avançando`);
+            logPainel(`[Auto Projudi Mandados] "${chave}" sem resultados — avançando`);
             avancarAutomacao(cfg);
             return true;
         }
@@ -5079,19 +5115,19 @@
             selMotivo.value = '0';
             selMotivo.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        console.log(`[Projudi Apreensões] motivo de encerramento definido como "(Apreensão não encerrada)" (value=${selMotivo ? selMotivo.value : 'n/d'})`);
+        logPainel(`[Projudi Apreensões] motivo de encerramento definido como "(Apreensão não encerrada)" (value=${selMotivo ? selMotivo.value : 'n/d'})`);
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Apreensões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Apreensões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Apreensões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Apreensões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Apreensões] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Apreensões] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Apreensões] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Apreensões] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5124,11 +5160,11 @@
     function iniciarColetaBensPendentesSngb(disparadoPelaAutomacao) {
         const link = acharLinkAcessoRapidoSngb();
         if (!link) {
-            console.warn('[Projudi Bens Pendentes SNGB] link "Acesso rápido: Processos com apreensões sem registro no SNGB" não encontrado nesta tela.');
+            logPainelAviso('[Projudi Bens Pendentes SNGB] link "Acesso rápido: Processos com apreensões sem registro no SNGB" não encontrado nesta tela.');
             return;
         }
         if (!disparadoPelaAutomacao) store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora', '1');
-        console.log('[Projudi Bens Pendentes SNGB] clicando no link de acesso rápido...');
+        logPainel('[Projudi Bens Pendentes SNGB] clicando no link de acesso rápido...');
         link.click();
     }
 
@@ -5191,13 +5227,13 @@
     function selecionarFormatoCSVBensSngb(form) {
         const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
         if (radioCSV && !radioCSV.checked) radioCSV.click();
-        else if (!radioCSV) console.warn('[Projudi Bens Pendentes SNGB] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        else if (!radioCSV) logPainelAviso('[Projudi Bens Pendentes SNGB] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
         return radioCSV;
     }
 
     async function coletarViaFetchBensSngb(urlAction, corpo) {
         const resp = await fetch(urlAction, { method: 'POST', body: corpo, credentials: 'same-origin' });
-        console.log('[Projudi Bens Pendentes SNGB] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url);
+        logPainel('[Projudi Bens Pendentes SNGB] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url);
         if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
         const buffer = await resp.arrayBuffer();
         if (!buffer || buffer.byteLength === 0) {
@@ -5207,15 +5243,15 @@
         // processo pendente, o Projudi pode ignorar o tipoExportacao=CSV pedido e devolver
         // um PDF avulso (relatório vazio) em vez do CSV — resultado válido (0 registros).
         if (respostaEhPDF(buffer)) {
-            console.log('[Projudi Bens Pendentes SNGB] resposta veio como PDF (não CSV) — nenhum processo pendente encontrado, tratando como 0 registros.');
+            logPainel('[Projudi Bens Pendentes SNGB] resposta veio como PDF (não CSV) — nenhum processo pendente encontrado, tratando como 0 registros.');
             return '';
         }
         const { texto, encoding, tentativas } = decodificarResposta(buffer);
         if (!texto) {
-            console.warn('[Projudi Bens Pendentes SNGB] nenhuma decodificação pareceu CSV:', tentativas);
+            logPainelAviso('[Projudi Bens Pendentes SNGB] nenhuma decodificação pareceu CSV:', tentativas);
             throw new Error(`a resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`);
         }
-        console.log(`[Projudi Bens Pendentes SNGB] CSV reconhecido (encoding ${encoding})`);
+        logPainel(`[Projudi Bens Pendentes SNGB] CSV reconhecido (encoding ${encoding})`);
         return texto;
     }
 
@@ -5223,16 +5259,16 @@
 
     async function coletarBensPendentesSngb() {
         if (coletaBensPendentesSngbEmAndamento) {
-            console.log('[Projudi Bens Pendentes SNGB] coleta já em andamento — ignorando novo disparo');
+            logPainel('[Projudi Bens Pendentes SNGB] coleta já em andamento — ignorando novo disparo');
             return;
         }
         const form = paginaRelatorioBensSngb();
         if (!form) {
-            console.warn('[Projudi Bens Pendentes SNGB] formulário do relatório (#relatorioForm) não encontrado nesta tela.');
+            logPainelAviso('[Projudi Bens Pendentes SNGB] formulário do relatório (#relatorioForm) não encontrado nesta tela.');
             return;
         }
         coletaBensPendentesSngbEmAndamento = true;
-        console.log('[Projudi Bens Pendentes SNGB] formulário encontrado — solicitando o CSV em segundo plano (sem tocar nos botões da tela)');
+        logPainel('[Projudi Bens Pendentes SNGB] formulário encontrado — solicitando o CSV em segundo plano (sem tocar nos botões da tela)');
         try {
             selecionarFormatoCSVBensSngb(form);
             const corpo = new URLSearchParams(new FormData(form));
@@ -5246,7 +5282,7 @@
             const atuacao = lerAtuacao();
             const competencia = competenciaDe(atuacao);
             const registros = registrosBrutos.map(r => ({ ...r, atuacao, competencia }));
-            console.log(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
+            logPainel(`[Projudi Bens Pendentes SNGB] ${registros.length} processo(s) recebido(s) no CSV`);
             store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'pagina_0', JSON.stringify(registros));
             store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'num_paginas', '1');
             store.setItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'coletado', '1');
@@ -5256,7 +5292,7 @@
             // supervisão (mesmo motivo de extrairArquivadosSaldoAgora). O watchdog
             // (verificarTravamentoAutomacao) acaba pulando este item depois de alguns
             // minutos sem progresso, mesma rede de segurança usada pelos demais relatórios.
-            console.error('[Projudi Bens Pendentes SNGB] falha ao obter/processar o CSV', err);
+            logPainelErro('[Projudi Bens Pendentes SNGB] falha ao obter/processar o CSV', err);
         } finally {
             coletaBensPendentesSngbEmAndamento = false;
         }
@@ -5276,7 +5312,7 @@
         const gatilhoManual = store.getItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora') === '1';
         if (estadoAtual === 'coletando_bensSngb' || gatilhoManual) {
             store.removeItem(CFG_BENS_PENDENTES_SNGB.prefixo + 'buscar_agora');
-            console.log('[Projudi Bens Pendentes SNGB] tela do relatório encontrada — solicitando CSV ao Projudi');
+            logPainel('[Projudi Bens Pendentes SNGB] tela do relatório encontrada — solicitando CSV ao Projudi');
             coletarBensPendentesSngb();
             return true;
         }
@@ -5353,19 +5389,19 @@
         if (chkSemSentenca && !chkSemSentenca.checked) chkSemSentenca.click();
         const chkAgrupar = form.querySelector('#agruparPorProcesso');
         if (chkAgrupar && !chkAgrupar.checked) chkAgrupar.click();
-        console.log(`[Projudi Prescrições] semSentencaAnotada=${chkSemSentenca ? chkSemSentenca.checked : 'n/d'} agruparPorProcesso=${chkAgrupar ? chkAgrupar.checked : 'n/d'}`);
+        logPainel(`[Projudi Prescrições] semSentencaAnotada=${chkSemSentenca ? chkSemSentenca.checked : 'n/d'} agruparPorProcesso=${chkAgrupar ? chkAgrupar.checked : 'n/d'}`);
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Prescrições] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Prescrições] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Prescrições] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Prescrições] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Prescrições] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Prescrições] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Prescrições] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Prescrições] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5390,19 +5426,19 @@
 
         const radioAtrasadas = form.querySelector('input[name="situacao"][value="atrasadas"]');
         if (radioAtrasadas && !radioAtrasadas.checked) radioAtrasadas.click();
-        console.log(`[Projudi Monitoração Expirada] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
+        logPainel(`[Projudi Monitoração Expirada] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Monitoração Expirada] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Monitoração Expirada] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Monitoração Expirada] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Monitoração Expirada] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Monitoração Expirada] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Monitoração Expirada] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Monitoração Expirada] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Monitoração Expirada] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5430,19 +5466,19 @@
 
         const radioAtrasadas = form.querySelector('input[name="situacao"][value="atrasadas"]');
         if (radioAtrasadas && !radioAtrasadas.checked) radioAtrasadas.click();
-        console.log(`[Projudi Medidas Alternativas em Atraso] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
+        logPainel(`[Projudi Medidas Alternativas em Atraso] situacao=atrasadas marcado=${radioAtrasadas ? radioAtrasadas.checked : 'n/d'}`);
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Medidas Alternativas em Atraso] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Medidas Alternativas em Atraso] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Medidas Alternativas em Atraso] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Medidas Alternativas em Atraso] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Medidas Alternativas em Atraso] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Medidas Alternativas em Atraso] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Medidas Alternativas em Atraso] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Medidas Alternativas em Atraso] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5465,16 +5501,16 @@
         if (!form) return;
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Suspensos c/ Prazo] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Suspensos c/ Prazo] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Suspensos c/ Prazo] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Suspensos c/ Prazo] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Suspensos c/ Prazo] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Suspensos c/ Prazo] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Suspensos c/ Prazo] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5491,9 +5527,9 @@
             sel.dispatchEvent(new Event('change', { bubbles: true }));
         }
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Habilitações Adoção] status=${sel ? sel.value : '(select ausente)'}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Habilitações Adoção] status=${sel ? sel.value : '(select ausente)'}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Habilitações Adoção] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Habilitações Adoção] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
     }
@@ -5508,10 +5544,10 @@
         status.filter(cb => cb.value !== '0' && cb.checked).forEach(cb => cb.click());
         const ativo = status.find(cb => cb.value === '0');
         if (ativo && !ativo.checked) ativo.click();
-        console.log(`[Projudi Averiguação Paternidade] status marcados: ${status.filter(cb => cb.checked).map(cb => cb.value).join(',') || '(nenhum)'}`);
+        logPainel(`[Projudi Averiguação Paternidade] status marcados: ${status.filter(cb => cb.checked).map(cb => cb.value).join(',') || '(nenhum)'}`);
         selecionarClasseAveriguacaoPaternidade(form, () => {
             const btn = form.querySelector('#pesquisar') || form.querySelector('input[type="submit"]');
-            console.log('[Projudi Averiguação Paternidade] classe selecionada — clicando em Pesquisar em 1,5s');
+            logPainel('[Projudi Averiguação Paternidade] classe selecionada — clicando em Pesquisar em 1,5s');
             store.setItem(AUTO_ESTADO, 'coletando_averiguacaopaternidade');
             setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1500);
         });
@@ -5598,7 +5634,7 @@
             if (tick > 120) {
                 if (!avisou) {
                     avisou = true;
-                    console.warn('[Projudi Averiguação Paternidade] não consegui selecionar a classe pela lupa — selecione "123 - Averiguação de Paternidade" manualmente; a pesquisa segue sozinha depois disso.');
+                    logPainelAviso('[Projudi Averiguação Paternidade] não consegui selecionar a classe pela lupa — selecione "123 - Averiguação de Paternidade" manualmente; a pesquisa segue sozinha depois disso.');
                     atualizarStatus('Selecione a classe "123 - Averiguação de Paternidade" pela lupa — a pesquisa continua sozinha depois disso.');
                 }
                 setTimeout(passo, 1000);
@@ -5636,9 +5672,9 @@
         const radio = form.querySelector('input[name="opcao"][value="acolhidos"]');
         if (radio && !radio.checked) radio.click();
         const btn = document.getElementById('pesquisar') || form.querySelector('input[name="btPesquisar"]');
-        console.log(`[Projudi Acolhidos] opcao=acolhidos marcada=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Acolhidos] opcao=acolhidos marcada=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Acolhidos] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Acolhidos] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
     }
@@ -5652,7 +5688,7 @@
         const radio = form.querySelector(`input[name="flagAgruparPorReu"][value="${valor}"]`);
         if (radio && !radio.checked) radio.click();
         const btn = document.getElementById('pesquisar') || form.querySelector('input[name="btPesquisar"]');
-        console.log(`[Projudi Prisões] agrupar por=${valor} marcado=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Prisões] agrupar por=${valor} marcado=${!!(radio && radio.checked)}; botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
             if (btn && !btn.disabled) btn.click(); else form.submit();
         }, 1500);
@@ -5679,7 +5715,7 @@
         const tentativas = parseInt(store.getItem(p + 'tentativas_reu') || '0', 10);
         if (!(radio && radio.checked) && tentativas < 3) {
             store.setItem(p + 'tentativas_reu', String(tentativas + 1));
-            console.log(`[Projudi Prisões] "Por réu" ainda não está marcado — pesquisando de novo (tentativa ${tentativas + 1})`);
+            logPainel(`[Projudi Prisões] "Por réu" ainda não está marcado — pesquisando de novo (tentativa ${tentativas + 1})`);
             pesquisarPrisoesAgrupadoPor('porReu');
             return true;
         }
@@ -5693,7 +5729,7 @@
             if (total != null) store.setItem(p + 'total_reus', String(total));
             logPainel(`[Projudi Prisões] busca "Por réu" concluída — total de pessoas presas: ${total == null ? '(não identificado)' : total}`);
         } else {
-            console.warn('[Projudi Prisões] não foi possível pesquisar "Por réu" após 3 tentativas — seguindo sem o total de pessoas presas');
+            logPainelAviso('[Projudi Prisões] não foi possível pesquisar "Por réu" após 3 tentativas — seguindo sem o total de pessoas presas');
         }
         avancarAutomacao(CFG_PRISOES);
         return false;
@@ -5717,16 +5753,16 @@
         if (!form) return;
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Instância Recursal] botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Instância Recursal] botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Instância Recursal] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Instância Recursal] clicando em Filtrar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Instância Recursal] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Instância Recursal] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Instância Recursal] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
+                    logPainelAviso('[Projudi Instância Recursal] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5811,7 +5847,7 @@
         let fila = lerFilaDestinosRemetidos();
         if (!fila.length) {
             fila = opcoesDestinoRemetidos(form);
-            console.log(`[Projudi Processos Remetidos] fila de destinos preparada a partir do campo "Remetidos para" — ${fila.length} destino(s): ${fila.map(d => d.rotulo).join(', ') || '(nenhum — busca única sem filtro de destino)'}`);
+            logPainel(`[Projudi Processos Remetidos] fila de destinos preparada a partir do campo "Remetidos para" — ${fila.length} destino(s): ${fila.map(d => d.rotulo).join(', ') || '(nenhum — busca única sem filtro de destino)'}`);
         }
         const destino = fila[0] || null;
         store.setItem(CHAVE_FILA_DESTINOS_REMETIDOS, JSON.stringify(fila.slice(1)));
@@ -5834,16 +5870,16 @@
         store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Processos Remetidos] destino="${destino ? destino.rotulo : '(nenhum)'}" (${fila.length - (destino ? 1 : 0)} restante(s) na fila) — botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Processos Remetidos] destino="${destino ? destino.rotulo : '(nenhum)'}" (${fila.length - (destino ? 1 : 0)} restante(s) na fila) — botão de pesquisa (Filtrar) encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Processos Remetidos] clicando em Filtrar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Processos Remetidos] clicando em Filtrar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Processos Remetidos] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Processos Remetidos] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Processos Remetidos] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
+                    logPainelAviso('[Projudi Processos Remetidos] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Filtrar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5855,7 +5891,7 @@
     // Médio para os meses) em vez de avançar para o próximo relatório da automação.
     function avancarOuProximoDestinoRemetidos() {
         if (lerFilaDestinosRemetidos().length > 0) {
-            console.log('[Projudi Processos Remetidos] destino concluído — ainda restam destinos na fila, buscando o próximo');
+            logPainel('[Projudi Processos Remetidos] destino concluído — ainda restam destinos na fila, buscando o próximo');
             store.setItem(AUTO_ESTADO, 'ir_remetidos');
             setTimeout(passoAutomacao, 900);
         } else {
@@ -5889,16 +5925,16 @@
         preencherPeriodoAR(form, { dataInicio: hojeBR, dataFim: hojeBR });
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Ativos por Classe] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Ativos por Classe] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
         setTimeout(() => {
-            console.log('[Projudi Ativos por Classe] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Ativos por Classe] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             setTimeout(() => {
                 const aindaNoFormulario = !document.querySelector('table.resultTable');
-                console.log(`[Projudi Ativos por Classe] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
+                logPainel(`[Projudi Ativos por Classe] diagnóstico 15s depois — aindaSemResultado=${aindaNoFormulario}`);
                 if (aindaNoFormulario) {
-                    console.warn('[Projudi Ativos por Classe] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Ativos por Classe] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -5924,9 +5960,9 @@
             const mapa = lerMapaAtivos();
             mapa[atuacao] = total;
             store.setItem('projudi_estatisticas_ativos', JSON.stringify(mapa));
-            console.log(`[Projudi Ativos por Classe] total de ativos gravado para "${atuacao}": ${total}`);
+            logPainel(`[Projudi Ativos por Classe] total de ativos gravado para "${atuacao}": ${total}`);
         } catch (e) {
-            console.error('[Projudi Ativos por Classe] erro ao calcular/gravar total de ativos', e);
+            logPainelErro('[Projudi Ativos por Classe] erro ao calcular/gravar total de ativos', e);
         }
         avancarAutomacao(CFG_ATIVOS_CLASSE);
     }
@@ -6104,7 +6140,7 @@
     // normalmente ao terminar.
     function coletarOutrosCumprimentosAgora() {
         const { tabelaBnmp, tabelaPrincipal } = tabelasOutrosCumprimentos();
-        console.log(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
+        logPainel(`[Projudi Outros Cumprimentos] tabelaBnmp encontrada=${!!tabelaBnmp} tabelaPrincipal encontrada=${!!tabelaPrincipal}`);
 
         const atuacao = lerAtuacao();
         const competencia = competenciaDe(atuacao);
@@ -6112,7 +6148,7 @@
         const principal = extrairLinhasTabela(tabelaPrincipal, 'principal', CAMPOS_PENDENTES_PRINCIPAL, 'ComUrgencia');
         const registrosDestaAtribuicao = [...bnmp, ...principal].map(r => ({ ...r, atuacao, competencia }));
 
-        console.log(`[Projudi Outros Cumprimentos] "${atuacao || '(sem atuação)'}" — ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registrosDestaAtribuicao.length} no total)`);
+        logPainel(`[Projudi Outros Cumprimentos] "${atuacao || '(sem atuação)'}" — ${bnmp.length} tipo(s) BNMP + ${principal.length} tipo(s) principal(is) com pendência > 0 (${registrosDestaAtribuicao.length} no total)`);
 
         const prefixo = CFG_OUTROS_CUMPRIMENTOS.prefixo;
         // Legado: esta cfg sempre gravou direto em localStorage (nunca passou pelo
@@ -6156,13 +6192,13 @@
     function aguardarOutrosCumprimentosProntoEExtrair(tentativa, callback) {
         const assinaturaAtual = assinaturaTabelasOutrosCumprimentos();
         if (tentativa > 0 && assinaturaAtual === ultimaAssinaturaOutrosCump) {
-            console.log(`[Projudi Outros Cumprimentos] tela estável na tentativa ${tentativa} — extraindo`);
+            logPainel(`[Projudi Outros Cumprimentos] tela estável na tentativa ${tentativa} — extraindo`);
             coletarOutrosCumprimentosAgora();
             if (callback) callback();
             return;
         }
         if (tentativa >= 20) {
-            console.warn('[Projudi Outros Cumprimentos] tela não estabilizou em ~10s — extraindo mesmo assim (dados podem estar incompletos)');
+            logPainelAviso('[Projudi Outros Cumprimentos] tela não estabilizou em ~10s — extraindo mesmo assim (dados podem estar incompletos)');
             coletarOutrosCumprimentosAgora();
             if (callback) callback();
             return;
@@ -6181,7 +6217,7 @@
     // sobrescrever uma a outra e avançar a automação duas vezes.
     function coletarOutrosCumprimentos(callback) {
         if (coletaOutrosCumprimentosEmAndamento) {
-            console.log('[Projudi Outros Cumprimentos] coleta já em andamento — ignorando novo disparo');
+            logPainel('[Projudi Outros Cumprimentos] coleta já em andamento — ignorando novo disparo');
             return;
         }
         coletaOutrosCumprimentosEmAndamento = true;
@@ -6351,7 +6387,7 @@
     function selecionarFormatoCSV(form) {
         const radioCSV = form.querySelector('input[name="tipoExportacao"][value="CSV"]');
         if (radioCSV && !radioCSV.checked) radioCSV.click();
-        else if (!radioCSV) console.warn('[Projudi Arquivados c/ Saldo] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
+        else if (!radioCSV) logPainelAviso('[Projudi Arquivados c/ Saldo] rádio tipoExportacao=CSV não encontrado no formulário — a requisição pode sair no formato padrão (PDF) em vez de CSV.');
         return radioCSV;
     }
 
@@ -6362,7 +6398,7 @@
     function marcarCheckboxDoRelatorio(form) {
         const checkbox = form.querySelector('input[type="checkbox"]');
         if (checkbox && !checkbox.checked) checkbox.click();
-        else if (!checkbox) console.warn('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário; confira manualmente se o relatório depende dele.');
+        else if (!checkbox) logPainelAviso('[Projudi Arquivados c/ Saldo] nenhum checkbox encontrado no formulário; confira manualmente se o relatório depende dele.');
         return checkbox;
     }
 
@@ -6395,15 +6431,15 @@
         // registros), não uma falha — mesmo tratamento que o resto do script já dá a
         // buscas sem resultado (ver "sem buttonBar = 0 registros" em injetarBotoes).
         if (respostaEhPDF(buffer)) {
-            console.log(`[Projudi Arquivados c/ Saldo] [${origem}] resposta veio como PDF (não CSV) — nenhum processo arquivado com saldo encontrado, tratando como 0 registros.`);
+            logPainel(`[Projudi Arquivados c/ Saldo] [${origem}] resposta veio como PDF (não CSV) — nenhum processo arquivado com saldo encontrado, tratando como 0 registros.`);
             return '';
         }
         const { texto, encoding, tentativas } = decodificarResposta(buffer);
         if (!texto) {
-            console.warn(`[Projudi Arquivados c/ Saldo] [${origem}] nenhuma decodificação pareceu CSV:`, tentativas);
+            logPainelAviso(`[Projudi Arquivados c/ Saldo] [${origem}] nenhuma decodificação pareceu CSV:`, tentativas);
             throw new Error(`[${origem}] a resposta não parece o CSV esperado. Início do que voltou: ${tentativas[0] || '(vazio)'}`);
         }
-        console.log(`[Projudi Arquivados c/ Saldo] [${origem}] CSV reconhecido (encoding ${encoding})`);
+        logPainel(`[Projudi Arquivados c/ Saldo] [${origem}] CSV reconhecido (encoding ${encoding})`);
         return texto;
     }
 
@@ -6421,7 +6457,7 @@
         });
         // redirected/url final: diagnóstico chave se o endpoint na verdade redireciona
         // (302) para uma URL de download gerada.
-        console.log('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
+        logPainel('[Projudi Arquivados c/ Saldo] [fetch] status=', resp.status, 'redirected=', resp.redirected, 'url final=', resp.url, 'headers=', Object.fromEntries(resp.headers.entries()));
         if (!resp.ok) throw new Error(`[fetch] HTTP ${resp.status} ao solicitar o relatório`);
         const buffer = await resp.arrayBuffer();
         return interpretarResposta(buffer, 'fetch');
@@ -6435,7 +6471,7 @@
     // tempo (ver todosDocumentosAcessiveis) e disparar a extração em paralelo.
     async function extrairArquivadosSaldoAgora(form) {
         if (coletaArquivadosSaldoEmAndamento) {
-            console.log('[Projudi Arquivados c/ Saldo] extração já em andamento — ignorando novo disparo');
+            logPainel('[Projudi Arquivados c/ Saldo] extração já em andamento — ignorando novo disparo');
             return;
         }
         coletaArquivadosSaldoEmAndamento = true;
@@ -6443,7 +6479,7 @@
         // (verificarTravamentoAutomacao) marque falso travamento enquanto o fetch está
         // em voo.
         store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'ts', String(Date.now()));
-        console.log('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
+        logPainel('[Projudi Arquivados c/ Saldo] formulário encontrado — solicitando os dados em segundo plano (sem tocar nos botões da tela)');
         try {
             selecionarFormatoCSV(form);
             marcarCheckboxDoRelatorio(form);
@@ -6463,7 +6499,7 @@
             const anteriores = desembrulharArray(store.getItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0')) || [];
             const semEstaAtribuicao = anteriores.filter(r => (r.atuacao || '') !== (atuacao || ''));
             const dados = [...semEstaAtribuicao, ...dadosDestaAtribuicao];
-            console.log(`[Projudi Arquivados c/ Saldo] "${atuacao || '(sem atuação)'}" — ${dadosDestaAtribuicao.length} processo(s) nesta atribuição (${dados.length} no total acumulado) — salvando e avançando a automação`);
+            logPainel(`[Projudi Arquivados c/ Saldo] "${atuacao || '(sem atuação)'}" — ${dadosDestaAtribuicao.length} processo(s) nesta atribuição (${dados.length} no total acumulado) — salvando e avançando a automação`);
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'pagina_0', JSON.stringify(dados));
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'num_paginas', '1');
             store.setItem(CFG_ARQUIVADOS_SALDO.prefixo + 'coletado', '1');
@@ -6473,7 +6509,7 @@
             // supervisão. O watchdog (WATCHDOG_STALL_MS/verificarTravamentoAutomacao)
             // acaba pulando este item depois de ~8min sem progresso, mesma rede de
             // segurança usada pelos demais relatórios.
-            console.error('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
+            logPainelErro('[Projudi Arquivados c/ Saldo] falha ao obter/processar os dados', err);
         } finally {
             coletaArquivadosSaldoEmAndamento = false;
         }
@@ -6507,7 +6543,7 @@
 
         const linkListagem = acharLinkArquivadosSaldoNaListagem();
         if (linkListagem) {
-            console.log('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
+            logPainel('[Projudi Arquivados c/ Saldo] listagem de Relatórios Dinâmicos — clicando no relatório');
             linkListagem.click();
             return;
         }
@@ -6709,7 +6745,7 @@
         const contadores = lerContadoresCumprimentoMedidas();
         const registro = { ...contadores, atuacao, competencia };
 
-        console.log(`[Projudi Cumprimento de Medidas] "${atuacao || '(sem atuação)'}" — atrasados=${contadores.atrasados} semCumprimento=${contadores.semCumprimento} aVencer=${contadores.aVencer}`);
+        logPainel(`[Projudi Cumprimento de Medidas] "${atuacao || '(sem atuação)'}" — atrasados=${contadores.atrasados} semCumprimento=${contadores.semCumprimento} aVencer=${contadores.aVencer}`);
 
         const prefixo = CFG_CUMPRIMENTO_MEDIDAS.prefixo;
         const anteriores = desembrulharArray(store.getItem(prefixo + 'pagina_0')) || [];
@@ -6747,7 +6783,7 @@
             return;
         }
         if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
-            console.warn('[Projudi Cumprimento de Medidas] tela não estabilizou em ~40s — extraindo mesmo assim (dados podem estar incompletos).');
+            logPainelAviso('[Projudi Cumprimento de Medidas] tela não estabilizou em ~40s — extraindo mesmo assim (dados podem estar incompletos).');
             coletarCumprimentoMedidasAgora();
             if (callback) callback();
             return;
@@ -6762,7 +6798,7 @@
     // "Baixar PDF"). Trava contra chamadas concorrentes.
     function coletarCumprimentoMedidas(callback) {
         if (coletaCumprimentoMedidasEmAndamento) {
-            console.log('[Projudi Cumprimento de Medidas] coleta já em andamento — ignorando novo disparo');
+            logPainel('[Projudi Cumprimento de Medidas] coleta já em andamento — ignorando novo disparo');
             return;
         }
         coletaCumprimentoMedidasEmAndamento = true;
@@ -6948,7 +6984,7 @@
                 if (!bruto) continue;
                 const legado = desembrulharArray(bruto);
                 if (legado) dados = dados.concat(legado);
-                else console.error('[Exportar Projudi] parte ilegível no índice', i);
+                else logPainelErro('[Exportar Projudi] parte ilegível no índice', i);
             }
             // Pedido do usuário: como o número único do processo é identificador único,
             // o mesmo processo não pode ser contado duas vezes dentro da mesma seção do
@@ -7014,7 +7050,7 @@
                     const th = t.querySelector(':scope > thead');
                     return `[${i}] ${th ? th.textContent.replace(/\s+/g, ' ').trim() : '(sem thead)'}`;
                 });
-                console.log('[Projudi] coletarPaginaAtual — nenhuma linha em nenhuma table.resultTable; cabeçalhos encontrados:', cabecalhos);
+                logPainel('[Projudi] coletarPaginaAtual — nenhuma linha em nenhuma table.resultTable; cabeçalhos encontrados:', cabecalhos);
             }
             return dados;
         }
@@ -7044,16 +7080,16 @@
                 const opcoesDisponiveis = [...sel.options].map(o => o.value);
                 const alvo = opcoesDisponiveis.includes(pss.valor) ? pss.valor : null;
                 if (alvo && sel.value !== alvo) {
-                    console.log(`[Projudi] alterando pageSize de ${sel.value} para ${alvo} — aguardando reload`);
+                    logPainel(`[Projudi] alterando pageSize de ${sel.value} para ${alvo} — aguardando reload`);
                     store.setItem(KEY_RODANDO, '1');
                     marcarAtividade();
                     sel.value = alvo;
                     sel.dispatchEvent(new Event('change', { bubbles: true }));
                     return;
                 }
-                if (!alvo) console.log(`[Projudi] opção ${pss.valor} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
+                if (!alvo) logPainel(`[Projudi] opção ${pss.valor} não existe no seletor de tamanho de página — mantendo ${sel.value}`);
             }
-            console.log('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
+            logPainel('[Projudi] iniciar() — pageSize OK, iniciando continuar()');
             store.setItem(KEY_RODANDO, '1');
             marcarAtividade();
             return continuar();
@@ -7067,7 +7103,7 @@
             if (automacaoPausada()) { aguardarFimDaPausaNoColetor(continuar); return; }
             desabilitarBotoes(true);
             marcarAtividade();
-            console.log('[Projudi] continuar() — coletando página atual');
+            logPainel('[Projudi] continuar() — coletando página atual');
 
             // coletarPaginaAtual() (cfg.extrai por linha) ficava FORA deste try — uma
             // exceção numa linha atípica da tabela (célula em formato inesperado) subia
@@ -7087,7 +7123,7 @@
             } catch (err) {
                 store.removeItem(KEY_RODANDO);
                 atualizarStatus(`Erro ao ler/armazenar dados (${err.name}). Os dados já coletados foram mantidos.`);
-                console.error('[Exportar Projudi]', err);
+                logPainelErro('[Exportar Projudi]', err);
                 // QuotaExceededError = o localStorage do navegador ENCHEU (limite de
                 // ~5-10MB por origem) — relatado em produção com Apreensões na página 10.
                 // Isso não é um problema deste relatório específico: TODO próximo write em
@@ -7100,7 +7136,7 @@
                 // acumularem entre exportações, o que deixa isso mais provável de
                 // acontecer com o tempo.
                 if (err.name === 'QuotaExceededError') {
-                    console.error('[Auto Projudi] armazenamento do navegador CHEIO — parando a automação (não adianta avançar, o próximo write falharia igual)');
+                    logPainelErro('[Auto Projudi] armazenamento do navegador CHEIO — parando a automação (não adianta avançar, o próximo write falharia igual)');
                     store.setItem(AUTO_ESTADO, 'armazenamento_cheio');
                     store.setItem('projudi_auto_lock', String(Date.now()));
                     atualizarPainel();
@@ -7114,7 +7150,7 @@
                 // avancarAutomacao já confere sozinha se a automação está mesmo
                 // esperando este cfg (senão é um no-op) — chamar sempre é seguro.
                 store.setItem(cfg.prefixo + 'erro', '1');
-                console.warn('[Auto Projudi] erro durante a coleta — avançando a fila automaticamente em vez de travar');
+                logPainelAviso('[Auto Projudi] erro durante a coleta — avançando a fila automaticamente em vez de travar');
                 avancarAutomacao(cfg);
                 render();
                 return;
@@ -7149,13 +7185,13 @@
                 // extraídas" (log já existente em coletarPaginaAtual, acima) mostra que o
                 // filtro dentro de extrai() descartou tudo.
                 if (total === 0 && cfg.mostrarSeVazio) {
-                    console.warn(`[Projudi] "${cfg.prefixo}" terminou com 0 registros acumulados — se a tela mostrava processos, confira os logs de "coletarPaginaAtual" acima (linhas encontradas vs. extraídas) para saber se foi a leitura da tabela ou o filtro de extrai() que zerou.`);
+                    logPainelAviso(`[Projudi] "${cfg.prefixo}" terminou com 0 registros acumulados — se a tela mostrava processos, confira os logs de "coletarPaginaAtual" acima (linhas encontradas vs. extraídas) para saber se foi a leitura da tabela ou o filtro de extrai() que zerou.`);
                 }
                 // Tempo Médio busca mês a mês (ver preencherEPesquisarTempoMedio) — se ainda
                 // restam meses na fila, volta para a tela de filtros e pesquisa o próximo em
                 // vez de avançar para o próximo relatório da automação.
                 if (cfg === CFG_TEMPOMEDIO && lerFilaMesesTempoMedio().length > 0) {
-                    console.log('[Projudi TM] mês concluído — ainda restam meses na fila, buscando o próximo');
+                    logPainel('[Projudi TM] mês concluído — ainda restam meses na fila, buscando o próximo');
                     store.setItem(AUTO_ESTADO, 'ir_tempomedio');
                     setTimeout(passoAutomacao, 900);
                 } else if (typeof cfg.aoTerminarColeta === 'function') {
@@ -7180,7 +7216,7 @@
                 atualizarStatus(`✓ ${dados.length} registros${extra} exportados. Use "Limpar" para começar de novo.`);
             } catch (err) {
                 atualizarStatus(`Erro ao gerar planilha: ${err.message}`);
-                console.error('[Exportar Projudi]', err);
+                logPainelErro('[Exportar Projudi]', err);
             }
         }
 
@@ -7198,7 +7234,7 @@
                 atualizarStatus(`✓ PDF gerado com ${dados.length} registros${extraResumo}. Dados acumulados apagados — pronto para nova coleta.`);
             } catch (err) {
                 atualizarStatus(`Erro ao gerar PDF: ${err.message}`);
-                console.error('[Exportar Projudi]', err);
+                logPainelErro('[Exportar Projudi]', err);
             }
         }
 
@@ -7215,7 +7251,7 @@
                 atualizarStatus(`✓ PDF por juiz gerado com ${dados.length} registros. Dados acumulados apagados — pronto para nova coleta.`);
             } catch (err) {
                 atualizarStatus(`Erro ao gerar PDF por juiz: ${err.message}`);
-                console.error('[Exportar Projudi]', err);
+                logPainelErro('[Exportar Projudi]', err);
             }
         }
 
@@ -8866,7 +8902,7 @@
             // mostra, no momento exato da MONTAGEM do PDF, se o valor gravado por aquela
             // função ainda está acessível aqui (mesma store, mesma chave) e quantos
             // indicadores (>0) sobraram depois do filtro.
-            console.log(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": ${lista.length} indicador(es) no total → ${extras.length} com valor > 0`);
+            logPainel(`[Projudi Juntadas] montarResumoGenerico — lendo "${chavePainelExtra}": ${lista.length} indicador(es) no total → ${extras.length} com valor > 0`);
             temIndicadorCritico = extras.some(it => it.critico);
             if (extras.length) {
                 tituloSecao(doc, m, y + 4, uw, p.painelExtraTitulo);
@@ -14982,8 +15018,8 @@
     async function dadosRemessasConsolidados(dadosBase) {
         let extrasRemessas = [];
         let extrasRemetidos = [];
-        try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
-        try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { console.warn('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
+        try { extrasRemessas = await lerDadosDe(CFG_REMESSAS.prefixo); } catch (e) { logPainelAviso('[Projudi Remessas] erro ao ler dados de Remessas em Aberto para mesclar', e); }
+        try { extrasRemetidos = await lerDadosDe(CFG_PROCESSOS_REMETIDOS.prefixo); } catch (e) { logPainelAviso('[Projudi Remessas] erro ao ler dados de Processos Remetidos para mesclar', e); }
         // O mesmo processo pode aparecer nas DUAS fontes (ex.: um "Em remessa" de
         // Paralisados que também foi encontrado por Processos Remetidos, com destino
         // "Delegacia"/"Distribuidor"/etc.). removerProcessosDuplicados mantém só a 1ª
@@ -16148,7 +16184,7 @@
         else if (/processoBuscaParalisado\.do/i.test(location.pathname + location.search)) {
             cfg = opcaoBuscaParalisadoSelecionada() === '3' ? CFG_REMESSAS : CFG_PARALISADOS;
         }
-        console.log(`[Projudi] detectarConfig — url=${location.pathname} thead=${!!thead} situacaoAudiencia=${situacaoAudienciaSelecionada()} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
+        logPainel(`[Projudi] detectarConfig — url=${location.pathname} thead=${!!thead} situacaoAudiencia=${situacaoAudienciaSelecionada()} cfg=${cfg ? cfg.prefixo : 'null'} cab="${cab.slice(0,80).replace(/\s+/g,' ')}"`);
         return cfg;
     }
 
@@ -16292,12 +16328,12 @@
         const assinaturaAnterior = store.getItem(CHAVE_ASSINATURA_ANTERIOR_TM);
         const jaMudou = assinaturaAnterior == null || assinaturaAtual !== assinaturaAnterior;
         if (tentativa > 0 && jaMudou && assinaturaAtual === ultimaAssinaturaVistaTM) {
-            console.log('[Projudi TM] resultado estável — iniciando coleta');
+            logPainel('[Projudi TM] resultado estável — iniciando coleta');
             iniciarCallback();
             return;
         }
         if (tentativa >= 30) {
-            console.warn('[Projudi TM] resultado não estabilizou em ~15s — coletando mesmo assim (valores podem estar desatualizados)');
+            logPainelAviso('[Projudi TM] resultado não estabilizou em ~15s — coletando mesmo assim (valores podem estar desatualizados)');
             iniciarCallback();
             return;
         }
@@ -16316,7 +16352,7 @@
 
         const fila = lerFilaMesesTempoMedio();
         const mes = fila[0];
-        if (!mes) { console.warn('[Projudi TM] preencherEPesquisarTempoMedio chamado sem fila de meses — nada a pesquisar'); return; }
+        if (!mes) { logPainelAviso('[Projudi TM] preencherEPesquisarTempoMedio chamado sem fila de meses — nada a pesquisar'); return; }
         // Remove o mês do início da fila agora — quando essa pesquisa terminar de coletar
         // (ver criarColetor/continuar), o próximo item (se houver) dispara uma nova rodada.
         store.setItem(CHAVE_FILA_MESES_TM, JSON.stringify(fila.slice(1)));
@@ -16327,7 +16363,7 @@
 
         const radioAnalisadas = form.querySelector('input[name="situacao"][value="A"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
-        console.log(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico} mês="${mes.rotulo}" (${fila.length - 1} restante(s) na fila)`);
+        logPainel(`[Projudi TM] radioAnalisadas encontrado=${!!radioAnalisadas} radioAnalitico encontrado=${!!radioAnalitico} mês="${mes.rotulo}" (${fila.length - 1} restante(s) na fila)`);
         if (radioAnalisadas) radioAnalisadas.checked = true;
         if (radioAnalitico) radioAnalitico.checked = true;
 
@@ -16340,7 +16376,7 @@
         }
         const campoFim = form.querySelector('input[name="dataFim"]');
         if (campoFim) { campoFim.disabled = false; campoFim.value = mes.fim; } // idem — sem isso a busca não teria fim de mês
-        console.log(`[Projudi TM] campos preenchidos — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
+        logPainel(`[Projudi TM] campos preenchidos — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
 
         // Salva o período ACUMULADO (não só o deste mês) para uso posterior no PDF — como a
         // fila roda do mês mais recente para o mais antigo, o "fim" só é gravado na primeira
@@ -16368,10 +16404,10 @@
         store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi TM] flag auto_iniciar definida; clicando em Pesquisar em 1,5s (btn encontrado=${!!btn})`);
+        logPainel(`[Projudi TM] flag auto_iniciar definida; clicando em Pesquisar em 1,5s (btn encontrado=${!!btn})`);
 
         setTimeout(() => {
-            console.log('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi TM] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
             // Marca atividade no MOMENTO do clique — sem isso, todo o tempo de busca
             // (que pode passar de minutos com o site lento, ver STALE_MS) ficava sem
@@ -16387,9 +16423,9 @@
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
                 const temResultado = !!document.querySelector('table.resultTable');
-                console.log(`[Projudi TM] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                logPainel(`[Projudi TM] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
-                    console.warn('[Projudi TM] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
+                    logPainelAviso('[Projudi TM] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
                     const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
                     if (btnRetry && !btnRetry.disabled) btnRetry.click();
                     store.setItem(CFG_TEMPOMEDIO.prefixo + 'ts', String(Date.now()));
@@ -16411,24 +16447,24 @@
 
         const radioPendentes = form.querySelector('input[name="situacao"][value="P"]');
         const radioAnalitico = form.querySelector('input[name="analitico"][value="true"]');
-        console.log(`[Projudi Conclusões] radioPendentes encontrado=${!!radioPendentes} radioAnalitico encontrado=${!!radioAnalitico}`);
+        logPainel(`[Projudi Conclusões] radioPendentes encontrado=${!!radioPendentes} radioAnalitico encontrado=${!!radioAnalitico}`);
         if (radioPendentes) radioPendentes.checked = true;
         if (radioAnalitico) radioAnalitico.checked = true;
 
         const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Conclusões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Conclusões] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
 
         setTimeout(() => {
-            console.log('[Projudi Conclusões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Conclusões] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
             store.setItem(CFG_CONCLUSOES.prefixo + 'ts', String(Date.now()));
 
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('estatisticaConclusaoForm');
                 const temResultado = !!document.querySelector('table.resultTable');
-                console.log(`[Projudi Conclusões] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                logPainel(`[Projudi Conclusões] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
-                    console.warn('[Projudi Conclusões] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
+                    logPainelAviso('[Projudi Conclusões] ainda sem resultado após 15s — reclicando em Pesquisar uma vez.');
                     const btnRetry = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
                     if (btnRetry && !btnRetry.disabled) btnRetry.click();
                     store.setItem(CFG_CONCLUSOES.prefixo + 'ts', String(Date.now()));
@@ -16453,7 +16489,7 @@
         if (!form) return;
 
         const radio = form.querySelector(`input[name="opcaoBusca"][value="${opcaoBuscaValor}"]`);
-        console.log(`[Projudi Paralisado] radio opcaoBusca=${opcaoBuscaValor} encontrado=${!!radio}`);
+        logPainel(`[Projudi Paralisado] radio opcaoBusca=${opcaoBuscaValor} encontrado=${!!radio}`);
         if (radio) {
             radio.checked = true;
             radio.dispatchEvent(new Event('click', { bubbles: true }));
@@ -16466,24 +16502,24 @@
             campoDias.dispatchEvent(new Event('input', { bubbles: true }));
             campoDias.dispatchEvent(new Event('change', { bubbles: true }));
         }
-        console.log(`[Projudi Paralisado] campos preenchidos — opcaoBusca=${opcaoBuscaValor} diasMinimo="${campoDias ? campoDias.value : '?'}"`);
+        logPainel(`[Projudi Paralisado] campos preenchidos — opcaoBusca=${opcaoBuscaValor} diasMinimo="${campoDias ? campoDias.value : '?'}"`);
 
         if (chaveParaAutoIniciar) store.setItem('projudi_paralisado_auto_iniciar', chaveParaAutoIniciar);
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Paralisado] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Paralisado] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
 
         setTimeout(() => {
-            console.log('[Projudi Paralisado] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Paralisado] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
             setTimeout(() => {
                 const aindaNoFormulario = !!document.getElementById('processoBuscaParalisadoForm');
                 const temResultado = !!document.querySelector('table.resultTable tbody tr');
-                console.log(`[Projudi Paralisado] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
+                logPainel(`[Projudi Paralisado] diagnóstico 15s depois — aindaNoFormulario=${aindaNoFormulario} temResultado=${temResultado}`);
                 if (aindaNoFormulario && !temResultado) {
-                    console.warn('[Projudi Paralisado] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Paralisado] ainda sem resultado após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -16504,7 +16540,7 @@
         if (!form) return;
 
         const radio = form.querySelector('input[name="idSituacaoAudiencia"][value="8"]');
-        console.log(`[Projudi Audiências] radio Pendentes encontrado=${!!radio}`);
+        logPainel(`[Projudi Audiências] radio Pendentes encontrado=${!!radio}`);
         if (radio) {
             radio.checked = true;
             radio.dispatchEvent(new Event('click', { bubbles: true }));
@@ -16512,18 +16548,18 @@
         }
 
         const btn = document.getElementById('pesquisar') || form.querySelector('input[type="submit"]');
-        console.log(`[Projudi Audiências] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
+        logPainel(`[Projudi Audiências] botão de pesquisa encontrado=${!!btn}; clicando em 1,5s`);
 
         setTimeout(() => {
-            console.log('[Projudi Audiências] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            logPainel('[Projudi Audiências] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
             if (btn && !btn.disabled) btn.click(); else form.submit();
 
             // Diagnóstico tardio (site é lento; não dispara nenhum reenvio, só informa).
             setTimeout(() => {
                 const aindaSemPendentes = detectarConfig() !== CFG_AUDIENCIAS;
-                console.log(`[Projudi Audiências] diagnóstico 15s depois — aindaSemPendentes=${aindaSemPendentes}`);
+                logPainel(`[Projudi Audiências] diagnóstico 15s depois — aindaSemPendentes=${aindaSemPendentes}`);
                 if (aindaSemPendentes) {
-                    console.warn('[Projudi Audiências] ainda sem resultado de "Pendentes" após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
+                    logPainelAviso('[Projudi Audiências] ainda sem resultado de "Pendentes" após 15s — o site pode estar lento; se persistir, clique em Pesquisar manualmente.');
                 }
             }, 15000);
         }, 1500);
@@ -16581,10 +16617,10 @@
         tentativa = tentativa || 0;
         if (!paginaOutrosCumprimentos()) {
             if (tentativa >= 30) {
-                console.warn('[Projudi Outros Cumprimentos] a tabela "Cumprimento" não apareceu em ~15s — desistindo (tela pode ter mudado ou carregamento travou).');
+                logPainelAviso('[Projudi Outros Cumprimentos] a tabela "Cumprimento" não apareceu em ~15s — desistindo (tela pode ter mudado ou carregamento travou).');
                 const estadoDesistencia = store.getItem(AUTO_ESTADO);
                 if (estadoDesistencia === 'coletando_outroscumprimentos' || estadoDesistencia === 'preenchendo_outroscumprimentos') {
-                    console.warn('[Projudi Outros Cumprimentos] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    logPainelAviso('[Projudi Outros Cumprimentos] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
                     store.setItem(CFG_OUTROS_CUMPRIMENTOS.prefixo + 'coletado', '1');
                     avancarAutomacao(CFG_OUTROS_CUMPRIMENTOS);
                 }
@@ -16596,7 +16632,7 @@
 
         const estadoAtual = store.getItem(AUTO_ESTADO);
         if (estadoAtual === 'coletando_outroscumprimentos' || estadoAtual === 'preenchendo_outroscumprimentos') {
-            console.log('[Projudi Outros Cumprimentos] automação: extraindo o painel de contadores (sem preencher/pesquisar — a página já chega pronta)');
+            logPainel('[Projudi Outros Cumprimentos] automação: extraindo o painel de contadores (sem preencher/pesquisar — a página já chega pronta)');
             coletarOutrosCumprimentos();
             return;
         }
@@ -16654,10 +16690,10 @@
         tentativa = tentativa || 0;
         if (!paginaCumprimentoMedidas()) {
             if (tentativa >= CM_TENTATIVAS_MAXIMAS) {
-                console.warn('[Projudi Cumprimento de Medidas] os contadores não apareceram em ~40s — desistindo (tela pode ter mudado ou carregamento travou).');
+                logPainelAviso('[Projudi Cumprimento de Medidas] os contadores não apareceram em ~40s — desistindo (tela pode ter mudado ou carregamento travou).');
                 const estadoDesistencia = store.getItem(AUTO_ESTADO);
                 if (estadoDesistencia === 'coletando_cumprimentomedidas' || estadoDesistencia === 'preenchendo_cumprimentomedidas') {
-                    console.warn('[Projudi Cumprimento de Medidas] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
+                    logPainelAviso('[Projudi Cumprimento de Medidas] automação esperava este relatório — marcando como coletado (0) e avançando para não travar a fila.');
                     store.setItem(CFG_CUMPRIMENTO_MEDIDAS.prefixo + 'coletado', '1');
                     avancarAutomacao(CFG_CUMPRIMENTO_MEDIDAS);
                 }
@@ -16669,7 +16705,7 @@
 
         const estadoAtual = store.getItem(AUTO_ESTADO);
         if (estadoAtual === 'coletando_cumprimentomedidas' || estadoAtual === 'preenchendo_cumprimentomedidas') {
-            console.log('[Projudi Cumprimento de Medidas] automação: extraindo os contadores (sem preencher/pesquisar — a tela já chega pronta)');
+            logPainel('[Projudi Cumprimento de Medidas] automação: extraindo os contadores (sem preencher/pesquisar — a tela já chega pronta)');
             coletarCumprimentoMedidas();
             return;
         }
@@ -16768,10 +16804,10 @@
         const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key;
 
         if (coletor.rodando() && !coletor.obsoleta()) {
-            console.log('[Projudi Reavaliação Prisão Provisória] retomando coleta após reload de paginação');
+            logPainel('[Projudi Reavaliação Prisão Provisória] retomando coleta após reload de paginação');
             coletor.continuar();
         } else if (querColetarAuto) {
-            console.log('[Projudi Reavaliação Prisão Provisória] automação: iniciando coleta ao chegar no relatório');
+            logPainel('[Projudi Reavaliação Prisão Provisória] automação: iniciando coleta ao chegar no relatório');
             coletor.iniciar();
         } else {
             coletor.limparFlags();
@@ -16917,10 +16953,10 @@
         if (estadoAutoNoInicio === 'preenchendo_prescricoes' && !formularioPrescricoes()) {
             const linkVencidas = acharLinkMenu(/mesaAnalistaEscrivao\.do/i, /^vencidas$/i);
             if (linkVencidas) {
-                console.log('[Projudi Prescrições] aba "Mesa do Escrivão Criminal" carregada — clicando em "Vencidas"');
+                logPainel('[Projudi Prescrições] aba "Mesa do Escrivão Criminal" carregada — clicando em "Vencidas"');
                 linkVencidas.click();
             } else {
-                console.log('[Projudi Prescrições] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Vencidas" ainda não apareceu)');
+                logPainel('[Projudi Prescrições] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Vencidas" ainda não apareceu)');
             }
             return;
         }
@@ -16939,11 +16975,11 @@
         if (estadoAutoNoInicio === 'preenchendo_seminfracaopenal' && !document.querySelector('table.resultTable')) {
             const cartao = acharCardSemInfracaoPenal();
             if (cartao) {
-                console.log('[Projudi Sem Infração Penal] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos sem infração penal"');
+                logPainel('[Projudi Sem Infração Penal] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos sem infração penal"');
                 store.setItem(AUTO_ESTADO, 'coletando_seminfracaopenal');
                 cartao.click();
             } else {
-                console.log('[Projudi Sem Infração Penal] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+                logPainel('[Projudi Sem Infração Penal] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -16959,10 +16995,10 @@
         if (estadoAutoNoInicio === 'preenchendo_monitoracaoexpiradas' && !formularioMonitoracaoExpiradas()) {
             const linkExpiradas = acharLinkMenu(/buscaMonitoracaoEletronica\.do/i, /^expiradas$/i);
             if (linkExpiradas) {
-                console.log('[Projudi Monitoração Expirada] aba "Mesa do Escrivão Criminal" carregada — clicando em "Expiradas"');
+                logPainel('[Projudi Monitoração Expirada] aba "Mesa do Escrivão Criminal" carregada — clicando em "Expiradas"');
                 linkExpiradas.click();
             } else {
-                console.log('[Projudi Monitoração Expirada] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Expiradas" ainda não apareceu)');
+                logPainel('[Projudi Monitoração Expirada] aguardando a aba "Mesa do Escrivão Criminal" carregar (link "Expiradas" ainda não apareceu)');
             }
             return;
         }
@@ -16972,22 +17008,22 @@
         if (estadoAutoNoInicio === 'preenchendo_semrg' && !document.querySelector('table.resultTable')) {
             const cartao = acharCardSemRg();
             if (cartao) {
-                console.log('[Projudi Sem RG] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem RG/IIPR"');
+                logPainel('[Projudi Sem RG] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem RG/IIPR"');
                 store.setItem(AUTO_ESTADO, 'coletando_semrg');
                 cartao.click();
             } else {
-                console.log('[Projudi Sem RG] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+                logPainel('[Projudi Sem RG] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
         if (estadoAutoNoInicio === 'preenchendo_semcpf' && !document.querySelector('table.resultTable')) {
             const cartao = acharCardSemCpf();
             if (cartao) {
-                console.log('[Projudi Sem CPF/CNPJ] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem CPF/CNPJ"');
+                logPainel('[Projudi Sem CPF/CNPJ] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Feitos com réu sem CPF/CNPJ"');
                 store.setItem(AUTO_ESTADO, 'coletando_semcpf');
                 cartao.click();
             } else {
-                console.log('[Projudi Sem CPF/CNPJ] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+                logPainel('[Projudi Sem CPF/CNPJ] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -16997,11 +17033,11 @@
         if (estadoAutoNoInicio === 'preenchendo_camposobrigatoriosvd' && !document.querySelector('table.resultTable')) {
             const cartao = acharCardCamposObrigatoriosVD();
             if (cartao) {
-                console.log('[Projudi Campos Obrig. VD] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Campos obrigatórios pendentes da parte em proc. VD"');
+                logPainel('[Projudi Campos Obrig. VD] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Campos obrigatórios pendentes da parte em proc. VD"');
                 store.setItem(AUTO_ESTADO, 'coletando_camposobrigatoriosvd');
                 cartao.click();
             } else {
-                console.log('[Projudi Campos Obrig. VD] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+                logPainel('[Projudi Campos Obrig. VD] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -17012,11 +17048,11 @@
         if (estadoAutoNoInicio === 'preenchendo_reavaliacaoprisao' && !document.querySelector('table.resultTable')) {
             const cartaoReavaliacao = acharCardReavaliacaoPrisaoProvisoria();
             if (cartaoReavaliacao) {
-                console.log('[Projudi Reavaliação Prisão Provisória] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)"');
+                logPainel('[Projudi Reavaliação Prisão Provisória] aba "Mesa do Escrivão Criminal" carregada — clicando no card "Reavaliação da prisão provisória a cada 90 dias (Art 316, CPP)"');
                 store.setItem(AUTO_ESTADO, 'coletando_reavaliacaoprisao');
                 cartaoReavaliacao.click();
             } else {
-                console.log('[Projudi Reavaliação Prisão Provisória] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
+                logPainel('[Projudi Reavaliação Prisão Provisória] aguardando a aba "Mesa do Escrivão Criminal" carregar (card ainda não apareceu)');
             }
             return;
         }
@@ -17050,7 +17086,7 @@
                 const rel = relatorioPorChave(estadoAuto.slice('coletando_'.length));
                 const urlRe = rel && urlEsperadaRelatorio(rel.navAlvo);
                 if (rel && urlRe && urlRe.test(location.href)) {
-                    console.log(`[Auto Projudi] "${rel.rotulo}" sem tabela de resultados (0 registros) — avançando automação`);
+                    logPainel(`[Auto Projudi] "${rel.rotulo}" sem tabela de resultados (0 registros) — avançando automação`);
                     // Sem isso, "0 registros" (nunca chega a passar por criarColetor) ficava
                     // indistinguível de "nunca coletado" — e o card sumia do PDF conjunto em
                     // vez de mostrar 0 pendências (ver KEY_COLETADO em criarColetor).
@@ -17069,7 +17105,7 @@
             // sozinho (sem esperar clique manual) — a fila de meses já foi preparada em
             // iniciarAutomacao() (ou por uma rodada anterior, ver criarColetor/continuar).
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_tempomedio') {
-                console.log('[Projudi TM] automação: preenchendo e pesquisando o próximo mês da fila');
+                logPainel('[Projudi TM] automação: preenchendo e pesquisando o próximo mês da fila');
                 store.setItem(AUTO_ESTADO, 'coletando_tempomedio');
                 preencherEPesquisarTempoMedio();
                 return;
@@ -17080,7 +17116,7 @@
             // então "Pendentes" sempre traz TODAS as conclusões pendentes, sem filtro de
             // data; ver preencherEPesquisarConclusoes).
             if (store.getItem(AUTO_ESTADO) === 'preenchendo_conclusoes') {
-                console.log('[Projudi Conclusões] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Conclusões] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_conclusoes');
                 preencherEPesquisarConclusoes();
                 return;
@@ -17141,7 +17177,7 @@
             if (estadoAtual === 'preenchendo_paralisados' || estadoAtual === 'preenchendo_remessas') {
                 const chave = estadoAtual.slice('preenchendo_'.length);
                 const opcaoBuscaValor = chave === 'remessas' ? '3' : '1';
-                console.log(`[Projudi Paralisado] automação: preenchendo e pesquisando (${chave})`);
+                logPainel(`[Projudi Paralisado] automação: preenchendo e pesquisando (${chave})`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + chave);
                 preencherEPesquisarParalisado(opcaoBuscaValor, 30, chave);
                 return;
@@ -17181,7 +17217,7 @@
         if (formularioAudiencias()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_audiencias') {
-                console.log('[Projudi Audiências] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Audiências] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_audiencias');
                 preencherEPesquisarAudiencias();
                 return;
@@ -17206,7 +17242,7 @@
         if (formularioPautaAudiencias()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_audienciasdesignadas') {
-                console.log('[Projudi Audiências Designadas] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Audiências Designadas] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_audienciasdesignadas');
                 preencherEPesquisarPautaAudiencias();
                 return;
@@ -17317,7 +17353,7 @@
         if (formularioApreensoes()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_apreensoes') {
-                console.log('[Projudi Apreensões] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Apreensões] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_apreensoes');
                 preencherEPesquisarApreensoes();
                 return;
@@ -17327,7 +17363,7 @@
             // iniciarColetaBensPendentesSngb/CFG_BENS_PENDENTES_SNGB para o porquê deste
             // fluxo fugir do padrão de preencherEPesquisar+criarColetor).
             if (estadoAtual === 'preenchendo_bensSngb') {
-                console.log('[Projudi Bens Pendentes SNGB] automação: clicando no link de acesso rápido');
+                logPainel('[Projudi Bens Pendentes SNGB] automação: clicando no link de acesso rápido');
                 store.setItem(AUTO_ESTADO, 'coletando_bensSngb');
                 iniciarColetaBensPendentesSngb(true);
                 return;
@@ -17360,7 +17396,7 @@
         if (formularioPrescricoes()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_prescricoes') {
-                console.log('[Projudi Prescrições] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Prescrições] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_prescricoes');
                 preencherEPesquisarPrescricoes();
                 return;
@@ -17385,7 +17421,7 @@
         if (formularioMonitoracaoExpiradas()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_monitoracaoexpiradas') {
-                console.log('[Projudi Monitoração Expirada] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Monitoração Expirada] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_monitoracaoexpiradas');
                 preencherEPesquisarMonitoracaoExpiradas();
                 return;
@@ -17411,7 +17447,7 @@
         if (formularioMedidasAlternativasAtraso()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_medidasalternativasatraso') {
-                console.log('[Projudi Medidas Alternativas em Atraso] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Medidas Alternativas em Atraso] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_medidasalternativasatraso');
                 preencherEPesquisarMedidasAlternativasAtraso();
                 return;
@@ -17438,12 +17474,12 @@
         if (formularioBuscaAvancada()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_averiguacaopaternidade') {
-                console.log('[Projudi Averiguação Paternidade] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Averiguação Paternidade] automação: preenchendo e pesquisando');
                 preencherEPesquisarAveriguacaoPaternidade();
                 return;
             }
             if (estadoAtual === 'coletando_averiguacaopaternidade') {
-                console.warn('[Projudi Averiguação Paternidade] pesquisa voltou à tela de busca (sem resultados) — 0 registros, avançando');
+                logPainelAviso('[Projudi Averiguação Paternidade] pesquisa voltou à tela de busca (sem resultados) — 0 registros, avançando');
                 store.setItem(CFG_AVERIGUACAO_PATERNIDADE.prefixo + 'coletado', '1');
                 avancarAutomacao(CFG_AVERIGUACAO_PATERNIDADE);
                 return;
@@ -17455,7 +17491,7 @@
         if (formularioHabilitacoesAdocao()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_habilitacoesadocao') {
-                console.log('[Projudi Habilitações Adoção] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Habilitações Adoção] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_habilitacoesadocao');
                 preencherEPesquisarHabilitacoesAdocao();
                 return;
@@ -17482,7 +17518,7 @@
                 // Total gravado: segue o fluxo normal só para renderizar os botões (a
                 // coleta já terminou — 'rodando' foi limpo e a automação já avançou).
             } else if (estadoAtual === 'preenchendo_prisoes') {
-                console.log('[Projudi Prisões] automação: pesquisando "Por processo"');
+                logPainel('[Projudi Prisões] automação: pesquisando "Por processo"');
                 store.setItem(AUTO_ESTADO, 'coletando_prisoes');
                 preencherEPesquisarPrisoes();
                 return;
@@ -17505,20 +17541,20 @@
             const estadoAtual = store.getItem(AUTO_ESTADO);
             // Internados (VIJ - Seção Infracional): mesma tela e mesmo preenchimento.
             if (estadoAtual === 'preenchendo_internados') {
-                console.log('[Projudi Internados] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Internados] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_internados');
                 preencherEPesquisarAcolhidos();
                 return;
             }
             // Prisões - Alimentos (FAMÍLIA): mesma tela e mesmo preenchimento.
             if (estadoAtual === 'preenchendo_prisoesalimentos') {
-                console.log('[Projudi Prisões - Alimentos] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Prisões - Alimentos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_prisoesalimentos');
                 preencherEPesquisarAcolhidos();
                 return;
             }
             if (estadoAtual === 'preenchendo_acolhidos') {
-                console.log('[Projudi Acolhidos] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Acolhidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_acolhidos');
                 preencherEPesquisarAcolhidos();
                 return;
@@ -17540,7 +17576,7 @@
         if (formularioSuspensoPrazo()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_suspensosprazo') {
-                console.log('[Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Suspensos c/ Prazo] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_suspensosprazo');
                 preencherEPesquisarSuspensoPrazo();
                 return;
@@ -17565,7 +17601,7 @@
         if (formularioInstanciaRecursal()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_instanciarecursal') {
-                console.log('[Projudi Instância Recursal] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Instância Recursal] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_instanciarecursal');
                 preencherEPesquisarInstanciaRecursal();
                 return;
@@ -17590,7 +17626,7 @@
         if (formularioProcessosRemetidos()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_remetidos') {
-                console.log('[Projudi Processos Remetidos] automação: preenchendo e pesquisando');
+                logPainel('[Projudi Processos Remetidos] automação: preenchendo e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_remetidos');
                 preencherEPesquisarProcessosRemetidos();
                 return;
@@ -17615,7 +17651,7 @@
         if (formularioAtivosClasse()) {
             const estadoAtual = store.getItem(AUTO_ESTADO);
             if (estadoAtual === 'preenchendo_ativosclasse') {
-                console.log('[Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
+                logPainel('[Projudi Ativos por Classe] automação: preenchendo datas de hoje e pesquisando');
                 store.setItem(AUTO_ESTADO, 'coletando_ativosclasse');
                 preencherEPesquisarAtivosClasse();
                 return;
@@ -17702,31 +17738,31 @@
         // estabilizar antes de coletar, em vez de confiar em "resultTable existe".
         const autoIniciarRemetidos = cfg === CFG_PROCESSOS_REMETIDOS && store.getItem('projudi_remetidos_auto_iniciar') === '1';
 
-        console.log(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado} autoIniciarRemetidos=${autoIniciarRemetidos}`);
+        logPainel(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado} autoIniciarRemetidos=${autoIniciarRemetidos}`);
 
         if (coletor.rodando() && !coletor.obsoleta()) {
-            console.log('[Projudi] retomando coleta após reload de paginação');
+            logPainel('[Projudi] retomando coleta após reload de paginação');
             coletor.continuar(); // retoma após o reload da paginação
         } else if (querColetarAuto) {
-            console.log('[Projudi] automação: iniciando coleta ao chegar no relatório');
+            logPainel('[Projudi] automação: iniciando coleta ao chegar no relatório');
             coletor.iniciar();   // automação: inicia a coleta ao chegar no relatório
         } else if (autoIniciarTM) {
             store.removeItem('projudi_tempomedio_auto_iniciar');
-            console.log('[Projudi TM] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            logPainel('[Projudi TM] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
             // Bug relatado pelo usuário: coletar direto aqui podia pegar o resultado
             // ainda da pesquisa do mês ANTERIOR (não substituído a tempo) — espera
             // estabilizar primeiro (ver aguardarResultadoTMEstabilizarEIniciar).
             aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else if (autoIniciarParalisado) {
             store.removeItem('projudi_paralisado_auto_iniciar');
-            console.log(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
+            logPainel(`[Projudi Paralisado] flag auto_iniciar detectada (${chaveAutoIniciarParalisado}) — iniciando extração automaticamente`);
             coletor.iniciar();   // início automático após o usuário clicar em "Pesquisar"
         } else if (autoIniciarRemetidos) {
             store.removeItem('projudi_remetidos_auto_iniciar');
-            console.log('[Projudi Processos Remetidos] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            logPainel('[Projudi Processos Remetidos] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
             aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else {
-            console.log('[Projudi] nenhuma coleta em andamento — renderizando botões');
+            logPainel('[Projudi] nenhuma coleta em andamento — renderizando botões');
             coletor.limparFlags(); // descarta flag de execução presa, mantendo os dados
             coletor.render();
         }
@@ -17798,7 +17834,7 @@
         const chaves = {};
         chavesDoStore().filter(chaveEntraNoMarco).forEach(k => { chaves[k] = store.getItem(k); });
         try { store.setItem(CHAVE_AUTO_MARCO, JSON.stringify({ key, chaves })); }
-        catch (e) { store.removeItem(CHAVE_AUTO_MARCO); console.warn('[Auto Projudi] não foi possível gravar o marco da etapa', e); }
+        catch (e) { store.removeItem(CHAVE_AUTO_MARCO); logPainelAviso('[Auto Projudi] não foi possível gravar o marco da etapa', e); }
     }
     // Volta tudo ao instante em que a etapa começou (apaga as páginas gravadas depois
     // dele) e manda a automação refazê-la a partir da navegação ("ir_").
@@ -18077,7 +18113,7 @@
     }
 
     function finalizarMultiUnidade() {
-        console.log('[Projudi MultiUnidade] encerrando modo várias unidades — limpando estado');
+        logPainel('[Projudi MultiUnidade] encerrando modo várias unidades — limpando estado');
         store.removeItem(CHAVE_MU_ATIVO);
         store.removeItem(CHAVE_MU_TITULOS);
         store.removeItem(CHAVE_MU_INDICE);
@@ -18187,11 +18223,11 @@
             if (!link) continue;
             const atuacaoAtual = lerAtuacaoEmQualquerFrame();
             store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, atuacaoAtual || '');
-            console.log(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (achado em ${doc === document ? 'frame local' : 'outro frame'}; atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
+            logPainel(`[Projudi MultiUnidade] clicando #alterarAreaAtuacao (achado em ${doc === document ? 'frame local' : 'outro frame'}; atuação atual: "${atuacaoAtual || '(vazia)'}") — abrindo popup`);
             link.click();
             return true;
         }
-        console.warn(`[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado em nenhum frame acessível (${todosDocumentosAcessiveis().length} documento(s) verificado(s)) — tentando de novo no próximo poll`);
+        logPainelAviso(`[Projudi MultiUnidade] link #alterarAreaAtuacao não encontrado em nenhum frame acessível (${todosDocumentosAcessiveis().length} documento(s) verificado(s)) — tentando de novo no próximo poll`);
         return false;
     }
 
@@ -18204,7 +18240,7 @@
     function arvoreUnidadesEstabilizada() {
         const n = listarUnidadesAreaAtuacao().length;
         const anterior = store.getItem(CHAVE_MU_ASSINATURA_ARVORE);
-        console.log(`[Projudi MultiUnidade] lendo árvore de unidades — ${n} unidade(s) encontrada(s) nesta leitura (leitura anterior: ${anterior === null ? '(nenhuma)' : anterior})`);
+        logPainel(`[Projudi MultiUnidade] lendo árvore de unidades — ${n} unidade(s) encontrada(s) nesta leitura (leitura anterior: ${anterior === null ? '(nenhuma)' : anterior})`);
         if (n === 0) {
             // Árvore ainda nem começou a aparecer — não conta como "leitura anterior"
             // válida, senão duas leituras vazias seguidas (ex.: script rodou antes do
@@ -18214,10 +18250,10 @@
         }
         if (anterior !== String(n)) {
             store.setItem(CHAVE_MU_ASSINATURA_ARVORE, String(n));
-            console.log('[Projudi MultiUnidade] árvore ainda carregando (contagem mudou) — aguardando estabilizar no próximo poll');
+            logPainel('[Projudi MultiUnidade] árvore ainda carregando (contagem mudou) — aguardando estabilizar no próximo poll');
             return false;
         }
-        console.log(`[Projudi MultiUnidade] árvore estabilizada em ${n} unidade(s) — prosseguindo`);
+        logPainel(`[Projudi MultiUnidade] árvore estabilizada em ${n} unidade(s) — prosseguindo`);
         return true;
     }
 
@@ -18231,12 +18267,12 @@
         const titulos = lerTitulosMultiUnidade();
         const titulo = titulos[idx];
         if (!titulo) {
-            console.warn('[Projudi MultiUnidade] sem próxima unidade na fila — encerrando modo várias unidades');
+            logPainelAviso('[Projudi MultiUnidade] sem próxima unidade na fila — encerrando modo várias unidades');
             finalizarMultiUnidade();
             store.setItem(AUTO_ESTADO, 'ir_fim');
             return;
         }
-        console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length} — procurando "${titulo}" na árvore`);
+        logPainel(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length} — procurando "${titulo}" na árvore`);
         // A troca só é reconhecida quando lerAtuacaoEmQualquerFrame() mudar em relação a
         // ESTA leitura (ver CHAVE_MU_ATUACAO_ANTERIOR/retomarAutomacaoNaProximaUnidade) —
         // dentro do iframe do popup normalmente vem vazio (não é a página do app), então
@@ -18244,8 +18280,8 @@
         store.setItem(CHAVE_MU_ATUACAO_ANTERIOR, lerAtuacaoEmQualquerFrame() || '');
         const ok = clicarUnidadePorTitulo(titulo);
         store.setItem(CHAVE_MU_INDICE, String(idx + 1));
-        if (ok) console.log(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clique em "${titulo}" disparado — aguardando a página recarregar`);
-        else console.warn(`[Projudi MultiUnidade] unidade "${titulo}" NÃO encontrada na árvore desta tela (${titulos.length} no total marcadas) — pulando pra próxima`);
+        if (ok) logPainel(`[Projudi MultiUnidade] unidade ${idx + 1}/${titulos.length}: clique em "${titulo}" disparado — aguardando a página recarregar`);
+        else logPainelAviso(`[Projudi MultiUnidade] unidade "${titulo}" NÃO encontrada na árvore desta tela (${titulos.length} no total marcadas) — pulando pra próxima`);
     }
 
     // Só estamos de volta numa atuação normal quando: (1) não é mais a tela de seleção,
@@ -18260,13 +18296,13 @@
         const atuacaoAtual = lerAtuacaoEmQualquerFrame();
         const atuacaoAnterior = store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || '';
         if (!atuacaoAtual || atuacaoAtual === atuacaoAnterior) {
-            console.log(`[Projudi MultiUnidade] ainda na atuação anterior ("${atuacaoAnterior || '(vazia)'}") — popup/troca ainda em andamento, aguardando`);
+            logPainel(`[Projudi MultiUnidade] ainda na atuação anterior ("${atuacaoAnterior || '(vazia)'}") — popup/troca ainda em andamento, aguardando`);
             return;
         }
         store.removeItem(CHAVE_MU_ATUACAO_ANTERIOR);
         const fila = lerFilaAutomacao();
         const periodoTM = store.getItem('projudi_auto_periodo_tm') || '1m';
-        console.log(`[Projudi MultiUnidade] nova atuação confirmada ("${atuacaoAnterior || '(vazia)'}" -> "${atuacaoAtual}") — retomando automação com ${fila.length} relatório(s): ${fila.join(', ')}`);
+        logPainel(`[Projudi MultiUnidade] nova atuação confirmada ("${atuacaoAnterior || '(vazia)'}" -> "${atuacaoAtual}") — retomando automação com ${fila.length} relatório(s): ${fila.join(', ')}`);
         iniciarAutomacao(fila, periodoTM);
     }
 
@@ -18281,8 +18317,8 @@
             alert('Nenhum relatório está marcado. Marque ao menos um relatório no painel desta mesma tela.');
             return;
         }
-        console.log(`[Projudi MultiUnidade] === iniciando automação em ${titulos.length} unidade(s) === relatórios marcados: ${fila.join(', ')}`);
-        console.log(`[Projudi MultiUnidade] ordem das unidades: ${titulos.map((t, i) => `${i + 1}) ${t}`).join(' | ')}`);
+        logPainel(`[Projudi MultiUnidade] === iniciando automação em ${titulos.length} unidade(s) === relatórios marcados: ${fila.join(', ')}`);
+        logPainel(`[Projudi MultiUnidade] ordem das unidades: ${titulos.map((t, i) => `${i + 1}) ${t}`).join(' | ')}`);
         store.setItem(CHAVE_MU_TITULOS, JSON.stringify(titulos));
         store.setItem(CHAVE_MU_INDICE, '1'); // [0] é clicado agora mesmo, abaixo
         store.setItem(CHAVE_MU_ATIVO, '1');
@@ -18297,14 +18333,14 @@
         store.setItem('projudi_auto_periodo_tm', periodoTM || store.getItem('projudi_auto_periodo_tm') || '1m');
         store.setItem(AUTO_ESTADO, 'trocando_unidade');
         store.setItem('projudi_auto_lock', String(Date.now()));
-        console.log(`[Projudi MultiUnidade] unidade 1/${titulos.length}: procurando "${titulos[0]}" na árvore`);
+        logPainel(`[Projudi MultiUnidade] unidade 1/${titulos.length}: procurando "${titulos[0]}" na árvore`);
         if (!clicarUnidadePorTitulo(titulos[0])) {
-            console.error(`[Projudi MultiUnidade] unidade "${titulos[0]}" NÃO encontrada nesta tela — abortando`);
+            logPainelErro(`[Projudi MultiUnidade] unidade "${titulos[0]}" NÃO encontrada nesta tela — abortando`);
             alert(`Não foi possível localizar a unidade "${titulos[0]}" nesta tela.`);
             finalizarMultiUnidade();
             store.removeItem(AUTO_ESTADO);
         } else {
-            console.log(`[Projudi MultiUnidade] clique em "${titulos[0]}" disparado — aguardando a página recarregar`);
+            logPainel(`[Projudi MultiUnidade] clique em "${titulos[0]}" disparado — aguardando a página recarregar`);
         }
     }
 
@@ -18344,13 +18380,13 @@
         if (!paginaSelecaoAreaAtuacao()) return;
         const unidades = listarUnidadesAreaAtuacao();
         if (!unidades.length) {
-            console.log('[Projudi MultiUnidade] tela de seleção de área de atuação detectada, mas ainda sem unidades na árvore — aguardando carregar');
+            logPainel('[Projudi MultiUnidade] tela de seleção de área de atuação detectada, mas ainda sem unidades na árvore — aguardando carregar');
             return;
         }
 
         if (document.getElementById('projudi-mu-painel')) return; // já injetado nesta tela
 
-        console.log(`[Projudi MultiUnidade] injetando painel de seleção — ${unidades.length} unidade(s) encontrada(s) na árvore`);
+        logPainel(`[Projudi MultiUnidade] injetando painel de seleção — ${unidades.length} unidade(s) encontrada(s) na árvore`);
         unidades.forEach(({ titulo, elemento }) => {
             if (elemento.dataset.muInjetado) return;
             elemento.dataset.muInjetado = '1';
@@ -18613,7 +18649,7 @@
         // ao copiar/colar texto do console — assim o log sai completo, legível, sem
         // precisar expandir nada no DevTools.
         if (resultado.length < dados.length) {
-            console.warn(`[Projudi] removerProcessosDuplicados — ${dados.length - resultado.length} registro(s) removido(s) por duplicata (campo=${JSON.stringify(campo)}); exemplo(s):\n` + JSON.stringify(removidos, null, 2));
+            logPainelAviso(`[Projudi] removerProcessosDuplicados — ${dados.length - resultado.length} registro(s) removido(s) por duplicata (campo=${JSON.stringify(campo)}); exemplo(s):\n` + JSON.stringify(removidos, null, 2));
         }
         return resultado;
     }
@@ -19067,11 +19103,11 @@
             const encontrados = INDICADORES_EXTRA_JUNTADAS
                 .filter(ind => acumuladorIndicadoresExtraJuntadas[ind.id])
                 .map(ind => acumuladorIndicadoresExtraJuntadas[ind.id]);
-            console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
+            logPainel(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — ${encontrados.length}/${INDICADORES_EXTRA_JUNTADAS.length} indicadores acumulados nesta tela (doc ${docs.indexOf(d) + 1}/${docs.length}):`, encontrados.map(e => `${e.label}=${e.valor}`).join('; '));
             gravarPorUnidade(CFG_JUNTADAS.prefixo + 'outros_indicadores', encontrados);
             return;
         }
-        console.log(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
+        logPainel(`[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
     }
 
     // Mesma ideia de capturarContadoresPainelJuntadas, para o painel "Retorno de
@@ -19374,8 +19410,8 @@
         // "Prisões/Acolhimentos/Internações" (Processos > Busca) — mesma URL de Acolhidos,
         // o texto do link distingue.
         else if (alvo === 'prisoes') link = acharLinkMenu(/infanciaJuventude\/buscaAcolhimento\.do/i, /^pris[õo]es\/acolhimentos\/interna[çc][õo]es$/i);
-        if (!link) { console.warn('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
-        console.log(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
+        if (!link) { logPainelAviso('[Auto Projudi] link de menu não encontrado:', alvo); return false; }
+        logPainel(`[Auto Projudi] navegarMenu("${alvo}") — link encontrado, clicando`);
         link.click();
         return true;
     }
@@ -19422,10 +19458,10 @@
             // Essa aba só existe na home "Mesa do Magistrado" — perfis sem essa mesa não a
             // têm; mesmo tratamento silencioso (warning) dos demais navegarMenu quando não
             // acham o link.
-            console.warn('[Auto Projudi] link de menu não encontrado: outroscumprimentos (aba "Outros Cumprimentos" ausente — perfil sem Mesa do Magistrado?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: outroscumprimentos (aba "Outros Cumprimentos" ausente — perfil sem Mesa do Magistrado?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaOutrosCumprimentos — clicando na aba "Outros Cumprimentos" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19435,10 +19471,10 @@
         if (!link) {
             // Essa aba só existe em unidades com competência criminal (Mesa do
             // Magistrado) — mesmo tratamento silencioso dos demais navegarMenu.
-            console.warn('[Auto Projudi] link de menu não encontrado: cumprimentomedidas (aba "Cumprimentos de Medidas" ausente — perfil sem Mesa do Magistrado/sem competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: cumprimentomedidas (aba "Cumprimentos de Medidas" ausente — perfil sem Mesa do Magistrado/sem competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaCumprimentoMedidas — clicando na aba "Cumprimentos de Medidas" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaCumprimentoMedidas — clicando na aba "Cumprimentos de Medidas" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19455,10 +19491,10 @@
     function navegarAbaMesaEscrivaoCriminalParaPrescricoes() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: prescricoes (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: prescricoes (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaPrescricoes — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaPrescricoes — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19470,10 +19506,10 @@
     function navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: seminfracaopenal (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: seminfracaopenal (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemInfracaoPenal — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19488,10 +19524,10 @@
     function navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: monitoracaoexpiradas (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: monitoracaoexpiradas (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaMonitoracaoExpiradas — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19501,20 +19537,20 @@
     function navegarAbaMesaEscrivaoCriminalParaSemRg() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: semrg (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: semrg (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemRg — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemRg — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
     function navegarAbaMesaEscrivaoCriminalParaSemCpf() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: semcpf (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: semcpf (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemCpf — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaSemCpf — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19524,10 +19560,10 @@
     function navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: camposobrigatoriosvd (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: camposobrigatoriosvd (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19538,10 +19574,10 @@
     function navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria() {
         const link = acharAbaMesaEscrivaoCriminal();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: reavaliacaoprisao (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: reavaliacaoprisao (aba "Mesa do Escrivão Criminal" ausente — perfil sem essa mesa/competência criminal?)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaMesaEscrivaoCriminalParaReavaliacaoPrisaoProvisoria — clicando na aba "Mesa do Escrivão Criminal" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19585,10 +19621,10 @@
     function navegarAbaAnaliseJuntadas() {
         const link = acharAbaAnaliseJuntadas();
         if (!link) {
-            console.warn('[Auto Projudi] link de menu não encontrado: mandados (aba "Análise de Juntadas" ausente)');
+            logPainelAviso('[Auto Projudi] link de menu não encontrado: mandados (aba "Análise de Juntadas" ausente)');
             return false;
         }
-        console.log('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
+        logPainel('[Auto Projudi] navegarAbaAnaliseJuntadas — clicando na aba "Análise de Juntadas" (clique real, sem href)');
         link.click();
         return true;
     }
@@ -19667,12 +19703,12 @@
         const qtdAtual = parseInt(assinaturaAtual.split('|')[0], 10) || 0;
         const completo = qtdAtual >= IDS_PAINEL_ANALISE_JUNTADAS.length;
         const estavel = completo && leiturasEstaveisPainelJuntadas >= LEITURAS_ESTAVEIS_NECESSARIAS;
-        console.log(`[Auto Projudi Juntadas] leitura ${tentativa} do painel — assinatura="${assinaturaAtual}" (qtd|soma), estáveis seguidas=${leiturasEstaveisPainelJuntadas}/${LEITURAS_ESTAVEIS_NECESSARIAS}`);
+        logPainel(`[Auto Projudi Juntadas] leitura ${tentativa} do painel — assinatura="${assinaturaAtual}" (qtd|soma), estáveis seguidas=${leiturasEstaveisPainelJuntadas}/${LEITURAS_ESTAVEIS_NECESSARIAS}`);
         if (estavel || tentativa >= 35) {
             if (!estavel) {
-                console.warn(`[Auto Projudi Juntadas] painel "Análise de Juntadas" não estabilizou em ~17s (última assinatura="${assinaturaAtual}") — capturando indicadores mesmo assim (podem estar incompletos)`);
+                logPainelAviso(`[Auto Projudi Juntadas] painel "Análise de Juntadas" não estabilizou em ~17s (última assinatura="${assinaturaAtual}") — capturando indicadores mesmo assim (podem estar incompletos)`);
             } else {
-                console.log(`[Auto Projudi Juntadas] painel estável (assinatura="${assinaturaAtual}") na tentativa ${tentativa} — capturando indicadores`);
+                logPainel(`[Auto Projudi Juntadas] painel estável (assinatura="${assinaturaAtual}") na tentativa ${tentativa} — capturando indicadores`);
             }
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
             chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
@@ -19680,7 +19716,7 @@
             // sem isso, o gate em injetarBotoes reentraria aqui na tela de RESULTADOS de
             // Juntadas, onde o contador não existe, ficando preso esperando ~15s à toa).
             store.setItem(AUTO_ESTADO, 'coletando_juntadas');
-            console.log('[Auto Projudi Juntadas] indo para a tela de resultados de Juntadas');
+            logPainel('[Auto Projudi Juntadas] indo para a tela de resultados de Juntadas');
             link.click();
             return;
         }
@@ -19710,7 +19746,7 @@
                 setTimeout(() => tratarPainelAnaliseJuntadasParaJuntadas(tentativa + 1), 500);
                 return;
             }
-            console.warn('[Auto Projudi Juntadas] contador/link de "Juntadas" (Para Realizar) não apareceu em ~15s no painel "Análise de Juntadas" — voltando a tentar do zero');
+            logPainelAviso('[Auto Projudi Juntadas] contador/link de "Juntadas" (Para Realizar) não apareceu em ~15s no painel "Análise de Juntadas" — voltando a tentar do zero');
             store.setItem(AUTO_ESTADO, 'ir_juntadas');
             return;
         }
@@ -19737,7 +19773,7 @@
         if (!foraDaAtribuicao(rel.cfg, atuacaoRodada)) registrarUnidadeRodada(rel, atuacaoRodada);
         logPainel(`[Auto Projudi] avancarAutomacao — "${rel.key}" concluído, próximo="${prox || '(fim)'}" (fila completa: ${fila.join(', ')})`);
         if (!prox && multiUnidadeEmCurso()) {
-            console.log(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
+            logPainel(`[Projudi MultiUnidade] última extração desta unidade concluída — haProximaUnidadeMultiUnidade()=${haProximaUnidadeMultiUnidade()} índice=${store.getItem(CHAVE_MU_INDICE)} títulos=${lerTitulosMultiUnidade().join(' | ')}`);
         }
         store.setItem(AUTO_ESTADO, prox ? ('ir_' + prox) : 'ir_fim');
         setTimeout(passoAutomacao, 900);
@@ -19761,7 +19797,7 @@
     // que só confirma e chama isto) para ser reaproveitado pelo watchdog automático
     // (verificarTravamentoAutomacao), que não tem `confirm()` nem pode esperar o usuário.
     function executarPular(rel, motivo) {
-        console.warn(`[Auto Projudi] pulando a extração de "${rel.rotulo}" (${motivo})`);
+        logPainelAviso(`[Auto Projudi] pulando a extração de "${rel.rotulo}" (${motivo})`);
         // Item pode ter mais de um cfg (ver "mandados" — 3 fases internas): marca erro/
         // coletado em todos, mesmo que só uma fase estivesse em andamento — os dados das
         // fases não alcançadas ficam ausentes de qualquer forma (mostrarSeVazio faria o
@@ -19807,7 +19843,7 @@
     // diferentes da mesma rodada de automação podem ter ou não esse relatório.
     function marcarPrejudicadoEAvancar(rel, atuacao) {
         const nomeAtuacao = (atuacao || '(sem atuação)').trim();
-        console.warn(`[Auto Projudi] "${rel.rotulo}" não encontrado após 3 tentativas em "${nomeAtuacao}" — marcando como Prejudicado e avançando (provável unidade sem esse relatório).`);
+        logPainelAviso(`[Auto Projudi] "${rel.rotulo}" não encontrado após 3 tentativas em "${nomeAtuacao}" — marcando como Prejudicado e avançando (provável unidade sem esse relatório).`);
         cfgsDoRelatorio(rel).forEach(cfg => {
             const lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
             if (!lista.includes(nomeAtuacao)) lista.push(nomeAtuacao);
@@ -19908,6 +19944,14 @@
     function passoAutomacao() {
         const estado = store.getItem(AUTO_ESTADO);
         if (!estado || estado === 'concluido') return;
+        // Log de cada mudança de etapa da automação (ir_X → coletando_X → ... → ir_fim),
+        // sem depender de cada ponto que grava AUTO_ESTADO lembrar de logar. Guardado em
+        // localStorage (não em variável) porque este poll roda em várias frames: assim a
+        // transição é registrada uma vez só, não uma por frame.
+        if (store.getItem('projudi_log_ultimo_estado') !== estado) {
+            store.setItem('projudi_log_ultimo_estado', estado);
+            logPainel(`[Auto Projudi] etapa da automação: "${estado}" (url=${location.pathname})`);
+        }
         if (automacaoPausada()) return; // "Parar" — ver CHAVE_AUTO_PAUSADO
         // Durante a coleta ou o preenchimento do formulário, quem conduz é a própria
         // página atual (injetarBotoes / preencherEPesquisarTempoMedio /
@@ -19942,7 +19986,7 @@
             store.setItem(CHAVE_AUTO_FIM, String(agora)); // marca o fim desta unidade (mostrador do painel)
             const idxAtual = parseInt(store.getItem(CHAVE_MU_INDICE) || '0', 10);
             const totalUnidades = lerTitulosMultiUnidade().length;
-            console.log(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacaoEmQualquerFrame() || ''}") — abrindo popup pra trocar de atuação`);
+            logPainel(`[Projudi MultiUnidade] unidade ${idxAtual}/${totalUnidades} concluída (atuação atual: "${lerAtuacaoEmQualquerFrame() || ''}") — abrindo popup pra trocar de atuação`);
             if (!tentarAbrirPopupTrocaAtuacao()) navegarMenu('inicio');
             return;
         }
@@ -19957,13 +20001,13 @@
         if (estado === 'trocando_unidade') {
             store.setItem('projudi_auto_lock', String(agora));
             const naArvore = !!documentoComArvoreAreaAtuacao();
-            console.log(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
+            logPainel(`[Projudi MultiUnidade] poll trocando_unidade — url=${location.pathname} naArvoreDeSelecao=${naArvore} lerAtuacaoEmQualquerFrame()="${lerAtuacaoEmQualquerFrame() || ''}" atuacaoAnterior="${store.getItem(CHAVE_MU_ATUACAO_ANTERIOR) || ''}"`);
             if (naArvore) {
                 avancarParaProximaUnidadeSelecionada();
             } else if (lerAtuacaoEmQualquerFrame()) {
                 retomarAutomacaoNaProximaUnidade();
             } else if (!tentarAbrirPopupTrocaAtuacao()) {
-                console.warn('[Projudi MultiUnidade] nem árvore de seleção nem atuação detectadas, e #alterarAreaAtuacao não encontrado — indo pra página inicial e tentando de novo no próximo poll');
+                logPainelAviso('[Projudi MultiUnidade] nem árvore de seleção nem atuação detectadas, e #alterarAreaAtuacao não encontrado — indo pra página inicial e tentando de novo no próximo poll');
                 navegarMenu('inicio'); // popup ainda não achou o link nesta página — tenta a partir da início
             }
             return;
@@ -19979,19 +20023,20 @@
         if (estado.startsWith('ir_')) {
             const key = estado.slice(3);
             const rel = relatorioPorChave(key);
-            if (!rel) { console.warn('[Auto Projudi] relatório desconhecido no estado', estado); return; }
+            if (!rel) { logPainelAviso('[Auto Projudi] relatório desconhecido no estado', estado); return; }
             store.setItem('projudi_auto_lock', String(agora));
             gravarMarcoDaEtapa(key);
             // Item de outra seção/atribuição (ver foraDaAtribuicao — seção errada da VIJ,
             // ou Averiguação de Paternidade fora da Vara de Família): não coleta aqui.
             const atuacaoAtual = lerAtuacaoEmQualquerFrame();
             if (foraDaAtribuicao(rel.cfg, atuacaoAtual)) {
-                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" — pulando nesta unidade`);
+                logPainel(`[Auto Projudi] "${rel.key}" não se aplica a "${atuacaoAtual}" (atribuição/sem competência criminal) — pulando nesta unidade`);
                 store.setItem(AUTO_ESTADO, 'coletando_' + key);
                 avancarAutomacao(rel.cfg);
                 return;
             }
             if (navegarMenu(rel.navAlvo)) {
+                logPainel(`[Auto Projudi] navegou para "${rel.navAlvo}" (${rel.rotulo})`);
                 store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, rel.precisaPreencher ? ('preenchendo_' + key) : ('coletando_' + key));
                 return;
@@ -20004,7 +20049,7 @@
             // link em vez de mostrar "0"). Detecta esse caso ANTES de gastar as tentativas
             // e trata como "0 registros" — mesmo padrão já usado para buttonBar ausente.
             if (rel.navAlvo === 'suspensos' && labelSemLinkEncontrado(/suspensos\s+por\s+tempo\s+indeterminado/i)) {
-                console.log('[Auto Projudi] card de "Suspensos por Tempo Indeterminado" sem link (0 processos) — marcando coletado sem navegar');
+                logPainel('[Auto Projudi] card de "Suspensos por Tempo Indeterminado" sem link (0 processos) — marcando coletado sem navegar');
                 store.removeItem('projudi_auto_nav_falhas');
                 store.setItem(AUTO_ESTADO, 'coletando_' + key);
                 store.setItem(CFG_SUSPENSOS.prefixo + 'coletado', '1');
@@ -20021,7 +20066,7 @@
             if (registro.key !== key) { registro.key = key; registro.n = 0; }
             registro.n = (registro.n || 0) + 1;
             store.setItem(chaveFalhas, JSON.stringify(registro));
-            console.warn(`[Auto Projudi] tentativa ${registro.n} sem sucesso para "${rel.navAlvo}" — URL atual: ${location.href}`);
+            logPainelAviso(`[Auto Projudi] tentativa ${registro.n} sem sucesso para "${rel.navAlvo}" — URL atual: ${location.href}`);
 
             // Relatórios exclusivos da categoria Crime (Apreensões/Cumprimento de
             // Medidas) podem simplesmente não existir em unidades sem competência
@@ -20041,7 +20086,7 @@
             if (registro.n >= LIMITE_TENTATIVAS) {
                 store.removeItem(chaveFalhas);
                 store.setItem(AUTO_ESTADO, 'travado_' + key);
-                console.error(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
+                logPainelErro(`[Auto Projudi] desistindo de navegar para "${rel.navAlvo}" após ${LIMITE_TENTATIVAS} tentativas — automação parada. Navegue manualmente até "${rel.rotulo}" pela página inicial, ou clique em Limpar para recomeçar.`);
                 return;
             }
             // Praticamente todo link/aba de menu (Paralisados, Remessas, Suspensos,
@@ -20053,7 +20098,7 @@
             // automação "travar" sem alterar nada até o usuário clicar em "Pular"). Volta
             // à início em toda tentativa sem sucesso; o estado continua "ir_X" para tentar
             // de novo assim que a home carregar.
-            console.log(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
+            logPainel(`[Auto Projudi] link/aba de "${rel.navAlvo}" não encontrado(a) nesta página — voltando à início para tentar de lá`);
             navegarMenu('inicio');
         }
     }
@@ -20303,7 +20348,7 @@
         catch (err) {
             overrideMapaAtivos = null;
             overrideUnidadesPDF = null;
-            alert('Erro ao gerar PDF: ' + err.message); console.error(err);
+            alert('Erro ao gerar PDF: ' + err.message); logPainelErro('[Projudi] erro ao gerar PDF', err);
         }
     }
 
@@ -20513,7 +20558,7 @@
             const blob = new Blob(['﻿' + html], { type: 'application/msword' });
             baixarBlob(blob, `relatorio_conjunto_projudi_${dataArquivo()}.doc`);
         }
-        catch (err) { alert('Erro ao gerar relatório Word: ' + err.message); console.error(err); }
+        catch (err) { alert('Erro ao gerar relatório Word: ' + err.message); logPainelErro('[Projudi] erro ao gerar relatório Word', err); }
     }
 
     // Calcula o progresso da fila de automação: quantos relatórios já foram coletados por
@@ -21474,7 +21519,7 @@
     // sem a qual a automação fica parada sem nenhum aviso ao usuário.
     function chamarSeguro(fn, nome) {
         try { fn(); }
-        catch (err) { console.error(`[Projudi] erro em ${nome}:`, err); }
+        catch (err) { logPainelErro(`[Projudi] erro em ${nome}:`, err); }
     }
 
     // ── Verificação diária de atualização (pedido do usuário) ──────────────────────────
@@ -21525,10 +21570,10 @@
                 if (!m) return;
                 GM_setValue(CHAVE_VERSAO_DISPONIVEL, m[1]);
                 if (!versaoMaisNova(m[1], instalada)) return;
-                console.log(`[Projudi] versão nova na main: ${m[1]} (instalada: ${instalada})`);
+                logPainel(`[Projudi] versão nova na main: ${m[1]} (instalada: ${instalada})`);
                 mostrarAvisoAtualizacao(m[1], instalada);
             },
-            onerror: () => console.log('[Projudi] não foi possível verificar atualização agora'),
+            onerror: () => logPainel('[Projudi] não foi possível verificar atualização agora'),
         });
     }
     // Sem botão "Depois" (pedido do usuário): o aviso fica na tela até o clique em
@@ -21551,7 +21596,7 @@
     }
 
     function bootstrap() {
-        console.log(`[Projudi] bootstrap — URL: ${location.href}`);
+        logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
         // Limpeza de uma versão anterior: existia um "modo de teste" disfarçado (5
         // cliques no painel) que limitava a coleta a 2 páginas por relatório — causou um
         // bug real (Tempo Médio/Conclusões parando de virar página a partir da 2ª). O
