@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.33
+// @version      26.34
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -19155,6 +19155,10 @@
             gravarPorUnidade(CFG_JUNTADAS.prefixo + 'outros_indicadores', encontrados);
             return;
         }
+        // Sem o painel na tela só é um problema se a automação estiver justamente coletando
+        // Juntadas (aí o painel deveria estar carregando); em qualquer outra tela/etapa a
+        // ausência é o normal e não vale uma linha no log.
+        if (keyDoEstadoAtual(store.getItem(AUTO_ESTADO)) !== 'juntadas') return;
         logPainelSeMudou('juntadas_indicadores_extras', `[Projudi Juntadas] capturarOutrosIndicadoresPainelJuntadas — nenhum dos ${INDICADORES_EXTRA_JUNTADAS.length} indicadores extras encontrado em nenhum dos ${docs.length} documento(s) acessível(is) — painel provavelmente ainda não carregou, ou esta não é a tela certa`);
     }
 
