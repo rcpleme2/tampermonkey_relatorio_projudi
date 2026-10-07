@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.49
+// @version      26.50
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -8619,20 +8619,6 @@
         return doc.lastAutoTable.finalY;
     }
 
-    // Legenda discreta do critério de classificação (Regular/Atenção/Crítico) — pedido do
-    // usuário: toda tabela que mostra a coluna "Situação" fora da capa (que já tem sua
-    // própria legenda de bolinhas, ver desenharCapaSituacao) precisa deixar claro o
-    // critério usado, sem disputar espaço visual com o conteúdo — por isso itálico, bem
-    // pequeno, cor muted.
-    function legendaCriterios(doc, x, y, w, limites) {
-        const yy = y + 4.4;
-        doc.setFont('PublicSans', 'italic'); doc.setFontSize(6.6); doc.setTextColor(...COR.muted);
-        const texto = `Situação calculada pela pendência mais antiga: Regular ≤${limites.atencao}d  •  `
-            + `Atenção ${limites.atencao + 1}–${limites.critico}d  •  Crítico >${limites.critico}d`;
-        doc.text(doc.splitTextToSize(texto, w)[0], x, yy);
-        return yy + 2;
-    }
-
     // ★ A tabela central da reorganização (pedido do usuário): o resumo geral e o resumo
     // de cada competência, lado a lado na MESMA página, no lugar de uma página inteira
     // por competência (ver subBlocosPorAtribuicao, removido). Uma linha por competência
@@ -8655,7 +8641,6 @@
                 const t = parseDataBR(d[p.dataCampo]);
                 return t != null && Math.floor((now - t) / DIA_MS) > limites.critico;
             }).length;
-            const sit = SITUACAO_INFO[classificarSituacaoPorDias(dias, limites.atencao, limites.critico)];
             // opts.diasNaColunaAntiga (pedido do usuário, resumo de Conclusões por Juiz):
             // sem coluna "Dias" separada — o número de dias vai entre parênteses depois
             // da data, na própria coluna "Mais antiga" (ex. "14/07/2026 (51 d)").
@@ -8671,7 +8656,7 @@
                 dt,
                 di: dias == null ? '—' : String(dias),
                 md: p.mediaLabel ? (mediaPorDia(sub, p.dataCampo) || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) : null,
-                _sit: sit, _total: !!ehTotal,
+                _total: !!ehTotal,
             };
         };
 
@@ -8700,10 +8685,9 @@
         // embutidos na coluna "Mais antiga", ver opts.diasNaColunaAntiga acima).
         if (!opts.diasNaColunaAntiga) addCol('Dias', 'di', 12);
         if (p.mediaLabel && !opts.semMedia) addCol('Méd./dia', 'md', 16);
-        addCol('Situação', 'st', 22);
 
         const columnStyles = { k: { cellWidth: w - somaFixas, fontStyle: 'bold', textColor: COR.tinta } };
-        Object.keys(larguras).forEach(key => { columnStyles[key] = { cellWidth: larguras[key], halign: key === 'st' ? 'center' : 'right' }; });
+        Object.keys(larguras).forEach(key => { columnStyles[key] = { cellWidth: larguras[key], halign: 'right' }; });
         if (columnStyles.pr) columnStyles.pr.textColor = COR.vermelho;
 
         doc.autoTable({
@@ -8711,12 +8695,12 @@
             startY: y + TITULO_TABELA_H,
             columns: colunas,
             columnStyles,
-            // _total/_sit já vêm em `r` (linhaDe) e são preservados pelo spread abaixo —
+            // _total já vem em `r` (linhaDe) e é preservado em d.row.raw —
             // lidos de volta via d.row.raw (a própria linha), não reindexando `corpo` por
             // d.row.index: mesmo bug/mesma correção de corpoTabelaCategorias acima —
             // quando a tabela (2+ unidades combinadas = mais competências = mais linhas)
             // quebra em mais de uma página, esse índice para de bater 1:1 com `corpo`.
-            body: corpo.map(r => ({ ...r, st: '' })),
+            body: corpo,
             didParseCell: (d) => {
                 if (d.section === 'body' && d.row.raw._total) {
                     d.cell.styles.fillColor = COR.azulTint;
@@ -8724,13 +8708,8 @@
                     d.cell.styles.textColor = COR.tinta;
                 }
             },
-            didDrawCell: (d) => {
-                if (d.section !== 'body' || d.column.dataKey !== 'st') return;
-                const sit = d.row.raw._sit;
-                desenharChip(doc, d.cell.x + d.cell.width - 2, d.cell.y + d.cell.height / 2, sit.rotulo, sit.cor, true, d.cell.width - 4);
-            },
         });
-        return legendaCriterios(doc, x, doc.lastAutoTable.finalY, w, limites);
+        return doc.lastAutoTable.finalY;
     }
 
     // Layout de 2 colunas para as tabelas de distribuição — substitui
@@ -10399,7 +10378,6 @@
             doc.setFillColor(...COR.cartao); doc.rect(x + 0.3, y, w - 0.6, h, 'F');
             doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
             doc.text(l.nome, col.labelX, y + h / 2 + 1.3);
-            desenharChip(doc, col.chipRightX, y + h / 2, '—', COR.muted, false, col.CHIP_W);
             l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
             return;
         }
@@ -10421,7 +10399,7 @@
         const yIndicadorChip = temSub ? y + 3.7 : y + h / 2 + 1.3;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(9); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, l.indicador || '', col.numW), col.numRightX, yIndicadorChip, { align: 'right' });
-        desenharChip(doc, col.chipRightX, yIndicadorChip, l.semSituacao ? '—' : l.situacaoLabel, l.semSituacao ? COR.muted : l.corTexto, !l.semSituacao, col.CHIP_W);
+        if (!l.semSituacao) desenharChip(doc, col.chipRightX, yIndicadorChip, l.situacaoLabel, l.corTexto, true, col.CHIP_W);
         l._rect = { x: col.labelX, y, w: col.labelW, h, page: doc.internal.getCurrentPageInfo().pageNumber };
     }
 
@@ -10447,14 +10425,12 @@
         // colunaExtra (opcional): coluna adicional (ex.: pré-analisados no Gabinete).
         const temExtra = !!cfg.colunaExtra;
         const linhas = cfg.itens.map(it => {
-            const infoIt = SITUACAO_INFO[it.status] || SITUACAO_INFO.regular;
             const detalhes = [];
             if (it.prioritarios) detalhes.push(`${it.prioritarios} prioritário(s)`);
             detalhes.push(it.maisAntiga != null ? `Mais antiga: ${it.maisAntiga} dia(s)` : 'Sem pendências');
             return {
                 it, rotulo: it.rotulo, subtitulo: detalhes.join(' · '), pendentes: String(it.pendentes),
                 extra: temExtra ? String(cfg.colunaExtra.get(it.dados || [])) : null,
-                situacaoLabel: infoIt.rotulo, cor: infoIt.cor,
             };
         });
         // Linha de total — mesmo papel de antes (agregado dos itens do domínio).
@@ -10483,7 +10459,6 @@
                 doc2.setFont('PublicSans', 'normal'); doc2.setFontSize(8.5); doc2.setTextColor(...COR.tintaSec);
                 doc2.text(l.extra, c.extraRightX, cy + ch / 2 + 1.3, { align: 'right' });
             }
-            desenharChip(doc2, c.chipRightX, cy + ch / 2, l.situacaoLabel, l.cor, true, c.CHIP_W);
             // Pedido do usuário: atalho clicável no nome do magistrado — mesmo mecanismo
             // _rect/PASSO 4 já usado pelas linhas do Cartório (ver desenharLinhaCartorio).
             l.it._rect = { x: c.labelX, y: cy, w: c.labelW, h: ch, page: doc2.internal.getCurrentPageInfo().pageNumber };
@@ -10495,7 +10470,6 @@
             doc2.setFont('PublicSans', 'bold'); doc2.setFontSize(7.2); doc2.setTextColor(...COR.tintaSec);
             doc2.text(textoTruncadoParaLargura(doc2, 'PENDENTES', c.numW), c.numRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
             if (temExtra) doc2.text(textoTruncadoParaLargura(doc2, 'PRÉ-ANALISADOS', c.extraW), c.extraRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
-            doc2.text(textoTruncadoParaLargura(doc2, 'SITUAÇÃO', c.CHIP_W), c.chipRightX, cy + CARD_HEADER_H / 2 + 1.3, { align: 'right' });
         };
         return desenharCardComLinhas(doc, x, yy, w, cabecalhoFn, linhas, alturaFn, desenharLinhaFn, ph, mBottom, x);
     }
@@ -10560,15 +10534,6 @@
         // gerarPDFConjunto), não mais um card à parte — resumo inicial ficou só em tabela.
         y = desenharBlocoCartorioUnificado(doc, m, y, uw, {
             titulo: 'Cartório',
-            // Legenda de bolinhas coloridas (redesign aprovado pelo usuário) — substitui o
-            // antigo parágrafo em itálico explicando os limiares de dia por situação.
-            // Tempo Médio e Audiências Pendentes/Realizadas continuam informativos (chip
-            // "—"); Audiências Designadas segue a régua própria de 180/360 dias.
-            legenda: [
-                { cor: COR.aqua, rotulo: 'Regular ≤30d' },
-                { cor: COR.ambar, rotulo: 'Atenção 31–90d' },
-                { cor: COR.vermelho, rotulo: 'Crítico >90d' },
-            ],
             linhas: cartorio.linhas,
         });
 
@@ -10585,15 +10550,6 @@
 
         desenharBlocoDominio(doc, m, y, uw, {
             titulo: 'Gabinete',
-            // Legenda de bolinhas, mesmo padrão do Cartório (era um parágrafo em texto
-            // corrido — pedido do usuário pra uniformizar com a legenda simples que já
-            // existe no Cartório). Limiares vêm de LIMITES_GABINETE — nunca hardcoded aqui.
-            legenda: [
-                { cor: COR.aqua, rotulo: `Regular ≤${LIMITES_GABINETE.atencao}d` },
-                { cor: COR.ambar, rotulo: `Atenção ${LIMITES_GABINETE.atencao + 1}–${LIMITES_GABINETE.critico}d` },
-                { cor: COR.vermelho, rotulo: `Crítico >${LIMITES_GABINETE.critico}d` },
-            ],
-            situacao: gabinete.situacao,
             colunaRotulo: 'Magistrado(a)',
             itens: gabinete.itens,
             // Pedido do usuário: se Conclusões foi coletado e não há NENHUM processo
@@ -11016,9 +10972,8 @@
                 nome,
                 indicador: `${t.pendentes} ${unidade || 'pendente(s)'}`,
                 detalhamento: detalhes.length ? detalhes.join(' · ') : '—',
-                situacaoLabel: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).rotulo,
-                corTexto: (SITUACAO_INFO[t.status] || SITUACAO_INFO.regular).cor,
-                semSituacao: false,
+                situacaoLabel: '', corTexto: '',
+                semSituacao: true,
                 cfgOriginal: t.secao.cfgOriginal,
             };
         }
@@ -11245,13 +11200,11 @@
             const r = secaoAudienciasDesignadas.dados[0] || {};
             const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
             const diasAteUltima = tsUltima != null ? Math.round((tsUltima - now) / DIA_MS) : null;
-            const statusAD = classificarSituacaoPorDias(diasAteUltima, 180, 360);
-            const infoAD = SITUACAO_INFO[statusAD] || SITUACAO_INFO.regular;
             itensAudiencias.push({
                 nome: 'Designadas',
                 indicador: `${r.totalDesignadas || 0} designada(s)`,
                 detalhamento: r.ultimaData ? `Última: ${r.ultimaData} (${diasAteUltima} dia(s))` : '—',
-                situacaoLabel: infoAD.rotulo, corTexto: infoAD.cor, semSituacao: false, cfgOriginal: CFG_AUDIENCIAS_DESIGNADAS,
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_AUDIENCIAS_DESIGNADAS,
             });
         }
         if (secaoAudienciasRealizadas) {
@@ -12561,26 +12514,18 @@
         desenharCard(doc, m,             kY, kW2, 28, 'Total de Audiências Designadas', String(r.totalDesignadas), [], true, COR.azul);
         desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Último dia com audiência', r.ultimaData || '—', [], true, COR.azul);
 
-        // Dois KPIs (pedido do usuário): 1) só a situação da vara (verde até 180 dias até a
-        // audiência mais distante, amarelo de 180 a 360, vermelho acima de 360 — mesma
-        // régua Regular/Atenção/Crítico usada nos demais relatórios, só que aqui o "atraso"
-        // é a agenda já estar preenchida muito longe no futuro); 2) só os processos do dia
-        // mais distante, com os dias até essa data.
+        // Só os processos do dia mais distante, com os dias até essa data (sem veredito de
+        // situação da vara — branch sem-analise).
         const k2Y = kY + 28 + gap;
         const tsUltima = r.ultimaData ? parseDataBR(r.ultimaData) : null;
         const diasAteUltima = tsUltima != null ? Math.round((tsUltima - agora.getTime()) / DIA_MS) : null;
-        const status = classificarSituacaoPorDias(diasAteUltima, 180, 360);
-        const infoStatus = SITUACAO_INFO[status] || SITUACAO_INFO.regular;
         const totalUltimoDia = r.totalProcessosUltimoDia != null ? r.totalProcessosUltimoDia : (r.processosUltimoDia || []).length;
         // Lista COMPLETA de processos, sem cortar (pedido do usuário) — o card quebra em
         // várias linhas em vez de truncar, então a altura é calculada antes de desenhar.
         const processosTexto = (r.processosUltimoDia || []).join(', ') || '—';
         const subLinhaProcessos = r.ultimaData && diasAteUltima != null ? `${diasAteUltima} dia(s) até ${r.ultimaData}` : 'Nenhuma audiência designada';
-        const alturaCard2 = Math.max(28, medirAlturaCardLista(doc, kW2, processosTexto, true));
-        desenharCard(doc, m, k2Y, kW2, alturaCard2, 'Situação da Vara', infoStatus.rotulo,
-            [diasAteUltima != null ? `${diasAteUltima} dia(s) até a audiência mais distante da pauta` : 'Sem audiências para calcular'],
-            true, infoStatus.cor);
-        desenharCardLista(doc, m + kW2 + gap, k2Y, kW2, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.azul);
+        const alturaCard2 = Math.max(28, medirAlturaCardLista(doc, uw, processosTexto, true));
+        desenharCardLista(doc, m, k2Y, uw, alturaCard2, `Processos no Dia Mais Distante (${totalUltimoDia})`, processosTexto, subLinhaProcessos, COR.azul);
 
         const tY = k2Y + alturaCard2 + gap + 4;
         if (r.porTipo.length) {
@@ -12910,7 +12855,7 @@
     // aviso "Situação: Crítico" em destaque colorido — cenário específico o bastante
     // (título multi-linha + aviso condicional) pra não valer a pena generalizar o
     // desenharCard compartilhado, usado por ~20 outros relatórios sem essa necessidade.
-    function desenharCardCumprimentoMedidas(doc, x, y, w, h, titulo, valor, critico, acento) {
+    function desenharCardCumprimentoMedidas(doc, x, y, w, h, titulo, valor, acento) {
         acento = acento || COR.azul;
         doc.setDrawColor(...COR.grade); doc.setFillColor(...COR.cartao); doc.setLineWidth(0.2);
         doc.roundedRect(x, y, w, h, 2, 2, 'FD');
@@ -12921,7 +12866,7 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...COR.muted);
         const linhasTitulo = doc.splitTextToSize(String(titulo).toUpperCase(), w - 8);
         const alturaLinhaTitulo = 3.3;
-        const blocoH = linhasTitulo.length * alturaLinhaTitulo + 8 + (critico ? 4.2 : 0);
+        const blocoH = linhasTitulo.length * alturaLinhaTitulo + 8;
         let yy = y + (h - blocoH) / 2 + alturaLinhaTitulo;
         linhasTitulo.forEach(l => { doc.text(l, cx, yy, { align: 'center' }); yy += alturaLinhaTitulo; });
         yy += 4.5;
@@ -12934,13 +12879,6 @@
         }
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(fonteValor); doc.setTextColor(...COR.tinta);
         doc.text(textoTruncadoParaLargura(doc, valorTexto, w - 10), cx, yy, { align: 'center' }); yy += 5.5;
-        if (critico) {
-            // Helvetica (não PublicSans embutida) — mesma fonte usada pelo card de
-            // Observação (desenharCardObservacao), evitando texto acentuado grudado que a
-            // fonte TTF customizada produzia em leitores de PDF reais.
-            doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...COR.vermelho);
-            doc.text('Situação: Crítico', cx, yy, { align: 'center' });
-        }
     }
 
     function gerarPDFCumprimentoMedidas(dados) {
@@ -12977,18 +12915,13 @@
         const yLinha = rotuloInfo.y + 3.5;
         doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
 
-        // Limiares de "Situação: Crítico" — mesmos valores do protótipo original (pedido
-        // explícito do usuário).
-        const LIMIAR_ATRASO_CRITICO = 100;
-        const LIMIAR_SEM_CUMPRIMENTO_CRITICO = 50;
-
         const gap = 6;
         const kY = yLinha + 7;
-        const kH = 34; // 2 linhas de título + valor + linha de "Situação: Crítico"
+        const kH = 30; // 2 linhas de título + valor
         const kW = (uw - 2 * gap) / 3;
-        desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), atrasados > LIMIAR_ATRASO_CRITICO, COR.vermelho);
-        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), semCumprimento > LIMIAR_SEM_CUMPRIMENTO_CRITICO, COR.azul);
-        desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), false, COR.azul);
+        desenharCardCumprimentoMedidas(doc, m, kY, kW, kH, 'Cumprimentos em Atraso', String(atrasados), COR.vermelho);
+        desenharCardCumprimentoMedidas(doc, m + kW + gap, kY, kW, kH, 'Medidas sem Cumprimentos Gerados', String(semCumprimento), COR.azul);
+        desenharCardCumprimentoMedidas(doc, m + 2 * (kW + gap), kY, kW, kH, 'Cumprimentos a Vencer', String(aVencer), COR.azul);
 
         const y = kY + kH + 10;
         const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_CUMPRIMENTO_MEDIDAS);
