@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.47
+// @version      26.48
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -757,7 +757,7 @@
             // contagem dos registros dela (a lista coletada é a fila "Para Realizar").
             kpisExtras: (dados) => {
                 const somaOuValor = (chave, contarRegistros) => {
-                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, dados, contarRegistros);
+                    const soma = somaPorUnidade(CFG_JUNTADAS.prefixo + chave, dados, contarRegistros, contarRegistros);
                     return soma != null ? soma : parseInt(store.getItem(CFG_JUNTADAS.prefixo + chave) || '', 10);
                 };
                 const urg = somaOuValor('urgencia', false);
@@ -7493,12 +7493,13 @@
     // calculava "pendentes" direto como dados.length, sem passar por essa mesma lógica.
     function totalIdentificadoOuColetado(cfg, dados) {
         if (cfg.totalIdentificadoNoResumo) {
-            const porUnidade = somaPorUnidade(cfg.prefixo + 'total_identificado', dados);
+            const porUnidade = somaPorUnidade(cfg.prefixo + 'total_identificado', dados, true, !!cfg.totalIdentificadoSoDoPainel);
             if (porUnidade != null) return porUnidade > 0 ? porUnidade : dados.length;
         }
         const totalIdentificado = cfg.totalIdentificadoNoResumo
             ? parseInt(store.getItem(cfg.prefixo + 'total_identificado') || '', 10)
             : NaN;
+        if (cfg.totalIdentificadoSoDoPainel) return Math.max(Number.isFinite(totalIdentificado) ? totalIdentificado : 0, dados.length);
         return Number.isFinite(totalIdentificado) && totalIdentificado > 0 ? totalIdentificado : dados.length;
     }
 
@@ -7552,14 +7553,18 @@
     // `dados` — passe [] quando os registros não representam esse contador.
     // contarRegistros=false: `dados` só indica as unidades (ex.: "Com urgência", que não
     // é a fila coletada) — unidade sem contador entra com 0.
-    function somaPorUnidade(chave, dados, contarRegistros = true) {
+    // pisoRegistros=true: o contador de uma unidade nunca fica abaixo dos registros
+    // coletados dela (contador do painel pode estar defasado — ex. Juntadas: 94 coletados,
+    // KPI 1).
+    function somaPorUnidade(chave, dados, contarRegistros = true, pisoRegistros = false) {
         const mapa = desembrulharObjeto(store.getItem(chave + '_por_unidade')) || {};
         const unidades = unidadesComContador(mapa, dados);
         if (!unidades) return null;
         return unidades.reduce((s, u) => {
             const v = parseInt(mapa[u], 10);
-            if (Number.isFinite(v)) return s + v;
-            return s + (contarRegistros ? (dados || []).filter(d => unidadeDoRegistro(d) === u).length : 0);
+            const n = contarRegistros || pisoRegistros ? (dados || []).filter(d => unidadeDoRegistro(d) === u).length : 0;
+            if (Number.isFinite(v)) return s + (pisoRegistros ? Math.max(v, n) : v);
+            return s + (contarRegistros ? n : 0);
         }, 0);
     }
 
