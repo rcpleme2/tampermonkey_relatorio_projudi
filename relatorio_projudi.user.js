@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.48
+// @version      26.49
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -21971,8 +21971,7 @@
             onerror: () => logPainel('[Projudi] não foi possível verificar atualização agora'),
         });
     }
-    // Sem botão "Depois" (pedido do usuário): o aviso fica na tela até o clique em
-    // "Atualizar agora".
+    // Aviso simples de nova versão, com "Atualizar agora" e "Fechar" (pedido do usuário).
     function mostrarAvisoAtualizacao(nova, instalada) {
         const existente = document.getElementById('projudi-aviso-atualizacao');
         if (existente) existente.remove();
@@ -21981,8 +21980,10 @@
         aviso.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;'
             + 'background:#FFFFFF;border:2px solid #C42E2E;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.25);'
             + 'padding:12px 16px;font:13px/1.4 sans-serif;color:#2B2A27;display:flex;gap:12px;align-items:center;';
-        aviso.innerHTML = `<span><strong>Atualização obrigatória do Relatório Projudi:</strong> versão ${nova} disponível (instalada: ${instalada}).<br>Clique em "Atualizar agora" e confirme a instalação na tela do Tampermonkey.</span>
-            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:600;white-space:nowrap;">Atualizar agora</button>`;
+        aviso.innerHTML = `<span><strong>Há uma nova versão do script Relatório Projudi disponível</strong> (${nova}; instalada: ${instalada}).</span>
+            <button type="button" data-acao="atualizar" style="background:#3A5A7D;color:#fff;border:none;border-radius:6px;padding:8px 12px;cursor:pointer;font-weight:600;white-space:nowrap;">Atualizar agora</button>
+            <button type="button" data-acao="fechar" style="background:#F4F4F0;color:#2B2A27;border:1px solid #BDBDB5;border-radius:6px;padding:8px 12px;cursor:pointer;white-space:nowrap;">Fechar</button>`;
+        aviso.querySelector('[data-acao="fechar"]').onclick = () => aviso.remove();
         aviso.querySelector('[data-acao="atualizar"]').onclick = () => {
             window.open(URL_SCRIPT_MAIN, '_blank');
             aviso.remove();
