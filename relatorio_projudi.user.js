@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.54
+// @version      26.55
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3186,6 +3186,16 @@
     function normalizarAtuacao(atuacao) {
         return (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
+    // Unidade com competência criminal própria (sem contar Família/Infância, onde os
+    // itens de Crime rodam só por terem sido marcados).
+    const RE_UNIDADE_CRIME = /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica/;
+    // Pedido do usuário: item de Crime "Prejudicado" (menu inexistente) numa unidade de
+    // Família/Infância não aparece no sumário do PDF — some como já some do corpo. Em
+    // unidade criminal de verdade o "Prejudicado" continua (lá o menu deveria existir).
+    function ignorarPrejudicadoNoPDF(cfg, atuacao) {
+        const rel = relatorioPorCfg(cfg);
+        return !!rel && rel.categoriaEspecifica === 'crime' && !RE_UNIDADE_CRIME.test(normalizarAtuacao(atuacao));
+    }
     // Atuação desconhecida: vale tudo. Além da regra acima, mantém as regras antigas: as
     // seções da VIJ (Cível/Infracional) só rodam na seção correspondente e não rodam em
     // Vara de Família; Averiguação de Paternidade (classe 123) só na Vara de Família.
@@ -3197,7 +3207,7 @@
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
         if (rel && rel.categoriaEspecifica === 'crime') {
-            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica|familia|infancia/.test(nome) ? ''
+            return (RE_UNIDADE_CRIME.test(nome) || /familia|infancia/.test(nome)) ? ''
                 : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal", "infrações penais contra", "juizado de violência doméstica", "família" nem "infância"';
         }
         if (dominio === 'juri') {
@@ -11021,7 +11031,8 @@
             const secao = secoes.find(s => s.cfgOriginal === cfg);
             if (secao && Array.isArray(secao.dados) && secao.dados.length) return true;
             const rodadas = lerUnidadesRodadas(cfg);
-            const prejudicadas = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            const prejudicadas = (desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [])
+                .filter(n => !ignorarPrejudicadoNoPDF(cfg, n));
             if (rodadas === null && !prejudicadas.length) return relatorioMarcadoPorPadrao(rel.key);
             return [...(rodadas || []), ...prejudicadas].some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
         }
@@ -11316,7 +11327,7 @@
                 lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
             }
             // Seção da VIJ que não é a deste item não conta como "Prejudicado" nele.
-            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome));
+            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome) && !ignorarPrejudicadoNoPDF(cfg, nome));
             if (!lista.length) return null;
             return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
