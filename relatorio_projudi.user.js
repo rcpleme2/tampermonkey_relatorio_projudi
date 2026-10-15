@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.56
+// @version      26.57
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3185,6 +3185,23 @@
     // marcados no menu de automação (e omitidos do PDF, como já era para VIJ).
     function normalizarAtuacao(atuacao) {
         return (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    }
+    // Pedido do usuário (v26.57): item não encontrado após 3 tentativas
+    // (marcarPrejudicadoEAvancar) só aparece no sumário do PDF, como "Não Encontrado",
+    // quando for FALHA REAL — a unidade tem a competência própria do item, então o menu
+    // deveria existir. Fora disso (ex. Crime numa vara de Família/Infância, onde roda só
+    // por estar marcado) a ausência do menu é esperada e o item é omitido.
+    function unidadeDeveriaTerItem(cfg, atuacao) {
+        const rel = relatorioPorCfg(cfg);
+        if (!rel) return true;
+        const nome = normalizarAtuacao(atuacao);
+        if (rel.categoriaEspecifica === 'crime') {
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica/.test(nome);
+        }
+        if (rel.dominio === 'juri') return /tribunal\s+do\s+juri/.test(nome);
+        if (rel.dominio === 'familia') return atuacaoEhFamilia(atuacao);
+        if (rel.dominio === 'vijcivel' || rel.dominio === 'vijinfracional') return tipoAtribuicao(atuacao) === rel.dominio;
+        return true;
     }
     // Atuação desconhecida: vale tudo. Além da regra acima, mantém as regras antigas: as
     // seções da VIJ (Cível/Infracional) só rodam na seção correspondente e não rodam em
@@ -10225,7 +10242,9 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.6);
         const DOT_D = 1.6, DOT_GAP = 1.3;
         const larguraTexto = comCor ? larguraMax - DOT_D - DOT_GAP : larguraMax;
-        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraTexto);
+        // Sem toUpperCase (v26.57): pedido do usuário — "Não Encontrado" sem caixa alta; o
+        // texto do chip sai como vem (ex. 'INTERROMPIDO' já é passado em maiúsculas).
+        const label = textoTruncadoParaLargura(doc, String(texto), larguraTexto);
         doc.setTextColor(...(comCor ? cor : COR.muted));
         doc.text(label, rightX, yCenter + 1.05, { align: 'right' });
         if (comCor) {
@@ -11023,9 +11042,11 @@
             const rodadas = lerUnidadesRodadas(cfg);
             const prejudicadas = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
             if (rodadas === null && !prejudicadas.length) return relatorioMarcadoPorPadrao(rel.key);
-            // Pedido do usuário (v26.56): unidade onde o item ficou "Prejudicado" (menu
-            // inexistente) não faz o item entrar no sumário — só unidades onde ele rodou.
-            return (rodadas || []).some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
+            // Pedido do usuário (v26.57): unidade onde o item não foi encontrado só faz ele
+            // entrar no sumário (como "Não Encontrado") se for falha real — ver
+            // unidadeDeveriaTerItem; nas demais, só contam as unidades onde ele rodou.
+            const falhasReais = prejudicadas.filter(n => unidadeDeveriaTerItem(cfg, n));
+            return [...(rodadas || []), ...falhasReais].some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
         }
         // Tira do subgrupo os itens fora do sumário, junto com as sub-linhas por
         // atribuição deles e os cabeçalhos de grupo (ex. Benefícios/Medidas/Suspensões)
@@ -11302,11 +11323,20 @@
             };
         }
         // Unidades onde o item não foi encontrado após 3 tentativas (ver
-        // marcarPrejudicadoEAvancar) já não aparecem como "Prejudicado" — pedido do
-        // usuário (v26.56): em nenhum sumário, qualquer que seja a competência/unidade; o
-        // item só lista o que rodou (ver entraNoSumarioPDF).
+        // marcarPrejudicadoEAvancar). Pedido do usuário (v26.57): só aparecem no sumário,
+        // como "Não Encontrado", as de FALHA REAL (unidadeDeveriaTerItem) — nas demais o
+        // menu simplesmente não existe e o item só lista o que rodou. Aparecer em vez de
+        // "0" evita que pareça um resultado genuíno de uma extração que nem rodou.
         function prejudicadoInfo(cfg) {
-            return null;
+            let lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
+            // A lista acumula unidades de automações anteriores — filtra pela seleção do
+            // diálogo de atribuições (opcoes.atribuicoesSelecionadas).
+            if (opcoes.atribuicoesSelecionadas) {
+                lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
+            }
+            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome) && unidadeDeveriaTerItem(cfg, nome));
+            if (!lista.length) return null;
+            return `Não encontrado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
         // Pedido do usuário: a ordem da capa unificada precisa bater EXATAMENTE com a
         // ordem do popup de automação (REPORTS_AUTOMACAO) — dentro deste subgrupo sem
@@ -11370,7 +11400,7 @@
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
             });
         }
         // "Bens Pendentes de Cadastro no SNGB" — logo após Bens Apreendidos (pedido do
@@ -11402,7 +11432,7 @@
                 detalhamento: prejudicado
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
             });
         }
         // "Medidas Alternativas em Atraso" — logo após Cumprimento de
@@ -11433,7 +11463,7 @@
                 nome: 'Prescrições',
                 indicador: `${secaoPrescricoes.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
             });
         }
         // "Feitos Sem Infração Penal" — logo após Prescrições (mesma ordem do popup:
@@ -11448,7 +11478,7 @@
                 nome: 'Feitos Sem Infração Penal',
                 indicador: `${secaoSemInfracaoPenal.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
             });
         }
         // "Monitoração Eletrônica Expirada" — logo após Sem Infração Penal (mesma ordem
@@ -11462,7 +11492,7 @@
                 nome: 'Monitoração Eletrônica Expirada',
                 indicador: `${secaoMonitoracaoExpiradas.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_MONITORACAO_EXPIRADAS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_MONITORACAO_EXPIRADAS,
             });
         }
         // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — logo após
@@ -11479,7 +11509,7 @@
                 nome: 'Feitos com Réu Sem RG/IIPR',
                 indicador: `${secaoSemRg.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_RG,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_RG,
             });
         }
         if (secaoSemCpf) {
@@ -11490,7 +11520,7 @@
                 nome: 'Feitos com Réu Sem CPF/CNPJ',
                 indicador: `${secaoSemCpf.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
             });
         }
         // "Reavaliação da Prisão Provisória (Art 316, CPP)" — logo após Sem Infração
@@ -11504,7 +11534,7 @@
                 nome: 'Reavaliação de Prisão Provisória (Art 316, CPP)',
                 indicador: `${secaoReavaliacaoPrisaoProvisoria.dados.length} preso(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
             });
         }
         // Prisões — logo após Reavaliação de Prisão Provisória (mesma ordem de
@@ -11520,7 +11550,7 @@
                 indicador: `${totalIdentificadoOuColetado(CFG_PRISOES, secaoPrisoes.dados)} processo(s)`
                     + (pessoas == null ? '' : ` · ${pessoas} pessoa(s) presa(s)`),
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRISOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRISOES,
             });
         }
         // "Campos Obrigatórios Pendentes da Parte (VD)" — ÚLTIMO da categoria Crime
@@ -11536,7 +11566,7 @@
                 nome: 'Campos Obrigatórios Pendentes da Parte (VD)',
                 indicador: `${secaoCamposObrigatoriosVD.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -11558,7 +11588,7 @@
                 // contarPessoasDistintas.
                 indicador: `${contarPessoasDistintas(secao.dados)} ${t.indicador}`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
             };
         };
         const itensVijCivel = [];
@@ -11570,7 +11600,7 @@
                 indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
                 // Sem o nº de pretendentes (pedido do usuário) — só o total no indicador.
                 detalhamento: prejudicado || '—',
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
         empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
@@ -11591,7 +11621,7 @@
                 nome: 'Averiguação de Paternidade (Processos Ativos)',
                 indicador: `${secaoAveriguacaoPaternidade.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · Classe 123` : 'Classe 123 · Status Ativo',
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
             });
         }
         // Prisões - Alimentos (depois de Averiguação, mesma ordem do painel): zero presos
@@ -11611,7 +11641,7 @@
                 nome: 'Listas de Jurados (últimos 5 anos)',
                 indicador: `${secaoListasJurados.dados.length} lista(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAnos}` : detalheAnos,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_LISTAS_JURADOS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_LISTAS_JURADOS,
             });
         }
         empilharSubgrupo('Tribunal do Júri', itensJuri);
@@ -11622,7 +11652,7 @@
         linhasCartorio.forEach(l => {
             if (l.cfgOriginal && foiInterrompidoPorErro(l.cfgOriginal)) {
                 l.detalhamento = 'Extração interrompida por erro — dados parciais';
-                l.situacaoLabel = 'Interrompido'; l.corTexto = COR.vermelho; l.semSituacao = false;
+                l.situacaoLabel = 'INTERROMPIDO'; l.corTexto = COR.vermelho; l.semSituacao = false;
             }
         });
         cartorio.linhas = linhasCartorio;
