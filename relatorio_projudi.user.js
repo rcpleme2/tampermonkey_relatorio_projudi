@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.53
+// @version      26.54
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3174,6 +3174,11 @@
     //                                 Penais Contra Crianças, Adolescentes e Idosos") ou
     //                                 "juizado de violência doméstica" (ex. "Juizado de
     //                                 Violência Doméstica e Familiar Contra a Mulher");
+    //                                 também rodam onde vale a regra da Família ("família"
+    //                                 ou "infância" no nome) — pedido do usuário: lá rodam
+    //                                 só se marcados (Crime vem desmarcado por padrão, ver
+    //                                 relatorioMarcadoPorPadrao); menu inexistente na
+    //                                 unidade vira "Prejudicado" (marcarPrejudicadoEAvancar);
     //   itens do grupo FAMÍLIA        -> só se o nome tiver "família" ou "infância";
     //   itens do TRIBUNAL DO JÚRI     -> só se o nome tiver "tribunal do júri".
     // Itens de Crime/FAMÍLIA/JÚRI de unidade que não casa com a regra são pulados mesmo
@@ -3192,8 +3197,8 @@
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
         if (rel && rel.categoriaEspecifica === 'crime') {
-            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica/.test(nome) ? ''
-                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal", "infrações penais contra" nem "juizado de violência doméstica"';
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica|familia|infancia/.test(nome) ? ''
+                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal", "infrações penais contra", "juizado de violência doméstica", "família" nem "infância"';
         }
         if (dominio === 'juri') {
             return /tribunal\s+do\s+juri/.test(nome) ? '' : 'item do Tribunal do Júri — o nome da unidade não tem "tribunal do júri"';
@@ -18101,8 +18106,8 @@
     // automação de novo, e antes tinha que remarcar tudo do zero toda vez, já que o
     // painel é recriado a cada carregamento de página — ver injetarPainel). Guarda um
     // snapshot {key: true/false} de TODOS os checkboxes a cada mudança; na próxima
-    // renderização, cada item usa o valor salvo se existir, senão o padrão (todos
-    // marcados, ver relatorioMarcadoPorPadrao).
+    // renderização, cada item usa o valor salvo se existir, senão o padrão (só Cartório
+    // e Gabinete marcados, ver relatorioMarcadoPorPadrao).
     const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
     function lerSelecoesSalvasPainel() {
         // desembrulharObjeto (não JSON.parse único) — mesma proteção de
@@ -18134,19 +18139,20 @@
     function lerCopiaTampermonkey(chave) {
         try { return typeof GM_getValue === 'function' ? GM_getValue(chave, null) : null; } catch (e) { return null; }
     }
-    // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
-    // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
-    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Cível" (DOMINIOS_VIJ)
-    // vêm DESMARCADOS por padrão — seleção manual.
+    // Por padrão vêm marcados só os itens de Cartório (inclusive Tempo Médio) e Gabinete
+    // — os demais (Crime, Tribunal do Júri, Família, VIJ) vêm DESMARCADOS (v26.54).
     function relatorioMarcadoPorPadrao(key) {
         restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
         desmarcarVijCivelFamiliaUmaVez();
+        desmarcarCrimeUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
-        return !(rel && DOMINIOS_VIJ.includes(rel.dominio));
+        // Pedido do usuário (v26.54): só Cartório e Gabinete vêm marcados por padrão;
+        // Crime, Tribunal do Júri, Família e VIJ vêm desmarcados (seleção manual).
+        return !!rel && !rel.categoriaEspecifica && ['cartorio', 'gabinete'].includes(rel.dominio);
     }
     // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
     // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
@@ -18193,6 +18199,7 @@
         // também a desmarcação abaixo como feita, senão ela desmarcaria de novo, a cada
         // limpeza, o que o usuário marcou (recuperado da cópia do Tampermonkey).
         store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+        store.setItem(CHAVE_DESMARCACAO_CRIME_2654, '1');
     }
 
     // Desmarcação única (v26.13, pedido do usuário): VIJ - Seção Cível e FAMÍLIA devem
@@ -18206,6 +18213,20 @@
         REPORTS_AUTOMACAO.filter(r => r.dominio === 'vijcivel' || r.dominio === 'familia').forEach(r => { salvas[r.key] = false; });
         gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+    }
+
+    // Desmarcação única (v26.54, pedido do usuário): os itens de Crime passaram a vir
+    // desmarcados por padrão — e, como agora também rodam em Família/Infância (ver
+    // motivoForaDaAtribuicao), só devem rodar lá se o usuário marcar. Uma marcação salva
+    // prevalece sobre o padrão, então desmarca esses itens uma vez (mesmo esquema de
+    // desmarcarVijCivelFamiliaUmaVez); dali em diante vale o que o usuário marcar.
+    const CHAVE_DESMARCACAO_CRIME_2654 = 'projudi_pa_crime_desmarcado_2654';
+    function desmarcarCrimeUmaVez() {
+        if (store.getItem(CHAVE_DESMARCACAO_CRIME_2654) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime').forEach(r => { salvas[r.key] = false; });
+        gravarSelecoesSalvasPainel(salvas);
+        store.setItem(CHAVE_DESMARCACAO_CRIME_2654, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -21163,6 +21184,7 @@
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
         desmarcarVijCivelFamiliaUmaVez();
+        desmarcarCrimeUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         let aplicados = 0;
         Object.entries(p.relatoriosSelecionados || {}).forEach(([key, marcado]) => {
@@ -21197,7 +21219,7 @@
         // (CFG_ATIVOS_CLASSE/key 'ativosclasse', subgrupo "Estatísticas Gerais") — entra
         // no checklist como qualquer outro item (.pa-check), sem tratamento especial.
 
-        // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
+        // Só Cartório (inclusive Tempo Médio) e Gabinete vêm marcados por padrão — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
