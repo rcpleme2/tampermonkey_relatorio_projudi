@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.50
+// @version      26.57
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3169,13 +3169,39 @@
     // nem acentos):
     //   itens de Cartório (e Gabinete) -> rodam em qualquer unidade;
     //   itens de Crime (categoriaEspecifica: 'crime') -> só se o nome tiver "crim*",
-    //                                 "tribunal do júri" ou "execução penal";
+    //                                 "tribunal do júri", "execução penal",
+    //                                 "infrações penais contra" (ex. "Vara de Infrações
+    //                                 Penais Contra Crianças, Adolescentes e Idosos") ou
+    //                                 "juizado de violência doméstica" (ex. "Juizado de
+    //                                 Violência Doméstica e Familiar Contra a Mulher");
+    //                                 também rodam onde vale a regra da Família ("família"
+    //                                 ou "infância" no nome) — pedido do usuário: lá rodam
+    //                                 só se marcados (Crime vem desmarcado por padrão, ver
+    //                                 relatorioMarcadoPorPadrao); menu inexistente na
+    //                                 unidade vira "Prejudicado" (marcarPrejudicadoEAvancar);
     //   itens do grupo FAMÍLIA        -> só se o nome tiver "família" ou "infância";
     //   itens do TRIBUNAL DO JÚRI     -> só se o nome tiver "tribunal do júri".
     // Itens de Crime/FAMÍLIA/JÚRI de unidade que não casa com a regra são pulados mesmo
     // marcados no menu de automação (e omitidos do PDF, como já era para VIJ).
     function normalizarAtuacao(atuacao) {
         return (atuacao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    }
+    // Pedido do usuário (v26.57): item não encontrado após 3 tentativas
+    // (marcarPrejudicadoEAvancar) só aparece no sumário do PDF, como "Não Encontrado",
+    // quando for FALHA REAL — a unidade tem a competência própria do item, então o menu
+    // deveria existir. Fora disso (ex. Crime numa vara de Família/Infância, onde roda só
+    // por estar marcado) a ausência do menu é esperada e o item é omitido.
+    function unidadeDeveriaTerItem(cfg, atuacao) {
+        const rel = relatorioPorCfg(cfg);
+        if (!rel) return true;
+        const nome = normalizarAtuacao(atuacao);
+        if (rel.categoriaEspecifica === 'crime') {
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica/.test(nome);
+        }
+        if (rel.dominio === 'juri') return /tribunal\s+do\s+juri/.test(nome);
+        if (rel.dominio === 'familia') return atuacaoEhFamilia(atuacao);
+        if (rel.dominio === 'vijcivel' || rel.dominio === 'vijinfracional') return tipoAtribuicao(atuacao) === rel.dominio;
+        return true;
     }
     // Atuação desconhecida: vale tudo. Além da regra acima, mantém as regras antigas: as
     // seções da VIJ (Cível/Infracional) só rodam na seção correspondente e não rodam em
@@ -3188,8 +3214,8 @@
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
         if (rel && rel.categoriaEspecifica === 'crime') {
-            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais/.test(nome) ? ''
-                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri" nem "execução penal"';
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|juizado\s+de\s+violencia\s+domestica|familia|infancia/.test(nome) ? ''
+                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal", "infrações penais contra", "juizado de violência doméstica", "família" nem "infância"';
         }
         if (dominio === 'juri') {
             return /tribunal\s+do\s+juri/.test(nome) ? '' : 'item do Tribunal do Júri — o nome da unidade não tem "tribunal do júri"';
@@ -10216,7 +10242,9 @@
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(6.6);
         const DOT_D = 1.6, DOT_GAP = 1.3;
         const larguraTexto = comCor ? larguraMax - DOT_D - DOT_GAP : larguraMax;
-        const label = textoTruncadoParaLargura(doc, String(texto).toUpperCase(), larguraTexto);
+        // Sem toUpperCase (v26.57): pedido do usuário — "Não Encontrado" sem caixa alta; o
+        // texto do chip sai como vem (ex. 'INTERROMPIDO' já é passado em maiúsculas).
+        const label = textoTruncadoParaLargura(doc, String(texto), larguraTexto);
         doc.setTextColor(...(comCor ? cor : COR.muted));
         doc.text(label, rightX, yCenter + 1.05, { align: 'right' });
         if (comCor) {
@@ -11014,7 +11042,11 @@
             const rodadas = lerUnidadesRodadas(cfg);
             const prejudicadas = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
             if (rodadas === null && !prejudicadas.length) return relatorioMarcadoPorPadrao(rel.key);
-            return [...(rodadas || []), ...prejudicadas].some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
+            // Pedido do usuário (v26.57): unidade onde o item não foi encontrado só faz ele
+            // entrar no sumário (como "Não Encontrado") se for falha real — ver
+            // unidadeDeveriaTerItem; nas demais, só contam as unidades onde ele rodou.
+            const falhasReais = prejudicadas.filter(n => unidadeDeveriaTerItem(cfg, n));
+            return [...(rodadas || []), ...falhasReais].some(n => (!unidadesDoPDF.size || unidadesDoPDF.has(n)) && !foraDaAtribuicao(cfg, n));
         }
         // Tira do subgrupo os itens fora do sumário, junto com as sub-linhas por
         // atribuição deles e os cabeçalhos de grupo (ex. Benefícios/Medidas/Suspensões)
@@ -11290,26 +11322,21 @@
                 };
             };
         }
-        // Pedido do usuário: unidades onde um relatório exclusivo da categoria Crime
-        // (Apreensões/Cumprimento de Medidas) não foi encontrado após 3 tentativas (ver
-        // marcarPrejudicadoEAvancar) entram aqui como "Prejudicado" — some no
-        // detalhamento da linha e marca a situação, em vez de aparecer como "0" (que
-        // pareceria um resultado genuíno em vez de uma extração que nem chegou a rodar).
+        // Unidades onde o item não foi encontrado após 3 tentativas (ver
+        // marcarPrejudicadoEAvancar). Pedido do usuário (v26.57): só aparecem no sumário,
+        // como "Não Encontrado", as de FALHA REAL (unidadeDeveriaTerItem) — nas demais o
+        // menu simplesmente não existe e o item só lista o que rodou. Aparecer em vez de
+        // "0" evita que pareça um resultado genuíno de uma extração que nem rodou.
         function prejudicadoInfo(cfg) {
             let lista = desembrulharArray(store.getItem(cfg.prefixo + 'prejudicado')) || [];
-            // Bug relatado pelo usuário: esta lista acumula TODAS as unidades já rodadas
-            // em qualquer automação anterior (marcarPrejudicadoEAvancar), sem nunca ser
-            // limpa por atuação — sem filtrar pela seleção do diálogo de checkboxes
-            // (opcoes.atribuicoesSelecionadas), unidades desmarcadas na exportação (ex.:
-            // Antonina/Ampere) continuavam aparecendo no PDF de outra unidade (ex.:
-            // Fazenda Rio Grande).
+            // A lista acumula unidades de automações anteriores — filtra pela seleção do
+            // diálogo de atribuições (opcoes.atribuicoesSelecionadas).
             if (opcoes.atribuicoesSelecionadas) {
                 lista = lista.filter(nome => opcoes.atribuicoesSelecionadas.has(nome));
             }
-            // Seção da VIJ que não é a deste item não conta como "Prejudicado" nele.
-            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome));
+            lista = lista.filter(nome => !foraDaAtribuicao(cfg, nome) && unidadeDeveriaTerItem(cfg, nome));
             if (!lista.length) return null;
-            return `Prejudicado em ${lista.length} unidade(s): ${lista.join(', ')}`;
+            return `Não encontrado em ${lista.length} unidade(s): ${lista.join(', ')}`;
         }
         // Pedido do usuário: a ordem da capa unificada precisa bater EXATAMENTE com a
         // ordem do popup de automação (REPORTS_AUTOMACAO) — dentro deste subgrupo sem
@@ -11373,7 +11400,7 @@
                 nome: 'Bens Apreendidos',
                 indicador: `${secaoApreensoes.dados.length} apreensão(ões)`,
                 detalhamento,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_APREENSOES,
             });
         }
         // "Bens Pendentes de Cadastro no SNGB" — logo após Bens Apreendidos (pedido do
@@ -11405,7 +11432,7 @@
                 detalhamento: prejudicado
                     ? `${prejudicado} · ${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`
                     : `${semCumprimento} sem cumprimento gerado · ${aVencer} a vencer`,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CUMPRIMENTO_MEDIDAS,
             });
         }
         // "Medidas Alternativas em Atraso" — logo após Cumprimento de
@@ -11436,7 +11463,7 @@
                 nome: 'Prescrições',
                 indicador: `${secaoPrescricoes.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRESCRICOES,
             });
         }
         // "Feitos Sem Infração Penal" — logo após Prescrições (mesma ordem do popup:
@@ -11451,7 +11478,7 @@
                 nome: 'Feitos Sem Infração Penal',
                 indicador: `${secaoSemInfracaoPenal.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_INFRACAO_PENAL,
             });
         }
         // "Monitoração Eletrônica Expirada" — logo após Sem Infração Penal (mesma ordem
@@ -11465,7 +11492,7 @@
                 nome: 'Monitoração Eletrônica Expirada',
                 indicador: `${secaoMonitoracaoExpiradas.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_MONITORACAO_EXPIRADAS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_MONITORACAO_EXPIRADAS,
             });
         }
         // "Feitos com Réu Sem RG/IIPR" e "Feitos com Réu Sem CPF/CNPJ" — logo após
@@ -11482,7 +11509,7 @@
                 nome: 'Feitos com Réu Sem RG/IIPR',
                 indicador: `${secaoSemRg.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_RG,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_RG,
             });
         }
         if (secaoSemCpf) {
@@ -11493,7 +11520,7 @@
                 nome: 'Feitos com Réu Sem CPF/CNPJ',
                 indicador: `${secaoSemCpf.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_SEM_CPF,
             });
         }
         // "Reavaliação da Prisão Provisória (Art 316, CPP)" — logo após Sem Infração
@@ -11507,7 +11534,7 @@
                 nome: 'Reavaliação de Prisão Provisória (Art 316, CPP)',
                 indicador: `${secaoReavaliacaoPrisaoProvisoria.dados.length} preso(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_REAVALIACAO_PRISAO_PROVISORIA,
             });
         }
         // Prisões — logo após Reavaliação de Prisão Provisória (mesma ordem de
@@ -11523,7 +11550,7 @@
                 indicador: `${totalIdentificadoOuColetado(CFG_PRISOES, secaoPrisoes.dados)} processo(s)`
                     + (pessoas == null ? '' : ` · ${pessoas} pessoa(s) presa(s)`),
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRISOES,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_PRISOES,
             });
         }
         // "Campos Obrigatórios Pendentes da Parte (VD)" — ÚLTIMO da categoria Crime
@@ -11539,7 +11566,7 @@
                 nome: 'Campos Obrigatórios Pendentes da Parte (VD)',
                 indicador: `${secaoCamposObrigatoriosVD.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -11561,7 +11588,7 @@
                 // contarPessoasDistintas.
                 indicador: `${contarPessoasDistintas(secao.dados)} ${t.indicador}`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: cfg,
             };
         };
         const itensVijCivel = [];
@@ -11573,7 +11600,7 @@
                 indicador: `${secaoHabilitacoesAdocao.dados.length} habilitação(ões)`,
                 // Sem o nº de pretendentes (pedido do usuário) — só o total no indicador.
                 detalhamento: prejudicado || '—',
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_HABILITACOES_ADOCAO,
             });
         }
         empilharSubgrupo('VIJ - Seção Cível', itensVijCivel);
@@ -11594,7 +11621,7 @@
                 nome: 'Averiguação de Paternidade (Processos Ativos)',
                 indicador: `${secaoAveriguacaoPaternidade.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · Classe 123` : 'Classe 123 · Status Ativo',
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_AVERIGUACAO_PATERNIDADE,
             });
         }
         // Prisões - Alimentos (depois de Averiguação, mesma ordem do painel): zero presos
@@ -11614,7 +11641,7 @@
                 nome: 'Listas de Jurados (últimos 5 anos)',
                 indicador: `${secaoListasJurados.dados.length} lista(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAnos}` : detalheAnos,
-                situacaoLabel: prejudicado ? 'Prejudicado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_LISTAS_JURADOS,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_LISTAS_JURADOS,
             });
         }
         empilharSubgrupo('Tribunal do Júri', itensJuri);
@@ -11625,7 +11652,7 @@
         linhasCartorio.forEach(l => {
             if (l.cfgOriginal && foiInterrompidoPorErro(l.cfgOriginal)) {
                 l.detalhamento = 'Extração interrompida por erro — dados parciais';
-                l.situacaoLabel = 'Interrompido'; l.corTexto = COR.vermelho; l.semSituacao = false;
+                l.situacaoLabel = 'INTERROMPIDO'; l.corTexto = COR.vermelho; l.semSituacao = false;
             }
         });
         cartorio.linhas = linhasCartorio;
@@ -18097,8 +18124,8 @@
     // automação de novo, e antes tinha que remarcar tudo do zero toda vez, já que o
     // painel é recriado a cada carregamento de página — ver injetarPainel). Guarda um
     // snapshot {key: true/false} de TODOS os checkboxes a cada mudança; na próxima
-    // renderização, cada item usa o valor salvo se existir, senão o padrão (todos
-    // marcados, ver relatorioMarcadoPorPadrao).
+    // renderização, cada item usa o valor salvo se existir, senão o padrão (só Cartório
+    // e Gabinete marcados, ver relatorioMarcadoPorPadrao).
     const CHAVE_RELATORIOS_SELECIONADOS = 'projudi_pa_selecionados';
     function lerSelecoesSalvasPainel() {
         // desembrulharObjeto (não JSON.parse único) — mesma proteção de
@@ -18130,19 +18157,20 @@
     function lerCopiaTampermonkey(chave) {
         try { return typeof GM_getValue === 'function' ? GM_getValue(chave, null) : null; } catch (e) { return null; }
     }
-    // Todos os relatórios vêm marcados por padrão — inclusive Tempo Médio (pedido do
-    // usuário; antes só ele vinha desmarcado, exigindo habilitação manual toda vez).
-    // Exceção (pedido do usuário): os itens do grupo "VIJ - Seção Cível" (DOMINIOS_VIJ)
-    // vêm DESMARCADOS por padrão — seleção manual.
+    // Por padrão vêm marcados só os itens de Cartório (inclusive Tempo Médio) e Gabinete
+    // — os demais (Crime, Tribunal do Júri, Família, VIJ) vêm DESMARCADOS (v26.54).
     function relatorioMarcadoPorPadrao(key) {
         restaurarSelecoesPadraoUmaVez();
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
         desmarcarVijCivelFamiliaUmaVez();
+        desmarcarCrimeUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         if (Object.prototype.hasOwnProperty.call(salvas, key)) return !!salvas[key];
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
-        return !(rel && DOMINIOS_VIJ.includes(rel.dominio));
+        // Pedido do usuário (v26.54): só Cartório e Gabinete vêm marcados por padrão;
+        // Crime, Tribunal do Júri, Família e VIJ vêm desmarcados (seleção manual).
+        return !!rel && !rel.categoriaEspecifica && ['cartorio', 'gabinete'].includes(rel.dominio);
     }
     // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
     // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
@@ -18189,6 +18217,7 @@
         // também a desmarcação abaixo como feita, senão ela desmarcaria de novo, a cada
         // limpeza, o que o usuário marcou (recuperado da cópia do Tampermonkey).
         store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+        store.setItem(CHAVE_DESMARCACAO_CRIME_2654, '1');
     }
 
     // Desmarcação única (v26.13, pedido do usuário): VIJ - Seção Cível e FAMÍLIA devem
@@ -18202,6 +18231,20 @@
         REPORTS_AUTOMACAO.filter(r => r.dominio === 'vijcivel' || r.dominio === 'familia').forEach(r => { salvas[r.key] = false; });
         gravarSelecoesSalvasPainel(salvas);
         store.setItem(CHAVE_DESMARCACAO_VIJ_FAMILIA_2613, '1');
+    }
+
+    // Desmarcação única (v26.54, pedido do usuário): os itens de Crime passaram a vir
+    // desmarcados por padrão — e, como agora também rodam em Família/Infância (ver
+    // motivoForaDaAtribuicao), só devem rodar lá se o usuário marcar. Uma marcação salva
+    // prevalece sobre o padrão, então desmarca esses itens uma vez (mesmo esquema de
+    // desmarcarVijCivelFamiliaUmaVez); dali em diante vale o que o usuário marcar.
+    const CHAVE_DESMARCACAO_CRIME_2654 = 'projudi_pa_crime_desmarcado_2654';
+    function desmarcarCrimeUmaVez() {
+        if (store.getItem(CHAVE_DESMARCACAO_CRIME_2654) === '1') return;
+        const salvas = lerSelecoesSalvasPainel();
+        REPORTS_AUTOMACAO.filter(r => r.categoriaEspecifica === 'crime').forEach(r => { salvas[r.key] = false; });
+        gravarSelecoesSalvasPainel(salvas);
+        store.setItem(CHAVE_DESMARCACAO_CRIME_2654, '1');
     }
 
     // ── Automação em várias unidades (pedido do usuário: "total automatização") ──────
@@ -21159,6 +21202,7 @@
         migrarSelecoesVjiDesmarcadas();
         migrarItensParaSecaoCivel();
         desmarcarVijCivelFamiliaUmaVez();
+        desmarcarCrimeUmaVez();
         const salvas = lerSelecoesSalvasPainel();
         let aplicados = 0;
         Object.entries(p.relatoriosSelecionados || {}).forEach(([key, marcado]) => {
@@ -21193,7 +21237,7 @@
         // (CFG_ATIVOS_CLASSE/key 'ativosclasse', subgrupo "Estatísticas Gerais") — entra
         // no checklist como qualquer outro item (.pa-check), sem tratamento especial.
 
-        // Todos os relatórios vêm marcados por padrão, inclusive Tempo Médio — ver
+        // Só Cartório (inclusive Tempo Médio) e Gabinete vêm marcados por padrão — ver
         // relatorioMarcadoPorPadrao (a marcação persiste entre atuações/recargas).
         function linhaChecklistItem(r, ehFilho) {
             const seletorPeriodo = r.key === 'tempomedio'
