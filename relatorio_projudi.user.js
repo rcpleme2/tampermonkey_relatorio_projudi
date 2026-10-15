@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.51
+// @version      26.52
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3169,9 +3169,12 @@
     // nem acentos):
     //   itens de Cartório (e Gabinete) -> rodam em qualquer unidade;
     //   itens de Crime (categoriaEspecifica: 'crime') -> só se o nome tiver "crim*",
-    //                                 "tribunal do júri", "execução penal" ou
+    //                                 "tribunal do júri", "execução penal",
     //                                 "infrações penais contra" (ex. "Vara de Infrações
-    //                                 Penais Contra Crianças, Adolescentes e Idosos");
+    //                                 Penais Contra Crianças, Adolescentes e Idosos") ou
+    //                                 "violência doméstica e familiar contra" (ex.
+    //                                 "Juizado de Violência Doméstica e Familiar Contra a
+    //                                 Mulher");
     //   itens do grupo FAMÍLIA        -> só se o nome tiver "família" ou "infância";
     //   itens do TRIBUNAL DO JÚRI     -> só se o nome tiver "tribunal do júri".
     // Itens de Crime/FAMÍLIA/JÚRI de unidade que não casa com a regra são pulados mesmo
@@ -3190,8 +3193,8 @@
         const dominio = rel && rel.dominio;
         const nome = normalizarAtuacao(atuacao);
         if (rel && rel.categoriaEspecifica === 'crime') {
-            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra/.test(nome) ? ''
-                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal" nem "infrações penais contra"';
+            return /crim|tribunal\s+do\s+juri|execucao\s+penal|execucoes\s+penais|infracoes\s+penais\s+contra|violencia\s+domestica\s+e\s+familiar\s+contra/.test(nome) ? ''
+                : 'item de Crime — o nome da unidade não tem "crim*", "tribunal do júri", "execução penal", "infrações penais contra" nem "violência doméstica e familiar contra"';
         }
         if (dominio === 'juri') {
             return /tribunal\s+do\s+juri/.test(nome) ? '' : 'item do Tribunal do Júri — o nome da unidade não tem "tribunal do júri"';
