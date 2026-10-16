@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.58
+// @version      26.57
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -21620,43 +21620,6 @@
     }
 
     GM_addStyle(`
-        #kanban-fab { position: fixed; bottom: 12px; right: 12px; z-index: 999998; padding: 8px 14px; border: 0; border-radius: 20px; background: #1565C0; color: #fff; font: 600 13px sans-serif; cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,.3); }
-        #kanban-overlay { position: fixed; inset: 0; z-index: 1000000; background: #E8EEF4; display: flex; flex-direction: column; font: 13px sans-serif; color: #1a1a1a; }
-        #kanban-overlay button { cursor: pointer; border: 1px solid #b8c2cc; background: #fff; border-radius: 4px; padding: 5px 10px; font: inherit; }
-        #kanban-overlay button:hover { background: #f1f4f7; }
-        #kanban-overlay .kb-btn-prim { background: #1565C0; color: #fff; border-color: #1565C0; }
-        #kanban-overlay .kb-btn-perigo { color: #C62828; }
-        .kb-topo { display: flex; gap: 8px; align-items: center; padding: 10px 14px; background: #fff; border-bottom: 1px solid #ccd; flex-wrap: wrap; }
-        .kb-topo select { padding: 5px; font: inherit; }
-        .kb-espaco { flex: 1; }
-        .kb-colunas { flex: 1; display: flex; gap: 12px; padding: 14px; overflow-x: auto; align-items: flex-start; }
-        .kb-col { width: 280px; flex: none; background: #DDE3EA; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; max-height: 100%; }
-        .kb-col-topo { display: flex; gap: 4px; align-items: center; margin-bottom: 6px; }
-        .kb-col-nome { flex: 1; min-width: 0; font: 700 14px sans-serif; border: 1px solid transparent; background: transparent; padding: 4px; border-radius: 4px; }
-        .kb-col-nome:focus { background: #fff; border-color: #1565C0; }
-        .kb-cont { font-size: 11px; background: #fff; border-radius: 10px; padding: 1px 7px; }
-        #kanban-overlay .kb-mini { padding: 1px 5px; font-size: 11px; background: transparent; border-color: transparent; }
-        .kb-cards { overflow-y: auto; min-height: 30px; display: flex; flex-direction: column; gap: 6px; border-radius: 6px; }
-        .kb-cards.alvo { outline: 2px dashed #1565C0; }
-        .kb-card { background: #fff; border-radius: 6px; padding: 8px; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,.2); }
-        .kb-card.arrastando { opacity: .4; }
-        .kb-card-titulo { font-weight: 600; word-break: break-word; }
-        .kb-card-desc { margin-top: 4px; color: #555; font-size: 12px; white-space: pre-wrap; max-height: 60px; overflow: hidden; word-break: break-word; }
-        .kb-card-prazo { margin-top: 5px; font-size: 11px; color: #555; }
-        .kb-card-prazo.atrasado { color: #C62828; font-weight: 700; }
-        #kanban-overlay .kb-add { margin-top: 6px; text-align: left; background: transparent; border-color: transparent; color: #444; }
-        #kanban-overlay .kb-add-col { flex: none; width: 200px; background: rgba(255,255,255,.6); }
-        .kb-modal-fundo { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; }
-        .kb-modal { background: #fff; border-radius: 8px; padding: 16px; width: 420px; max-width: 92vw; display: flex; flex-direction: column; gap: 10px; }
-        .kb-modal h3 { margin: 0; }
-        .kb-modal input[type=text], .kb-modal textarea { padding: 6px; font: inherit; border: 1px solid #b8c2cc; border-radius: 4px; }
-        .kb-cores { display: flex; gap: 6px; }
-        .kb-cores button { width: 24px; height: 24px; padding: 0 !important; border-radius: 50% !important; }
-        .kb-cores button.sel { outline: 2px solid #1a1a1a; outline-offset: 1px; }
-        .kb-acoes { display: flex; gap: 8px; }
-    `);
-
-    GM_addStyle(`
         #painel-automacao , #projudi-mu-painel {
             position: fixed; top: 8px; right: 8px; z-index: 999999; width: 308px;
             background: #FFFFFF; border: 1px solid #DEDDD6; border-radius: 8px;
@@ -22005,199 +21968,6 @@
         document.body.appendChild(aviso);
     }
 
-    // ── Kanban (organização de trabalhos e projetos, estilo Trello) ─────────────────
-    // Ferramenta independente dos relatórios: não usa criarColetor/PDF/REPORTS_AUTOMACAO.
-    // Dados em localStorage (CHAVE_KANBAN), um JSON único: { boards:[{id,nome,colunas:
-    // [{id,nome,cards:[{id,titulo,desc,cor,prazo}]}]}], atual }. Botão flutuante só na
-    // página que hospeda o menu (mesmo critério do painel de automação, evita duplicar
-    // por frame) e fora das telas de resultado de relatório.
-    const CHAVE_KANBAN = 'projudi_kanban_v1';
-    const CORES_KANBAN = ['', '#2E7D32', '#F9A825', '#EF6C00', '#C62828', '#6A1B9A', '#1565C0'];
-
-    function kanbanId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-
-    function kanbanCarregar() {
-        let d = null;
-        try { d = JSON.parse(store.getItem(CHAVE_KANBAN)); } catch (e) { /* usa padrão */ }
-        if (!d || !Array.isArray(d.boards) || !d.boards.length) {
-            d = { atual: null, boards: [{ id: kanbanId(), nome: 'Meu quadro', colunas: ['A fazer', 'Em andamento', 'Concluído'].map(n => ({ id: kanbanId(), nome: n, cards: [] })) }] };
-        }
-        if (!d.boards.some(b => b.id === d.atual)) d.atual = d.boards[0].id;
-        return d;
-    }
-
-    function kanbanSalvar(d) { chamarSeguro(() => store.setItem(CHAVE_KANBAN, JSON.stringify(d)), 'salvar kanban'); }
-
-    function kanbanEl(tag, props, ...filhos) {
-        const e = document.createElement(tag);
-        Object.assign(e, props || {});
-        filhos.forEach(f => e.append(f));
-        return e;
-    }
-
-    function abrirKanban() {
-        if (document.getElementById('kanban-overlay')) return;
-        const dados = kanbanCarregar();
-        const overlay = kanbanEl('div', { id: 'kanban-overlay' });
-        document.body.appendChild(overlay);
-        let arrastando = null; // { colId, cardId }
-
-        const board = () => dados.boards.find(b => b.id === dados.atual);
-        const salvarERender = () => { kanbanSalvar(dados); render(); };
-
-        function editarCard(col, card) {
-            const novo = !card;
-            const c = card || { id: kanbanId(), titulo: '', desc: '', cor: '', prazo: '' };
-            const m = kanbanEl('div', { className: 'kb-modal-fundo' });
-            const titulo = kanbanEl('input', { type: 'text', value: c.titulo, placeholder: 'Título' });
-            const desc = kanbanEl('textarea', { value: c.desc, placeholder: 'Descrição / anotações', rows: 5 });
-            const prazo = kanbanEl('input', { type: 'date', value: c.prazo });
-            let cor = c.cor;
-            const cores = kanbanEl('div', { className: 'kb-cores' });
-            CORES_KANBAN.forEach(k => {
-                const b = kanbanEl('button', { type: 'button', title: k || 'Sem cor' });
-                b.style.background = k || '#fff';
-                if (k === cor) b.classList.add('sel');
-                b.onclick = () => { cor = k; cores.querySelectorAll('button').forEach(x => x.classList.remove('sel')); b.classList.add('sel'); };
-                cores.append(b);
-            });
-            const salvar = kanbanEl('button', { textContent: 'Salvar', className: 'kb-btn-prim' });
-            salvar.onclick = () => {
-                if (!titulo.value.trim()) { titulo.focus(); return; }
-                Object.assign(c, { titulo: titulo.value.trim(), desc: desc.value, cor, prazo: prazo.value });
-                if (novo) col.cards.push(c);
-                m.remove(); salvarERender();
-            };
-            const cancelar = kanbanEl('button', { textContent: 'Cancelar', onclick: () => m.remove() });
-            const botoes = kanbanEl('div', { className: 'kb-acoes' }, salvar, cancelar);
-            if (!novo) {
-                botoes.append(kanbanEl('button', { textContent: 'Excluir', className: 'kb-btn-perigo', onclick: () => {
-                    if (!confirm('Excluir este cartão?')) return;
-                    col.cards = col.cards.filter(x => x.id !== c.id); m.remove(); salvarERender();
-                } }));
-            }
-            m.append(kanbanEl('div', { className: 'kb-modal' },
-                kanbanEl('h3', { textContent: novo ? 'Novo cartão' : 'Editar cartão' }),
-                titulo, desc, kanbanEl('label', { textContent: 'Prazo ' }, prazo), cores, botoes));
-            overlay.append(m);
-            titulo.focus();
-        }
-
-        function renderColuna(col) {
-            const b = board();
-            const corpo = kanbanEl('div', { className: 'kb-cards' });
-            col.cards.forEach(card => {
-                const hoje = new Date().toISOString().slice(0, 10);
-                const el = kanbanEl('div', { className: 'kb-card', draggable: true });
-                el.dataset.id = card.id;
-                if (card.cor) el.style.borderLeft = `5px solid ${card.cor}`;
-                el.append(kanbanEl('div', { className: 'kb-card-titulo', textContent: card.titulo }));
-                if (card.desc) el.append(kanbanEl('div', { className: 'kb-card-desc', textContent: card.desc }));
-                if (card.prazo) {
-                    const [a, mm, d] = card.prazo.split('-');
-                    el.append(kanbanEl('div', { className: 'kb-card-prazo' + (card.prazo < hoje ? ' atrasado' : ''), textContent: `⏰ ${d}/${mm}/${a}` }));
-                }
-                el.onclick = () => editarCard(col, card);
-                el.ondragstart = (e) => { arrastando = { colId: col.id, cardId: card.id }; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', card.id); setTimeout(() => el.classList.add('arrastando'), 0); };
-                el.ondragend = () => el.classList.remove('arrastando');
-                corpo.append(el);
-            });
-            // Solta: insere antes do cartão sobre o qual caiu (ou no fim, se solto no vazio).
-            corpo.ondragover = (e) => { e.preventDefault(); corpo.classList.add('alvo'); };
-            corpo.ondragleave = () => corpo.classList.remove('alvo');
-            corpo.ondrop = (e) => {
-                e.preventDefault(); corpo.classList.remove('alvo');
-                if (!arrastando) return;
-                const origem = b.colunas.find(c => c.id === arrastando.colId);
-                const card = origem.cards.find(c => c.id === arrastando.cardId);
-                if (!card) return;
-                origem.cards = origem.cards.filter(c => c !== card);
-                const alvoEl = e.target.closest('.kb-card');
-                // posição pelo id do cartão-alvo, já sem o cartão arrastado (vale também p/ mesma coluna)
-                const idx = alvoEl ? col.cards.findIndex(c => c.id === alvoEl.dataset.id) : -1;
-                const pos = idx < 0 ? col.cards.length : idx;
-                col.cards.splice(Math.min(pos, col.cards.length), 0, card);
-                arrastando = null; salvarERender();
-            };
-
-            const nome = kanbanEl('input', { className: 'kb-col-nome', value: col.nome });
-            nome.onchange = () => { col.nome = nome.value.trim() || col.nome; kanbanSalvar(dados); };
-            const del = kanbanEl('button', { textContent: '✕', title: 'Excluir coluna', className: 'kb-mini', onclick: () => {
-                if (col.cards.length && !confirm(`Excluir a coluna "${col.nome}" e seus ${col.cards.length} cartão(ões)?`)) return;
-                b.colunas = b.colunas.filter(c => c !== col); salvarERender();
-            } });
-            const esq = kanbanEl('button', { textContent: '◀', title: 'Mover para a esquerda', className: 'kb-mini', onclick: () => moverColuna(col, -1) });
-            const dir = kanbanEl('button', { textContent: '▶', title: 'Mover para a direita', className: 'kb-mini', onclick: () => moverColuna(col, 1) });
-            const add = kanbanEl('button', { textContent: '+ Adicionar cartão', className: 'kb-add', onclick: () => editarCard(col, null) });
-            return kanbanEl('div', { className: 'kb-col' },
-                kanbanEl('div', { className: 'kb-col-topo' }, nome, kanbanEl('span', { className: 'kb-cont', textContent: String(col.cards.length) }), esq, dir, del),
-                corpo, add);
-        }
-
-        function moverColuna(col, delta) {
-            const cs = board().colunas, i = cs.indexOf(col), j = i + delta;
-            if (j < 0 || j >= cs.length) return;
-            cs.splice(i, 1); cs.splice(j, 0, col); salvarERender();
-        }
-
-        function render() {
-            overlay.replaceChildren();
-            const b = board();
-            const sel = kanbanEl('select');
-            dados.boards.forEach(x => sel.append(kanbanEl('option', { value: x.id, textContent: x.nome, selected: x.id === b.id })));
-            sel.onchange = () => { dados.atual = sel.value; salvarERender(); };
-            const novoQuadro = kanbanEl('button', { textContent: '+ Quadro', onclick: () => {
-                const n = (prompt('Nome do novo quadro/projeto:') || '').trim(); if (!n) return;
-                const nb = { id: kanbanId(), nome: n, colunas: ['A fazer', 'Em andamento', 'Concluído'].map(x => ({ id: kanbanId(), nome: x, cards: [] })) };
-                dados.boards.push(nb); dados.atual = nb.id; salvarERender();
-            } });
-            const renomear = kanbanEl('button', { textContent: 'Renomear', onclick: () => {
-                const n = (prompt('Novo nome do quadro:', b.nome) || '').trim(); if (n) { b.nome = n; salvarERender(); }
-            } });
-            const excluir = kanbanEl('button', { textContent: 'Excluir quadro', className: 'kb-btn-perigo', onclick: () => {
-                if (dados.boards.length < 2) { alert('Mantenha ao menos um quadro.'); return; }
-                if (!confirm(`Excluir o quadro "${b.nome}" com todos os cartões?`)) return;
-                dados.boards = dados.boards.filter(x => x !== b); dados.atual = dados.boards[0].id; salvarERender();
-            } });
-            const exportar = kanbanEl('button', { textContent: 'Exportar', onclick: () => {
-                const url = URL.createObjectURL(new Blob([JSON.stringify(dados, null, 2)], { type: 'application/json' }));
-                const a = kanbanEl('a', { href: url, download: 'kanban_projudi.json' }); document.body.append(a); a.click(); a.remove();
-                setTimeout(() => URL.revokeObjectURL(url), 2000);
-            } });
-            const importar = kanbanEl('button', { textContent: 'Importar', onclick: () => {
-                const inp = kanbanEl('input', { type: 'file', accept: '.json,application/json' });
-                inp.onchange = () => {
-                    const f = inp.files[0]; if (!f) return;
-                    f.text().then(t => {
-                        const d = JSON.parse(t);
-                        if (!d || !Array.isArray(d.boards) || !d.boards.length) throw new Error('formato inválido');
-                        if (!confirm('Importar substitui todos os quadros atuais. Continuar?')) return;
-                        Object.assign(dados, d); if (!dados.boards.some(x => x.id === dados.atual)) dados.atual = dados.boards[0].id;
-                        salvarERender();
-                    }).catch(err => alert('Não foi possível importar: ' + err.message));
-                };
-                inp.click();
-            } });
-            const fechar = kanbanEl('button', { textContent: '✕ Fechar', onclick: () => overlay.remove() });
-            const topo = kanbanEl('div', { className: 'kb-topo' }, kanbanEl('strong', { textContent: '📋 Kanban' }), sel, novoQuadro, renomear, excluir, exportar, importar, kanbanEl('span', { className: 'kb-espaco' }), fechar);
-            const colunas = kanbanEl('div', { className: 'kb-colunas' });
-            b.colunas.forEach(c => colunas.append(renderColuna(c)));
-            colunas.append(kanbanEl('button', { textContent: '+ Adicionar coluna', className: 'kb-add-col', onclick: () => {
-                const n = (prompt('Nome da coluna:') || '').trim(); if (!n) return;
-                b.colunas.push({ id: kanbanId(), nome: n, cards: [] }); salvarERender();
-            } }));
-            overlay.append(topo, colunas);
-        }
-        render();
-    }
-
-    function injetarBotaoKanban() {
-        if (document.getElementById('kanban-fab')) return;
-        if (!document.querySelector('#main-menu')) return;
-        if (detectarConfig()) return;
-        document.body.appendChild(kanbanEl('button', { id: 'kanban-fab', textContent: '📋 Kanban', title: 'Organizar trabalhos e projetos', onclick: abrirKanban }));
-    }
-
     function bootstrap() {
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
         try { logPainelSeMudou('versao', `═══ Relatório Projudi versão ${(typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?'} ═══`); } catch (e) { /* GM_info indisponível */ }
@@ -22216,7 +21986,6 @@
         chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
-        chamarSeguro(injetarBotaoKanban, 'injetarBotaoKanban'); // botão flutuante do Kanban (só na página inicial)
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
         chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas'); // demais cards do mesmo painel
         chamarSeguro(capturarContadoresPainelRetorno, 'capturarContadoresPainelRetorno'); // soma Com Urgência + Para Realizar pro KPI de Retorno de Conclusão
@@ -22235,7 +22004,6 @@
         // automação parada até uma ação manual do usuário.
         setInterval(() => {
             chamarSeguro(atualizarPainel, 'atualizarPainel');
-            chamarSeguro(injetarBotaoKanban, 'injetarBotaoKanban');
             chamarSeguro(injetarSeletorUnidades, 'injetarSeletorUnidades');
             chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas');
             chamarSeguro(capturarOutrosIndicadoresPainelJuntadas, 'capturarOutrosIndicadoresPainelJuntadas');
