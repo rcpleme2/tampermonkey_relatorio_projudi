@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.57
+// @version      26.58
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10532,6 +10532,36 @@
         return yy - 6;
     }
 
+    // Varas (atuações) abrangidas pelo PDF conjunto, para a faixa azul da capa (pedido do
+    // usuário: nome da vara abaixo de "Relatório para Correição Ordinária"). Usa
+    // overrideUnidadesPDF, setado no topo de gerarPDFConjunto — as atribuições marcadas
+    // no diálogo de checkboxes ou, sem diálogo, as presentes nos dados coletados (nunca
+    // todas as chaves do mapa de ativos, que acumula unidades por onde o usuário só
+    // passou). Vazio quando nenhum registro traz atuação — a faixa fica como antes.
+    function varasDoRelatorio() {
+        return [...(overrideUnidadesPDF || [])].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    }
+
+    // Faixa azul do topo das capas do PDF conjunto: título + linhas extras (subtítulo
+    // fixo e/ou uma linha por vara). A altura cresce com o nº de linhas, e nomes longos
+    // quebram por largura (splitTextToSize) — várias competências nunca se sobrepõem.
+    // Devolve a altura da faixa, para o chamador posicionar o conteúdo logo abaixo.
+    function desenharFaixaTituloCorreicao(doc, pw, m, linhasFixas) {
+        const linhas = [...(linhasFixas || []), ...varasDoRelatorio()];
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(10.5);
+        const quebradas = linhas.flatMap(l => doc.splitTextToSize(l, pw - 2 * m));
+        const PASSO = 5.5;
+        // Sem linhas extras: mesma faixa de antes (26mm, título em 17).
+        const yTitulo = quebradas.length ? 14 : 17;
+        const altura = quebradas.length ? 22 + (quebradas.length - 1) * PASSO + 7 : 26;
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, altura, 'F');
+        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
+        doc.text('Relatório para Correição Ordinária', pw / 2, yTitulo, { align: 'center' });
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(10.5);
+        quebradas.forEach((l, i) => doc.text(l, pw / 2, 22 + i * PASSO, { align: 'center' }));
+        return altura;
+    }
+
     // Página "Situação da Unidade" (substitui a antiga capa/índice): processos ativos
     // por atuação, seguidos de Cartório (tramitação) e Gabinete (decisão) — a situação
     // (Crítico/Atenção/Regular) só aparece por item, nas mini-tabelas de cada domínio.
@@ -10550,13 +10580,11 @@
         // atribuições coletadas — sempre com os dados de TODAS elas somados (nunca
         // filtrado), mesmo quando o relatório inclui blocos específicos por atribuição
         // dentro de cada item (ver subBlocosPorAtribuicao em gerarPDFConjunto).
-        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 26, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
-        doc.text('Relatório para Correição Ordinária', pw / 2, 17, { align: 'center' });
+        const alturaFaixa = desenharFaixaTituloCorreicao(doc, pw, m, []);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 36);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, alturaFaixa + 10);
 
-        let y = 44;
+        let y = alturaFaixa + 18;
 
         // Processos Ativos agora é uma LINHA da tabela do Cartório (ver linhasCartorio em
         // gerarPDFConjunto), não mais um card à parte — resumo inicial ficou só em tabela.
@@ -10598,13 +10626,11 @@
         const m = 16;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 30, 'F');
-        doc.setFont('PublicSans', 'bold'); doc.setFontSize(15); doc.setTextColor(255, 255, 255);
-        doc.text('Relatório para Correição Ordinária', pw / 2, 14, { align: 'center' });
-        doc.setFont('PublicSans', 'normal'); doc.setFontSize(10.5);
-        doc.text('Tabelas discriminadas de todos os itens coletados', pw / 2, 22, { align: 'center' });
+        const alturaFaixa = desenharFaixaTituloCorreicao(doc, pw, m, ['Tabelas discriminadas de todos os itens coletados']);
         doc.setFont('PublicSans', 'normal'); doc.setFontSize(10); doc.setTextColor(...COR.tintaSec);
-        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, 40);
+        doc.text(`Projudi — TJPR  •  Extraído em ${hoje} às ${hora}`, m, alturaFaixa + 10);
+        // Onde o sumário (desenharSumarioTabelas) começa — a faixa cresce com o nº de varas.
+        return alturaFaixa + 18;
     }
 
     // Sumário do modo 'tabelas' (pedido do usuário): lista clicável de cada seção
@@ -10616,12 +10642,12 @@
     // pro sumário sem reordenar todo o documento — se a lista não couber, os itens que
     // sobrarem ficam de fora dela (ainda acessíveis pelos marcadores/bookmarks do PDF),
     // com um aviso no lugar de estourar a margem inferior.
-    function desenharSumarioTabelas(doc, itens) {
+    function desenharSumarioTabelas(doc, itens, yInicio) {
         doc.setPage(1);
         const pw = doc.internal.pageSize.getWidth();
         const ph = doc.internal.pageSize.getHeight();
         const m = 16;
-        let y = 48;
+        let y = yInicio || 48;
         doc.setFont('PublicSans', 'bold'); doc.setFontSize(10); doc.setTextColor(...COR.tinta);
         doc.text('Sumário', m, y);
         y += 6;
@@ -11848,7 +11874,7 @@
             // mais fica livre pra conteúdo de seção, todo `montarFn` abre sua própria
             // página normalmente (comportamento padrão dele, sem o hack de deletar a
             // página 1 que existia antes).
-            desenharCapaTabelas(doc, agora, true);
+            const ySumarioTabelas = desenharCapaTabelas(doc, agora, true);
             usouPagina1 = true;
             const sumarioItens = []; // {grupo, rotulo, pg}
 
@@ -11906,7 +11932,7 @@
                 sumarioItens.push({ grupo: 'Gabinete', rotulo: `${info.rotulo} (${info.pendentes})`, pg });
             });
 
-            desenharSumarioTabelas(doc, sumarioItens);
+            desenharSumarioTabelas(doc, sumarioItens, ySumarioTabelas);
         }
 
         // Nome do arquivo com as unidades incluídas (pedido do usuário) — no modo resumo
