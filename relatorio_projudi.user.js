@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.59
+// @version      26.60
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -10656,6 +10656,10 @@
         // cortando visualmente o título do bloco (relatado pelo usuário, com print).
         const ph = doc.internal.pageSize.getHeight();
         const ALTURA_MIN_CABECALHO_DOMINIO = 40; // faixa (15) + observação (~2 linhas) + folga
+        // Pedido do usuário: sem nenhum item de Gabinete (Conclusões nem coletado), o
+        // título "Gabinete" saía sozinho, vazio, no fim da capa. Só desenha o bloco se
+        // houver magistrado(a) ou o aviso de "coletado, sem conclusos".
+        if (!gabinete.itens.length && !gabinete.coletado) return;
         if (y > ph - ALTURA_MIN_CABECALHO_DOMINIO) { doc.addPage(); y = m; }
 
         desenharBlocoDominio(doc, m, y, uw, {
@@ -12394,7 +12398,14 @@
         const uw = pw - 2 * m;
         const hoje = agora.toLocaleDateString('pt-BR');
         const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-        const rodape = () => desenharRodape(doc, TITULO_TEMPOMEDIO_JUNTADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        // Uma vez por página (as duas tabelas abaixo podem dividir a mesma página).
+        const paginasComRodape = new Set();
+        const rodape = () => {
+            const pg = doc.internal.getCurrentPageInfo().pageNumber;
+            if (paginasComRodape.has(pg)) return;
+            paginasComRodape.add(pg);
+            desenharRodape(doc, TITULO_TEMPOMEDIO_JUNTADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+        };
 
         const validos = dados.filter(d => d.dias != null);
         const geral = mediaSimples(validos, 'dias');
@@ -12433,31 +12444,56 @@
         }
         desenharCard(doc, m, k2Y, uw, 26, 'Análise mais demorada', valMD, subsMD, true, COR.vermelho);
 
-        // Mesmo visual de tabelaRanking, mas com didDrawPage: a lista de movimentos pode
-        // continuar em páginas seguintes, e cada uma precisa do próprio rodapé.
+        // Mesmo visual de tabelaRanking, mas com didDrawPage: as tabelas podem continuar
+        // em páginas seguintes, e cada uma precisa do próprio rodapé. Título vai para a
+        // página seguinte se não sobrar espaço nem para o cabeçalho + 2 linhas.
+        const tabela = (y, titulo, itens, colunas, acento) => {
+            if (y + medirTabela(2, true) > ph - 14) { rodape(); doc.addPage(); y = m; }
+            tituloSecao(doc, m, y + 4, uw, titulo, acento);
+            const columnStyles = columnStylesEscalados(colunas, uw);
+            colunas.forEach((c, i) => { columnStyles['k' + i].halign = c.halign || 'left'; });
+            doc.autoTable({
+                ...estiloTabelaCompacta(m, uw),
+                startY: y + TITULO_TABELA_H,
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                columnStyles,
+                body: itens.map(item => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(item) ?? ''); });
+                    return o;
+                }),
+                didParseCell: (data) => {
+                    if (data.section === 'body' && data.column.index === 0 && itens[data.row.index] && itens[data.row.index].prioritario) {
+                        data.cell.styles.textColor = COR_PRIORITARIO;
+                        data.cell.styles.fontStyle = 'bold';
+                    }
+                },
+                didDrawPage: rodape,
+            });
+            return doc.lastAutoTable.finalY;
+        };
+
+        let y = k2Y + 26 + gap + 2;
+        // Pedido do usuário: as 15 juntadas com maior demora para análise.
+        const top15 = validos.slice().sort((a, b) => b.dias - a.dias).slice(0, 15);
+        if (top15.length) {
+            y = tabela(y, 'Juntadas com maior demora para análise (15 maiores)', top15, [
+                { header: 'Processo', get: d => d.processo, width: 28 },
+                { header: 'Movimento', get: d => d.movimento, width: 48 },
+                { header: 'Data', get: d => d.data, width: 22 },
+                { header: 'Analisado Em', get: d => d.analisadoEm, width: 22 },
+                { header: 'Dias', get: d => d.dias.toFixed(1).replace('.', ','), width: 10, halign: 'right' },
+            ], COR.vermelho) + 8;
+        }
         const porMovimento = agregarMedia(validos, 'movimento', 'dias', Infinity);
-        const yTabela = k2Y + 26 + gap + 2;
-        tituloSecao(doc, m, yTabela + 4, uw, 'Tempo médio por Movimento');
-        if (!porMovimento.length) { rodape(); return; }
-        const colunas = [
-            { header: 'Movimento', get: d => d.label, width: 60 },
-            { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
-            { header: 'Juntadas', get: d => d.n, width: 14, halign: 'right' },
-        ];
-        const columnStyles = columnStylesEscalados(colunas, uw);
-        colunas.forEach((c, i) => { columnStyles['k' + i].halign = c.halign || 'left'; });
-        doc.autoTable({
-            ...estiloTabelaCompacta(m, uw),
-            startY: yTabela + TITULO_TABELA_H,
-            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
-            columnStyles,
-            body: porMovimento.map(item => {
-                const o = {};
-                colunas.forEach((c, i) => { o['k' + i] = String(c.get(item) ?? ''); });
-                return o;
-            }),
-            didDrawPage: rodape,
-        });
+        if (porMovimento.length) {
+            tabela(y, 'Tempo médio por Movimento', porMovimento, [
+                { header: 'Movimento', get: d => d.label, width: 60 },
+                { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
+                { header: 'Juntadas', get: d => d.n, width: 14, halign: 'right' },
+            ]);
+        }
+        rodape();
     }
 
     // Tabela discriminada (sempre inicia em página nova), da análise mais demorada para a
@@ -18510,7 +18546,7 @@
         const rel = REPORTS_AUTOMACAO.find(r => r.key === key);
         // Pedido do usuário (v26.54): só Cartório e Gabinete vêm marcados por padrão;
         // Crime, Tribunal do Júri, Família e VIJ vêm desmarcados (seleção manual).
-        return !!rel && !rel.categoriaEspecifica && ['cartorio', 'gabinete'].includes(rel.dominio);
+        return !!rel && !rel.categoriaEspecifica && !rel.desmarcadoPorPadrao && ['cartorio', 'gabinete'].includes(rel.dominio);
     }
     // Migração única: nas versões 25.98/25.99 os itens VIJ vinham marcados por padrão, e
     // o snapshot salvo (que grava TODOS os checkboxes a cada mudança) pode ter guardado
@@ -19421,7 +19457,8 @@
         // Logo após o Tempo Médio de cumprimento (pedido do usuário). Uma única busca no
         // período escolhido no painel (ver PERIODOS_TEMPOMEDIO_JUNTADAS/
         // preencherEPesquisarTempoMedioJuntadas).
-        { key: 'tempomediojuntadas', cfg: CFG_TEMPOMEDIO_JUNTADAS, navAlvo: 'tempomediojuntadas', rotulo: 'Tempo Médio de Análise de Juntadas', curto: 'TM Juntadas', dominio: 'cartorio', precisaPreencher: true },
+        // Desmarcado por padrão (pedido do usuário) — ver relatorioMarcadoPorPadrao.
+        { key: 'tempomediojuntadas', cfg: CFG_TEMPOMEDIO_JUNTADAS, navAlvo: 'tempomediojuntadas', rotulo: 'Tempo Médio de Análise de Juntadas', curto: 'TM Juntadas', dominio: 'cartorio', precisaPreencher: true, desmarcadoPorPadrao: true },
         // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
         // formulário/pesquisa (a página já chega pronta ao clicar na aba), por isso
         // precisaPreencher: false, mesmo não sendo um dos 5 clássicos "direto nos
