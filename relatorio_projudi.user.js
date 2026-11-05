@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.58
+// @version      26.59
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -876,6 +876,53 @@
         linha: (d) => [d.processo, d.dtAnalise, d.dtCartorio, d.usuarioCartorio, d.responsavel, d.preAnalise, d.tipoConclusao, d.classe,
                        (d.dias == null ? '' : String(d.dias)), d.prioritario ? 'Sim' : 'Não'],
         pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedio(dados, somenteResumo),
+    };
+
+    // Tempo médio de análise de juntadas — tela "Juntadas Analisadas" (cabeçalho > menu
+    // Análise de Juntadas > Análise de Juntadas > Busca, processo/analiseJuntada.do). O
+    // filtro de período da tela (dataInicio/dataFim) recai sobre "Analisado Em"; ver
+    // preencherEPesquisarTempoMedioJuntadas. Colunas da tabela:
+    //   [0](vazio) [1]Processo [2]Movimento [3]Movimentado Por [4]Data (dd/mm/aaaa hh:mm:ss)
+    //   [5]Analisado Por [6]Analisado Em (dd/mm/aaaa hh:mm:ss)
+    // Um registro por JUNTADA (não por processo) — o mesmo processo aparece várias vezes.
+    const CFG_TEMPOMEDIO_JUNTADAS = {
+        prefixo: 'projudi_tempomediojuntadas_',
+        detecta: (cab) => /movimentado\s+por/i.test(cab) && /analisado\s+em/i.test(cab),
+        minTds: 7,
+        usaAtuacao: false,
+        // Dedupe pelo registro inteiro (não por 'processo', que descartaria todas as
+        // juntadas de um mesmo processo menos a primeira).
+        chaveDuplicata: '*',
+        nomeArquivo: 'tempo_medio_analise_juntadas_projudi',
+        rotulos: { coletar: 'Extrair Tempo Médio de Juntadas', coletarMais: 'Extrair mais (Tempo Médio de Juntadas)', baixar: '⬇ Baixar Tempo Médio de Juntadas' },
+        cabecalhos: ['Processo', 'Movimento', 'Movimentado Por', 'Data', 'Analisado Por', 'Analisado Em', 'Dias p/ Análise', 'Prioritário'],
+        larguras: [{ wch: 26 }, { wch: 45 }, { wch: 30 }, { wch: 20 }, { wch: 30 }, { wch: 20 }, { wch: 14 }, { wch: 11 }],
+        extrai: (tds, atuacao) => {
+            const emProc = tds[1].querySelector('em');
+            const processo = emProc ? emProc.textContent.trim() : textoCelula(tds[1]);
+            if (!processo) return null;
+            const data = textoCelula(tds[4]);
+            const analisadoEm = textoCelula(tds[6]);
+            // Diferença "Analisado Em" - "Data" em dias, com fração (a análise costuma
+            // ocorrer no mesmo dia — arredondar para dias inteiros zeraria quase tudo).
+            const tD = parseDataBR(data), tA = parseDataBR(analisadoEm);
+            const dias = (tD != null && tA != null) ? Math.max(0, (tA - tD) / DIA_MS) : null;
+            return {
+                processo,
+                movimento: textoCelula(tds[2]),
+                movimentadoPor: textoCelula(tds[3]),
+                data,
+                analisadoPor: textoCelula(tds[5]),
+                analisadoEm,
+                dias,
+                prioritario: emPrioritario(emProc),
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            };
+        },
+        linha: (d) => [d.processo, d.movimento, d.movimentadoPor, d.data, d.analisadoPor, d.analisadoEm,
+                       (d.dias == null ? '' : d.dias.toFixed(1).replace('.', ',')), d.prioritario ? 'Sim' : 'Não'],
+        pdfCustom: (dados, somenteResumo) => gerarPDFTempoMedioJuntadas(dados, somenteResumo),
     };
 
     // "Processos Paralisados" e "Remessas em Aberto" usam a MESMA tabela/URL
@@ -9974,6 +10021,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedio(doc, dados, comIndice),
             };
         }
+        if (cfg === CFG_TEMPOMEDIO_JUNTADAS) {
+            return {
+                rotulo: TITULO_TEMPOMEDIO_JUNTADAS,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoTempoMedioJuntadas(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaTempoMedioJuntadas(doc, dados, comIndice),
+            };
+        }
         if (cfg === CFG_PARALISADOS) {
             return {
                 rotulo: TITULO_PARALISADOS,
@@ -10948,6 +11002,7 @@
         // tarefas clássicas). Isso é só o RESUMO na capa — cada um continua tendo sua
         // própria seção com gráfico/tabela discriminada mais adiante (ver outrasSecoes).
         const secaoTempoMedio = secoes.find(s => s.cfgOriginal === CFG_TEMPOMEDIO);
+        const secaoTempoMedioJuntadas = secoes.find(s => s.cfgOriginal === CFG_TEMPOMEDIO_JUNTADAS);
         const secaoAudienciasDesignadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_DESIGNADAS);
         const secaoAudienciasRealizadas = secoes.find(s => s.cfgOriginal === CFG_AUDIENCIAS_REALIZADAS);
         const secaoApreensoes = secoes.find(s => s.cfgOriginal === CFG_APREENSOES);
@@ -11347,6 +11402,20 @@
                     media: mediaJuiz != null ? Math.round(mediaJuiz * 10) / 10 : null,
                 };
             };
+        }
+        // Tempo médio de análise de juntadas — logo depois do Tempo Médio de cumprimento
+        // (mesma ordem do painel de automação).
+        if (secaoTempoMedioJuntadas) {
+            const mediaTMJ = mediaSimples(secaoTempoMedioJuntadas.dados, 'dias');
+            const periodoTMJ = lerPeriodoTempoMedioJuntadas();
+            const detalhesTMJ = [`${secaoTempoMedioJuntadas.dados.length} juntada(s) analisada(s)`];
+            if (periodoTMJ) detalhesTMJ.push(`Período: ${periodoTMJ}`);
+            itensOutros.push({
+                nome: TITULO_TEMPOMEDIO_JUNTADAS,
+                indicador: mediaTMJ != null ? `${mediaTMJ.toFixed(1).replace('.', ',')} dia(s) méd.` : '—',
+                detalhamento: detalhesTMJ.join(' · '),
+                situacaoLabel: '', corTexto: '', semSituacao: true, cfgOriginal: CFG_TEMPOMEDIO_JUNTADAS,
+            });
         }
         // Unidades onde o item não foi encontrado após 3 tentativas (ver
         // marcarPrejudicadoEAvancar). Pedido do usuário (v26.57): só aparecem no sumário,
@@ -12288,6 +12357,163 @@
                 }
             },
             didDrawPage: () => desenharRodape(doc, TITULO_TEMPOMEDIO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+        });
+
+        return paginaInicial;
+    }
+
+    // ── PDF do relatório de Tempo Médio de Análise de Juntadas ────────────────────
+    const TITULO_TEMPOMEDIO_JUNTADAS = 'Tempo médio de análise de juntadas';
+
+    function lerPeriodoTempoMedioJuntadas() {
+        const per = desembrulharObjeto(store.getItem('projudi_tempomediojuntadas_periodo')) || {};
+        return (per.ini || per.fim) ? `${per.ini || '?'} a ${per.fim || '?'}` : '';
+    }
+
+    function gerarPDFTempoMedioJuntadas(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoTempoMedioJuntadas(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo) {
+            const pgTabela = montarTabelaTempoMedioJuntadas(doc, dados, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_TEMPOMEDIO_JUNTADAS.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    // Resumo: KPIs (juntadas analisadas, tempo médio geral, análise mais demorada) e a
+    // tabela "Tempo médio por Movimento" (todos os movimentos, da maior média para a
+    // menor — pode continuar em páginas seguintes).
+    function montarResumoTempoMedioJuntadas(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const rodape = () => desenharRodape(doc, TITULO_TEMPOMEDIO_JUNTADAS, `${hoje} ${hora}`, pw, ph, m, comIndice);
+
+        const validos = dados.filter(d => d.dias != null);
+        const geral = mediaSimples(validos, 'dias');
+        const maisDemorada = validos.slice().sort((a, b) => b.dias - a.dias)[0] || null;
+        const periodoStr = lerPeriodoTempoMedioJuntadas();
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_TEMPOMEDIO_JUNTADAS, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        let subtitulo = `Extraído em ${hoje} às ${hora}  •  ${dados.length} juntada(s) analisada(s)`;
+        if (periodoStr) subtitulo += `  •  Período (Analisado Em): ${periodoStr}`;
+        if (!rotuloInfo.semFrase) {
+            const fraseComp = fraseCompetenciasComContagem(dados);
+            if (fraseComp) subtitulo += `  •  ${fraseComp}`;
+        }
+        const linhasSubtitulo = doc.splitTextToSize(subtitulo, uw);
+        doc.text(linhasSubtitulo, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + (linhasSubtitulo.length - 1) * 4.2 + 3;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 5;
+        const kW2 = (uw - gap) / 2;
+        desenharCard(doc, m, kY, kW2, 28, 'Juntadas analisadas', String(dados.length), [periodoStr ? `Período: ${periodoStr}` : ''], true, COR.azul);
+        desenharCard(doc, m + kW2 + gap, kY, kW2, 28, 'Tempo médio de análise', fmtDias(geral), ['entre "Data" e "Analisado Em"'], true, COR.azul);
+
+        const k2Y = kY + 28 + gap;
+        let valMD = '—', subsMD = ['Nenhum registro com datas válidas'];
+        if (maisDemorada) {
+            valMD = fmtDias(maisDemorada.dias);
+            subsMD = [
+                `Processo ${maisDemorada.processo}${maisDemorada.prioritario ? '  — PRIORITÁRIO' : ''}`,
+                textoTruncadoParaLargura(doc, `${maisDemorada.movimento} (${maisDemorada.data} a ${maisDemorada.analisadoEm})`, uw - 10),
+            ];
+        }
+        desenharCard(doc, m, k2Y, uw, 26, 'Análise mais demorada', valMD, subsMD, true, COR.vermelho);
+
+        // Mesmo visual de tabelaRanking, mas com didDrawPage: a lista de movimentos pode
+        // continuar em páginas seguintes, e cada uma precisa do próprio rodapé.
+        const porMovimento = agregarMedia(validos, 'movimento', 'dias', Infinity);
+        const yTabela = k2Y + 26 + gap + 2;
+        tituloSecao(doc, m, yTabela + 4, uw, 'Tempo médio por Movimento');
+        if (!porMovimento.length) { rodape(); return; }
+        const colunas = [
+            { header: 'Movimento', get: d => d.label, width: 60 },
+            { header: 'Média (dias)', get: d => fmtDias(d.valor), width: 20, halign: 'right' },
+            { header: 'Juntadas', get: d => d.n, width: 14, halign: 'right' },
+        ];
+        const columnStyles = columnStylesEscalados(colunas, uw);
+        colunas.forEach((c, i) => { columnStyles['k' + i].halign = c.halign || 'left'; });
+        doc.autoTable({
+            ...estiloTabelaCompacta(m, uw),
+            startY: yTabela + TITULO_TABELA_H,
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            columnStyles,
+            body: porMovimento.map(item => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(item) ?? ''); });
+                return o;
+            }),
+            didDrawPage: rodape,
+        });
+    }
+
+    // Tabela discriminada (sempre inicia em página nova), da análise mais demorada para a
+    // mais rápida. Retorna o número da página inicial (índice/bookmarks do PDF conjunto).
+    function montarTabelaTempoMedioJuntadas(doc, dados, comIndice) {
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const ordenados = dados.slice().sort((a, b) => {
+            const da = a.dias == null ? -Infinity : a.dias;
+            const db = b.dias == null ? -Infinity : b.dias;
+            return db - da;
+        });
+
+        doc.addPage();
+        const paginaInicial = doc.internal.getNumberOfPages();
+        const uw = pw - 2 * m;
+        tituloSecao(doc, m, m + 3, uw, `Tabela discriminada — ${TITULO_TEMPOMEDIO_JUNTADAS}`);
+
+        const colunas = [
+            { header: 'Processo', width: 28, get: (d) => d.processo },
+            { header: 'Movimento', width: 42, get: (d) => d.movimento },
+            { header: 'Movimentado Por', width: 26, get: (d) => d.movimentadoPor },
+            { header: 'Data', width: 20, get: (d) => d.data },
+            { header: 'Analisado Por', width: 26, get: (d) => d.analisadoPor },
+            { header: 'Analisado Em', width: 20, get: (d) => d.analisadoEm },
+            { header: 'Dias', width: 10, get: (d) => (d.dias == null ? '' : d.dias.toFixed(1).replace('.', ',')) },
+        ];
+        const columnStyles = columnStylesEscalados(colunas, uw);
+
+        doc.autoTable({
+            columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+            body: ordenados.map(d => {
+                const o = {};
+                colunas.forEach((c, i) => { o['k' + i] = String(c.get(d) ?? ''); });
+                return o;
+            }),
+            startY: m + 8,
+            margin: { left: m, right: m, top: m, bottom: 14 },
+            theme: 'grid',
+            styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                      lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+            headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+            alternateRowStyles: { fillColor: COR.cartao },
+            columnStyles,
+            didParseCell: (data) => {
+                if (data.section === 'body' && data.column.index === 0 && ordenados[data.row.index] && ordenados[data.row.index].prioritario) {
+                    data.cell.styles.textColor = COR_PRIORITARIO;
+                    data.cell.styles.fontStyle = 'bold';
+                }
+            },
+            didDrawPage: () => desenharRodape(doc, TITULO_TEMPOMEDIO_JUNTADAS, `${hoje} ${hora}`, pw, ph, m, comIndice),
         });
 
         return paginaInicial;
@@ -16287,7 +16513,10 @@
         // Determinado TAMBÉM tem "Início Suspensão" (o regex largo de CFG_SUSPENSOS
         // casaria com ela por engano), mas só ela tem "Fim Suspensão" — regex mais
         // específico primeiro.
-        if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
+        // Tempo Médio de Análise de Juntadas primeiro: cabeçalho exclusivo ("Movimentado
+        // Por" + "Analisado Em"); sem isto a tela caía no fallback de Retorno.
+        if (CFG_TEMPOMEDIO_JUNTADAS.detecta(cab)) cfg = CFG_TEMPOMEDIO_JUNTADAS;
+        else if (CFG_SUSPENSOS_PRAZO.detecta(cab)) cfg = CFG_SUSPENSOS_PRAZO;
         // CFG_PROCESSOS_REMETIDOS vem antes de CFG_INSTANCIA_RECURSAL: as duas telas
         // compartilham "Classe Processual"+"Enviado"+"Recebido" no cabeçalho, mas só
         // Processos Remetidos tem "Destino da Remessa"/"Dias em aberto" (CFG_INSTANCIA_
@@ -16645,6 +16874,74 @@
         }, 1500);
     }
 
+    // ── Tempo Médio de Análise de Juntadas: período e pesquisa ─────────────────────
+    // Sempre meses completos (o mês corrente, em andamento, nunca entra), terminando no
+    // último dia do mês anterior — mesmo critério do Tempo Médio de cumprimento. Uma
+    // ÚNICA pesquisa cobre o período inteiro (a tela não tem seletor de tamanho de
+    // página; o coletor genérico percorre todas as páginas de 20 registros).
+    const PERIODOS_TEMPOMEDIO_JUNTADAS = [
+        { id: '1m', rotulo: 'Último mês inteiro', meses: 1 },
+        { id: '6m', rotulo: 'Últimos 6 meses',    meses: 6 },
+        { id: '1a', rotulo: 'Último ano',         meses: 12 },
+        { id: '3a', rotulo: 'Últimos 3 anos',     meses: 36 },
+    ];
+    const CHAVE_PERIODO_TMJ = 'projudi_auto_periodo_tmj';
+    const CHAVE_AUTO_INICIAR_TMJ = 'projudi_tempomediojuntadas_auto_iniciar';
+
+    // <select> de período mostrado ao lado do item no painel de automação e no de várias
+    // unidades; o valor escolhido fica em CHAVE_PERIODO_TMJ (lido em
+    // preencherEPesquisarTempoMedioJuntadas).
+    function htmlSeletorPeriodoTMJ(id) {
+        const salvo = store.getItem(CHAVE_PERIODO_TMJ) || '1m';
+        return `<select id="${id}" class="sel-periodo sel-periodo-tmj" title="Período de busca (campo Analisado Em) — meses completos">${
+            PERIODOS_TEMPOMEDIO_JUNTADAS.map(p => `<option value="${p.id}"${p.id === salvo ? ' selected' : ''}>${p.rotulo}</option>`).join('')
+        }</select>`;
+    }
+
+    function intervaloTempoMedioJuntadas(periodoId, agora) {
+        const periodo = PERIODOS_TEMPOMEDIO_JUNTADAS.find(p => p.id === periodoId) || PERIODOS_TEMPOMEDIO_JUNTADAS[0];
+        const base = agora || new Date();
+        const ini = new Date(base.getFullYear(), base.getMonth() - periodo.meses, 1);
+        const fim = new Date(base.getFullYear(), base.getMonth(), 0); // último dia do mês anterior
+        return { ini: formatarDataBR(ini), fim: formatarDataBR(fim) };
+    }
+
+    function formularioAnaliseJuntadas() {
+        const form = document.getElementById('analiseJuntadaForm');
+        return form && form.querySelector('input[name="dataInicio"]') ? form : null;
+    }
+
+    // Preenche Período (dataInicio/dataFim) com o intervalo escolhido no painel de
+    // automação e clica em Pesquisar; a coleta começa sozinha quando o resultado carregar
+    // (CHAVE_AUTO_INICIAR_TMJ, ver injetarBotoes).
+    function preencherEPesquisarTempoMedioJuntadas() {
+        const form = formularioAnaliseJuntadas();
+        if (!form) return;
+        const { ini, fim } = intervaloTempoMedioJuntadas(store.getItem(CHAVE_PERIODO_TMJ) || '1m');
+        const campoInicio = form.querySelector('input[name="dataInicio"]');
+        const campoFim = form.querySelector('input[name="dataFim"]');
+        [[campoInicio, ini], [campoFim, fim]].forEach(([campo, valor]) => {
+            if (!campo) return;
+            campo.disabled = false;
+            campo.value = valor;
+            campo.dispatchEvent(new Event('input', { bubbles: true }));
+            campo.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        logPainel(`[Projudi TM Juntadas] período preenchido — dataInicio="${campoInicio ? campoInicio.value : '?'}" dataFim="${campoFim ? campoFim.value : '?'}"`);
+        store.setItem('projudi_tempomediojuntadas_periodo', JSON.stringify({ ini, fim }));
+        store.setItem(CHAVE_AUTO_INICIAR_TMJ, '1');
+        // Assinatura da tabela ANTES de pesquisar (vazia, "Nenhum registro encontrado") —
+        // aguardarResultadoTMEstabilizarEIniciar exige que o resultado mude em relação a ela.
+        store.setItem(CHAVE_ASSINATURA_ANTERIOR_TM, assinaturaResultadoTM());
+
+        const btn = document.getElementById('searchButton') || form.querySelector('input[type="submit"]');
+        setTimeout(() => {
+            logPainel('[Projudi TM Juntadas] clicando em Pesquisar — o site pode demorar para responder, aguarde.');
+            if (btn && !btn.disabled) btn.click(); else form.submit();
+            store.setItem(CFG_TEMPOMEDIO_JUNTADAS.prefixo + 'ts', String(Date.now()));
+        }, 1500);
+    }
+
     // Marca Situação=Pendentes, Tipo=Analítico (mesma tela de Tempo Médio, ver
     // formularioTempoMedio) e clica em Pesquisar — sem mexer no período: os campos de
     // data vêm desabilitados nessa tela (não são enviados no submit de um form comum),
@@ -16790,6 +17087,7 @@
         // Conclusões migrou para a mesma URL de Tempo Médio (conclusao/estatistica.do,
         // ver comentário acima de situacaoConclusaoSelecionada).
         if (navAlvo === 'conclusoes' || navAlvo === 'tempomedio') return /conclusao\/estatistica\.do/i;
+        if (navAlvo === 'tempomediojuntadas') return /\/processo\/analiseJuntada\.do/i;
         if (navAlvo === 'paralisados' || navAlvo === 'remessas') return /processoBuscaParalisado\.do/i;
         if (navAlvo === 'suspensos' || navAlvo === 'suspensosprazo') return /processoBuscaSuspenso\.do/i;
         if (navAlvo === 'instanciarecursal') return /processoBuscaInstanciaSuperior\.do/i;
@@ -17377,6 +17675,17 @@
             return;
         }
 
+        // Tela "Juntadas Analisadas" (Tempo Médio de Análise de Juntadas): formulário e
+        // table.resultTable (vazia) convivem desde o primeiro carregamento — decide pelo
+        // ESTADO da automação, como Paralisados. Depois da pesquisa, o fluxo genérico
+        // abaixo inicia a coleta (CHAVE_AUTO_INICIAR_TMJ).
+        if (formularioAnaliseJuntadas() && store.getItem(AUTO_ESTADO) === 'preenchendo_tempomediojuntadas') {
+            logPainel('▶ [Projudi TM Juntadas] automação: preenchendo o período e pesquisando');
+            store.setItem(AUTO_ESTADO, 'coletando_tempomediojuntadas');
+            preencherEPesquisarTempoMedioJuntadas();
+            return;
+        }
+
         // Tela de filtros de Processos Paralisados/Remessas (mesma página para os dois
         // relatórios — só muda o rádio "opcaoBusca" marcado e o mínimo de dias). Diferente
         // do Tempo Médio, aqui o form e a table.resultTable (com cabeçalho, mesmo sem
@@ -17944,7 +18253,7 @@
 
         const estadoAuto = store.getItem(AUTO_ESTADO);
         const relAtual = relatorioPorCfg(cfg);
-        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO && cfg !== CFG_PROCESSOS_REMETIDOS;
+        const querColetarAuto = !!relAtual && estadoAuto === 'coletando_' + relAtual.key && cfg !== CFG_TEMPOMEDIO && cfg !== CFG_PROCESSOS_REMETIDOS && cfg !== CFG_TEMPOMEDIO_JUNTADAS;
         const autoIniciarTM = cfg === CFG_TEMPOMEDIO && store.getItem('projudi_tempomedio_auto_iniciar') === '1';
         const chaveAutoIniciarParalisado = store.getItem('projudi_paralisado_auto_iniciar');
         const autoIniciarParalisado = !!chaveAutoIniciarParalisado && !!relAtual && relAtual.key === chaveAutoIniciarParalisado;
@@ -17952,6 +18261,7 @@
         // formulário (ver preencherEPesquisarProcessosRemetidos) — espera o resultado
         // estabilizar antes de coletar, em vez de confiar em "resultTable existe".
         const autoIniciarRemetidos = cfg === CFG_PROCESSOS_REMETIDOS && store.getItem('projudi_remetidos_auto_iniciar') === '1';
+        const autoIniciarTMJ = cfg === CFG_TEMPOMEDIO_JUNTADAS && store.getItem(CHAVE_AUTO_INICIAR_TMJ) === '1';
 
         logPainel(`[Projudi] injetarBotoes — cfg=${cfg.prefixo} rodando=${coletor.rodando()} obsoleta=${coletor.obsoleta()} querColetarAuto=${querColetarAuto} autoIniciarTM=${autoIniciarTM} autoIniciarParalisado=${autoIniciarParalisado} autoIniciarRemetidos=${autoIniciarRemetidos}`);
 
@@ -17975,6 +18285,10 @@
         } else if (autoIniciarRemetidos) {
             store.removeItem('projudi_remetidos_auto_iniciar');
             logPainel('[Projudi Processos Remetidos] flag auto_iniciar detectada — esperando a tabela estabilizar antes de iniciar');
+            aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
+        } else if (autoIniciarTMJ) {
+            store.removeItem(CHAVE_AUTO_INICIAR_TMJ);
+            logPainel('[Projudi TM Juntadas] resultado da pesquisa carregado — esperando a tabela estabilizar antes de iniciar');
             aguardarResultadoTMEstabilizarEIniciar(() => coletor.iniciar());
         } else {
             logPainel('[Projudi] nenhuma coleta em andamento — renderizando botões');
@@ -18651,7 +18965,7 @@
                 ? `<select id="projudi-mu-periodo-tm" class="sel-periodo">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === periodoTmSalvo ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
-                : '';
+                : (r.key === 'tempomediojuntadas' ? htmlSeletorPeriodoTMJ('projudi-mu-periodo-tmj') : '');
             const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `<label class="${classeItem}">
                     <input type="checkbox" class="projudi-mu-rel-check" data-key="${r.key}" ${relatorioMarcadoPorPadrao(r.key) ? 'checked' : ''}> ${r.rotuloChecklist || r.rotulo}${seletorPeriodo}
@@ -18883,7 +19197,11 @@
             store.setItem('projudi_auto_periodo_tm', periodoTmSel.value);
         });
 
+        const periodoTmjSel = painel.querySelector('#projudi-mu-periodo-tmj');
+        if (periodoTmjSel) periodoTmjSel.addEventListener('change', () => store.setItem(CHAVE_PERIODO_TMJ, periodoTmjSel.value));
+
         painel.querySelector('#projudi-mu-iniciar').onclick = () => {
+            if (periodoTmjSel) store.setItem(CHAVE_PERIODO_TMJ, periodoTmjSel.value);
             const titulos = [...document.querySelectorAll('.projudi-mu-chk:checked')].map(c => c.dataset.tituloUnidade);
             iniciarAutomacaoMultiUnidade(titulos, periodoTmSel ? periodoTmSel.value : null);
         };
@@ -19100,6 +19418,10 @@
         // evitar pesquisas grandes e lentas no Projudi. Vem DESMARCADO por padrão no
         // painel (ver injetarPainel): o usuário precisa marcar explicitamente para incluí-lo.
         { key: 'tempomedio',  cfg: CFG_TEMPOMEDIO,  navAlvo: 'tempomedio',  rotulo: 'Tempo Médio',            curto: 'Tempo Médio', dominio: 'cartorio', precisaPreencher: true },
+        // Logo após o Tempo Médio de cumprimento (pedido do usuário). Uma única busca no
+        // período escolhido no painel (ver PERIODOS_TEMPOMEDIO_JUNTADAS/
+        // preencherEPesquisarTempoMedioJuntadas).
+        { key: 'tempomediojuntadas', cfg: CFG_TEMPOMEDIO_JUNTADAS, navAlvo: 'tempomediojuntadas', rotulo: 'Tempo Médio de Análise de Juntadas', curto: 'TM Juntadas', dominio: 'cartorio', precisaPreencher: true },
         // Painel de contadores da Mesa do Magistrado (aba "Outros Cumprimentos") — sem
         // formulário/pesquisa (a página já chega pronta ao clicar na aba), por isso
         // precisaPreencher: false, mesmo não sendo um dos 5 clássicos "direto nos
@@ -19626,6 +19948,9 @@
         else if (alvo === 'conclusoes') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
         else if (alvo === 'retorno') link = acharLinkMenu(/conclusao\.do/i, /retorno de processos conclusos/i);
         else if (alvo === 'tempomedio') link = acharLinkMenu(/conclusao\/estatistica\.do/i, null);
+        // Cabeçalho > Análise de Juntadas > Análise de Juntadas > Busca. Atenção:
+        // analiseJuntada.do (esta busca) ≠ analisarJuntada.do (Juntadas/Listar).
+        else if (alvo === 'tempomediojuntadas') link = acharLinkMenu(/\/processo\/analiseJuntada\.do/i, /^busca$/i);
         else if (alvo === 'paralisados') {
             link = acharLinkPorRotulo(/processoBuscaParalisado\.do/i, /secretaria/i) || acharLinkMenu(/processoBuscaParalisado\.do/i, null);
         }
@@ -20149,6 +20474,7 @@
         // tentativa desse relatório retomaria do meio (mês/usuário errado) em vez de
         // recomeçar do zero.
         if (rel.key === 'tempomedio') { store.removeItem(CHAVE_FILA_MESES_TM); store.removeItem(CHAVE_MES_ATUAL_TM); store.removeItem(CHAVE_ASSINATURA_ANTERIOR_TM); }
+        if (rel.key === 'tempomediojuntadas') store.removeItem(CHAVE_AUTO_INICIAR_TMJ);
         if (rel.key === 'remetidos') {
             store.removeItem(CHAVE_FILA_DESTINOS_REMETIDOS);
             store.removeItem(CHAVE_DESTINO_ATUAL_REMETIDOS);
@@ -21126,7 +21452,7 @@
         }
         // "Limpar" nunca é desabilitado — é o botão de resgate caso a automação trave
         // num estado intermediário (evita o usuário ficar sem forma de apagar e recomeçar).
-        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
+        painel.querySelectorAll('.pa-check, #pa-periodo-tm, #pa-periodo-tmj, #pa-marcar-tudo, #pa-desmarcar-tudo').forEach(el => {
             el.disabled = emCurso;
         });
 
@@ -21270,7 +21596,7 @@
                 ? `<select id="pa-periodo-tm" class="sel-periodo" title="Quantos meses completos buscar (sempre em pesquisas separadas por mês)">${
                     PERIODOS_TEMPOMEDIO.map(p => `<option value="${p.id}"${p.id === '1m' ? ' selected' : ''}>${p.rotulo}</option>`).join('')
                   }</select>`
-                : '';
+                : (r.key === 'tempomediojuntadas' ? htmlSeletorPeriodoTMJ('pa-periodo-tmj') : '');
             const classeItem = ehFilho ? 'pa-item pa-item-filho' : (r.subgrupo ? 'pa-item pa-item-sub' : 'pa-item');
             return `
                     <label class="${classeItem}">
@@ -21416,6 +21742,10 @@
             // #pa-periodo-tm só existe quando o Tempo Médio está ativo em REPORTS_AUTOMACAO.
             const periodoSelTM = painel.querySelector('#pa-periodo-tm');
             const periodoTM = periodoSelTM ? periodoSelTM.value : '1m';
+            // Lido no momento do clique (mesmo motivo do período do Tempo Médio em
+            // iniciarAutomacaoMultiUnidade) e usado em preencherEPesquisarTempoMedioJuntadas.
+            const periodoSelTMJ = painel.querySelector('#pa-periodo-tmj');
+            if (periodoSelTMJ) store.setItem(CHAVE_PERIODO_TMJ, periodoSelTMJ.value);
             // Pedido do usuário: desde que "Limpar" deixou de rodar sozinho depois do PDF
             // (ver baixarPDFConjunto), reiniciar "Automatizar" por cima de dados já
             // coletados dos relatórios marcados precisa de uma escolha explícita —

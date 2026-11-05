@@ -10,6 +10,7 @@ Exige login de servidor ou Corregedoria, assim como vinculação à unidade judi
 - **Retorno de Processos Conclusos**
 - **Juntadas** — juntadas pendentes de análise
 - **Tempo Médio de Cumprimento**
+- **Tempo Médio de Análise de Juntadas** — tempo entre "Data" e "Analisado Em" (geral e por Movimento), com período escolhido no painel (último mês inteiro, 6 meses, 1 ano ou 3 anos)
 - **Processos Paralisados**
 - **Remessas em Aberto**
 
