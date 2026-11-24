@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.60
+// @version      26.61
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3007,6 +3007,65 @@
                 { header: 'Data de Distribuição', width: 20, get: (d) => d.dataDistribuicao },
                 { header: 'Data Último Movimento', width: 20, get: (d) => d.dataUltimoMovimento },
                 { header: 'Dias Paralisado', width: 14, get: (d) => (d.dias == null ? '' : String(d.dias)) },
+            ],
+        },
+    };
+
+    // ── Formulário Nacional de Avaliação de Risco (MPU — classe 1268) ──────────────────
+    // Pedido do usuário: identificar os processos ATIVOS da classe "1268 - Medidas
+    // Protetivas de urgência (Lei Maria da Penha) Criminal" que NÃO têm formulário
+    // cadastrado na linha "Formulário Nacional de Avaliação de Risco" (aba "Informações
+    // Adicionais" do processo). Categoria Crime; ÚLTIMO item da fila de automação (pedido
+    // do usuário: é a etapa mais demorada — ver moverFormularioRiscoParaFimDaFila).
+    //
+    // Caminho: número de ativos da página inicial ("Eletrônicos: N" — mesmo href do menu
+    // "Ativos", processo.do?_tj=...) → tela "Processos" (form#processoForm,
+    // processo.do?actionType=listar) → Classe Processual = 1268 pelo autocomplete (ou pela
+    // lupa, como reserva) → Filtrar → para cada processo da lista, em todas as páginas,
+    // consulta OCULTA da aba "Informações Adicionais" (fetch em segundo plano; se a aba
+    // não vier no HTML, quadro oculto com clique real na aba — ver
+    // consultarFormularioRisco).
+    //
+    // NÃO usa criarColetor/montarResumoGenerico: o dado não é a linha da lista, é o
+    // resultado da consulta de cada processo. Grava só as PENDÊNCIAS (sem formulário ou
+    // não verificados) em prefixo+'pagina_0' (mesmo formato de Outros Cumprimentos, para
+    // lerDadosDe/foiColetado/capa unificada funcionarem sem mudança) e os totais
+    // consultados por atuação em prefixo+'resumo'.
+    //
+    // Colunas da lista (.mhtml enviado pelo usuário): [0] Processo (<em>) + link "EL"
+    // (processo.do?actionType=visualizar&id=N) [1] Partes (table.form aninhada, ver
+    // partesPorPolo) [2] Distribuição [3] Classe Processual + "(Assunto Principal)".
+    const TITULO_FORMULARIO_RISCO = 'MPU sem Formulário Nacional de Avaliação de Risco';
+    const PARAGRAFOS_OBSERVACAO_FORMULARIO_RISCO = [
+        'A secretaria deverá providenciar o cadastro do Formulário Nacional de Avaliação de Risco (Lei nº 14.149/2021) nos processos de medidas protetivas de urgência listados. Processos marcados como "Não verificado" não puderam ser consultados automaticamente e devem ser conferidos manualmente.',
+    ];
+    const CFG_FORMULARIO_RISCO = {
+        prefixo: 'projudi_formulariorisco_',
+        // "Nenhum processo sem formulário" é informação válida (todos regulares) — mostra
+        // a linha/seção mesmo vazia, desde que já coletada.
+        mostrarSeVazio: true,
+        // Nunca detectado pelo cabeçalho genérico — a tela "Processos" serve a qualquer
+        // filtro; o fluxo é dirigido pelo estado da automação (ver
+        // tratarPaginaFormularioRisco no início de injetarBotoes).
+        detecta: () => false,
+        usaAtuacao: false,
+        nomeArquivo: 'mpu_sem_formulario_risco_projudi',
+        rotulos: { coletar: 'Extrair Formulário de Risco', coletarMais: 'Extrair mais (Formulário de Risco)', baixar: '⬇ Baixar Formulário de Risco' },
+        cabecalhos: ['Processo', 'Partes', 'Distribuição', 'Classe Processual', 'Assunto Principal', 'Situação', 'Detalhe'],
+        larguras: [{ wch: 26 }, { wch: 70 }, { wch: 12 }, { wch: 40 }, { wch: 40 }, { wch: 16 }, { wch: 40 }],
+        linha: (d) => [d.processo, d.partes, d.distribuicao, d.classe, d.assunto, d.situacao, d.detalhe || ''],
+        pdfCustom: (dados, somenteResumo) => gerarPDFFormularioRisco(dados, somenteResumo),
+        pdf: {
+            titulo: TITULO_FORMULARIO_RISCO,
+            tabelaTitulo: 'Tabela discriminada das MPUs sem Formulário Nacional de Avaliação de Risco',
+            dataCampo: 'distribuicao',
+            processoCampo: 'processo',
+            colunas: [
+                { header: 'Processo', width: 36, get: (d) => d.processo },
+                { header: 'Partes', width: 64, get: (d) => d.partes },
+                { header: 'Distribuição', width: 20, get: (d) => d.distribuicao },
+                { header: 'Dias', width: 10, get: (d, ctx) => diasDecorridos(d.distribuicao, ctx ? ctx.now : Date.now()) },
+                { header: 'Situação', width: 24, get: (d) => d.situacao },
             ],
         },
     };
@@ -6780,6 +6839,433 @@
         // (menu) ou o conteúdo ainda está carregando; nada a fazer neste ciclo.
     }
 
+    // ── Formulário Nacional de Avaliação de Risco (ver CFG_FORMULARIO_RISCO) ───────────
+    // Nome do quadro oculto da consulta de reserva (consultarFormularioRiscoViaQuadro) — o
+    // bootstrap não roda dentro dele (o @match também casa com a página do processo
+    // aberta no quadro, e o script não pode injetar painel/conduzir a automação lá).
+    const NOME_QUADRO_OCULTO_FORMULARIO_RISCO = 'projudi_formulario_risco_oculto';
+    const RE_CLASSE_FORMULARIO_RISCO = /^\s*1268\s*-\s*\S/;
+    const RE_LABEL_FORMULARIO_RISCO = /formul.{1,2}rio\s+nacional\s+de\s+avalia.{1,4}o\s+de\s+risco/i;
+    const RE_SEM_FORMULARIO_RISCO = /nenhum\s+formul/i;
+    // Muitas consultas seguidas sem achar a linha do formulário = sessão expirada/tela
+    // mudou; para em vez de gastar horas consultando à toa.
+    const LIMITE_FALHAS_SEGUIDAS_FORMULARIO_RISCO = 8;
+
+    // Tela "Processos" (processo.do?actionType=listar) — a mesma do filtro e do resultado.
+    function formularioProcessosAtivos() {
+        const form = document.getElementById('processoForm');
+        return form && /processo\.do\?actionType=listar/i.test(form.getAttribute('action') || '')
+            && form.querySelector('#descricaoClasseProcessual') ? form : null;
+    }
+
+    // Link do número de ativos da página inicial ("Eletrônicos: N") ou, como reserva, o
+    // item de menu "Ativos" — os dois têm o MESMO href (processo.do?_tj=..., sem subpasta,
+    // o que já exclui processoBuscaSuspenso.do e afins).
+    function acharLinkProcessosAtivos() {
+        const reUrl = /\/projudi\/processo\.do\?_tj=/i;
+        return acharLinkPorRotulo(reUrl, /eletr[oô]nicos\s*:?\s*$/i)
+            || acharLinkMenu(reUrl, /^ativos$/i);
+    }
+
+    // Uma linha da lista → registro base (sem a situação, que vem da consulta).
+    function linhasListaFormularioRisco() {
+        const tabela = document.querySelector('table.resultTable');
+        if (!tabela) return [];
+        return [...tabela.querySelectorAll(':scope > tbody > tr')].map(tr => {
+            const tds = tr.querySelectorAll(':scope > td');
+            if (tds.length < 4) return null;
+            const em = tds[0].querySelector('em');
+            const processo = ((em ? em.textContent : textoCelula(tds[0])).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [''])[0];
+            if (!processo) return null;
+            // Link "EL" (processo.do?actionType=visualizar&id=N) — selectedIcon abre o
+            // processo já na aba "Informações Adicionais" (mesmo parâmetro que o próprio
+            // Projudi usa no link de Vínculos: selectedIcon=tabAcoesVinculadas).
+            const linkEl = tds[0].querySelector('a[href*="actionType=visualizar"][href*="id="]');
+            const linkNumero = em && em.closest('a[href]');
+            const base = linkEl ? linkEl.href : (linkNumero ? linkNumero.href : '');
+            const [classe, assunto] = textoComQuebras(tds[3]);
+            return {
+                processo,
+                urlConsulta: base ? base + (base.includes('?') ? '&' : '?') + 'selectedIcon=tabDadosAdicionais' : '',
+                partes: partesPorPolo(tds[1]),
+                distribuicao: (textoCelula(tds[2]).match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0],
+                classe: classe || '',
+                assunto: (assunto || '').replace(/^\(\s*/, '').replace(/\s*\)$/, ''),
+                prioritario: emPrioritario(em),
+            };
+        }).filter(Boolean);
+    }
+
+    // Situação da linha "Formulário Nacional de Avaliação de Risco" num documento (HTML do
+    // fetch ou documento do quadro oculto): 'sem' ("Nenhum formulário cadastrado"),
+    // 'com' (qualquer outro conteúdo) ou null (linha não encontrada).
+    function situacaoFormularioRiscoNoDoc(doc) {
+        for (const label of doc.querySelectorAll('label')) {
+            if (!RE_LABEL_FORMULARIO_RISCO.test(label.textContent || '')) continue;
+            const tr = label.closest('tr');
+            const cels = tr ? [...tr.querySelectorAll(':scope > td')] : [];
+            const texto = cels.slice(1).map(td => td.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+            if (!texto) return { situacao: 'indeterminado', texto: 'linha do formulário sem conteúdo' };
+            return { situacao: RE_SEM_FORMULARIO_RISCO.test(texto) ? 'sem' : 'com', texto };
+        }
+        return null;
+    }
+
+    // As páginas do Projudi vêm em windows-1252; fetch().text() decodificaria como UTF-8 e
+    // estragaria os acentos.
+    async function baixarHtmlProjudi(url) {
+        const resp = await fetch(url, { credentials: 'same-origin' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buffer = await resp.arrayBuffer();
+        const charset = (/charset=([\w-]+)/i.exec(resp.headers.get('content-type') || '') || [])[1] || 'windows-1252';
+        try { return new TextDecoder(charset).decode(buffer); } catch (e) { return new TextDecoder('windows-1252').decode(buffer); }
+    }
+
+    // Reserva: abre o processo num quadro invisível e, se a linha não aparecer sozinha,
+    // clica de verdade na aba "Informações Adicionais" (aba <a> sem href — ver armadilha
+    // de clique sintético no CLAUDE.md). Teto de ~30s por processo.
+    function consultarFormularioRiscoViaQuadro(url) {
+        return new Promise(resolve => {
+            const quadro = document.createElement('iframe');
+            quadro.name = NOME_QUADRO_OCULTO_FORMULARIO_RISCO;
+            quadro.setAttribute('aria-hidden', 'true');
+            quadro.tabIndex = -1;
+            quadro.style.cssText = 'position:absolute;left:-10000px;top:0;width:1200px;height:800px;visibility:hidden;border:0;';
+            let tick = 0, completoEm = -1, cliques = 0, fim = false;
+            const terminar = (r) => {
+                if (fim) return;
+                fim = true;
+                quadro.remove();
+                resolve(r);
+            };
+            const passo = () => {
+                if (fim) return;
+                tick++;
+                let d = null;
+                try { d = quadro.contentDocument; } catch (e) { d = null; }
+                if (d && d.body && d.location && d.location.href !== 'about:blank') {
+                    const r = situacaoFormularioRiscoNoDoc(d);
+                    if (r) { terminar(r); return; }
+                    if (d.readyState === 'complete') {
+                        if (completoEm < 0) completoEm = tick;
+                        if (tick - completoEm >= 3 && cliques < 2 && (cliques === 0 || tick - completoEm >= 23)) {
+                            const aba = [...d.querySelectorAll('#tabHorz a, .tabCenter a')].find(a => /informa..es\s+adicionais/i.test(a.textContent || ''));
+                            if (aba) { cliques++; completoEm = tick; aba.click(); }
+                        }
+                    } else {
+                        completoEm = -1;
+                    }
+                }
+                if (tick >= 60) { terminar(null); return; }
+                setTimeout(passo, 500);
+            };
+            quadro.src = url;
+            document.body.appendChild(quadro);
+            setTimeout(passo, 500);
+        });
+    }
+
+    // Consulta de UM processo. Tenta primeiro o fetch em segundo plano (rápido, sem tocar
+    // na tela); se as 3 primeiras tentativas da rodada não trouxerem a linha do
+    // formulário no HTML (a aba pode ser carregada por AJAX), passa a usar o quadro oculto
+    // para o resto da rodada.
+    async function consultarFormularioRisco(reg) {
+        const p = CFG_FORMULARIO_RISCO.prefixo;
+        if (!reg.urlConsulta) return { situacao: 'indeterminado', texto: 'link do processo não encontrado na lista' };
+        if (store.getItem(p + 'modo_consulta') !== 'quadro') {
+            try {
+                const html = await baixarHtmlProjudi(reg.urlConsulta);
+                const r = situacaoFormularioRiscoNoDoc(new DOMParser().parseFromString(html, 'text/html'));
+                if (r) { store.setItem(p + 'fetch_ok', '1'); return r; }
+                logPainel(`[Projudi Formulário de Risco] ${reg.processo}: a linha do formulário não veio no HTML da consulta em segundo plano — tentando pelo quadro oculto`);
+            } catch (e) {
+                logPainelAviso(`[Projudi Formulário de Risco] ${reg.processo}: falha na consulta em segundo plano (${e.message}) — tentando pelo quadro oculto`);
+            }
+            const falhas = parseInt(store.getItem(p + 'fetch_falhas') || '0', 10) + 1;
+            store.setItem(p + 'fetch_falhas', String(falhas));
+            if (falhas >= 3 && !store.getItem(p + 'fetch_ok')) {
+                store.setItem(p + 'modo_consulta', 'quadro');
+                logPainelAviso('[Projudi Formulário de Risco] consulta em segundo plano não traz a aba "Informações Adicionais" — usando só o quadro oculto no restante desta rodada');
+            }
+        }
+        const r = await consultarFormularioRiscoViaQuadro(reg.urlConsulta);
+        return r || { situacao: 'indeterminado', texto: 'a linha "Formulário Nacional de Avaliação de Risco" não foi encontrada no processo' };
+    }
+
+    // Começo de uma rodada nesta atuação: zera o que é transitório e descarta o resultado
+    // anterior DESTA atuação (re-rodar não duplica contagens; outras unidades da rodada
+    // de várias unidades ficam intactas).
+    function prepararRodadaFormularioRisco(atuacao) {
+        const p = CFG_FORMULARIO_RISCO.prefixo;
+        ['verificados', 'fetch_ok', 'fetch_falhas', 'modo_consulta', 'falhas_seguidas', 'tentativas_filtro'].forEach(k => store.removeItem(p + k));
+        const chave = atuacao || '(sem atuação)';
+        const lista = (desembrulharArray(store.getItem(p + 'pagina_0')) || []).filter(d => (d.atuacao || '(sem atuação)') !== chave);
+        gravarPendenciasFormularioRisco(lista);
+        const resumo = desembrulharObjeto(store.getItem(p + 'resumo')) || {};
+        delete resumo[chave];
+        store.setItem(p + 'resumo', JSON.stringify(resumo));
+    }
+
+    function gravarPendenciasFormularioRisco(lista) {
+        const p = CFG_FORMULARIO_RISCO.prefixo;
+        store.setItem(p + 'pagina_0', JSON.stringify(lista));
+        store.setItem(p + 'num_paginas', '1');
+        store.setItem(p + 'total_registros', String(lista.length));
+    }
+
+    function registrarResultadoFormularioRisco(reg, r, atuacao) {
+        const p = CFG_FORMULARIO_RISCO.prefixo;
+        const chave = atuacao || '(sem atuação)';
+        const resumo = desembrulharObjeto(store.getItem(p + 'resumo')) || {};
+        const c = resumo[chave] || (resumo[chave] = { consultados: 0, comFormulario: 0, semFormulario: 0, naoVerificados: 0 });
+        c.consultados++;
+        if (r.situacao === 'com') c.comFormulario++;
+        else if (r.situacao === 'sem') c.semFormulario++;
+        else c.naoVerificados++;
+        store.setItem(p + 'resumo', JSON.stringify(resumo));
+        if (r.situacao !== 'com') {
+            const lista = desembrulharArray(store.getItem(p + 'pagina_0')) || [];
+            lista.push({
+                processo: reg.processo,
+                partes: reg.partes,
+                distribuicao: reg.distribuicao,
+                classe: reg.classe,
+                assunto: reg.assunto,
+                prioritario: reg.prioritario,
+                situacao: r.situacao === 'sem' ? 'Sem formulário' : 'Não verificado',
+                detalhe: r.situacao === 'sem' ? '' : r.texto,
+                atuacao: atuacao || '',
+                competencia: competenciaDe(atuacao),
+            });
+            gravarPendenciasFormularioRisco(lista);
+        }
+        const verificados = desembrulharArray(store.getItem(p + 'verificados')) || [];
+        verificados.push(reg.processo);
+        store.setItem(p + 'verificados', JSON.stringify(verificados));
+    }
+
+    // Totais somados de todas as atuações (ou só das informadas) — usado nos cards do PDF.
+    function totaisFormularioRisco(atuacoes) {
+        const resumo = desembrulharObjeto(store.getItem(CFG_FORMULARIO_RISCO.prefixo + 'resumo')) || {};
+        const t = { consultados: 0, comFormulario: 0, semFormulario: 0, naoVerificados: 0 };
+        Object.entries(resumo).forEach(([atuacao, c]) => {
+            if (atuacoes && !atuacoes.has(atuacao)) return;
+            Object.keys(t).forEach(k => { t[k] += (c && c[k]) || 0; });
+        });
+        return t;
+    }
+
+    // Teclas sintéticas para o autocomplete (Ajax.Autocompleter/ajaxtags do Projudi). O
+    // Prototype IGNORA tecla com keyCode 0 no Chrome (WebKit) — por isso keyCode/which
+    // explícitos (no init e, se o navegador não respeitar, por defineProperty).
+    function digitarNoAutocomplete(campo, texto) {
+        campo.focus();
+        campo.value = texto;
+        const tecla = texto.slice(-1);
+        const codigo = tecla.charCodeAt(0);
+        ['keydown', 'keypress', 'keyup'].forEach(tipo => {
+            const ev = new KeyboardEvent(tipo, { bubbles: true, cancelable: true, key: tecla, keyCode: codigo, which: codigo, charCode: tipo === 'keypress' ? codigo : 0 });
+            if (!ev.keyCode) {
+                try {
+                    Object.defineProperty(ev, 'keyCode', { get: () => codigo });
+                    Object.defineProperty(ev, 'which', { get: () => codigo });
+                } catch (e) { /* sem como forçar — a lupa é a reserva */ }
+            }
+            campo.dispatchEvent(ev);
+        });
+        campo.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    // Rádio "1268" na janela "Seleção de Classe Processual" (mesma janela da Busca
+    // Avançada — ver janelaClassesProcessuais/radioClasseAveriguacaoPaternidade).
+    function radioClasseFormularioRisco(janela) {
+        const docs = [janela.raiz.ownerDocument, ...todosDocumentosAcessiveis()];
+        for (const d of docs) {
+            const r = d.querySelector('input[type="radio"][name="idClasseProcessualSelecionado"][value="1268"]');
+            if (r) return r;
+        }
+        for (const d of docs) {
+            const r = [...d.querySelectorAll('input[type="radio"]')].find(x => RE_CLASSE_FORMULARIO_RISCO.test(textoDoRadio(x)));
+            if (r) return r;
+        }
+        return null;
+    }
+
+    let preenchimentoFormularioRiscoEmAndamento = false;
+
+    // Classe Processual = 1268 e Filtrar. Caminho pedido pelo usuário: digitar 1268 e
+    // clicar na opção do balão azul do autocomplete. Se o balão não aparecer em ~15s,
+    // usa a lupa (janela de classes, mesmo esquema de Averiguação de Paternidade). Depois
+    // de ~60s sem conseguir, pede ao usuário para selecionar a classe — a pesquisa segue
+    // sozinha depois disso.
+    function preencherEPesquisarFormularioRisco() {
+        const form = formularioProcessosAtivos();
+        if (!form || preenchimentoFormularioRiscoEmAndamento) return;
+        preenchimentoFormularioRiscoEmAndamento = true;
+        const ativos = form.querySelector('input[name="tipo"][value="ativos"]');
+        if (ativos && !ativos.checked) ativos.click();
+        const prioritarios = form.querySelector('#flagSomentePrioritarios');
+        if (prioritarios && prioritarios.checked) prioritarios.click();
+        const campo = form.querySelector('#descricaoClasseProcessual');
+        const caixa = document.getElementById('ajaxAuto_descricaoClasseProcessual');
+        const lupa = campo && campo.parentElement ? campo.parentElement.querySelector('a.searchButton') : null;
+        let tick = 0, digitouEm = -999, clicouEm = -999, abriuLupaEm = -999, pesquisouLupaEm = -999, selecionouLupaEm = -999, avisou = false;
+        const pesquisar = () => {
+            logPainel(`[Projudi Formulário de Risco] classe selecionada ("${campo.value}") — clicando em Filtrar`);
+            prepararRodadaFormularioRisco(lerAtuacao());
+            store.setItem(AUTO_ESTADO, 'coletando_formulariorisco');
+            const btn = form.querySelector('#searchButton') || form.querySelector('input[type="submit"]');
+            setTimeout(() => { if (btn && !btn.disabled) btn.click(); else form.submit(); }, 1000);
+        };
+        const passo = () => {
+            if (store.getItem(AUTO_ESTADO) !== 'preenchendo_formulariorisco') { preenchimentoFormularioRiscoEmAndamento = false; return; }
+            tick++;
+            // Espera 1s depois do clique na opção (afterUpdateElement do autocomplete).
+            if (campo && RE_CLASSE_FORMULARIO_RISCO.test(campo.value || '') && tick - clicouEm >= 2) { pesquisar(); return; }
+            const opcao = caixa && [...caixa.querySelectorAll('li')].find(li => RE_CLASSE_FORMULARIO_RISCO.test(li.textContent || ''));
+            const janela = tick > 30 ? janelaClassesProcessuais() : null;
+            if (opcao) {
+                if (tick - clicouEm >= 6) {
+                    clicouEm = tick;
+                    logPainel('[Projudi Formulário de Risco] opção "1268 - ..." apareceu no autocomplete — selecionando');
+                    opcao.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                    opcao.click();
+                }
+            } else if (janela) {
+                const radio = radioClasseFormularioRisco(janela);
+                if (radio) {
+                    if (!radio.checked) radio.click();
+                    if (tick - selecionouLupaEm >= 6) { selecionouLupaEm = tick; clicouEm = tick; janela.selecionar.click(); }
+                } else if (janela.descricao && janela.pesquisar && tick - pesquisouLupaEm >= 20) {
+                    pesquisouLupaEm = tick;
+                    janela.descricao.value = '1268';
+                    janela.descricao.dispatchEvent(new Event('input', { bubbles: true }));
+                    janela.descricao.dispatchEvent(new Event('change', { bubbles: true }));
+                    janela.pesquisar.click();
+                }
+            } else if (tick > 30 && lupa && tick - abriuLupaEm >= 20) {
+                abriuLupaEm = tick;
+                logPainel('[Projudi Formulário de Risco] autocomplete não respondeu — abrindo a lupa de Classe Processual');
+                lupa.click();
+            } else if (tick <= 30 && campo && tick - digitouEm >= 10) {
+                digitouEm = tick;
+                digitarNoAutocomplete(campo, '1268');
+            }
+            if (tick > 120 && !avisou) {
+                avisou = true;
+                logPainelAviso('[Projudi Formulário de Risco] não consegui selecionar a classe 1268 — selecione "1268 - Medidas Protetivas de urgência..." manualmente; a pesquisa segue sozinha depois disso.');
+                atualizarStatus('Selecione a classe "1268 - Medidas Protetivas de urgência (Lei Maria da Penha) Criminal" — a pesquisa continua sozinha depois disso.');
+            }
+            setTimeout(passo, 500);
+        };
+        passo();
+    }
+
+    let verificacaoFormularioRiscoEmAndamento = false;
+
+    function concluirFormularioRisco(motivoErro) {
+        const p = CFG_FORMULARIO_RISCO.prefixo;
+        if (motivoErro) {
+            logPainelErro(`[Projudi Formulário de Risco] ${motivoErro}`);
+            store.setItem(p + 'erro', '1');
+        }
+        if (store.getItem(p + 'num_paginas') == null) gravarPendenciasFormularioRisco([]);
+        ['verificados', 'falhas_seguidas', 'tentativas_filtro', 'ts'].forEach(k => store.removeItem(p + k));
+        store.setItem(p + 'coletado', '1');
+        const c = (desembrulharObjeto(store.getItem(p + 'resumo')) || {})[lerAtuacao() || '(sem atuação)'];
+        if (c) logPainel(`[Projudi Formulário de Risco] concluído — ${c.consultados} consultado(s), ${c.semFormulario} sem formulário, ${c.naoVerificados} não verificado(s)`);
+        avancarAutomacao(CFG_FORMULARIO_RISCO);
+    }
+
+    // Consulta, um a um, os processos da página atual da lista ainda não verificados
+    // nesta rodada (sequencial, com pausa curta — não sobrecarrega o Projudi), depois vira
+    // a página (clique em "Próxima Página", que recarrega a tela e chama esta função de
+    // novo) ou conclui. Tolera recarga: o que já foi consultado fica em
+    // prefixo+'verificados'.
+    async function verificarPaginaFormularioRisco() {
+        if (verificacaoFormularioRiscoEmAndamento) return;
+        verificacaoFormularioRiscoEmAndamento = true;
+        try {
+            const p = CFG_FORMULARIO_RISCO.prefixo;
+            const form = formularioProcessosAtivos();
+            const campo = form && form.querySelector('#descricaoClasseProcessual');
+            const todas = linhasListaFormularioRisco();
+            // Defesa: se o filtro não pegou, a lista traria TODOS os ativos (milhares) —
+            // nunca consultar essa lista inteira.
+            const filtroAplicado = (campo && RE_CLASSE_FORMULARIO_RISCO.test(campo.value || ''))
+                || (todas.length > 0 && todas.every(r => /medidas\s+protetivas/i.test(r.classe)));
+            if (!filtroAplicado && todas.length > 0) {
+                const tentativas = parseInt(store.getItem(p + 'tentativas_filtro') || '0', 10) + 1;
+                store.setItem(p + 'tentativas_filtro', String(tentativas));
+                if (tentativas > 2) { concluirFormularioRisco('o filtro da classe 1268 não foi aplicado na lista de processos após 2 tentativas — relatório interrompido.'); return; }
+                logPainelAviso(`[Projudi Formulário de Risco] a lista não está filtrada pela classe 1268 — preenchendo o filtro de novo (tentativa ${tentativas})`);
+                store.setItem(AUTO_ESTADO, 'preenchendo_formulariorisco');
+                preencherEPesquisarFormularioRisco();
+                return;
+            }
+            const linhas = todas.filter(r => /medidas\s+protetivas/i.test(r.classe) || !r.classe);
+            const atuacao = lerAtuacao();
+            const verificados = new Set(desembrulharArray(store.getItem(p + 'verificados')) || []);
+            const total = totalRegistrosPagina();
+            const pagina = numeroPaginaAtual();
+            const totPag = total ? Math.ceil(total / Math.max(todas.length, 20)) : '?';
+            for (let i = 0; i < linhas.length; i++) {
+                const reg = linhas[i];
+                if (verificados.has(reg.processo)) continue;
+                if (automacaoPausada()) {
+                    aguardarFimDaPausa(() => verificarPaginaFormularioRisco(), 'verificação do Formulário de Risco');
+                    return;
+                }
+                if (store.getItem(AUTO_ESTADO) !== 'coletando_formulariorisco') return; // "Pular"/"Limpar" no meio
+                store.setItem(p + 'ts', String(Date.now()));
+                atualizarStatus(`Formulário de Risco: página ${pagina} de ${totPag} — processo ${i + 1} de ${linhas.length} (${reg.processo})${total ? ` — ${total} processo(s) na classe 1268` : ''}`);
+                const r = await consultarFormularioRisco(reg);
+                registrarResultadoFormularioRisco(reg, r, atuacao);
+                verificados.add(reg.processo);
+                if (r.situacao === 'indeterminado') {
+                    const seguidas = parseInt(store.getItem(p + 'falhas_seguidas') || '0', 10) + 1;
+                    store.setItem(p + 'falhas_seguidas', String(seguidas));
+                    logPainelAviso(`[Projudi Formulário de Risco] ${reg.processo}: não verificado — ${r.texto}`);
+                    if (seguidas >= LIMITE_FALHAS_SEGUIDAS_FORMULARIO_RISCO) {
+                        concluirFormularioRisco(`${seguidas} processos seguidos sem conseguir ler a linha do formulário (sessão expirada ou tela diferente?) — relatório interrompido; o que já foi consultado foi mantido.`);
+                        return;
+                    }
+                } else {
+                    store.removeItem(p + 'falhas_seguidas');
+                }
+                await new Promise(ok => setTimeout(ok, 300));
+            }
+            store.setItem(p + 'ts', String(Date.now()));
+            if (temProximaPagina()) {
+                logPainel(`[Projudi Formulário de Risco] página ${pagina} concluída — indo para a próxima`);
+                document.querySelector('a.arrowNextOn').click();
+                return;
+            }
+            concluirFormularioRisco();
+        } finally {
+            verificacaoFormularioRiscoEmAndamento = false;
+        }
+    }
+
+    // Chamado no início de injetarBotoes enquanto a automação estiver neste relatório.
+    function tratarPaginaFormularioRisco() {
+        const estado = store.getItem(AUTO_ESTADO);
+        if (!formularioProcessosAtivos()) return; // ainda na página inicial/carregando
+        if (estado === 'preenchendo_formulariorisco') {
+            logPainel('▶ [Projudi Formulário de Risco] automação: filtrando a classe 1268');
+            preencherEPesquisarFormularioRisco();
+        } else if (estado === 'coletando_formulariorisco') {
+            verificarPaginaFormularioRisco();
+        }
+    }
+
+    // Pedido do usuário: esta consulta é sempre a ÚLTIMA etapa da automação (é a mais
+    // demorada), independente da ordem em que os itens aparecem no painel.
+    function moverFormularioRiscoParaFimDaFila(fila) {
+        if (!fila.includes('formulariorisco')) return fila;
+        return [...fila.filter(k => k !== 'formulariorisco'), 'formulariorisco'];
+    }
+
     // ── Cumprimento de Medidas (Mesa do Magistrado, aba "Cumprimentos de Medidas") ─────
     // Mesma armadilha de Outros Cumprimentos: a aba é um <a> SEM href (só reage a clique
     // real, não a eventos sintéticos) e fica restrita ao container da barra de abas
@@ -10203,6 +10689,13 @@
                 montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_CAMPOS_OBRIGATORIOS_VD, comIndice),
             };
         }
+        if (cfg === CFG_FORMULARIO_RISCO) {
+            return {
+                rotulo: TITULO_FORMULARIO_RISCO,
+                montarResumo: (doc, dados, primeira, comIndice, rotuloBloco) => montarResumoFormularioRisco(doc, dados, primeira, comIndice, rotuloBloco),
+                montarTabela: (doc, dados, comIndice) => montarTabelaGenerico(doc, dados, CFG_FORMULARIO_RISCO, comIndice),
+            };
+        }
         if (cfg === CFG_REAVALIACAO_PRISAO_PROVISORIA) {
             return {
                 rotulo: TITULO_REAVALIACAO_PRISAO_PROVISORIA,
@@ -11025,6 +11518,7 @@
         const secaoReavaliacaoPrisaoProvisoria = secoes.find(s => s.cfgOriginal === CFG_REAVALIACAO_PRISAO_PROVISORIA);
         const secaoPrisoes = secoes.find(s => s.cfgOriginal === CFG_PRISOES);
         const secaoCamposObrigatoriosVD = secoes.find(s => s.cfgOriginal === CFG_CAMPOS_OBRIGATORIOS_VD);
+        const secaoFormularioRisco = secoes.find(s => s.cfgOriginal === CFG_FORMULARIO_RISCO);
         const secaoAcolhidos = secoes.find(s => s.cfgOriginal === CFG_ACOLHIDOS);
         const secaoInternados = secoes.find(s => s.cfgOriginal === CFG_INTERNADOS);
         const secaoPrisoesAlimentos = secoes.find(s => s.cfgOriginal === CFG_PRISOES_ALIMENTOS);
@@ -11666,6 +12160,22 @@
                 indicador: `${secaoCamposObrigatoriosVD.dados.length} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalheAntigo}` : detalheAntigo,
                 situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_CAMPOS_OBRIGATORIOS_VD,
+            });
+        }
+        // MPU sem Formulário Nacional de Avaliação de Risco — logo após Campos
+        // Obrigatórios VD (mesma ordem de REPORTS_AUTOMACAO). Indicador: processos sem
+        // formulário; detalhamento: quantas MPUs foram consultadas (e não verificadas).
+        if (secaoFormularioRisco) {
+            const t = totaisFormularioRisco(overrideUnidadesPDF);
+            const sem = secaoFormularioRisco.dados.filter(d => d.situacao === 'Sem formulário').length;
+            const naoVerif = secaoFormularioRisco.dados.length - sem;
+            const prejudicado = prejudicadoInfo(CFG_FORMULARIO_RISCO);
+            const detalhe = `${t.consultados} MPU(s) ativa(s) consultada(s)` + (naoVerif ? ` · ${naoVerif} não verificada(s)` : '');
+            itensOutros.push({
+                nome: 'MPU sem Formulário Nacional de Avaliação de Risco',
+                indicador: `${sem} processo(s)`,
+                detalhamento: prejudicado ? `${prejudicado} · ${detalhe}` : detalhe,
+                situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_FORMULARIO_RISCO,
             });
         }
         empilharSubgrupo('Outros', itensOutros);
@@ -14003,6 +14513,88 @@
         }
 
         desenharRodape(doc, TITULO_CAMPOS_OBRIGATORIOS_VD, `${hoje} ${hora}`, pw, ph, m, comIndice);
+    }
+
+    // ── PDF de MPU sem Formulário Nacional de Avaliação de Risco ───────────────────────
+    // Mesmo padrão de Campos Obrigatórios VD (resumo dedicado + tabela genérica). Os
+    // totais consultados vêm de prefixo+'resumo' (não dos dados, que só têm pendências).
+    function gerarPDFFormularioRisco(dados, somenteResumo) {
+        const doc = novoDocPDF();
+        montarResumoFormularioRisco(doc, dados, true, false);
+        doc.outline.add(null, 'Resumo', { pageNumber: 1 });
+        if (!somenteResumo && dados.length) {
+            const pgTabela = montarTabelaGenerico(doc, dados, CFG_FORMULARIO_RISCO, false);
+            doc.outline.add(null, 'Tabela detalhada', { pageNumber: pgTabela });
+        }
+        const sufixo = somenteResumo ? '_resumo' : '';
+        baixarBlob(doc.output('blob'), `${CFG_FORMULARIO_RISCO.nomeArquivo}${sufixo}_${dataArquivo()}.pdf`);
+    }
+
+    function montarResumoFormularioRisco(doc, dados, ehPrimeiraSecao, comIndice, rotuloBloco) {
+        if (!ehPrimeiraSecao) doc.addPage();
+        const r = dados || [];
+        const agora = new Date();
+        const pw = doc.internal.pageSize.getWidth();
+        const ph = doc.internal.pageSize.getHeight();
+        const m = 12;
+        const uw = pw - 2 * m;
+        const hoje = agora.toLocaleDateString('pt-BR');
+        const hora = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        const t = totaisFormularioRisco(overrideUnidadesPDF);
+        const sem = r.filter(d => d.situacao === 'Sem formulário').length;
+        const naoVerificados = r.length - sem;
+
+        doc.setFillColor(...COR.azul); doc.rect(0, 0, pw, 3, 'F'); doc.setFont('PublicSans', 'bold'); doc.setFontSize(16); doc.setTextColor(...COR.tinta);
+        doc.text(TITULO_FORMULARIO_RISCO, m, m + 2);
+        const rotuloInfo = desenharRotuloBloco(doc, m, m + 8, rotuloBloco);
+        doc.setFont('PublicSans', 'normal'); doc.setFontSize(9); doc.setTextColor(...COR.tintaSec);
+        doc.text(`Extraído em ${hoje} às ${hora}  •  classe 1268 - Medidas Protetivas de urgência (Lei Maria da Penha) Criminal`, m, rotuloInfo.y);
+        const yLinha = rotuloInfo.y + 3.5;
+        doc.setDrawColor(...COR.azul); doc.setLineWidth(0.5); doc.line(m, yLinha, pw - m, yLinha);
+
+        const gap = 6;
+        const kY = yLinha + 7;
+        const kH = 28;
+        const kW = (uw - 2 * gap) / 3;
+        desenharCard(doc, m, kY, kW, kH, 'MPUs ativas consultadas', String(t.consultados), [`${t.comFormulario} com formulário`], true, COR.azul);
+        desenharCard(doc, m + kW + gap, kY, kW, kH, 'Sem formulário', String(sem), [], true, COR.vermelho, sem ? COR.vermelho : undefined);
+        desenharCard(doc, m + 2 * (kW + gap), kY, kW, kH, 'Não verificados', String(naoVerificados), naoVerificados ? ['Conferir manualmente'] : [], true, COR.ambar);
+
+        // Tabela embutida com os 5 primeiros (mesmo limite de Campos Obrigatórios VD).
+        const LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO = 5;
+        let yObs = kY + kH + gap;
+        if (r.length > 0) {
+            const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO
+                ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO} Processos`
+                : 'Lista das MPUs sem Formulário Nacional de Avaliação de Risco';
+            tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
+            const colunas = CFG_FORMULARIO_RISCO.pdf.colunas;
+            const ctx = { now: agora.getTime() };
+            doc.autoTable({
+                columns: colunas.map((c, i) => ({ header: c.header, dataKey: 'k' + i })),
+                body: r.slice(0, LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO).map(d => {
+                    const o = {};
+                    colunas.forEach((c, i) => { o['k' + i] = String(c.get(d, ctx) ?? ''); });
+                    return o;
+                }),
+                startY: yObs + 8,
+                margin: { left: m, right: m, top: m, bottom: 14 },
+                theme: 'grid',
+                styles: { font: 'PublicSans', fontSize: 7.5, cellPadding: 1.6, textColor: COR.tintaSec,
+                          lineColor: COR.grade, lineWidth: 0.1, overflow: 'linebreak', valign: 'middle' },
+                headStyles: { fillColor: COR.azul, textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+                alternateRowStyles: { fillColor: COR.cartao },
+                columnStyles: columnStylesEscalados(colunas, uw),
+                didDrawPage: () => desenharRodape(doc, TITULO_FORMULARIO_RISCO, `${hoje} ${hora}`, pw, ph, m, comIndice),
+            });
+            yObs = doc.lastAutoTable.finalY + gap;
+            const alturaObs = medirAlturaCardObservacao(doc, uw, PARAGRAFOS_OBSERVACAO_FORMULARIO_RISCO);
+            if (yObs + alturaObs <= ph - m) {
+                desenharCardObservacao(doc, m, yObs, uw, alturaObs, 'Observação', PARAGRAFOS_OBSERVACAO_FORMULARIO_RISCO, COR.ambar);
+            }
+        }
+
+        desenharRodape(doc, TITULO_FORMULARIO_RISCO, `${hoje} ${hora}`, pw, ph, m, comIndice);
     }
 
     // ── PDF de Reavaliação da Prisão Provisória a cada 90 dias (Art 316, CPP) ─────────
@@ -17414,6 +18006,13 @@
             return;
         }
 
+        // Formulário Nacional de Avaliação de Risco — fluxo próprio dirigido pelo estado
+        // (a tela "Processos" serve a qualquer filtro; ver tratarPaginaFormularioRisco).
+        if (estadoAutoNoInicio === 'preenchendo_formulariorisco' || estadoAutoNoInicio === 'coletando_formulariorisco') {
+            tratarPaginaFormularioRisco();
+            return;
+        }
+
         // Página de Cumprimento de Medidas — mesmo tratamento de Outros Cumprimentos
         // acima (painel sem table.buttonBar, conteúdo carregado via AJAX). paginaCumprimen
         // toMedidas() (span já no DOM) só cobre "já carregou"; a URL de destino do clique
@@ -18902,7 +19501,7 @@
     // relatórios uma vez no painel, marca as unidades aqui, e os dois ficam combinados.
     function iniciarAutomacaoMultiUnidade(titulos, periodoTM) {
         if (!titulos || !titulos.length) { alert('Selecione ao menos uma unidade.'); return; }
-        const fila = REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key);
+        const fila = moverFormularioRiscoParaFimDaFila(REPORTS_AUTOMACAO.filter(r => relatorioMarcadoPorPadrao(r.key)).map(r => r.key));
         if (!fila.length) {
             alert('Nenhum relatório está marcado. Marque ao menos um relatório no painel desta mesma tela.');
             return;
@@ -19568,6 +20167,10 @@
         // Escrivão Criminal" (card sem link, ver acharCardCamposObrigatoriosVD); ÚLTIMO
         // da categoria Crime.
         { key: 'camposobrigatoriosvd', cfg: CFG_CAMPOS_OBRIGATORIOS_VD, navAlvo: 'camposobrigatoriosvd', rotulo: 'Campos Obrigatórios Pendentes da Parte (VD)', curto: 'Campos Obrig. VD', categoriaEspecifica: 'crime', precisaPreencher: true },
+        // MPU (classe 1268) sem Formulário Nacional de Avaliação de Risco — consulta cada
+        // processo da lista; sempre a ÚLTIMA etapa da automação, seja qual for a ordem no
+        // painel (ver moverFormularioRiscoParaFimDaFila).
+        { key: 'formulariorisco', cfg: CFG_FORMULARIO_RISCO, navAlvo: 'formulariorisco', rotulo: 'MPU sem Formulário Nacional de Avaliação de Risco', curto: 'Formulário de Risco', categoriaEspecifica: 'crime', precisaPreencher: true },
         // ── Grupo "VIJ - Seção Cível" (pedido do usuário: seção própria no painel, abaixo
         // de Gabinete — ver GRUPOS_AUTOMACAO; substituiu a antiga "VIJ - Seção
         // Infracional"). Sem categoriaEspecifica: aparece em todas as abas; unidade sem
@@ -20050,6 +20653,9 @@
         else if (alvo === 'semrg') return navegarAbaMesaEscrivaoCriminalParaSemRg();
         else if (alvo === 'semcpf') return navegarAbaMesaEscrivaoCriminalParaSemCpf();
         else if (alvo === 'camposobrigatoriosvd') return navegarAbaMesaEscrivaoCriminalParaCamposObrigatoriosVD();
+        // Formulário de Risco: número de ativos da página inicial ("Eletrônicos") ou menu
+        // "Ativos" — tela "Processos", onde o filtro da classe 1268 é aplicado.
+        else if (alvo === 'formulariorisco') link = acharLinkProcessosAtivos();
         // "Reavaliação da Prisão Provisória" fica na mesma aba "Mesa do Escrivão
         // Criminal" de Prescrições/Sem Infração Penal — abre a aba aqui; o clique no
         // card em si (sem link, ver acharCardReavaliacaoPrisaoProvisoria) acontece em
@@ -20521,6 +21127,7 @@
         }
         if (rel.key === 'audienciasdesignadas') store.removeItem(CHAVE_PROGRESSO_AD);
         if (rel.key === 'audienciasrealizadas') limparEstadoTransitorioAR();
+        if (rel.key === 'formulariorisco') ['verificados', 'falhas_seguidas', 'tentativas_filtro'].forEach(k => store.removeItem(CFG_FORMULARIO_RISCO.prefixo + k));
 
         const fila = lerFilaAutomacao();
         const idx = fila.indexOf(rel.key);
@@ -20827,7 +21434,7 @@
     // fila: array de chaves ('juntadas'|'retorno'|'tempomedio') na ordem a executar.
     // periodoTM: id do período pré-configurado para a data inicial do Tempo Médio.
     function iniciarAutomacao(fila, periodoTM) {
-        fila = (fila || []).filter(k => relatorioPorChave(k));
+        fila = moverFormularioRiscoParaFimDaFila((fila || []).filter(k => relatorioPorChave(k)));
         if (!fila.length) { alert('Selecione ao menos um relatório para automatizar.'); return; }
         // Marca esta unidade/atuação como "coletada" pro mostrador do painel só AGORA,
         // que o usuário de fato clicou em Automatizar — não antes (ver
@@ -22362,6 +22969,9 @@
     }
 
     function bootstrap() {
+        // Quadro invisível da consulta do Formulário de Risco (ver
+        // consultarFormularioRiscoViaQuadro): só serve para ler a aba do processo.
+        if (window.name === NOME_QUADRO_OCULTO_FORMULARIO_RISCO) return;
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
         try { logPainelSeMudou('versao', `═══ Relatório Projudi versão ${(typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?'} ═══`); } catch (e) { /* GM_info indisponível */ }
         // Erros não tratados também vão para o log persistente (só os do próprio script:
