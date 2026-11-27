@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.62
+// @version      26.63
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -56,7 +56,7 @@
             try {
                 const req = indexedDB.open(LOG_DB_NOME, 1);
                 req.onupgradeneeded = () => { req.result.createObjectStore(LOG_DB_STORE, { autoIncrement: true }); };
-                req.onsuccess = () => resolve(req.result);
+                req.onsuccess = () => { podarLogDb(req.result); resolve(req.result); };
                 req.onerror = () => resolve(null);
                 req.onblocked = () => resolve(null);
             } catch (e) { resolve(null); }
@@ -67,14 +67,22 @@
         try {
             const db = await abrirLogDb();
             if (!db) return logMemoria.slice();
-            const regs = await new Promise(resolve => {
+            // Só as últimas LOG_DETALHADO_MAX linhas, lidas de trás pra frente — NUNCA
+            // getAll(): com o banco grande (a poda antiga quase nunca rodava, ver
+            // podarLogDb) ler tudo a cada linha travava a aba inteira (relato do usuário).
+            const linhas = await new Promise(resolve => {
+                const out = [];
                 try {
-                    const req = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE).getAll();
-                    req.onsuccess = () => resolve(req.result || []);
-                    req.onerror = () => resolve([]);
-                } catch (e) { resolve([]); }
+                    const req = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE).openCursor(null, 'prev');
+                    req.onsuccess = () => {
+                        const c = req.result;
+                        if (c && out.length < LOG_DETALHADO_MAX) { if (c.value && c.value.linha) out.push(c.value.linha); c.continue(); }
+                        else resolve(out.reverse());
+                    };
+                    req.onerror = () => resolve(out.reverse());
+                } catch (e) { resolve(out.reverse()); }
             });
-            return regs.map(r => r && r.linha).filter(Boolean);
+            return linhas;
         } catch (e) { return logMemoria.slice(); }
     }
     async function apagarLogDetalhado() {
@@ -91,20 +99,21 @@
             });
         } catch (e) { /* ignora */ }
     }
-    // Mantém no máximo LOG_DETALHADO_MAX linhas, apagando as mais antigas.
+    // Mantém no máximo LOG_DETALHADO_MAX linhas, apagando as mais antigas. Roda ao abrir
+    // o banco (todo carregamento de página) e a cada 200 linhas — antes só rodava após 200
+    // linhas NA MESMA página, o que quase nunca acontecia, e o log crescia sem limite.
+    // Apaga por intervalo de chaves (uma operação), não registro a registro.
     function podarLogDb(db) {
         try {
             const tx = db.transaction(LOG_DB_STORE, 'readwrite');
             const os = tx.objectStore(LOG_DB_STORE);
-            const cont = os.count();
-            cont.onsuccess = () => {
-                let excesso = cont.result - LOG_DETALHADO_MAX;
-                if (excesso <= 0) return;
-                const cur = os.openCursor();
-                cur.onsuccess = () => {
-                    const c = cur.result;
-                    if (c && excesso-- > 0) { c.delete(); c.continue(); }
-                };
+            const cur = os.openCursor(null, 'prev');
+            let pulou = false;
+            cur.onsuccess = () => {
+                const c = cur.result;
+                if (!c) return;
+                if (!pulou) { pulou = true; c.advance(LOG_DETALHADO_MAX); return; }
+                os.delete(IDBKeyRange.upperBound(c.key)); // c = 1ª linha além das MAX mais novas
             };
         } catch (e) { /* poda é só manutenção */ }
     }
@@ -142,8 +151,22 @@
         try { return store.getItem('projudi_log_mostrar_detalhes') === '1'; } catch (e) { return false; }
     }
     let atualizandoLogUI = false;
+    let ultimaAtualizacaoLogUI = 0;
+    let atualizacaoLogUIAgendada = false;
     async function atualizarLogDetalhadoUI() {
+        // Rajadas de linhas (ex.: consulta processo a processo do Formulário de Risco)
+        // redesenhavam a caixa a cada linha — agora no máximo 1x/s, com uma última
+        // atualização agendada para não perder as linhas finais.
+        const espera = 1000 - (Date.now() - ultimaAtualizacaoLogUI);
+        if (espera > 0) {
+            if (!atualizacaoLogUIAgendada) {
+                atualizacaoLogUIAgendada = true;
+                setTimeout(() => { atualizacaoLogUIAgendada = false; atualizarLogDetalhadoUI(); }, espera);
+            }
+            return;
+        }
         if (atualizandoLogUI) return;
+        ultimaAtualizacaoLogUI = Date.now();
         try {
             const caixa = document.getElementById('pa-log-detalhado');
             const wrap = document.getElementById('pa-log-wrap');
