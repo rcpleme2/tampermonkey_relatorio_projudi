@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.67
+// @version      26.68
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3111,7 +3111,7 @@
     // Colunas da lista (.mhtml enviado pelo usuário): [0] Processo (<em>) + link "EL"
     // (processo.do?actionType=visualizar&id=N) [1] Partes (table.form aninhada, ver
     // partesPorPolo) [2] Distribuição [3] Classe Processual + "(Assunto Principal)".
-    const TITULO_FORMULARIO_RISCO = 'MPU sem Formulário Nacional de Avaliação de Risco';
+    const TITULO_FORMULARIO_RISCO = 'MPU Ativa sem Formulário Nacional de Avaliação de Risco';
     const PARAGRAFOS_OBSERVACAO_FORMULARIO_RISCO = [
         'A secretaria deverá providenciar o cadastro do Formulário Nacional de Avaliação de Risco (Lei nº 14.149/2021) nos processos de medidas protetivas de urgência listados. Processos marcados como "Não verificado" não puderam ser consultados automaticamente e devem ser conferidos manualmente.',
     ];
@@ -3133,7 +3133,7 @@
         pdfCustom: (dados, somenteResumo) => gerarPDFFormularioRisco(dados, somenteResumo),
         pdf: {
             titulo: TITULO_FORMULARIO_RISCO,
-            tabelaTitulo: 'Tabela discriminada das MPUs sem Formulário Nacional de Avaliação de Risco',
+            tabelaTitulo: 'Tabela discriminada das MPUs ativas sem Formulário Nacional de Avaliação de Risco',
             dataCampo: 'distribuicao',
             processoCampo: 'processo',
             colunas: [
@@ -12249,7 +12249,7 @@
             const prejudicado = prejudicadoInfo(CFG_FORMULARIO_RISCO);
             const detalhe = `${t.consultados} MPU(s) ativa(s) consultada(s)` + (naoVerif ? ` · ${naoVerif} não verificada(s)` : '');
             itensOutros.push({
-                nome: 'MPU sem Formulário Nacional de Avaliação de Risco',
+                nome: TITULO_FORMULARIO_RISCO,
                 indicador: `${sem} processo(s)`,
                 detalhamento: prejudicado ? `${prejudicado} · ${detalhe}` : detalhe,
                 situacaoLabel: prejudicado ? 'Não Encontrado' : '', corTexto: prejudicado ? COR.ambar : '', semSituacao: !prejudicado, cfgOriginal: CFG_FORMULARIO_RISCO,
@@ -14643,7 +14643,7 @@
         if (r.length > 0) {
             const tituloTabela = r.length > LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO
                 ? `Lista dos Primeiros ${LIMITE_TABELA_EMBUTIDA_FORMULARIO_RISCO} Processos`
-                : 'Lista das MPUs sem Formulário Nacional de Avaliação de Risco';
+                : 'Lista das MPUs ativas sem Formulário Nacional de Avaliação de Risco';
             tituloSecao(doc, m, yObs + 4, uw, tituloTabela);
             const colunas = CFG_FORMULARIO_RISCO.pdf.colunas;
             const ctx = { now: agora.getTime() };
@@ -20247,7 +20247,7 @@
         // MPU (classe 1268) sem Formulário Nacional de Avaliação de Risco — consulta cada
         // processo da lista; sempre a ÚLTIMA etapa da automação, seja qual for a ordem no
         // painel (ver moverFormularioRiscoParaFimDaFila).
-        { key: 'formulariorisco', cfg: CFG_FORMULARIO_RISCO, navAlvo: 'formulariorisco', rotulo: 'MPU sem Formulário Nacional de Avaliação de Risco', curto: 'Formulário de Risco', categoriaEspecifica: 'crime', precisaPreencher: true },
+        { key: 'formulariorisco', cfg: CFG_FORMULARIO_RISCO, navAlvo: 'formulariorisco', rotulo: TITULO_FORMULARIO_RISCO, rotuloChecklist: 'MPU ativa sem FONAR', curto: 'MPU ativa sem FONAR', categoriaEspecifica: 'crime', precisaPreencher: true },
         // ── Grupo "VIJ - Seção Cível" (pedido do usuário: seção própria no painel, abaixo
         // de Gabinete — ver GRUPOS_AUTOMACAO; substituiu a antiga "VIJ - Seção
         // Infracional"). Sem categoriaEspecifica: aparece em todas as abas; unidade sem
