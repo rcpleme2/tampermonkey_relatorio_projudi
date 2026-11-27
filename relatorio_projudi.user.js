@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.68
+// @version      26.69
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3113,7 +3113,8 @@
     // partesPorPolo) [2] Distribuição [3] Classe Processual + "(Assunto Principal)".
     const TITULO_FORMULARIO_RISCO = 'MPU Ativa sem Formulário Nacional de Avaliação de Risco';
     const PARAGRAFOS_OBSERVACAO_FORMULARIO_RISCO = [
-        'A secretaria deverá providenciar o cadastro do Formulário Nacional de Avaliação de Risco (Lei nº 14.149/2021) nos processos de medidas protetivas de urgência listados. Processos marcados como "Não verificado" não puderam ser consultados automaticamente e devem ser conferidos manualmente.',
+        'A secretaria deverá providenciar o cadastro do Formulário Nacional de Avaliação de Risco (Lei nº 14.149/2021; Resolução Conjunta CNJ/CNMP nº 5, de 3 de março de 2020; e Portaria Conjunta CNJ/CNMP nº 6/2025) nos processos de medidas protetivas de urgência listados, nos termos do art. 3º da Res. Conjunta nº 5, que dispõe: Art. 3º O Formulário Nacional de Avaliação de Risco será preferencialmente aplicado pela Polícia Civil no momento do registro da ocorrência policial, ou, na impossibilidade, pela equipe do Ministério Público ou do Poder Judiciário, por ocasião do primeiro atendimento à mulher vítima de violência doméstica e familiar.',
+        'Sem prejuízo, a Autoridade Policial poderá ser orientada a atentar para a necessidade de envio dos metadados relativos ao FONAR quando da distribuição das medidas protetivas de urgência.',
     ];
     const CFG_FORMULARIO_RISCO = {
         prefixo: 'projudi_formulariorisco_',
