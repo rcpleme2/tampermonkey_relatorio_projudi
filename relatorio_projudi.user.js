@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.64
+// @version      26.65
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -56,37 +56,65 @@
             try {
                 const req = indexedDB.open(LOG_DB_NOME, 1);
                 req.onupgradeneeded = () => { req.result.createObjectStore(LOG_DB_STORE, { autoIncrement: true }); };
-                req.onsuccess = () => { podarLogDb(req.result); resolve(req.result); };
+                req.onsuccess = () => { podarLogDbSeVencido(req.result); resolve(req.result); };
                 req.onerror = () => resolve(null);
                 req.onblocked = () => resolve(null);
             } catch (e) { resolve(null); }
         });
         return logDbPromise;
     }
+    // Cópia em memória das últimas LOG_DETALHADO_MAX linhas do banco, atualizada de forma
+    // INCREMENTAL: a 1ª leitura pega o bloco final de uma vez (getAll a partir da chave de
+    // corte); as seguintes pegam só as linhas com chave maior que a última já lida. A v26.63
+    // relia as 5.000 linhas por cursor (um evento por linha) a cada 1-2s com o log aberto,
+    // deixando a navegação lenta (relato do usuário).
+    let logCacheLinhas = [];
+    let logCacheUltimaChave = null;
+    let logCacheVersao = 0;
+    function pedidoIDB(req) {
+        return new Promise(resolve => { req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(null); });
+    }
     async function lerLogDetalhado() {
         try {
             const db = await abrirLogDb();
             if (!db) return logMemoria.slice();
-            // Só as últimas LOG_DETALHADO_MAX linhas, lidas de trás pra frente — NUNCA
-            // getAll(): com o banco grande (a poda antiga quase nunca rodava, ver
-            // podarLogDb) ler tudo a cada linha travava a aba inteira (relato do usuário).
-            const linhas = await new Promise(resolve => {
-                const out = [];
-                try {
-                    const req = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE).openCursor(null, 'prev');
-                    req.onsuccess = () => {
-                        const c = req.result;
-                        if (c && out.length < LOG_DETALHADO_MAX) { if (c.value && c.value.linha) out.push(c.value.linha); c.continue(); }
-                        else resolve(out.reverse());
-                    };
-                    req.onerror = () => resolve(out.reverse());
-                } catch (e) { resolve(out.reverse()); }
-            });
-            return linhas;
+            let faixa;
+            if (logCacheUltimaChave === null) {
+                // Chave da linha mais antiga a manter: 2 passos de cursor (advance), não um
+                // evento por linha. Banco com menos de MAX linhas: cursor acaba → lê tudo.
+                const corte = await new Promise(resolve => {
+                    try {
+                        let pulou = false;
+                        const req = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE).openCursor(null, 'prev');
+                        req.onsuccess = () => {
+                            const c = req.result;
+                            if (!c) { resolve(null); return; }
+                            if (!pulou && LOG_DETALHADO_MAX > 1) { pulou = true; c.advance(LOG_DETALHADO_MAX - 1); return; }
+                            resolve(c.key);
+                        };
+                        req.onerror = () => resolve(null);
+                    } catch (e) { resolve(null); }
+                });
+                faixa = corte == null ? undefined : IDBKeyRange.lowerBound(corte);
+            } else {
+                faixa = IDBKeyRange.lowerBound(logCacheUltimaChave, true);
+            }
+            const os = db.transaction(LOG_DB_STORE, 'readonly').objectStore(LOG_DB_STORE);
+            const [valores, chaves] = await Promise.all([pedidoIDB(os.getAll(faixa)), pedidoIDB(os.getAllKeys(faixa))]);
+            if (valores && valores.length) {
+                const novas = valores.map(r => r && r.linha).filter(Boolean);
+                logCacheLinhas = logCacheLinhas.concat(novas);
+                if (logCacheLinhas.length > LOG_DETALHADO_MAX) logCacheLinhas = logCacheLinhas.slice(-LOG_DETALHADO_MAX);
+                if (chaves && chaves.length) logCacheUltimaChave = chaves[chaves.length - 1];
+                logCacheVersao++;
+            }
+            return logCacheLinhas.slice();
         } catch (e) { return logMemoria.slice(); }
     }
     async function apagarLogDetalhado() {
         logMemoria.length = 0;
+        logCacheLinhas = [];
+        logCacheVersao++;
         try {
             const db = await abrirLogDb();
             if (!db) return;
@@ -103,6 +131,14 @@
     // o banco (todo carregamento de página) e a cada 200 linhas — antes só rodava após 200
     // linhas NA MESMA página, o que quase nunca acontecia, e o log crescia sem limite.
     // Apaga por intervalo de chaves (uma operação), não registro a registro.
+    function podarLogDbSeVencido(db) {
+        try {
+            const ultima = parseInt(store.getItem('projudi_log_ultima_poda') || '0', 10);
+            if (Date.now() - ultima < 10 * 60 * 1000) return;
+            store.setItem('projudi_log_ultima_poda', String(Date.now()));
+        } catch (e) { /* sem carimbo: poda mesmo assim */ }
+        podarLogDb(db);
+    }
     function podarLogDb(db) {
         try {
             const tx = db.transaction(LOG_DB_STORE, 'readwrite');
@@ -173,6 +209,9 @@
             if (!caixa || (wrap && wrap.style.display === 'none')) return; // log fechado: não gasta leitura
             atualizandoLogUI = true;
             const todas = await lerLogDetalhado();
+            const assinatura = `${logCacheVersao}|${logMostraDetalhes()}|${todas.length}`;
+            if (assinatura === caixa.dataset.assinaturaLog) return; // nada novo: não refaz o texto
+            caixa.dataset.assinaturaLog = assinatura;
             const linhas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
             const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
             if (caixa.textContent !== texto) {
