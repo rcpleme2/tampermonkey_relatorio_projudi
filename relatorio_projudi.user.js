@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.61
+// @version      26.62
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -3022,9 +3022,8 @@
     // "Ativos", processo.do?_tj=...) → tela "Processos" (form#processoForm,
     // processo.do?actionType=listar) → Classe Processual = 1268 pelo autocomplete (ou pela
     // lupa, como reserva) → Filtrar → para cada processo da lista, em todas as páginas,
-    // consulta OCULTA da aba "Informações Adicionais" (fetch em segundo plano; se a aba
-    // não vier no HTML, quadro oculto com clique real na aba — ver
-    // consultarFormularioRisco).
+    // consulta OCULTA da aba "Informações Adicionais" (só fetch em segundo plano — ver
+    // consultarFormularioRisco sobre por que não usar quadro/iframe oculto).
     //
     // NÃO usa criarColetor/montarResumoGenerico: o dado não é a linha da lista, é o
     // resultado da consulta de cada processo. Grava só as PENDÊNCIAS (sem formulário ou
@@ -6840,10 +6839,6 @@
     }
 
     // ── Formulário Nacional de Avaliação de Risco (ver CFG_FORMULARIO_RISCO) ───────────
-    // Nome do quadro oculto da consulta de reserva (consultarFormularioRiscoViaQuadro) — o
-    // bootstrap não roda dentro dele (o @match também casa com a página do processo
-    // aberta no quadro, e o script não pode injetar painel/conduzir a automação lá).
-    const NOME_QUADRO_OCULTO_FORMULARIO_RISCO = 'projudi_formulario_risco_oculto';
     const RE_CLASSE_FORMULARIO_RISCO = /^\s*1268\s*-\s*\S/;
     const RE_LABEL_FORMULARIO_RISCO = /formul.{1,2}rio\s+nacional\s+de\s+avalia.{1,4}o\s+de\s+risco/i;
     const RE_SEM_FORMULARIO_RISCO = /nenhum\s+formul/i;
@@ -6897,7 +6892,7 @@
     }
 
     // Situação da linha "Formulário Nacional de Avaliação de Risco" num documento (HTML do
-    // fetch ou documento do quadro oculto): 'sem' ("Nenhum formulário cadastrado"),
+    // da consulta em segundo plano): 'sem' ("Nenhum formulário cadastrado"),
     // 'com' (qualquer outro conteúdo) ou null (linha não encontrada).
     function situacaoFormularioRiscoNoDoc(doc) {
         for (const label of doc.querySelectorAll('label')) {
@@ -6921,75 +6916,33 @@
         try { return new TextDecoder(charset).decode(buffer); } catch (e) { return new TextDecoder('windows-1252').decode(buffer); }
     }
 
-    // Reserva: abre o processo num quadro invisível e, se a linha não aparecer sozinha,
-    // clica de verdade na aba "Informações Adicionais" (aba <a> sem href — ver armadilha
-    // de clique sintético no CLAUDE.md). Teto de ~30s por processo.
-    function consultarFormularioRiscoViaQuadro(url) {
-        return new Promise(resolve => {
-            const quadro = document.createElement('iframe');
-            quadro.name = NOME_QUADRO_OCULTO_FORMULARIO_RISCO;
-            quadro.setAttribute('aria-hidden', 'true');
-            quadro.tabIndex = -1;
-            quadro.style.cssText = 'position:absolute;left:-10000px;top:0;width:1200px;height:800px;visibility:hidden;border:0;';
-            let tick = 0, completoEm = -1, cliques = 0, fim = false;
-            const terminar = (r) => {
-                if (fim) return;
-                fim = true;
-                quadro.remove();
-                resolve(r);
-            };
-            const passo = () => {
-                if (fim) return;
-                tick++;
-                let d = null;
-                try { d = quadro.contentDocument; } catch (e) { d = null; }
-                if (d && d.body && d.location && d.location.href !== 'about:blank') {
-                    const r = situacaoFormularioRiscoNoDoc(d);
-                    if (r) { terminar(r); return; }
-                    if (d.readyState === 'complete') {
-                        if (completoEm < 0) completoEm = tick;
-                        if (tick - completoEm >= 3 && cliques < 2 && (cliques === 0 || tick - completoEm >= 23)) {
-                            const aba = [...d.querySelectorAll('#tabHorz a, .tabCenter a')].find(a => /informa..es\s+adicionais/i.test(a.textContent || ''));
-                            if (aba) { cliques++; completoEm = tick; aba.click(); }
-                        }
-                    } else {
-                        completoEm = -1;
-                    }
-                }
-                if (tick >= 60) { terminar(null); return; }
-                setTimeout(passo, 500);
-            };
-            quadro.src = url;
-            document.body.appendChild(quadro);
-            setTimeout(passo, 500);
-        });
-    }
-
-    // Consulta de UM processo. Tenta primeiro o fetch em segundo plano (rápido, sem tocar
-    // na tela); se as 3 primeiras tentativas da rodada não trouxerem a linha do
-    // formulário no HTML (a aba pode ser carregada por AJAX), passa a usar o quadro oculto
-    // para o resto da rodada.
+    // Consulta de UM processo, só por fetch em segundo plano (leve: um GET, sem executar
+    // nada da página do processo). NÃO abrir o processo em quadro/iframe oculto: a v26.61
+    // fazia isso como reserva e travou a aba inteira do Projudi (cada quadro carregava a
+    // página completa E o próprio userscript com SheetJS/jsPDF/fontes — vários MB por
+    // processo, centenas de processos). Se a linha do formulário não vier no HTML, o
+    // processo fica "Não verificado" e, na 1ª vez da rodada, o log recebe um diagnóstico
+    // (trechos do HTML perto de "Adicionais") para descobrir como a aba é carregada.
     async function consultarFormularioRisco(reg) {
         const p = CFG_FORMULARIO_RISCO.prefixo;
         if (!reg.urlConsulta) return { situacao: 'indeterminado', texto: 'link do processo não encontrado na lista' };
-        if (store.getItem(p + 'modo_consulta') !== 'quadro') {
-            try {
-                const html = await baixarHtmlProjudi(reg.urlConsulta);
-                const r = situacaoFormularioRiscoNoDoc(new DOMParser().parseFromString(html, 'text/html'));
-                if (r) { store.setItem(p + 'fetch_ok', '1'); return r; }
-                logPainel(`[Projudi Formulário de Risco] ${reg.processo}: a linha do formulário não veio no HTML da consulta em segundo plano — tentando pelo quadro oculto`);
-            } catch (e) {
-                logPainelAviso(`[Projudi Formulário de Risco] ${reg.processo}: falha na consulta em segundo plano (${e.message}) — tentando pelo quadro oculto`);
-            }
-            const falhas = parseInt(store.getItem(p + 'fetch_falhas') || '0', 10) + 1;
-            store.setItem(p + 'fetch_falhas', String(falhas));
-            if (falhas >= 3 && !store.getItem(p + 'fetch_ok')) {
-                store.setItem(p + 'modo_consulta', 'quadro');
-                logPainelAviso('[Projudi Formulário de Risco] consulta em segundo plano não traz a aba "Informações Adicionais" — usando só o quadro oculto no restante desta rodada');
-            }
+        let html;
+        try {
+            html = await baixarHtmlProjudi(reg.urlConsulta);
+        } catch (e) {
+            return { situacao: 'indeterminado', texto: `falha na consulta em segundo plano (${e.message})` };
         }
-        const r = await consultarFormularioRiscoViaQuadro(reg.urlConsulta);
-        return r || { situacao: 'indeterminado', texto: 'a linha "Formulário Nacional de Avaliação de Risco" não foi encontrada no processo' };
+        const r = situacaoFormularioRiscoNoDoc(new DOMParser().parseFromString(html, 'text/html'));
+        if (r) { store.setItem(p + 'fetch_ok', '1'); return r; }
+        if (!store.getItem(p + 'diagnostico_logado')) {
+            store.setItem(p + 'diagnostico_logado', '1');
+            const trechos = [];
+            const re = /adicionais/gi;
+            let m;
+            while ((m = re.exec(html)) && trechos.length < 6) trechos.push(html.slice(Math.max(0, m.index - 250), m.index + 250).replace(/\s+/g, ' '));
+            logPainelAviso(`[Projudi Formulário de Risco] DIAGNÓSTICO — ${reg.processo}: a linha do formulário não veio no HTML (${html.length} caracteres, url=${reg.urlConsulta}). Trechos perto de "Adicionais":`, trechos);
+        }
+        return { situacao: 'indeterminado', texto: 'a linha "Formulário Nacional de Avaliação de Risco" não veio na consulta em segundo plano' };
     }
 
     // Começo de uma rodada nesta atuação: zera o que é transitório e descarta o resultado
@@ -6997,7 +6950,7 @@
     // de várias unidades ficam intactas).
     function prepararRodadaFormularioRisco(atuacao) {
         const p = CFG_FORMULARIO_RISCO.prefixo;
-        ['verificados', 'fetch_ok', 'fetch_falhas', 'modo_consulta', 'falhas_seguidas', 'tentativas_filtro'].forEach(k => store.removeItem(p + k));
+        ['verificados', 'fetch_ok', 'diagnostico_logado', 'falhas_seguidas', 'tentativas_filtro'].forEach(k => store.removeItem(p + k));
         const chave = atuacao || '(sem atuação)';
         const lista = (desembrulharArray(store.getItem(p + 'pagina_0')) || []).filter(d => (d.atuacao || '(sem atuação)') !== chave);
         gravarPendenciasFormularioRisco(lista);
@@ -7143,7 +7096,7 @@
                     janela.descricao.dispatchEvent(new Event('change', { bubbles: true }));
                     janela.pesquisar.click();
                 }
-            } else if (tick > 30 && lupa && tick - abriuLupaEm >= 20) {
+            } else if (tick > 30 && lupa && abriuLupaEm < 0) {
                 abriuLupaEm = tick;
                 logPainel('[Projudi Formulário de Risco] autocomplete não respondeu — abrindo a lupa de Classe Processual');
                 lupa.click();
@@ -7226,6 +7179,10 @@
                     const seguidas = parseInt(store.getItem(p + 'falhas_seguidas') || '0', 10) + 1;
                     store.setItem(p + 'falhas_seguidas', String(seguidas));
                     logPainelAviso(`[Projudi Formulário de Risco] ${reg.processo}: não verificado — ${r.texto}`);
+                    if (seguidas >= 3 && !store.getItem(p + 'fetch_ok')) {
+                        concluirFormularioRisco('as 3 primeiras consultas não trouxeram a linha do formulário — relatório interrompido para não sobrecarregar o Projudi. Envie o log detalhado (linha "DIAGNÓSTICO") para ajuste.');
+                        return;
+                    }
                     if (seguidas >= LIMITE_FALHAS_SEGUIDAS_FORMULARIO_RISCO) {
                         concluirFormularioRisco(`${seguidas} processos seguidos sem conseguir ler a linha do formulário (sessão expirada ou tela diferente?) — relatório interrompido; o que já foi consultado foi mantido.`);
                         return;
@@ -22969,9 +22926,6 @@
     }
 
     function bootstrap() {
-        // Quadro invisível da consulta do Formulário de Risco (ver
-        // consultarFormularioRiscoViaQuadro): só serve para ler a aba do processo.
-        if (window.name === NOME_QUADRO_OCULTO_FORMULARIO_RISCO) return;
         logPainel(`[Projudi] bootstrap — URL: ${location.href}`);
         try { logPainelSeMudou('versao', `═══ Relatório Projudi versão ${(typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?'} ═══`); } catch (e) { /* GM_info indisponível */ }
         // Erros não tratados também vão para o log persistente (só os do próprio script:
