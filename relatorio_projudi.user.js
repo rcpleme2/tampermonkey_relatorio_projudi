@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.65
+// @version      26.66
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -208,7 +208,10 @@
             const wrap = document.getElementById('pa-log-wrap');
             if (!caixa || (wrap && wrap.style.display === 'none')) return; // log fechado: não gasta leitura
             atualizandoLogUI = true;
+            const t0Log = performance.now();
             const todas = await lerLogDetalhado();
+            const dtLeitura = performance.now() - t0Log;
+            if (dtLeitura > 100) console.warn(`[Projudi LENTIDÃO] leitura do log detalhado levou ${Math.round(dtLeitura)}ms (${todas.length} linhas)`);
             const assinatura = `${logCacheVersao}|${logMostraDetalhes()}|${todas.length}`;
             if (assinatura === caixa.dataset.assinaturaLog) return; // nada novo: não refaz o texto
             caixa.dataset.assinaturaLog = assinatura;
@@ -22951,9 +22954,18 @@
     // Cada chamada isolada num try/catch: um erro (ex.: numa página com estrutura
     // inesperada) não pode derrubar as chamadas seguintes — em especial passoAutomacao(),
     // sem a qual a automação fica parada sem nenhum aviso ao usuário.
+    // Diagnóstico de lentidão (pedido do usuário): só escreve no console — não no log
+    // do painel — e só quando uma chamada demora (> LIMITE_LENTIDAO_MS). Filtre o
+    // console por "LENTIDÃO" para ver o que está pesando.
+    const LIMITE_LENTIDAO_MS = 100;
     function chamarSeguro(fn, nome) {
+        const t0 = performance.now();
         try { fn(); }
         catch (err) { logPainelErro(`[Projudi] erro em ${nome}:`, err); }
+        finally {
+            const dt = performance.now() - t0;
+            if (dt > LIMITE_LENTIDAO_MS) console.warn(`[Projudi LENTIDÃO] ${nome} levou ${Math.round(dt)}ms — ${location.pathname}${location.search.slice(0, 40)}`);
+        }
     }
 
     // ── Verificação diária de atualização (pedido do usuário) ──────────────────────────
@@ -23046,6 +23058,13 @@
         // sempre sem nenhum jeito de desligá-la (o gesto que a ativava/desativava também
         // não existe mais) — remove aqui, todo carregamento, por segurança.
         chamarSeguro(() => store.removeItem('projudi_modo_teste'), 'limpar modo_teste legado');
+        // Tarefas longas da página inteira (do script ou não) — se aparecerem sem uma
+        // linha "<função> levou Xms" junto, a lentidão vem de fora das funções do script.
+        try {
+            new PerformanceObserver(lista => lista.getEntries().forEach(e => {
+                if (e.duration >= 200) console.warn(`[Projudi LENTIDÃO] tarefa longa de ${Math.round(e.duration)}ms na página ${location.pathname}`);
+            })).observe({ type: 'longtask' });
+        } catch (e) { /* navegador sem suporte a longtask */ }
         chamarSeguro(injetarBotoes, 'injetarBotoes');   // botões nos relatórios (buttonBar)
         chamarSeguro(injetarPainel, 'injetarPainel');   // painel de automação (só na página inicial)
         chamarSeguro(capturarContadoresPainelJuntadas, 'capturarContadoresPainelJuntadas'); // soma Com Urgência + Para Realizar pro KPI de Juntadas
