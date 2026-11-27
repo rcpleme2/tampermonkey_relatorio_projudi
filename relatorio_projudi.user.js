@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.63
+// @version      26.64
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -6885,28 +6885,58 @@
             || acharLinkMenu(reUrl, /^ativos$/i);
     }
 
+    // Tabela de resultados da tela "Processos" e índices das colunas, achados pelo
+    // CABEÇALHO (não por posição fixa): a v26.61-63 usava [0]-[3] da amostra SEM filtro e,
+    // na lista filtrada real, não leu nenhuma linha (38 páginas, 0 processos consultados
+    // — relato do usuário). Posições da amostra ficam só como reserva.
+    function tabelaListaFormularioRisco() {
+        const tabelas = [...document.querySelectorAll('table.resultTable')];
+        const tabela = tabelas.find(t => /processo/i.test((t.querySelector('thead') || {}).textContent || '')) || tabelas[0] || null;
+        if (!tabela) return null;
+        const ths = [...tabela.querySelectorAll(':scope > thead > tr:first-child > th, :scope > thead > tr:first-child > td')];
+        const idx = (re, padrao) => { const k = ths.findIndex(th => re.test((th.textContent || '').replace(/\s+/g, ' ').trim())); return k >= 0 ? k : padrao; };
+        return {
+            tabela,
+            ths,
+            col: {
+                processo: idx(/^processo/i, 0),
+                partes: idx(/partes/i, 1),
+                distribuicao: idx(/distribui/i, 2),
+                classe: idx(/classe/i, 3),
+            },
+        };
+    }
+
     // Uma linha da lista → registro base (sem a situação, que vem da consulta).
     function linhasListaFormularioRisco() {
-        const tabela = document.querySelector('table.resultTable');
-        if (!tabela) return [];
+        const info = tabelaListaFormularioRisco();
+        if (!info) return [];
+        const { tabela, col } = info;
         return [...tabela.querySelectorAll(':scope > tbody > tr')].map(tr => {
-            const tds = tr.querySelectorAll(':scope > td');
-            if (tds.length < 4) return null;
-            const em = tds[0].querySelector('em');
-            const processo = ((em ? em.textContent : textoCelula(tds[0])).match(/\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/) || [''])[0];
+            const tds = [...tr.querySelectorAll(':scope > td')];
+            if (tds.length < 2) return null;
+            const reNumero = /\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}/;
+            const celProc = tds[col.processo] && reNumero.test(tds[col.processo].textContent || '') ? tds[col.processo]
+                : tds.find(td => reNumero.test(td.textContent || ''));
+            if (!celProc) return null;
+            const em = [...celProc.querySelectorAll('em')].find(e => reNumero.test(e.textContent || ''));
+            const processo = ((em ? em.textContent : celProc.textContent).match(reNumero) || [''])[0];
             if (!processo) return null;
-            // Link "EL" (processo.do?actionType=visualizar&id=N) — selectedIcon abre o
-            // processo já na aba "Informações Adicionais" (mesmo parâmetro que o próprio
-            // Projudi usa no link de Vínculos: selectedIcon=tabAcoesVinculadas).
-            const linkEl = tds[0].querySelector('a[href*="actionType=visualizar"][href*="id="]');
+            // Link "EL" (processo.do?actionType=visualizar&id=N) em qualquer célula da
+            // linha — selectedIcon abre o processo já na aba "Informações Adicionais"
+            // (mesmo parâmetro que o próprio Projudi usa no link de Vínculos:
+            // selectedIcon=tabAcoesVinculadas).
+            const linkEl = tr.querySelector('a[href*="actionType=visualizar"][href*="id="]');
             const linkNumero = em && em.closest('a[href]');
             const base = linkEl ? linkEl.href : (linkNumero ? linkNumero.href : '');
-            const [classe, assunto] = textoComQuebras(tds[3]);
+            const celClasse = tds[col.classe];
+            const [classe, assunto] = celClasse ? textoComQuebras(celClasse) : [];
+            const celDist = tds[col.distribuicao];
             return {
                 processo,
                 urlConsulta: base ? base + (base.includes('?') ? '&' : '?') + 'selectedIcon=tabDadosAdicionais' : '',
-                partes: partesPorPolo(tds[1]),
-                distribuicao: (textoCelula(tds[2]).match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0],
+                partes: tds[col.partes] ? partesPorPolo(tds[col.partes]) : '',
+                distribuicao: ((celDist ? celDist.textContent : '').match(/\d{2}\/\d{2}\/\d{4}/) || [''])[0],
                 classe: classe || '',
                 assunto: (assunto || '').replace(/^\(\s*/, '').replace(/\s*\)$/, ''),
                 prioritario: emPrioritario(em),
@@ -7179,12 +7209,25 @@
                 preencherEPesquisarFormularioRisco();
                 return;
             }
-            const linhas = todas.filter(r => /medidas\s+protetivas/i.test(r.classe) || !r.classe);
+            const linhas = todas;
             const atuacao = lerAtuacao();
             const verificados = new Set(desembrulharArray(store.getItem(p + 'verificados')) || []);
             const total = totalRegistrosPagina();
             const pagina = numeroPaginaAtual();
             const totPag = total ? Math.ceil(total / Math.max(todas.length, 20)) : '?';
+            const infoTabela = tabelaListaFormularioRisco();
+            const trsTabela = infoTabela ? [...infoTabela.tabela.querySelectorAll(':scope > tbody > tr')] : [];
+            logPainel(`[Projudi Formulário de Risco] página ${pagina}: ${trsTabela.length} linha(s) na tabela, ${todas.length} processo(s) lido(s)${total != null ? ` (total da busca: ${total})` : ''}`);
+            // Nunca concluir "com sucesso" sem ter lido nada de uma lista que tem processos
+            // (era o que acontecia na v26.63) — para com erro e registra o formato da tabela.
+            if (!todas.length && (trsTabela.length > 0 || (total || 0) > 0)) {
+                // No texto da mensagem (o "extra" do log é cortado em 600 caracteres).
+                const cab = infoTabela ? infoTabela.ths.map(th => (th.textContent || '').replace(/\s+/g, ' ').trim()).join(' | ') : '(sem tabela)';
+                logPainelAviso(`[Projudi Formulário de Risco] DIAGNÓSTICO DA LISTA — ${document.querySelectorAll('table.resultTable').length} table.resultTable; cabeçalho: ${cab}; colunas usadas: ${JSON.stringify(infoTabela ? infoTabela.col : null)}`);
+                logPainelAviso(`[Projudi Formulário de Risco] DIAGNÓSTICO DA LISTA — 1ª linha: ${trsTabela[0] ? trsTabela[0].outerHTML.replace(/\s+/g, ' ').slice(0, 2000) : '(sem linhas)'}`);
+                concluirFormularioRisco('nenhum processo pôde ser lido da lista filtrada — relatório interrompido. Envie o log (linha "DIAGNÓSTICO DA LISTA") para ajuste.');
+                return;
+            }
             for (let i = 0; i < linhas.length; i++) {
                 const reg = linhas[i];
                 if (verificados.has(reg.processo)) continue;
