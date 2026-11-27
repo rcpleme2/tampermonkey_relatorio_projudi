@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Relatório Projudi (Cartório e Gabinete)
 // @namespace    https://projudi2.tjpr.jus.br/
-// @version      26.66
+// @version      26.67
 // @description  Automatiza a extração conjunta de Cartório e Gabinete no Projudi (Conclusões, Juntadas, Retorno, Paralisados, Remessas, Suspensos, Mandados, Audiências, Tempo Médio, Apreensões, Outros Cumprimentos, Processos Arquivados com Saldo...) e gera o Relatório para Correição Ordinária em PDF/Excel
 // @author       rcpleme2
 // @match        https://projudi2.tjpr.jus.br/projudi/*
@@ -187,6 +187,8 @@
         try { return store.getItem('projudi_log_mostrar_detalhes') === '1'; } catch (e) { return false; }
     }
     let atualizandoLogUI = false;
+    const LOG_UI_MAX_LINHAS = 300;
+    const LOG_UI_MAX_CARACTERES = 500;
     let ultimaAtualizacaoLogUI = 0;
     let atualizacaoLogUIAgendada = false;
     async function atualizarLogDetalhadoUI() {
@@ -215,13 +217,23 @@
             const assinatura = `${logCacheVersao}|${logMostraDetalhes()}|${todas.length}`;
             if (assinatura === caixa.dataset.assinaturaLog) return; // nada novo: não refaz o texto
             caixa.dataset.assinaturaLog = assinatura;
-            const linhas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
+            // Na caixa, só as últimas LOG_UI_MAX_LINHAS linhas, cada uma cortada em
+            // LOG_UI_MAX_CARACTERES — redesenhar as 5.000 linhas (algumas com milhares de
+            // caracteres) a cada linha nova bloqueava o navegador por 5-10s (medido no
+            // console do usuário com o diagnóstico "[Projudi LENTIDÃO]"). O "Baixar log
+            // completo" continua com tudo (lerLogDetalhado).
+            const filtradas = logMostraDetalhes() ? todas : todas.filter(l => RE_LINHA_PRINCIPAL.test(l));
+            const linhas = filtradas.slice(-LOG_UI_MAX_LINHAS)
+                .map(l => (l.length > LOG_UI_MAX_CARACTERES ? l.slice(0, LOG_UI_MAX_CARACTERES) + '… (linha completa em "Baixar log completo")' : l));
             const texto = linhas.length ? linhas.join('\n') : '(sem entradas ainda)';
             if (caixa.textContent !== texto) {
+                const t0Desenho = performance.now();
                 // Só rola para o fim se o usuário já estava no fim — senão não dá pra subir e ler.
                 const noFim = caixa.scrollHeight - caixa.scrollTop - caixa.clientHeight < 30;
                 caixa.textContent = texto;
                 if (noFim) caixa.scrollTop = caixa.scrollHeight;
+                const dtDesenho = performance.now() - t0Desenho;
+                if (dtDesenho > 100) console.warn(`[Projudi LENTIDÃO] redesenho da caixa do log levou ${Math.round(dtDesenho)}ms (${linhas.length} linhas)`);
             }
         } catch (e) { /* nunca deixa o log detalhado quebrar quem chamou */ }
         finally { atualizandoLogUI = false; }
